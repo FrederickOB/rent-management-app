@@ -269,6 +269,39 @@ describe('TL-05 templates', () => {
   });
 });
 
+describe('TL-05 template versions keep their fixed clauses', () => {
+  it('refuses a version that rewords a clause the last version fixed, or drops one it required', async () => {
+    const [residential] = (await s.templates.list(admin)).filter(
+      (t) => t.starterKind === 'residential',
+    );
+    const content = STARTER_TEMPLATES.residential;
+    const section = content.sections[0]!;
+    const withRent = (change: Record<string, unknown>) => ({
+      sections: [
+        {
+          ...section,
+          clauses: section.clauses.map((c) => (c.key === 'rent' ? { ...c, ...change } : c)),
+        },
+      ],
+    });
+    await expect(
+      s.templates.publish(admin, residential!.id, {
+        content: withRent({ body: 'The rent is GH₵1.00 a month.' }),
+      }),
+    ).rejects.toMatchObject({ code: 'template.clause_fixed' });
+    await expect(
+      s.templates.publish(admin, residential!.id, { content: withRent({ editable: true }) }),
+    ).rejects.toMatchObject({ code: 'template.clause_fixed' });
+    await expect(
+      s.templates.publish(admin, residential!.id, {
+        content: {
+          sections: [{ ...section, clauses: section.clauses.filter((c) => c.key !== 'deposit') }],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'template.clause_required' });
+  });
+});
+
 describe('TL-06 rent schedule', () => {
   it('generates the schedule when a lease is signed: monthly, anchored, escalated and prorated', async () => {
     const tenant = await tenantFor('Schedule Tenant');
@@ -863,6 +896,44 @@ describe('AD-05 cancelling a signed lease', () => {
     await expect(
       s.leases.requestCancelSigned(manager, active.id, 'Too late to cancel this one'),
     ).rejects.toMatchObject({ code: 'lease_started' });
+  });
+});
+
+describe('AD-05 one cancellation waits at a time', () => {
+  it('opens one request when two people ask at once, refuses more while it waits, and takes a new one once it is withdrawn', async () => {
+    const cnl = await propertyWithUnits(s, manager, {
+      areaCode: 'ACC',
+      propertyPart: 'CNL',
+      ownerId: ownerA,
+      units: [{ unitType: 'apartment', count: 1, bedrooms: 1 }],
+    });
+    const tenant = await tenantFor('Withdrawn Cancellation Tenant');
+    const lease = await paper(cnl.units['ACC-CNL-B1-01']!, tenant.id, {
+      startDate: day(20),
+      endDate: endAfter(day(20), 12),
+    });
+    const asked = await Promise.allSettled([
+      s.leases.requestCancelSigned(manager, lease.id, 'Tenant withdrew before moving in'),
+      s.leases.requestCancelSigned(admin, lease.id, 'Tenant withdrew before moving in'),
+    ]);
+    const opened = asked.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+    const refused = asked.flatMap((r) => (r.status === 'rejected' ? [r.reason as unknown] : []));
+    expect(opened).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ status: 409, code: 'approval_open' });
+    await expect(
+      s.leases.requestCancelSigned(manager, lease.id, 'Asking again while one waits'),
+    ).rejects.toMatchObject({ status: 409, code: 'approval_open' });
+
+    const { request } = opened[0]!;
+    const initiator = request.initiatedBy === manager.personId ? manager : admin;
+    await s.approvals.cancel(initiator, request.id);
+    const again = await s.leases.requestCancelSigned(
+      manager,
+      lease.id,
+      'Asking again after withdrawing',
+    );
+    expect(again.request).toMatchObject({ status: 'pending', actionType: 'lease.cancel_signed' });
   });
 });
 

@@ -160,6 +160,8 @@ export class LeasesService {
       actionType: CANCEL_SIGNED_ACTION,
       eligibleRoles: ['owner', 'agency_admin', 'property_manager'],
       schema: cancelSignedPayload,
+      // One cancellation waits at a time for a lease; a second would only ask the same question.
+      onePerSubject: true,
       currentPayload: async (tx, request) => {
         const proposed = request.payload as CancelSignedPayload;
         const row = await leaseRow(tx, proposed.leaseId);

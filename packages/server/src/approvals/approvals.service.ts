@@ -4,6 +4,7 @@ import {
   and,
   desc,
   eq,
+  gt,
   inArray,
   lte,
   schema,
@@ -24,7 +25,7 @@ import { can, type Actor, type StaffRole } from '@rent/domain/policy';
 import { parseCompanySettings } from '@rent/domain/settings';
 import type { z } from 'zod';
 import type { Clock } from '../core/clock';
-import { AppError, forbidden, invalid, notFound } from '../core/errors';
+import { AppError, conflict, forbidden, invalid, notFound } from '../core/errors';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { AuditService } from '../audit/audit.service';
@@ -42,6 +43,8 @@ export interface ApprovalActionHandler<P = unknown> {
   /** Roles that may approve. A nominated approver may approve any action type. */
   readonly eligibleRoles: readonly StaffRole[];
   readonly schema: z.ZodType<P>;
+  /** At most one open request per subject: another is refused while one waits for a decision. */
+  readonly onePerSubject?: boolean;
   /** The fields that matter, re-read from the subject at decision time to detect changes. */
   currentPayload(tx: Tx, request: RequestRow): Promise<P>;
   /** Runs in the same transaction as the final approval; if it throws, nothing is recorded. */
@@ -114,6 +117,7 @@ export class ApprovalsService {
     const handler = this.handler(input.actionType);
     const payload = handler.schema.parse(input.payload);
     const id = await withCompany(this.database, ctxOf(staff), async (tx) => {
+      if (handler.onePerSubject) await this.refuseSecondOpen(tx, staff, input);
       const others = await tx
         .select({
           personId: schema.membership.personId,
@@ -297,6 +301,38 @@ export class ApprovalsService {
       await this.close(tx, request, 'cancelled', 'withdrawn');
     });
     return this.get(staff, requestId);
+  }
+
+  /**
+   * Refuses a request while another for the same action and subject is open. People asking at
+   * the same moment take turns on a transaction lock, so only one of them opens a request.
+   */
+  private async refuseSecondOpen(
+    tx: Tx,
+    staff: Staff,
+    input: { actionType: string; subjectType: string; subjectId: string },
+  ): Promise<void> {
+    const key = `approval:${staff.companyId}:${input.actionType}:${input.subjectType}:${input.subjectId}`;
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+    const [open] = await tx
+      .select({ id: schema.approvalRequest.id })
+      .from(schema.approvalRequest)
+      .where(
+        and(
+          eq(schema.approvalRequest.actionType, input.actionType),
+          eq(schema.approvalRequest.subjectType, input.subjectType),
+          eq(schema.approvalRequest.subjectId, input.subjectId),
+          inArray(schema.approvalRequest.status, ['pending', 'cooling_off']),
+          gt(schema.approvalRequest.expiresAt, this.clock.now()),
+        ),
+      )
+      .limit(1);
+    if (open)
+      throw conflict(
+        'approval_open',
+        'A request for this is already waiting for a decision. Withdraw it or wait for it to be decided.',
+        { requestId: open.id },
+      );
   }
 
   /** Closes requests past their expiry (hourly job, per company). Returns how many closed. */

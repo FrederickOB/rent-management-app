@@ -3,6 +3,7 @@ import { and, asc, desc, eq, isNull, schema, withCompany, type Database, type Tx
 import type { Actor } from '@rent/domain/policy';
 import {
   checkTemplateContent,
+  checkTemplateVersion,
   STARTER_TEMPLATE_KINDS,
   STARTER_TEMPLATE_NAMES,
   STARTER_TEMPLATES,
@@ -122,6 +123,7 @@ export class LeaseTemplatesService {
       const template = await this.template(tx, templateId, { lock: true });
       if (template.archivedAt) throw notFound('Template');
       const latest = await this.latestVersion(tx, templateId);
+      if (latest) checkTemplateVersion(latest.content as TemplateContent, content);
       await this.insertVersion(
         tx,
         staff,

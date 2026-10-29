@@ -118,6 +118,35 @@ export function checkTemplateContent(content: TemplateContent): TemplateContent 
   return content;
 }
 
+/**
+ * Checks a new version against the template's latest one (TL-05). The editor honours each
+ * clause's flags, and so does every version: a clause the latest version marks required stays,
+ * still required, and one it marks not editable keeps its title and wording and stays fixed.
+ */
+export function checkTemplateVersion(
+  previous: TemplateContent,
+  next: TemplateContent,
+): TemplateContent {
+  const content = checkTemplateContent(next);
+  const after = new Map(content.sections.flatMap((s) => s.clauses).map((c) => [c.key, c]));
+  for (const clause of previous.sections.flatMap((s) => s.clauses)) {
+    const label = clause.title ?? clause.key;
+    const kept = after.get(clause.key);
+    if (clause.required && !kept?.required)
+      throw new DomainError('template.clause_required', `The "${label}" clause cannot be removed`);
+    if (
+      kept &&
+      !clause.editable &&
+      (kept.editable || kept.title !== clause.title || kept.body !== clause.body)
+    )
+      throw new DomainError(
+        'template.clause_fixed',
+        `The "${label}" clause cannot be changed: its wording is fixed`,
+      );
+  }
+  return content;
+}
+
 /** Fills a body's placeholders; a placeholder with no value is left as a visible gap. */
 export function fillPlaceholders(
   body: string,
