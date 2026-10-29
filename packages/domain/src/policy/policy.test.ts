@@ -33,10 +33,22 @@ const COLUMNS: Column[] = [
 ];
 
 /**
- * The matrices in docs/plans/M1.md section 4.6 and docs/plans/M2.md section 4.4. 1 = allowed.
- * Approval decisions are tested separately; scope is tested below.
+ * The matrices in docs/plans/M1.md section 4.6, docs/plans/M2.md section 4.4 and
+ * docs/plans/M3.md section 4.14. 1 = allowed. Approval decisions are tested separately; scope is
+ * tested below.
  */
 const MATRIX: Partial<Record<PolicyAction, string>> = {
+  'tenant.view': '11111110',
+  'tenant.view_details': '11111010',
+  'tenant.manage': '10110000',
+  'tenant.id.verify': '10110000',
+  'tenant.id.reveal': '10110000',
+  'lease.view': '11111110',
+  'lease.view_terms': '11111010',
+  'lease.manage': '10110000',
+  'lease.cancel_signed': '10110000',
+  'lease_template.manage': '10100000',
+  'tenancy.view_own': '00000000',
   'owner.view': '11111010',
   'owner.manage': '10100000',
   'register.view': '11111110',
@@ -117,6 +129,18 @@ describe('AD-03 policy matrix', () => {
       can({ kind: 'tenant', personId: 't', authMethod: 'phone_otp' }, 'company.view').allowed,
     ).toBe(false);
     expect(can({ kind: 'system', companyId: 'c', job: 'x' }, 'company.view').allowed).toBe(false);
+  });
+
+  it('lets a tenant see only their own tenancies, never staff views of tenants or leases', () => {
+    const tenant = { kind: 'tenant', personId: 't', authMethod: 'phone_otp' } as const;
+    expect(can(tenant, 'tenancy.view_own').allowed).toBe(true);
+    for (const action of [
+      'tenant.view',
+      'lease.view',
+      'lease.view_terms',
+      'tenant.id.reveal',
+    ] as const)
+      expect(can(tenant, action).allowed, action).toBe(false);
   });
 });
 

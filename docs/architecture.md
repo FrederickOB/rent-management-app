@@ -951,6 +951,7 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `tenancy.renewal-reminders` | daily 08:00 | lease id + days before (90, 60, 30) | 3 | M3 |
 | `tenancy.rent-control-reminders` | daily 08:00 | lease id + reminder step | 3 | M3 |
 | `tenancy.stamping-reminders` | daily 08:00 | lease id + reminder step | 3 | M3 |
+| `tenancy.formal-lease-reminders` | weekly | lease id + week | 3 | M3 (terms over three years; OQ-44) |
 | `esign.signing-reminders` | every 15 min | signer id + ladder step | 3 | M3 |
 | `esign.finalise` | event: last signature | signing request id | 5 | M3 |
 | `billing.generate-invoices` | daily 00:10 | lease id + cycle start | 5 | M4a |
@@ -964,7 +965,7 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `payments.reconcile-settlements` | daily 02:30 | provider + settlement id | 5 | M4b |
 | `billing.paid-until-prompt` | daily 08:00 | lease id + paid-until date | 3 | M5 |
 | `tax.rent-tax-alerts` | daily 08:00 | tax item id + alert day (21, 28) | 3 | M5 |
-| `messaging.send` | event: message queued | message id | 5 per provider, then next channel | M6 |
+| `messaging.send` | event: message queued | message id | 5 per provider, then next channel | M3 (SMS and email, M3 decision 1); WhatsApp and push in M6 |
 | `messaging.process-inbound` | event: inbound webhook | provider + message id | 10 | M6 |
 | `messaging.fetch-media` | event: inbound media | provider media id | 5 | M6 |
 | `messaging.broadcast-fanout` | event: broadcast approved | broadcast id + batch number | 5 | M6 |
