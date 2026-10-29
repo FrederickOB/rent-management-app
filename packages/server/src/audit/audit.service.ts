@@ -110,6 +110,48 @@ export class AuditService {
     });
   }
 
+  /**
+   * The events about a set of records, newest first, in the caller's transaction (timelines,
+   * M3). The caller has already decided which records the actor may see.
+   */
+  async forRecords(
+    tx: Tx,
+    records: readonly { readonly type: string; readonly id: string }[],
+    limit: number,
+  ): Promise<
+    {
+      occurredAt: Date;
+      action: string;
+      recordType: string | null;
+      recordId: string | null;
+      actorName: string | null;
+      data: Record<string, unknown> | null;
+    }[]
+  > {
+    if (records.length === 0) return [];
+    const e = schema.auditEvent;
+    const rows = await tx
+      .select({
+        occurredAt: e.occurredAt,
+        action: e.action,
+        recordType: e.recordType,
+        recordId: e.recordId,
+        actorName: schema.person.name,
+        data: e.data,
+      })
+      .from(e)
+      .leftJoin(schema.person, eq(schema.person.id, e.actorPersonId))
+      .where(
+        sql`(${e.recordType}, ${e.recordId}) in (${sql.join(
+          records.map((r) => sql`(${r.type}, ${r.id})`),
+          sql`, `,
+        )})`,
+      )
+      .orderBy(desc(e.seq))
+      .limit(limit);
+    return rows.map((r) => ({ ...r, data: (r.data as Record<string, unknown> | null) ?? null }));
+  }
+
   /** Recomputes a company's chain from its first event (nightly job, AD-07). */
   async verifyChain(companyId: string): Promise<ChainVerification> {
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {

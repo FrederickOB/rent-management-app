@@ -10,6 +10,12 @@ import {
   registerImportsContract,
 } from './register';
 import { rulesContract } from './rules';
+import {
+  leasesContract,
+  leaseTemplatesContract,
+  tenantAppContract,
+  tenantsContract,
+} from './tenancy';
 
 export * from './approvals';
 export * from './audit';
@@ -18,6 +24,7 @@ export * from './me';
 export * from './memberships';
 export * from './register';
 export * from './rules';
+export * from './tenancy';
 
 /** The API contract (ADR-014). Routes are plain REST and JSON; amounts are integer `*Minor` fields. */
 export const contract = {
@@ -31,6 +38,10 @@ export const contract = {
   register: registerContract,
   propertyFiles: propertyFilesContract,
   registerImports: registerImportsContract,
+  tenants: tenantsContract,
+  leaseTemplates: leaseTemplatesContract,
+  leases: leasesContract,
+  tenantApp: tenantAppContract,
 };
 
 export type Contract = typeof contract;

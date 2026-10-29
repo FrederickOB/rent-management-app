@@ -35,6 +35,8 @@ export interface UnitRow {
   readonly bandOverridden: boolean;
   readonly availability: Availability;
   readonly status: DisplayStatus;
+  /** From leases (PB-09, M3): occupied, reserved between signature and start, or vacant. */
+  readonly occupancy: 'occupied' | 'reserved' | 'vacant';
   readonly underRepair: boolean;
   readonly owner: OwnerRef | null;
   readonly region: string;

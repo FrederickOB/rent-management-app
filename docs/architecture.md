@@ -123,19 +123,19 @@ flowchart TB
 | `tasks` | 11 | Staff tasks, including notice-ladder caretaker tasks until the field app (CF-06) | policy |
 | `esign` | 2, 4 | Signing requests, secure links, one-time codes, evidence, certificate PDFs (TL-07; LN-02, LN-04 signing) | documents, audit |
 | `portfolio` | 1 | Portfolios, properties, blocks, units, codes, meters, amenities, import, billing bands (PR-01 to PR-10, PB-01) | companies (owners), documents, rules, audit, policy |
-| `tenancy` | 2 | Tenants, ID verification, leases, templates, rent schedule, occupancy, renewals, advance-cap check (TL-01 to TL-10, TL-12, TL-13, PB-09, AR-05 check) | portfolio, esign, approvals, rules, companies |
+| `tenancy` | 2 | Tenants, ID verification, leases, templates, rent schedule, occupancy, renewals, trackers, advance-cap check (TL-01 to TL-10, TL-12, TL-13, PB-09, TX-05, AR-05 check) | portfolio, esign, approvals, rules, companies, policy, documents, audit, identity (staff to notify) |
 | `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents |
 | `payments` | 3 | Providers, pay links, webhooks, verification, matching, unmatched queue, receipts, reconciliation (BC-02 to BC-04, BC-06, BC-12, BC-14) | billing, ledger, companies, documents |
 | `tax` | 8 | Rent tax per receipt, due dates, GRA payments, withholding tax (TX-01 to TX-07) | billing, ledger, rules, documents |
 | `maintenance` | 6 | Jobs, priorities, assignment, artisan job sheets, inspections (MI-01 to MI-12) | tenancy, portfolio, documents, esign, tasks, approvals |
 | `notices` | 4 | Templates, effective dates, issue, tracking, ladder, escalation, service records (LN-01 to LN-10) | tenancy, esign, approvals, rules, documents, tasks, billing |
 | `moveout` | 2, 6 | Move-in report signing and move-out: notice, inspection, deductions, final statement, refund (TL-08, TL-11, MI-11) | tenancy, maintenance, billing, approvals |
-| `messaging` | 5 | Channels, inbox, menu bot, templates, consent, broadcasts, push (CM-01 to CM-12) | tenancy, billing, payments, documents |
+| `messaging` | 5 | Channels, inbox, menu bot, templates, consent, broadcasts, push (CM-01 to CM-12) | tenancy, esign, companies, identity (staff addresses), audit, policy in M3; billing, payments and documents from M4 |
 | `reporting` | 8, 13 | Fees, expenses, owner statements, remittances, dashboards, Gate 1 metrics (AC-02 to AC-08, DA-01 to DA-06) | ledger, billing, tax, portfolio, tenancy, maintenance, notices |
 | `subscription` | 14, section 21 | Plans, rate cards, snapshots, platform invoices, entitlements, dunning (AD-08, PB-01 to PB-11) | tenancy, ledger, payments, companies |
 | `admin` | 14 | Platform admin console, support access with consent, usage and messaging costs (AD-10) | subscription, companies, identity, audit |
 
-The lint rule `rent/module-layers` enforces this table (`packages/config/eslint/index.js`, MODULE_MAP); same-layer imports listed here are allowed because none forms a cycle. Events that cross layers upwards, for example: `payment.posted` (payments → messaging sends the receipt), `repair.reported` (messaging → maintenance creates the ticket, CM-04), `inspection.completed` (maintenance → moveout), `signing.link_ready` (esign → messaging). Phase 2 modules (utilities, commercial portal, leasing, field app, owner view) slot into layers 6 to 8.
+The lint rule `rent/module-layers` enforces this table (`packages/config/eslint/index.js`, MODULE_MAP); same-layer imports listed here are allowed because none forms a cycle. Any module queues an outbound message inside its own transaction with `queueMessage` in `core` (an outbox event of type `messaging.send`), so esign and tenancy send messages without importing messaging (M3 plan 4.9). Events that cross layers upwards, for example: `payment.posted` (payments → messaging sends the receipt), `repair.reported` (messaging → maintenance creates the ticket, CM-04), `inspection.completed` (maintenance → moveout), `signing.link_ready` (esign → messaging). Phase 2 modules (utilities, commercial portal, leasing, field app, owner view) slot into layers 6 to 8.
 
 ## 3. Data model
 
@@ -307,6 +307,14 @@ erDiagram
 ```
 
 `CHARGE_PERIOD` is the rent schedule: one row per month and charge type, anchored on the lease start date, with escalations from `RENT_STEP` applied, whatever the billing cycle. It drives invoices, accrual and paid-until. A renewal is a new lease that points to the old one (`renews_lease_id`).
+
+Built in M3 (`docs/plans/M3.md`, section 4; migrations `0006` to `0008`):
+
+- **People.** A tenant record belongs to one company. An individual's record links by phone to a global `person` through `app.ensure_tenant_person`, which returns an id whether or not the person existed; `app.tenancies_for_person` returns company and tenant ids only, and only for the tenant the transaction acts for.
+- **Leases.** Every lease starts as a draft. Triggers keep its unit, property and tenant fixed, freeze its terms (an allow-list of lifecycle and tracker columns) once it leaves draft, check each status change against the lease machine in section 7, freeze its parties, steps and charges with it, and allow a schedule only once it is signed. A `btree_gist` exclusion constraint stops two leases that hold a unit from overlapping. Cancelling a signed lease needs a second person's approval decision in the database.
+- **Occupancy.** A definer trigger on lease status writes `occupancy` rows (source `lease`) to `unit_status_event`; the application role still cannot insert them. The `unit_occupancy` view (security invoker) gives each held unit's occupancy, and the register's displayed status reads it. While a lease holds a unit its availability is only "available" or "under repair", and it cannot be archived.
+- **The schedule** is generated when a lease is signed (`LeaseLifecycleService.markSigned`, the one place a lease becomes signed). Holding over adds a month at a time at the last rate; after a short final period, the rest of that month first.
+- **ID numbers and TINs** are encrypted with the field cipher (AAD: company, table, column, row), blind-indexed and stored masked; the audit triggers record them only as changed.
 
 ### 3.4 Billing, payments and ledger
 
@@ -1010,7 +1018,7 @@ Sign-in codes are not a job: the auth request sends them straight to the SMS por
     - **Schedulers** call a `SECURITY DEFINER` function that returns company ids only.
     - **Platform admin aggregates** read `SECURITY DEFINER` views that return counts and totals, never rows.
     - **Support access** sets a company context only when an active, consented, time-boxed grant exists. Every query under it is audited.
-- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. Tenant scope follows in M3, and journal lines in M4a.
+- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. M3 adds the same property policy to every tenancy, e-signing and messaging table with `property_id`, and tenant scope: a tenant-app transaction sets `app.tenant_scope` to the person's tenant records in that company, every table with `tenant_id` filters on it, a tenant session sees issued leases only and never templates, links or codes, and its property scope is the properties of its own leases (no owner records). Scoped staff see a tenant through its leases on in-scope properties, or as its creator before it has any lease. Journal lines follow in M4a.
 
 ### Data protection
 

@@ -14,7 +14,7 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
 const AUDIT_NEEDS_WHOLE_COMPANY =
   'The audit log covers the whole company, so it is not open to people limited to some owners or properties';
 
-function toApproval({ request, decisions }: ApprovalView) {
+export function toApproval({ request, decisions }: ApprovalView) {
   return {
     id: request.id,
     actionType: request.actionType,

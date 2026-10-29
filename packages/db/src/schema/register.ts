@@ -17,7 +17,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { company } from './company';
+import { bytea, company } from './company';
 import { person } from './identity';
 import { document } from './platform';
 
@@ -50,6 +50,14 @@ export const owner = pgTable(
     timeZone: text().notNull().default('Africa/Accra'),
     notes: text(),
     isTestContact: boolean().notNull().default(false),
+    /** M3 tax fields (plan 4.13): a letting business pays income tax, not final rent tax (OQ-18). */
+    lettingBusiness: boolean().notNull().default(false),
+    /** VAT registration, for VAT on commercial invoices from M4a (OQ-20). */
+    vatRegistered: boolean().notNull().default(false),
+    /** The TIN, encrypted with the field cipher, its blind index and its masked form (M3 plan 4.4). */
+    tinEncrypted: bytea(),
+    tinIndex: text(),
+    tinMasked: text(),
     archivedAt: timestamp({ withTimezone: true }),
     createdAt: tsNow(),
     updatedAt: tsNow(),
@@ -57,7 +65,12 @@ export const owner = pgTable(
   (t) => [
     unique('owner_company_id_id_key').on(t.companyId, t.id),
     unique('owner_reference_key').on(t.companyId, t.reference),
+    index('owner_tin_idx').on(t.companyId, t.tinIndex),
     check('owner_kind_check', sql`${t.kind} in ('individual', 'company')`),
+    check(
+      'owner_tin_check',
+      sql`(${t.tinEncrypted} is null) = (${t.tinIndex} is null) and (${t.tinEncrypted} is null) = (${t.tinMasked} is null)`,
+    ),
   ],
 );
 

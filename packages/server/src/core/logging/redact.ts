@@ -4,7 +4,7 @@
  * and every string is scrubbed for values that look like personal data or secrets.
  */
 const SENSITIVE_KEY =
-  /^(phone|phones|phonenumber|phone_number|msisdn|to|from|email|emails|code|otp|token|tokens|accesstoken|refreshtoken|idtoken|password|newpassword|currentpassword|secret|secretkey|totpuri|backupcodes|idnumber|id_number|ghanacard|cardnumber|accountnumber|account_number|signature|authorization|cookie|cookies|set-cookie|body|payload|value)$/i;
+  /^(phone|phones|phonenumber|phone_number|msisdn|to|from|email|emails|code|otp|token|tokens|accesstoken|refreshtoken|idtoken|password|newpassword|currentpassword|secret|secretkey|totpuri|backupcodes|idnumber|id_number|ghanacard|cardnumber|accountnumber|account_number|passport|passportnumber|passport_number|tin|tinnumber|tin_number|signature|authorization|cookie|cookies|set-cookie|body|payload|value)$/i;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Ids are not secrets and logs need them; anything else long and token-like is masked.
@@ -13,6 +13,9 @@ const maskToken = (match: string) => (UUID.test(match) ? match : '[TOKEN]');
 const PATTERNS: readonly [RegExp, string | ((match: string) => string)][] = [
   [/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[EMAIL]'],
   [/\bGHA-?\d{9}-?\d\b/gi, '[ID_NUMBER]'],
+  // Passport numbers and TINs as the product stores them: one or two capitals, then digits
+  // (G1234567, C0012345678; M3 plan 4.4). Our ids are lower-case, so they are left alone.
+  [/\b[A-Z]{1,2}\d{6,10}\b/g, '[ID_NUMBER]'],
   [/\+\d[\d\s-]{6,17}\d/g, '[PHONE]'],
   [/\b0\d{2}[\s-]?\d{3}[\s-]?\d{4}\b/g, '[PHONE]'],
   [/\b233\d{9}\b/g, '[PHONE]'],

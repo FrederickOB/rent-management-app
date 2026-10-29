@@ -41,7 +41,7 @@ async function platformCompanyId(database: Database): Promise<string | null> {
 }
 
 /** A scheduler that enqueues one company job per company (ADR-002 system path). */
-function fanOut(
+export function fanOut(
   name: string,
   cron: string,
   target: string,

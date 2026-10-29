@@ -1,8 +1,8 @@
 /**
  * Accra demo dataset (CLAUDE.md section 14). M1 seeded companies and users; M2 adds owners,
- * properties, units, meters and each person's scope. Tenancies and money arrive in later
- * milestones. Every person is fictional and flagged as a test contact, and only fake providers
- * are configured locally, so nothing is ever sent.
+ * properties, units, meters and each person's scope; M3 adds tenants and their leases, recorded
+ * as signed on paper (decision 7). Money arrives in M4a. Every person is fictional and flagged as
+ * a test contact, and only fake providers are configured locally, so nothing is ever sent.
  *
  *   pnpm db:seed
  */
@@ -10,11 +10,27 @@ import 'reflect-metadata';
 import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { eq, schema, sql, withCompany, withSystem, type Database } from '@rent/db';
+import {
+  addDays,
+  addMonths,
+  businessDateOf,
+  instantFrom,
+  parseBusinessDate,
+  toIsoDate,
+} from '@rent/domain/dates';
 import { defaultCompanySettings } from '@rent/domain/settings';
+import type { StoragePort } from '@rent/integrations';
 import type { Actor, CompanyKind, MembershipRole } from '@rent/domain/policy';
 import type { Availability } from '@rent/domain/portfolio';
 import { symmetricEncrypt } from 'better-auth/crypto';
-import { CONFIG, CoreModule, DATABASE, loadConfig, type AppConfig } from '../src/core';
+import {
+  CONFIG,
+  CoreModule,
+  DATABASE,
+  loadConfig,
+  STORAGE_PORT,
+  type AppConfig,
+} from '../src/core';
 import { OwnersService } from '../src/companies/owners.service';
 import { IdentityModule, PersonAccounts } from '../src/identity';
 import {
@@ -24,6 +40,7 @@ import {
   RegisterService,
   type NewProperty,
 } from '../src/portfolio';
+import { LeasesService, TenancyModule, TenantsService, type TenantInput } from '../src/tenancy';
 
 const config = loadConfig();
 const host = new URL(config.DATABASE_URL).hostname;
@@ -153,7 +170,7 @@ const PEOPLE: DemoPerson[] = [
     staff: true,
     memberships: [{ companyId: LANDLORD, role: 'adviser', nominatedApprover: true }],
   },
-  // A tenant for the Expo app sign-in; tenancy records arrive in M3.
+  // A tenant for the Expo app sign-in. In M3 she rents from both the agency and the landlord.
   { name: 'Ama Tenant (demo)', phone: '+233200000021', staff: false, memberships: [] },
 ];
 
@@ -162,6 +179,7 @@ const PEOPLE: DemoPerson[] = [
     CoreModule.forRoot({ config, applicationName: 'rent-seed' }),
     IdentityModule,
     PortfolioModule,
+    TenancyModule,
   ],
 })
 class SeedModule {}
@@ -589,6 +607,324 @@ async function ensureScopes(database: Database): Promise<void> {
   }
 }
 
+interface DemoTenancy {
+  readonly companyId: string;
+  readonly actorEmail: string;
+  readonly what: string;
+  readonly tenant: TenantInput;
+  readonly unitCode: string;
+  /** Months before today that the lease started (anchored on today's day of the month). */
+  readonly startedMonthsAgo: number;
+  readonly months: number;
+  /** Ends this many days from today instead of after `months`. */
+  readonly endsInDays?: number;
+  readonly monthlyRentMinor: number;
+  readonly cycle: 'monthly' | 'quarterly' | 'six_monthly' | 'annual';
+  readonly initialAdvanceMonths?: number;
+  readonly depositMinor?: number;
+  readonly serviceChargeMonthlyMinor?: number;
+}
+
+const smsConsent = { sms: true };
+
+// Fictional tenancies on the M2 units (M3 plan 4.18). Phones come from the fake +233 20 000 00xx
+// block, and no ID number is seeded. The units the M2 end-to-end tests change by hand stay free:
+// ACC-LEG-B2-06 (under repair), ACC-OSU-G-03, ACC-OSU-G-04 (not lettable) and ACC-ELG-B1-08.
+const TENANCIES: DemoTenancy[] = [
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a monthly payer',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Kwame Monthly (demo)',
+      phone: '+233200000031',
+      occupation: 'Teacher',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B1-01',
+    startedMonthsAgo: 3,
+    months: 12,
+    monthlyRentMinor: 80_000,
+    cycle: 'monthly',
+    depositMinor: 160_000,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a one-year advance, billed annually',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Efua Annual (demo)',
+      phone: '+233200000032',
+      occupation: 'Nurse',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B1-02',
+    startedMonthsAgo: 2,
+    months: 12,
+    monthlyRentMinor: 70_000,
+    cycle: 'annual',
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a two-year residential advance (over the unverified cap; no flag under `off`)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Yaw Two-Year (demo)',
+      phone: '+233200000033',
+      occupation: 'Engineer',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ELG-B1-04',
+    startedMonthsAgo: 1,
+    months: 24,
+    monthlyRentMinor: 250_000,
+    cycle: 'annual',
+    initialAdvanceMonths: 24,
+    depositMinor: 500_000,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.two@demo.invalid',
+    what: 'a commercial company tenant with a signatory and a finance contact (withholds tax from M5)',
+    tenant: {
+      kind: 'company',
+      displayName: 'Osu Pharmacy Ltd (demo)',
+      legalName: 'Osu Pharmacy Limited (demo)',
+      businessType: 'Pharmacy',
+      registrationNumber: 'CS000000001',
+      email: 'accounts@pharmacy.invalid',
+      contacts: [
+        {
+          kind: 'signatory',
+          name: 'Kofi Director (demo)',
+          phone: '+233200000034',
+          position: 'Managing Director',
+          consent: smsConsent,
+        },
+        { kind: 'finance', name: 'Finance Desk (demo)', email: 'finance@pharmacy.invalid' },
+      ],
+    },
+    unitCode: 'ACC-OSU-G-01',
+    startedMonthsAgo: 4,
+    months: 36,
+    monthlyRentMinor: 300_000,
+    cycle: 'quarterly',
+    depositMinor: 900_000,
+    serviceChargeMonthlyMinor: 30_000,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a lease that expires in 60 days (renewal reminders)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Akua Expiring (demo)',
+      phone: '+233200000035',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ELG-B1-01',
+    startedMonthsAgo: 10,
+    months: 12,
+    endsInDays: 60,
+    monthlyRentMinor: 180_000,
+    cycle: 'monthly',
+    depositMinor: 360_000,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.two@demo.invalid',
+    what: 'a tenancy that will be 45 days in arrears (payments arrive in M4a)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Kofi Arrears-45 (demo)',
+      phone: '+233200000036',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B2-01',
+    startedMonthsAgo: 5,
+    months: 12,
+    monthlyRentMinor: 40_000,
+    cycle: 'monthly',
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.two@demo.invalid',
+    what: 'a tenancy that will be 95 days in arrears',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Esi Arrears-95 (demo)',
+      phone: '+233200000037',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B2-02',
+    startedMonthsAgo: 6,
+    months: 12,
+    monthlyRentMinor: 40_000,
+    cycle: 'monthly',
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.two@demo.invalid',
+    what: 'a tenancy that will be partly paid',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Kojo Partial (demo)',
+      phone: '+233200000038',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B2-03',
+    startedMonthsAgo: 2,
+    months: 12,
+    monthlyRentMinor: 45_000,
+    cycle: 'monthly',
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a tenancy that will hold an overpayment as credit',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Adwoa Credit (demo)',
+      phone: '+233200000039',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ELG-B1-02',
+    startedMonthsAgo: 2,
+    months: 12,
+    monthlyRentMinor: 180_000,
+    cycle: 'monthly',
+    depositMinor: 360_000,
+  },
+  // One person who rents from both the agency and the self-managing landlord (TL-01), on the demo
+  // tenant phone, so both tenancies show in the tenant app.
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'the demo tenant’s flat, rented from the agency',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Ama Tenant (demo)',
+      phone: '+233200000021',
+      occupation: 'Accountant',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ELG-B1-05',
+    startedMonthsAgo: 2,
+    months: 12,
+    monthlyRentMinor: 220_000,
+    cycle: 'monthly',
+    depositMinor: 440_000,
+  },
+  {
+    companyId: LANDLORD,
+    actorEmail: 'landlord@demo.invalid',
+    what: 'the demo tenant’s house, rented from the landlord',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Ama Tenant (demo)',
+      phone: '+233200000021',
+      occupation: 'Accountant',
+      consent: smsConsent,
+    },
+    unitCode: 'TEM-EST-B1-01',
+    startedMonthsAgo: 6,
+    months: 24,
+    monthlyRentMinor: 450_000,
+    cycle: 'six_monthly',
+    depositMinor: 900_000,
+  },
+];
+
+const PAPER_SCAN = Buffer.from(
+  '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n' +
+    'trailer<</Root 1 0 R>>\n%%EOF\n',
+  'latin1',
+);
+
+/**
+ * Tenants and their leases (M3), recorded through the services as signed on paper. Idempotent:
+ * a tenant is found by name in its company, and a unit that already has a lease is skipped.
+ */
+async function ensureTenancies(
+  database: Database,
+  services: {
+    tenants: TenantsService;
+    leases: LeasesService;
+    storage: StoragePort;
+    cfg: AppConfig;
+  },
+): Promise<number> {
+  const today = toIsoDate(businessDateOf(instantFrom(new Date()), 'Africa/Accra'));
+  let created = 0;
+  for (const t of TENANCIES) {
+    const actor = await actorFor(database, t.companyId, t.actorEmail);
+    const found = await withCompany(
+      database,
+      { companyId: t.companyId, actorKind: 'system' },
+      async (tx) => {
+        const [unit] = await tx
+          .select({ id: schema.unit.id })
+          .from(schema.unit)
+          .where(eq(schema.unit.code, t.unitCode));
+        const leased = unit
+          ? await tx.execute<{ id: string }>(
+              sql`select id from lease where unit_id = ${unit.id} and status <> 'cancelled' limit 1`,
+            )
+          : null;
+        const [tenant] = await tx
+          .select({ id: schema.tenant.id })
+          .from(schema.tenant)
+          .where(eq(schema.tenant.displayName, t.tenant.displayName));
+        return { unitId: unit?.id, leased: (leased?.rows.length ?? 0) > 0, tenantId: tenant?.id };
+      },
+    );
+    if (!found.unitId || found.leased) continue;
+    const tenantId =
+      found.tenantId ??
+      (await services.tenants.create(actor, t.tenant, { isTestContact: true })).tenant.id;
+    const start = toIsoDate(addMonths(parseBusinessDate(today), -t.startedMonthsAgo));
+    const end = t.endsInDays
+      ? toIsoDate(addDays(parseBusinessDate(today), t.endsInDays))
+      : toIsoDate(addDays(addMonths(parseBusinessDate(start), t.months), -1));
+    const signedOn = toIsoDate(addDays(parseBusinessDate(start), -7));
+    const upload = await services.leases.createUpload(actor, {
+      contentType: 'application/pdf',
+      sizeBytes: PAPER_SCAN.length,
+    });
+    // The scan goes where the browser's presigned upload would put it.
+    await services.storage.put({
+      bucket: services.cfg.S3_BUCKET_FILES,
+      key: upload.fields.key!,
+      body: PAPER_SCAN,
+      contentType: 'application/pdf',
+    });
+    const signer =
+      t.tenant.kind === 'company'
+        ? { role: 'signatory' as const, name: t.tenant.contacts![0]!.name }
+        : { role: 'tenant' as const, name: t.tenant.displayName };
+    await services.leases.recordPaper(actor, {
+      unitId: found.unitId,
+      tenantId,
+      startDate: start,
+      endDate: end,
+      monthlyRentMinor: t.monthlyRentMinor,
+      cycle: t.cycle,
+      initialAdvanceMonths: t.initialAdvanceMonths ?? null,
+      depositMinor: t.depositMinor ?? null,
+      serviceChargeMonthlyMinor: t.serviceChargeMonthlyMinor ?? null,
+      noticeDays: t.tenant.kind === 'company' ? 90 : 30,
+      parties: [{ ...signer, paperSignedOn: signedOn }],
+      scanUploadId: upload.uploadId,
+      signedOn,
+    });
+    created += 1;
+  }
+  return created;
+}
+
 /** RFC 4648 base32 without padding, for the otpauth URI people add to an authenticator app. */
 function base32(text: string): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -614,9 +950,20 @@ try {
     meters: app.get(MetersService),
   });
   await ensureScopes(database);
+  const storage = app.get<StoragePort>(STORAGE_PORT);
+  await storage.ensureBuckets({ files: cfg.S3_BUCKET_FILES, evidence: cfg.S3_BUCKET_EVIDENCE });
+  const leases = await ensureTenancies(database, {
+    tenants: app.get(TenantsService),
+    leases: app.get(LeasesService),
+    storage,
+    cfg,
+  });
   console.log(`Seeded ${COMPANIES.length} companies and ${PEOPLE.length} people.`);
   console.log(
     `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST).`,
+  );
+  console.log(
+    `Tenancies: ${leases} new paper leases of ${TENANCIES.length}; +233 20 000 0021 rents from both companies.`,
   );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(

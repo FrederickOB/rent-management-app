@@ -19,15 +19,24 @@ import {
   type Clock,
 } from '@rent/server/core';
 import { DocumentsModule, DocumentsService } from '@rent/server/documents';
+import { EsignModule } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
+import { MessagingModule, MessagingService } from '@rent/server/messaging';
 import {
   PortfolioModule,
   PropertyFilesService,
   RegisterImportService,
 } from '@rent/server/portfolio';
+import {
+  IdChecksService,
+  LeaseLifecycleService,
+  TenancyModule,
+  TenancyRemindersService,
+} from '@rent/server/tenancy';
 import { closeRenderer, renderPdfJob } from './render-pdf.job';
 import { workerJobs } from './jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
+import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
 const config = loadConfig();
 const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
@@ -39,6 +48,9 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     DocumentsModule,
     ApprovalsModule,
     PortfolioModule,
+    EsignModule,
+    TenancyModule,
+    MessagingModule,
   ],
 })
 class WorkerModule {}
@@ -74,6 +86,13 @@ const definitions = [
     propertyFiles: app.get(PropertyFilesService),
     imports: app.get(RegisterImportService),
   }),
+  ...tenancyJobs({
+    ...deps,
+    messaging: app.get(MessagingService),
+    idChecks: app.get(IdChecksService),
+    lifecycle: app.get(LeaseLifecycleService),
+    reminders: app.get(TenancyRemindersService),
+  }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -83,7 +102,7 @@ const relay = new OutboxRelay(
   database,
   jobs,
   logger,
-  new Set<string>(['documents.render-pdf', ...REGISTER_EVENT_TYPES]),
+  new Set<string>(['documents.render-pdf', ...REGISTER_EVENT_TYPES, ...TENANCY_EVENT_TYPES]),
 );
 await relay.start();
 logger.info({ jobs: definitions.map((d) => d.name) }, 'worker started');

@@ -13,6 +13,13 @@ export const APPEND_ONLY_TABLES = [
   'document',
   'property_ownership',
   'unit_status_event',
+  // M3: consent, the rent schedule, signature evidence and the signing timeline, and messages.
+  'consent_event',
+  'charge_period',
+  'signature',
+  'signing_event',
+  'message',
+  'message_event',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */

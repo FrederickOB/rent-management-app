@@ -18,9 +18,41 @@ const DOWNLOAD_SECONDS = 300;
 const UPLOAD_SECONDS = 600;
 
 export interface UploadPurpose {
-  readonly purpose: 'logo' | 'property_photo' | 'property_paper' | 'register_import';
+  readonly purpose: 'logo' | 'property_photo' | 'property_paper' | 'register_import' | 'lease_file';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
+}
+
+/**
+ * Papers for a lease (M3 decision 7 and plan 4.11): the scan of a lease signed on paper, a
+ * stamped copy and a wet-signed formal lease. They are stored write-once as evidence.
+ */
+export const LEASE_FILE_UPLOAD: UploadPurpose = {
+  purpose: 'lease_file',
+  contentTypes: ['application/pdf', 'image/jpeg', 'image/png'],
+  maxBytes: 20_000_000,
+};
+
+/** An upload checked and copied to write-once storage, waiting to be recorded as a document. */
+export interface StagedEvidence {
+  readonly companyId: string;
+  readonly uploadId: string;
+  readonly contentType: string;
+  readonly bytes: Buffer;
+  readonly storageKey: string;
+  readonly storageVersionId: string;
+  readonly retentionMode: 'GOVERNANCE' | 'COMPLIANCE';
+  readonly retainUntil: Date;
+  readonly createdBy: string;
+}
+
+/** What the bytes really are, whatever the upload declared. */
+function sniffContentType(bytes: Buffer): string | null {
+  if (bytes.subarray(0, 5).toString('latin1') === '%PDF-') return 'application/pdf';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])))
+    return 'image/png';
+  return null;
 }
 
 export const LOGO_UPLOAD: UploadPurpose = {
@@ -170,6 +202,110 @@ export class DocumentsService {
         .set({ status: 'processed', documentId })
         .where(eq(schema.uploadIntent.id, uploadId));
     });
+    return documentId;
+  }
+
+  /**
+   * Checks an upload (its uploader, purpose, size, declared type and real bytes) and copies it to
+   * the evidence bucket under Object Lock, with the retention from the rules table. Runs outside
+   * any transaction; the caller then records it with recordStagedEvidence in its own.
+   */
+  async stageEvidenceUpload(
+    ctx: { companyId: string; personId: string },
+    uploadId: string,
+    purpose: UploadPurpose,
+  ): Promise<StagedEvidence> {
+    const [intent] = await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+      tx
+        .select()
+        .from(schema.uploadIntent)
+        .where(
+          and(
+            eq(schema.uploadIntent.id, uploadId),
+            eq(schema.uploadIntent.companyId, ctx.companyId),
+          ),
+        ),
+    );
+    if (!intent || intent.purpose !== purpose.purpose || intent.createdBy !== ctx.personId)
+      throw notFound('Upload');
+    if (intent.status !== 'pending' || intent.expiresAt.getTime() < this.clock.now().getTime())
+      throw invalid('upload_expired', 'That upload has expired; upload the file again');
+    const head = await this.storage.head({
+      bucket: this.config.S3_BUCKET_FILES,
+      key: intent.storageKey,
+    });
+    if (!head) throw invalid('upload_missing', 'The file was not uploaded');
+    if (head.size > intent.maxBytes || head.contentType !== intent.contentType) {
+      await this.rejectUpload(ctx, uploadId, 'size or type does not match');
+      throw invalid('upload_rejected', 'The file does not match what was declared');
+    }
+    const bytes = await this.storage.get({
+      bucket: this.config.S3_BUCKET_FILES,
+      key: intent.storageKey,
+    });
+    if (sniffContentType(bytes) !== intent.contentType) {
+      await this.rejectUpload(ctx, uploadId, 'contents do not match the declared type');
+      throw invalid('upload_rejected', 'The file is not the PDF or image it was declared as');
+    }
+    const [company] = await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+      tx
+        .select({ countryCode: schema.company.countryCode })
+        .from(schema.company)
+        .where(eq(schema.company.id, ctx.companyId)),
+    );
+    const retention = await this.evidenceRetention(company?.countryCode ?? 'GH');
+    const storageKey = `evidence/${ctx.companyId}/${purpose.purpose}/${uuidv7()}`;
+    const stored = await this.storage.putWriteOnce({
+      bucket: this.config.S3_BUCKET_EVIDENCE,
+      key: storageKey,
+      body: bytes,
+      contentType: intent.contentType,
+      retainUntil: retention.retainUntil,
+      mode: retention.mode,
+    });
+    if (stored.sha256 !== createHash('sha256').update(bytes).digest('hex'))
+      throw new Error('Stored bytes do not match the upload');
+    // The plain copy in the files bucket is no longer needed.
+    await this.storage
+      .delete({ bucket: this.config.S3_BUCKET_FILES, key: intent.storageKey })
+      .catch(() => undefined);
+    return {
+      companyId: ctx.companyId,
+      uploadId,
+      contentType: intent.contentType,
+      bytes,
+      storageKey,
+      storageVersionId: stored.versionId,
+      retentionMode: retention.mode,
+      retainUntil: retention.retainUntil,
+      createdBy: ctx.personId,
+    };
+  }
+
+  /** Records a staged upload as a write-once document in the caller's transaction. */
+  async recordStagedEvidence(tx: Tx, staged: StagedEvidence, kind: string): Promise<string> {
+    const documentId = await this.insertDocument(tx, {
+      companyId: staged.companyId,
+      kind,
+      contentType: staged.contentType,
+      bytes: staged.bytes,
+      bucket: this.config.S3_BUCKET_EVIDENCE,
+      storageKey: staged.storageKey,
+      storageVersionId: staged.storageVersionId,
+      writeOnce: true,
+      retentionMode: staged.retentionMode,
+      retainUntil: staged.retainUntil,
+      createdBy: staged.createdBy,
+    });
+    const updated = await tx
+      .update(schema.uploadIntent)
+      .set({ status: 'processed', documentId })
+      .where(
+        and(eq(schema.uploadIntent.id, staged.uploadId), eq(schema.uploadIntent.status, 'pending')),
+      )
+      .returning({ id: schema.uploadIntent.id });
+    if (updated.length === 0)
+      throw invalid('upload_expired', 'That upload was already used; upload the file again');
     return documentId;
   }
 

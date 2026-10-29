@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -112,6 +113,98 @@ async function seedCompany(companyId: string) {
     await app.query(
       "insert into register_import (company_id, upload_intent_id, storage_key, created_by) values ($1, gen_random_uuid(), 'k', $2)",
       [companyId, initiator],
+    );
+    // Tenancy, e-signing and messaging (M3). The lease is drafted with its parties, then
+    // recorded as signed on paper, so the schedule and the occupancy view have rows too.
+    const { rows: tenants } = await app.query<{ id: string }>(
+      "insert into tenant (company_id, kind, display_name, phone) values ($1, 'individual', 'Tenant', '+233200000099') returning id",
+      [companyId],
+    );
+    const tenantId = tenants[0]!.id;
+    await app.query(
+      "insert into tenant_contact (company_id, tenant_id, kind, name) values ($1, $2, 'guarantor', 'Guarantor')",
+      [companyId, tenantId],
+    );
+    await app.query(
+      "insert into id_check (company_id, tenant_id, id_type, provider) values ($1, $2, 'ghana_card', 'memory')",
+      [companyId, tenantId],
+    );
+    await app.query(
+      "insert into consent_event (company_id, tenant_id, channel, action, text_version, text_sha256) values ($1, $2, 'sms', 'grant', 'messages.v1', $3)",
+      [companyId, tenantId, zero],
+    );
+    const { rows: templates } = await app.query<{ id: string }>(
+      "insert into lease_template (company_id, name, kind) values ($1, 'Residential', 'residential') returning id",
+      [companyId],
+    );
+    const { rows: versions } = await app.query<{ id: string }>(
+      "insert into lease_template_version (company_id, template_id, version, content, content_sha256) values ($1, $2, 1, '{}', $3) returning id",
+      [companyId, templates[0]!.id, zero],
+    );
+    const { rows: leases } = await app.query<{ id: string }>(
+      `insert into lease (company_id, property_id, unit_id, tenant_id, use, template_version_id, start_date, end_date,
+         monthly_rent_minor, rent_cycle, notice_days)
+       values ($1, $2, $3, $4, 'residential', $5, current_date, current_date + 364, 150000, 'monthly', 30) returning id`,
+      [companyId, propertyId, units[0]!.id, tenantId, versions[0]!.id],
+    );
+    const leaseRef = [companyId, propertyId, tenantId, leases[0]!.id];
+    await app.query(
+      "insert into lease_party (company_id, property_id, tenant_id, lease_id, party_role, name, position) values ($1, $2, $3, $4, 'tenant', 'Tenant', 1)",
+      leaseRef,
+    );
+    await app.query(
+      'insert into rent_step (company_id, property_id, tenant_id, lease_id, effective_from, monthly_rent_minor) values ($1, $2, $3, $4, current_date + 182, 160000)',
+      leaseRef,
+    );
+    await app.query(
+      "insert into lease_charge (company_id, property_id, tenant_id, lease_id, charge_type, monthly_amount_minor) values ($1, $2, $3, $4, 'service_charge', 10000)",
+      leaseRef,
+    );
+    await app.query(
+      "update lease set status = 'signed', signed_at = now(), signing_method = 'paper', signed_document_id = $2 where id = $1",
+      [leases[0]!.id, docs[0]!.id],
+    );
+    await app.query(
+      "insert into charge_period (company_id, property_id, tenant_id, lease_id, sequence, charge_type, period_start, period_end, amount_minor) values ($1, $2, $3, $4, 0, 'rent', current_date, current_date + 29, 150000)",
+      leaseRef,
+    );
+    const { rows: signing } = await app.query<{ id: string }>(
+      "insert into signing_request (company_id, property_id, tenant_id, subject_type, lease_id) values ($1, $2, $3, 'lease', $4) returning id",
+      leaseRef,
+    );
+    const signingRef = [companyId, propertyId, tenantId, signing[0]!.id];
+    const { rows: signers } = await app.query<{ id: string }>(
+      "insert into signer (company_id, property_id, tenant_id, signing_request_id, signer_role, subject_type, name, phone, position) values ($1, $2, $3, $4, 'tenant', 'tenant', 'Tenant', '+233200000099', 1) returning id",
+      signingRef,
+    );
+    const { rows: links } = await app.query<{ id: string }>(
+      "insert into secure_link (company_id, property_id, tenant_id, purpose, token_hash, signer_id, expires_at) values ($1, $2, $3, 'sign', $4, $5, now() + interval '30 days') returning id",
+      [companyId, propertyId, tenantId, randomBytes(32).toString('hex'), signers[0]!.id],
+    );
+    const { rows: codes } = await app.query<{ id: string }>(
+      `insert into otp_challenge (company_id, property_id, tenant_id, signer_id, secure_link_id, channel, destination_masked,
+         destination_hash, code_hash, expires_at)
+       values ($1, $2, $3, $4, $5, 'sms', '+233 ** *** 0099', 'h', 'c', now() + interval '10 minutes') returning id`,
+      [companyId, propertyId, tenantId, signers[0]!.id, links[0]!.id],
+    );
+    await app.query(
+      `insert into signature (company_id, property_id, tenant_id, signing_request_id, signer_id, method, typed_name,
+         consent_version, consent_sha256, verified_channel, verified_destination_masked, ip_address, user_agent,
+         document_sha256, otp_challenge_id)
+       values ($1, $2, $3, $4, $5, 'typed', 'Tenant', 'consent.v1', $6, 'sms', '+233 ** *** 0099', '203.0.113.7', 'test', $6, $7)`,
+      [...signingRef, signers[0]!.id, zero, codes[0]!.id],
+    );
+    await app.query(
+      "insert into signing_event (company_id, property_id, tenant_id, signing_request_id, signer_id, kind) values ($1, $2, $3, $4, $5, 'link_opened')",
+      [...signingRef, signers[0]!.id],
+    );
+    const { rows: messages } = await app.query<{ id: string }>(
+      "insert into message (id, company_id, tenant_id, recipient_type, purpose, body, channels) values (gen_random_uuid(), $1, $2, 'tenant', 'signing_link', 'Sign here: [link]', '{sms}') returning id",
+      [companyId, tenantId],
+    );
+    await app.query(
+      "insert into message_event (company_id, message_id, status) values ($1, $2, 'queued')",
+      [companyId, messages[0]!.id],
     );
   });
 }

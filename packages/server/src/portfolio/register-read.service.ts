@@ -34,11 +34,20 @@ import type {
 } from './register.types';
 
 /**
- * The status shown for a unit (PR-06). In M2 no unit is occupied: occupancy is derived from
- * leases in M3, which replaces this expression and only this one.
+ * A unit's occupancy from its leases (PB-09, M3): occupied while a lease is active, ending or
+ * holding over, reserved between signature and start. The `unit_occupancy` view the tenancy
+ * migration publishes has a row only for those units; nothing stores occupancy.
+ */
+const LEASE_OCCUPANCY = `(select o.occupancy from unit_occupancy o where o.company_id = u.company_id and o.unit_id = u.id)`;
+
+export const OCCUPANCY_SQL = sql.raw(`coalesce(${LEASE_OCCUPANCY}, 'vacant')`);
+
+/**
+ * The status shown for a unit (PR-06; prd-issues 21): occupancy from leases wins, then the
+ * availability set by hand. A repair on an occupied unit shows as a badge (underRepair).
  */
 export const DISPLAY_STATUS_SQL = sql.raw(
-  `(case u.availability when 'available' then 'vacant' else u.availability end)`,
+  `coalesce(${LEASE_OCCUPANCY}, case u.availability when 'available' then 'vacant' else u.availability end)`,
 );
 
 const MAX_PAGE = 500;
@@ -74,6 +83,7 @@ type UnitSqlRow = {
   band_overridden: boolean;
   availability: string;
   status: string;
+  occupancy: 'occupied' | 'reserved' | 'vacant';
   owner_id: string | null;
   owner_reference: string | null;
   owner_name: string | null;
@@ -103,6 +113,7 @@ const unitRow = (r: UnitSqlRow): UnitRow => ({
   bandOverridden: r.band_overridden,
   availability: r.availability as Availability,
   status: r.status as DisplayStatus,
+  occupancy: r.occupancy,
   underRepair: r.availability === 'under_repair',
   owner: ownerRef(r.owner_id, r.owner_reference, r.owner_name),
   region: r.region,
@@ -113,7 +124,7 @@ const unitRow = (r: UnitSqlRow): UnitRow => ({
 const UNIT_SELECT = sql`select u.id, u.code, u.label, u.property_id, p.code as property_code,
     p.name as property_name, u.block_id, b.code as block_code, u.unit_type, u.bedrooms,
     u.billing_band, u.band_override_reason is not null as band_overridden, u.availability,
-    ${DISPLAY_STATUS_SQL} as status, own.id as owner_id, own.reference as owner_reference,
+    ${DISPLAY_STATUS_SQL} as status, ${OCCUPANCY_SQL} as occupancy, own.id as owner_id, own.reference as owner_reference,
     own.display_name as owner_name, p.region, p.district, u.archived_at is not null as archived
   from unit u
   join block b on b.company_id = u.company_id and b.id = u.block_id

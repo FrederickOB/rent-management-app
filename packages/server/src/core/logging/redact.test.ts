@@ -69,6 +69,39 @@ describe('NFR-SEC log redaction', () => {
     );
   });
 
+  it('never writes a passport number or a TIN, wherever it appears (M3 plan 4.4)', () => {
+    const letters = (min: number, max: number) =>
+      fc.stringMatching(new RegExp(`^[A-Z]{${min},${max}}$`));
+    const passport = fc
+      .tuple(letters(1, 2), fc.integer({ min: 6, max: 9 }))
+      .chain(([prefix, n]) => digits(n).map((d) => `${prefix}${d}`));
+    const tin = fc
+      .tuple(fc.constantFrom('C', 'P', 'G', 'Q', 'V'), digits(10))
+      .map(([prefix, d]) => `${prefix}${d}`);
+    fc.assert(
+      fc.property(
+        fc.oneof(passport, tin),
+        fc.constantFrom('message', 'field', 'nested', 'error', 'array'),
+        (value, where) => {
+          const { logger, output } = capture();
+          if (where === 'message') logger.info(`checking ${value} now`);
+          if (where === 'field') logger.info({ detail: `number=${value}` }, 'event');
+          if (where === 'nested')
+            logger.info({ outer: { inner: { note: `x ${value} y` } } }, 'event');
+          if (where === 'error') logger.error({ err: new Error(`failed for ${value}`) }, 'failure');
+          if (where === 'array') logger.info({ list: ['a', `b ${value}`] }, 'event');
+          expect(output()).not.toContain(value);
+        },
+      ),
+      { numRuns: 400 },
+    );
+    const { logger, output } = capture();
+    logger.info({ passport: 'A1234567', tin: 'C0012345678', passportNumber: 'x' }, 'event');
+    const written = JSON.parse(output()) as Record<string, unknown>;
+    for (const key of ['passport', 'tin', 'passportNumber'])
+      expect(written[key]).toBe('[REDACTED]');
+  });
+
   it('drops sensitive fields by name, whatever their value', () => {
     const { logger, output } = capture();
     logger.info(

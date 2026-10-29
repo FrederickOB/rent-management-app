@@ -36,6 +36,11 @@ export const ownerSchema = z.object({
   residenceCountry: z.string().nullable(),
   timeZone: z.string(),
   notes: z.string().nullable(),
+  /** M3 tax fields (plan 4.13). Always sent; optional so M2 clients keep their types. */
+  lettingBusiness: z.boolean().optional(),
+  vatRegistered: z.boolean().optional(),
+  /** Masked; reveal it with a reason (owner.manage). */
+  tinMasked: z.string().nullable().optional(),
   archived: z.boolean(),
   createdAt: iso,
 });
@@ -49,6 +54,10 @@ const ownerFields = {
   residenceCountry: z.string().trim().length(2).nullable().optional(),
   timeZone: z.string().trim().max(64).optional(),
   notes: optionalText(1000),
+  lettingBusiness: z.boolean().optional(),
+  vatRegistered: z.boolean().optional(),
+  /** Stored encrypted; send null to remove it. Never returned except through reveal. */
+  tin: z.string().trim().max(20).nullable().optional(),
 };
 
 export const statusCountsSchema = z.object(
@@ -75,6 +84,8 @@ export const unitRowSchema = z.object({
   bandOverridden: z.boolean(),
   availability: z.enum(AVAILABILITY),
   status: z.enum(DISPLAY_STATUSES),
+  /** From leases (PB-09): reserved between signature and start. */
+  occupancy: z.enum(['occupied', 'reserved', 'vacant']),
   underRepair: z.boolean(),
   owner: ownerRefSchema.nullable(),
   region: z.string(),
@@ -300,6 +311,14 @@ export const ownersContract = {
     .route({ method: 'POST', path: '/owners/{ownerId}/archive' })
     .input(z.object({ ownerId: uuid }))
     .output(z.object({ ok: z.literal(true) })),
+  revealTin: oc
+    .route({
+      method: 'POST',
+      path: '/owners/{ownerId}/tin/reveal',
+      summary: 'Show an owner’s TIN, with a reason; audited (plan 4.13)',
+    })
+    .input(z.object({ ownerId: uuid, reason: z.string().trim().min(10).max(300) }))
+    .output(z.object({ tin: z.string() })),
 };
 
 export const registerContract = {

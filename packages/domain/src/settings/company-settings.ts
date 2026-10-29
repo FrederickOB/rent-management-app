@@ -25,10 +25,50 @@ export const companySettingsSchema = z
       .min(24)
       .max(24 * 7)
       .default(24),
+    // M3 tenancy settings (plan 4.11 and decision 4). Optional here, so stored settings and the
+    // M1 defaults are unchanged; tenancySettingsOf() applies their defaults.
+    /** Decision 4: a witness signs every lease unless the company turns this off. */
+    witnessRequired: z.boolean().optional(),
+    /** TX-05 and OQ-52: track Rent Control registration for commercial leases too. */
+    rentControlCommercial: z.boolean().optional(),
+    /** TX-05: days before the registration deadline; then weekly until registered. */
+    rentControlReminderDaysBefore: z
+      .array(z.number().int().min(0).max(366))
+      .min(1)
+      .max(12)
+      .optional(),
+    /** OQ-45: days before the stamping deadline; then weekly until stamped. */
+    stampingReminderDaysBefore: z.array(z.number().int().min(0).max(366)).min(1).max(12).optional(),
   })
   .strict();
 
 export type CompanySettings = z.infer<typeof companySettingsSchema>;
+
+/** The M3 settings with their defaults applied: product choices, not law (CLAUDE.md section 7). */
+export interface TenancySettings {
+  readonly witnessRequired: boolean;
+  readonly rentControlCommercial: boolean;
+  readonly renewalReminderDays: readonly number[];
+  readonly rentControlReminderDaysBefore: readonly number[];
+  readonly stampingReminderDaysBefore: readonly number[];
+  readonly advanceRentPolicy: CompanySettings['advanceRentPolicy'];
+}
+
+/**
+ * Reminder defaults from the M3 plan (4.11): Rent Control at 7, 12 and 14 days after signing,
+ * which with the 14-day rule is 7, 2 and 0 days before the deadline; stamping 30, 14 and 7 days
+ * before. Both then weekly.
+ */
+export function tenancySettingsOf(settings: CompanySettings): TenancySettings {
+  return {
+    witnessRequired: settings.witnessRequired ?? true,
+    rentControlCommercial: settings.rentControlCommercial ?? false,
+    renewalReminderDays: settings.renewalReminderDays,
+    rentControlReminderDaysBefore: settings.rentControlReminderDaysBefore ?? [7, 2, 0],
+    stampingReminderDaysBefore: settings.stampingReminderDaysBefore ?? [30, 14, 7],
+    advanceRentPolicy: settings.advanceRentPolicy,
+  };
+}
 
 export const parseCompanySettings = (value: unknown): CompanySettings =>
   companySettingsSchema.parse(value ?? {});

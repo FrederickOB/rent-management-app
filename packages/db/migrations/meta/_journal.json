@@ -43,6 +43,27 @@
       "when": 1793273002992,
       "tag": "0005_register_security",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793283056668,
+      "tag": "0006_tenancy",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793283076390,
+      "tag": "0007_tenancy_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793283077149,
+      "tag": "0008_rules_m3",
+      "breakpoints": true
     }
   ]
 }
