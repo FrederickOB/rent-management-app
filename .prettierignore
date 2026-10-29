@@ -1,0 +1,16 @@
+pnpm-lock.yaml
+node_modules/
+dist/
+.next/
+.turbo/
+.expo/
+web-build/
+coverage/
+playwright-report/
+test-results/
+packages/db/migrations/meta/
+docs/
+BUILD_PLAYBOOK.md
+CLAUDE.md
+next-env.d.ts
+.vitest/

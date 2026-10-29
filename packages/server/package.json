@@ -1,0 +1,55 @@
+{
+  "name": "@rent/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./core": "./src/core/index.ts",
+    "./jobs": "./src/core/jobs/index.ts",
+    "./identity": "./src/identity/index.ts",
+    "./policy": "./src/policy/index.ts",
+    "./audit": "./src/audit/index.ts",
+    "./rules": "./src/rules/index.ts",
+    "./documents": "./src/documents/index.ts",
+    "./companies": "./src/companies/index.ts",
+    "./approvals": "./src/approvals/index.ts",
+    "./testing": "./test/support/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint --max-warnings 0 .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "seed": "tsx --env-file-if-exists=../../.env scripts/seed.ts",
+    "rules:add": "tsx --env-file-if-exists=../../.env scripts/rules-add.ts",
+    "jobs:migrate": "tsx --env-file-if-exists=../../.env scripts/jobs-migrate.ts"
+  },
+  "dependencies": {
+    "@better-auth/expo": "catalog:",
+    "@nestjs/common": "catalog:",
+    "@nestjs/core": "catalog:",
+    "@rent/db": "workspace:*",
+    "@rent/domain": "workspace:*",
+    "@rent/integrations": "workspace:*",
+    "better-auth": "catalog:",
+    "pg-boss": "catalog:",
+    "pino": "catalog:",
+    "reflect-metadata": "catalog:",
+    "rxjs": "catalog:",
+    "uuid": "catalog:",
+    "zod": "catalog:",
+    "@rent/documents": "workspace:*",
+    "sharp": "0.35.5",
+    "otplib": "catalog:"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "catalog:",
+    "@rent/config": "workspace:*",
+    "@types/node": "catalog:",
+    "fast-check": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

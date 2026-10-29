@@ -1,0 +1,89 @@
+import { oc } from '@orpc/contract';
+import { z } from 'zod';
+
+const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex colour such as #0F766E');
+
+export const companySettingsSchema = z.object({
+  rentReminderOffsetsDays: z.array(z.number().int()),
+  noticeReminderOffsetsHours: z.array(z.number().int()),
+  renewalReminderDays: z.array(z.number().int()),
+  advanceRentPolicy: z.enum(['off', 'warn', 'block']),
+  approvalExpiryDays: z.number().int(),
+  approvalCoolingOffHours: z.number().int(),
+});
+
+export const companyProfileSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.enum(['landlord', 'agency', 'platform']),
+  legalName: z.string(),
+  displayName: z.string(),
+  countryCode: z.string(),
+  timeZone: z.string(),
+  currency: z.string(),
+  branding: z.object({
+    primaryColour: hex,
+    accentColour: hex,
+    senderName: z.string(),
+    /** Short-lived download link, issued after a policy check. */
+    logoUrl: z.string().url().nullable(),
+  }),
+  settings: companySettingsSchema,
+});
+
+export type CompanyProfile = z.infer<typeof companyProfileSchema>;
+
+export const LOGO_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
+export const LOGO_MAX_BYTES = 1_000_000;
+
+export const companyContract = {
+  get: oc
+    .route({
+      method: 'GET',
+      path: '/company',
+      summary: 'The current company and its branding (AD-01)',
+    })
+    .output(companyProfileSchema),
+  updateBranding: oc
+    .route({ method: 'PATCH', path: '/company/branding' })
+    .input(
+      z.object({
+        displayName: z.string().trim().min(2).max(80).optional(),
+        primaryColour: hex.optional(),
+        accentColour: hex.optional(),
+        senderName: z.string().trim().min(2).max(40).optional(),
+      }),
+    )
+    .output(companyProfileSchema),
+  updateSettings: oc
+    .route({ method: 'PATCH', path: '/company/settings' })
+    .input(companySettingsSchema.partial())
+    .output(companyProfileSchema),
+  createLogoUpload: oc
+    .route({
+      method: 'POST',
+      path: '/company/logo/uploads',
+      summary: 'A presigned upload for a new logo',
+    })
+    .input(
+      z.object({
+        contentType: z.enum(LOGO_CONTENT_TYPES),
+        sizeBytes: z.number().int().positive().max(LOGO_MAX_BYTES),
+      }),
+    )
+    .output(
+      z.object({
+        uploadId: z.string().uuid(),
+        url: z.string().url(),
+        fields: z.record(z.string(), z.string()),
+        expiresAt: z.string().datetime(),
+      }),
+    ),
+  confirmLogoUpload: oc
+    .route({
+      method: 'POST',
+      path: '/company/logo/uploads/{uploadId}/confirm',
+      summary: 'Check, re-encode and apply an uploaded logo',
+    })
+    .input(z.object({ uploadId: z.string().uuid() }))
+    .output(companyProfileSchema),
+};

@@ -1,0 +1,34 @@
+{
+  "name": "@rent/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env src/main.ts",
+    "lint": "eslint --max-warnings 0 .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit --passWithNoTests"
+  },
+  "dependencies": {
+    "@nestjs/common": "catalog:",
+    "@nestjs/core": "catalog:",
+    "@rent/db": "workspace:*",
+    "@rent/documents": "workspace:*",
+    "@rent/domain": "workspace:*",
+    "@rent/integrations": "workspace:*",
+    "@rent/server": "workspace:*",
+    "pg-boss": "catalog:",
+    "reflect-metadata": "catalog:",
+    "rxjs": "catalog:",
+    "tsx": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@rent/config": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

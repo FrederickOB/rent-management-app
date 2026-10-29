@@ -1,0 +1,81 @@
+import 'reflect-metadata';
+import { Module } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import type { Database } from '@rent/db';
+import type { AlertPort, StoragePort } from '@rent/integrations';
+import { ApprovalsModule, ApprovalsService } from '@rent/server/approvals';
+import { AuditModule, AuditService } from '@rent/server/audit';
+import {
+  ALERT_PORT,
+  CLOCK,
+  CONFIG,
+  CoreModule,
+  createLogger,
+  DATABASE,
+  loadConfig,
+  NestLogger,
+  STORAGE_PORT,
+  type AppConfig,
+  type Clock,
+} from '@rent/server/core';
+import { DocumentsModule, DocumentsService } from '@rent/server/documents';
+import { JobsService, OutboxRelay } from '@rent/server/jobs';
+import { closeRenderer, renderPdfJob } from './render-pdf.job';
+import { workerJobs } from './jobs';
+
+const config = loadConfig();
+const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
+
+@Module({
+  imports: [
+    CoreModule.forRoot({ config, logger, applicationName: 'rent-worker' }),
+    AuditModule,
+    DocumentsModule,
+    ApprovalsModule,
+  ],
+})
+class WorkerModule {}
+
+const app = await NestFactory.createApplicationContext(WorkerModule, {
+  logger: new NestLogger(logger),
+});
+app.enableShutdownHooks();
+
+const database = app.get<Database>(DATABASE);
+const alerts = app.get<AlertPort>(ALERT_PORT);
+const deps = {
+  database,
+  config: app.get<AppConfig>(CONFIG),
+  clock: app.get<Clock>(CLOCK),
+  alerts,
+  audit: app.get(AuditService),
+  approvals: app.get(ApprovalsService),
+  documents: app.get(DocumentsService),
+};
+
+const storage = app.get<StoragePort>(STORAGE_PORT);
+await storage
+  .ensureBuckets({ files: config.S3_BUCKET_FILES, evidence: config.S3_BUCKET_EVIDENCE })
+  .catch((error: unknown) => logger.warn({ err: error }, 'could not ensure storage buckets'));
+
+const jobs = new JobsService(database, logger, alerts, config.DATABASE_URL);
+await jobs.start();
+const definitions = [...workerJobs(deps), renderPdfJob({ ...deps, storage })];
+for (const definition of definitions) await jobs.register(definition);
+await jobs.watchDeadLetters();
+
+// Event types that have a consumer here; the rest stay in the outbox as the event log.
+const relay = new OutboxRelay(database, jobs, logger, new Set(['documents.render-pdf']));
+await relay.start();
+logger.info({ jobs: definitions.map((d) => d.name) }, 'worker started');
+
+async function shutdown(signal: string) {
+  logger.info({ signal }, 'worker stopping');
+  await relay.stop();
+  await jobs.stop();
+  await closeRenderer();
+  await app.close();
+  process.exit(0);
+}
+process.once('SIGTERM', () => void shutdown('SIGTERM'));
+process.once('SIGINT', () => void shutdown('SIGINT'));

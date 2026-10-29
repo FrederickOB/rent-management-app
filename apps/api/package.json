@@ -1,0 +1,42 @@
+{
+  "name": "@rent/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env src/main.ts",
+    "lint": "eslint --max-warnings 0 .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit --passWithNoTests"
+  },
+  "dependencies": {
+    "@fastify/helmet": "13.2.0",
+    "@nestjs/common": "catalog:",
+    "@nestjs/core": "catalog:",
+    "@nestjs/platform-fastify": "catalog:",
+    "@orpc/nest": "catalog:",
+    "@orpc/openapi": "catalog:",
+    "@orpc/server": "catalog:",
+    "@orpc/zod": "catalog:",
+    "@rent/contracts": "workspace:*",
+    "@rent/db": "workspace:*",
+    "@rent/domain": "workspace:*",
+    "@rent/integrations": "workspace:*",
+    "@rent/server": "workspace:*",
+    "fastify": "5.12.7",
+    "reflect-metadata": "catalog:",
+    "rxjs": "catalog:",
+    "tsx": "catalog:",
+    "uuid": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@rent/config": "workspace:*",
+    "@types/node": "catalog:",
+    "otplib": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

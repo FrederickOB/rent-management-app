@@ -1,0 +1,9 @@
+{
+  "extends": "@rent/config/tsconfig/react.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "target": "ES2024",
+    "types": ["node"]
+  },
+  "include": ["src", "vitest.config.ts"]
+}

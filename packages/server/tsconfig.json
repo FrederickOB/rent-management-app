@@ -1,0 +1,4 @@
+{
+  "extends": "@rent/config/tsconfig/nest.json",
+  "include": ["src", "test", "scripts", "vitest.config.ts"]
+}

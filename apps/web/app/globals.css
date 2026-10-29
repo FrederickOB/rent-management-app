@@ -1,0 +1,30 @@
+@import 'tailwindcss';
+
+/*
+ * Company branding arrives at run time (AD-01), so the brand colours are CSS variables that
+ * the app shell sets from the company profile. The defaults are the platform's own colours.
+ */
+@theme inline {
+  --color-brand: var(--brand-primary);
+  --color-brand-contrast: var(--brand-on-primary);
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-accent-contrast: var(--brand-on-accent);
+}
+
+:root {
+  --brand-primary: #0f766e;
+  --brand-on-primary: #ffffff;
+  --brand-accent: #f59e0b;
+  --brand-on-accent: #111827;
+  color-scheme: light;
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-sky-600;
+  }
+}

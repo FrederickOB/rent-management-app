@@ -1,0 +1,7 @@
+{
+  "extends": "@rent/config/tsconfig/base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "ES2023.Intl"]
+  },
+  "include": ["src", "vitest.config.ts"]
+}

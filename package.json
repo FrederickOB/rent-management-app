@@ -1,0 +1,35 @@
+{
+  "name": "rent-platform",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1+sha512.091d1dee7927575661b25dab3c2ae31cafc1c54d6b71ed6a6600cf0c1cb10434a447eae14015f1b23e2e6bedeed79df94a932e2164d2832280dce3fb32f656d1",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "services:up": "docker compose up -d --wait",
+    "services:down": "docker compose down",
+    "dev": "pnpm services:up && turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint && eslint --max-warnings 0 eslint.config.js",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm services:up && turbo run test",
+    "test:unit": "turbo run test:unit",
+    "test:e2e": "pnpm services:up && turbo run test:e2e --concurrency=1",
+    "db:migrate": "pnpm --filter @rent/db migrate && pnpm --filter @rent/server jobs:migrate",
+    "db:seed": "pnpm --filter @rent/server seed",
+    "db:backup": "bash scripts/db-backup.sh",
+    "db:restore": "bash scripts/db-restore.sh",
+    "rules:add": "pnpm --filter @rent/server rules:add"
+  },
+  "devDependencies": {
+    "@rent/config": "workspace:*",
+    "eslint": "catalog:",
+    "prettier": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "@playwright/test": "catalog:"
+  }
+}

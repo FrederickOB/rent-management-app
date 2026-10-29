@@ -1,0 +1,38 @@
+name: Set up the workspace
+description: Node.js from .nvmrc, pnpm through Corepack, the pnpm store and Turborepo caches, and a frozen install.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version-file: .nvmrc
+
+    # Corepack installs the pnpm version pinned in package.json (packageManager).
+    - name: Enable Corepack
+      shell: bash
+      run: corepack enable
+
+    - name: Locate the pnpm store
+      id: pnpm
+      shell: bash
+      run: echo "store=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the pnpm store
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.pnpm.outputs.store }}
+        key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: pnpm-store-${{ runner.os }}-
+
+    # Turborepo's local cache; there is no remote cache.
+    - name: Cache Turborepo
+      uses: actions/cache@v6
+      with:
+        path: .turbo/cache
+        key: turbo-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

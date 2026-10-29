@@ -1,0 +1,34 @@
+{
+  "name": "@rent/domain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./money": "./src/money/index.ts",
+    "./dates": "./src/dates/index.ts",
+    "./phone": "./src/phone/index.ts",
+    "./policy": "./src/policy/index.ts",
+    "./approvals": "./src/approvals/index.ts",
+    "./rules": "./src/rules/index.ts",
+    "./settings": "./src/settings/index.ts",
+    "./errors": "./src/errors.ts"
+  },
+  "scripts": {
+    "lint": "eslint --max-warnings 0 .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "libphonenumber-js": "catalog:",
+    "temporal-polyfill": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@rent/config": "workspace:*",
+    "fast-check": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

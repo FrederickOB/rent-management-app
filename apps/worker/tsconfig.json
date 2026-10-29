@@ -1,0 +1,5 @@
+{
+  "extends": "@rent/config/tsconfig/nest.json",
+  "compilerOptions": { "jsx": "react-jsx", "lib": ["ES2024", "DOM"] },
+  "include": ["src", "test", "vitest.config.ts"]
+}
