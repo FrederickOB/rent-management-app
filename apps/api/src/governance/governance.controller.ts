@@ -11,7 +11,7 @@ import { Ctx, type RequestContext } from '../http/request-context';
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
-export function toApproval({ request, decisions }: ApprovalView) {
+export function toApproval({ request, decisions, mayDecide }: ApprovalView) {
   return {
     id: request.id,
     actionType: request.actionType,
@@ -32,6 +32,7 @@ export function toApproval({ request, decisions }: ApprovalView) {
       reason: d.reason,
       decidedAt: d.decidedAt.toISOString(),
     })),
+    mayDecide,
   };
 }
 

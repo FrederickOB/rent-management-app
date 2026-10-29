@@ -22,6 +22,12 @@ export const approvalSchema = z.object({
       decidedAt: z.string().datetime(),
     }),
   ),
+  /**
+   * Whether you may approve or reject it now: it waits for a second person, you did not raise it
+   * or decide it yet, and your role may decide this kind of request. The API always sends it and
+   * checks again on a decision; a client that does not have it leaves the API to decide.
+   */
+  mayDecide: z.boolean().optional(),
 });
 
 export const approvalsContract = {

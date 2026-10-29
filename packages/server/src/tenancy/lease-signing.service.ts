@@ -237,6 +237,13 @@ export class LeaseSigningService {
       .from(schema.tenant)
       .where(eq(schema.tenant.id, row.tenantId));
     if (!tenant) throw notFound('Tenant');
+    // A person who rents signs their own lease: anyone who lives there too signs with them, from
+    // their contact record, never instead of them (review finding 1).
+    if (tenant.kind === 'individual' && asTenant.length === 0)
+      throw invalid(
+        'tenant_signer_required',
+        'Add the tenant as a signer: a person who rents signs their own lease, and anyone who lives there too signs with them',
+      );
     const signers: NewSigner[] = [];
     for (const p of parties) {
       let subject: SignerSubject = { type: 'other' };

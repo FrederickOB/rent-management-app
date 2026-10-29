@@ -39,7 +39,11 @@ export function closeReasonLabel(reason: string | null): string | null {
 }
 
 export interface ApprovalMoves {
-  /** Approve or reject: anyone but the initiator; the API checks the rest (AD-05). */
+  /**
+   * Approve or reject: anyone but the initiator, once, and only when the API says this person may
+   * decide it (`mayDecide`: their role may decide this kind of request). The API checks it all
+   * again (AD-05).
+   */
   readonly decide: boolean;
   /** The initiator withdraws an open request. */
   readonly withdraw: boolean;
@@ -57,7 +61,7 @@ export function approvalMoves(row: ApprovalRow, personId: string, now: Date): Ap
   if (!open) return { decide: false, withdraw: false, selfConfirm: false, waiting: null };
   if (!initiator)
     return {
-      decide: row.mode === 'two_person' && !decided,
+      decide: row.mode === 'two_person' && !decided && row.mayDecide !== false,
       withdraw: false,
       selfConfirm: false,
       waiting: null,

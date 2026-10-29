@@ -9,6 +9,7 @@ import {
   signsAs,
   STAFF_PART_PROBLEM,
   staffMaySignAs,
+  TENANT_SIGNS_PROBLEM,
   type SignerRecords,
 } from './lease-form';
 import { hasCode } from './register-format';
@@ -51,6 +52,12 @@ export function issueBlockers(lease: LeaseDetailView, records?: SignerRecords): 
   if (parties.length === 0) return ['Add the people who sign, in the draft.'];
   if (!signsAs(parties, 'tenant') && !signsAs(parties, 'signatory'))
     problems.push('Add the tenant, or a company tenant’s authorised signatory, as a signer.');
+  // A person who rents signs their own lease; someone who lives there too signs with them.
+  else if (
+    lease.tenant.kind === 'individual' &&
+    !parties.some((p) => partyLink(p) === 'tenant_record')
+  )
+    problems.push(TENANT_SIGNS_PROBLEM);
   if (!signsAs(parties, 'landlord'))
     problems.push('Add who signs for the landlord: an owner or a manager.');
   if (lease.witnessRequired && !signsAs(parties, 'witness'))

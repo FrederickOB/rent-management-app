@@ -543,6 +543,8 @@ export const ONE_TENANT_PROBLEM =
   'Only one signer signs as the tenant from the tenant’s record. Add anyone else who lives there as one of the tenant’s contacts, then add them from the contacts.';
 export const STAFF_PART_PROBLEM =
   'A member of your staff signs only for the landlord or as a witness.';
+export const TENANT_SIGNS_PROBLEM =
+  'Add the tenant as a signer: a person who rents signs their own lease, and anyone who lives there too signs with them.';
 
 /** Which field a signer's problem belongs to, so the screen can tie it to that input. */
 export type PartyField = 'role' | 'name' | 'phone' | 'email' | 'paperSignedOn' | 'record';

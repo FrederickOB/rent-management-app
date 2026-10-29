@@ -114,7 +114,7 @@ export class LeaseTemplatesService {
   async publish(
     actor: Actor | null,
     templateId: string,
-    input: { content: TemplateContent; changeNote?: string | null },
+    input: { content: TemplateContent; changeNote?: string | null; baseVersion?: number },
   ): Promise<TemplateView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'lease_template.manage');
@@ -123,6 +123,13 @@ export class LeaseTemplatesService {
       const template = await this.template(tx, templateId, { lock: true });
       if (template.archivedAt) throw notFound('Template');
       const latest = await this.latestVersion(tx, templateId);
+      // Edited from an older version: someone published in between (the template row is locked).
+      if (input.baseVersion !== undefined && input.baseVersion !== (latest?.version ?? 0))
+        throw conflict(
+          'template_changed',
+          `Version ${latest?.version ?? 0} of this template was published while you were editing version ${input.baseVersion}. Copy your changes, reload the template, then make them again.`,
+          { latestVersion: String(latest?.version ?? 0) },
+        );
       if (latest) checkTemplateVersion(latest.content as TemplateContent, content);
       await this.insertVersion(
         tx,

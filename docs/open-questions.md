@@ -1,6 +1,6 @@
 # Open questions
 
-50 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+54 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -81,6 +81,7 @@
 | OQ-36 | Annual prepayment discount and tier-change rules? (PRD section 21, open) | Founder | M10 | As the PRD recommends: upgrade now with proration, downgrade next cycle; discount set in configuration. | Decided 2026-10-28: as recommended. |
 | OQ-37 | Rates per tier and billing band? (PRD section 21) | Founder, from pricing research | M10 | Placeholder rates, editable in the admin console. | |
 | OQ-38 | How long is the free trial or guided onboarding period? (PB-08) | Founder | M10 | 30 days, configurable. | Decided 2026-10-28: as recommended. |
+| OQ-54 | Consent (CM-09) is recorded per channel, not per phone number or email. When staff change a tenant's or contact's phone or email, should the consent on record carry over to the new one, or must it be recorded again? (M3 review) | Founder, with counsel if needed | M6 (WhatsApp and broadcasts) | Ask again: a changed phone or email starts with no consent on that channel, and staff record the person's agreement for the new one. Until then, the edit forms say that consent stays with the new value and ask staff to check (M3). | |
 
 ## Research findings, 28 Oct 2026
 

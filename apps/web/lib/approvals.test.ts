@@ -90,3 +90,16 @@ describe('AD-05 and decision 6 the approvals screen', () => {
     );
   });
 });
+
+describe('AD-05 Approve and Reject only for people the API lets decide', () => {
+  it('offers the decision only when the API says this person may decide it', () => {
+    expect(approvalMoves(request({ mayDecide: true }), OTHER, now).decide).toBe(true);
+    // An accountant, say: they see the request, but their role does not decide this kind.
+    expect(approvalMoves(request({ mayDecide: false }), OTHER, now)).toEqual({
+      decide: false,
+      withdraw: false,
+      selfConfirm: false,
+      waiting: null,
+    });
+  });
+});

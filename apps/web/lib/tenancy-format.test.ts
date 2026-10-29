@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   daysLeftLabel,
+  endedLabel,
   formatMinor,
   rentLabel,
   ruleNote,
@@ -73,5 +74,16 @@ describe('TL-01 tenant timeline', () => {
       }),
     ).toBe('Status: Signed → Active. Changed: Notice days');
     expect(timelineDetail('tenant.update', { before: { updated_at: 'a' }, after: {} })).toBeNull();
+  });
+});
+
+describe('TL-06 and TL-09 how a lease ended', () => {
+  it('says why a lease ended when it was not a move-out', () => {
+    expect(endedLabel('2027-10-31', 'moved_out')).toBe('31 Oct 2027');
+    expect(endedLabel('2027-10-31', 'renewed')).toBe('31 Oct 2027, renewed');
+    expect(endedLabel('2027-10-31', 'superseded')).toBe(
+      '31 Oct 2027, when the next lease on the unit started',
+    );
+    expect(endedLabel('2027-10-31', null)).toBe('31 Oct 2027');
   });
 });

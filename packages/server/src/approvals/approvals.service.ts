@@ -51,9 +51,16 @@ export interface ApprovalActionHandler<P = unknown> {
   execute(tx: Tx, request: RequestRow, payload: P): Promise<void>;
 }
 
+type DecisionRow = typeof schema.approvalDecision.$inferSelect;
+
 export interface ApprovalView {
   readonly request: RequestRow;
-  readonly decisions: (typeof schema.approvalDecision.$inferSelect)[];
+  readonly decisions: DecisionRow[];
+  /**
+   * Whether the person reading may approve or reject it now, as `decide` would judge it, so the
+   * screens offer Approve and Reject only to them (M3 web review). `decide` checks it all again.
+   */
+  readonly mayDecide: boolean;
 }
 
 /** Canonical JSON (sorted keys) so the same payload always hashes the same. */
@@ -365,10 +372,9 @@ export class ApprovalsService {
         .orderBy(desc(schema.approvalRequest.createdAt))
         .limit(200);
       return Promise.all(
-        requests.map(async (request) => ({
-          request,
-          decisions: await this.decisions(tx, request.id),
-        })),
+        requests.map(async (request) =>
+          this.view(staff, request, await this.decisions(tx, request.id)),
+        ),
       );
     });
   }
@@ -383,11 +389,32 @@ export class ApprovalsService {
       if (!request) throw notFound('Approval request');
       const isParty = request.initiatedBy === staff.personId;
       if (!isParty) this.policy.assert(staff, 'approval.view');
-      return { request, decisions: await this.decisions(tx, requestId) };
+      return this.view(staff, request, await this.decisions(tx, requestId));
     });
   }
 
-  private decisions(tx: Tx, requestId: string) {
+  private view(staff: Staff, request: RequestRow, decisions: DecisionRow[]): ApprovalView {
+    return { request, decisions, mayDecide: this.mayDecide(staff, request, decisions) };
+  }
+
+  /**
+   * A second person's decision, open to this person now: the request waits for one and has not
+   * expired, they have not decided it, and the policy lets them decide this kind of request (not
+   * its initiator, and in a role the action type accepts). A request whose action type has no
+   * handler here can be decided by nobody.
+   */
+  private mayDecide(staff: Staff, request: RequestRow, decisions: readonly DecisionRow[]): boolean {
+    const handler = this.handlers.get(request.actionType);
+    if (!handler || request.mode !== 'two_person' || request.status !== 'pending') return false;
+    if (request.expiresAt.getTime() <= this.clock.now().getTime()) return false;
+    if (decisions.some((d) => d.decidedBy === staff.personId)) return false;
+    return this.policy.can(staff, 'approval.decide', {
+      initiatorPersonId: request.initiatedBy,
+      eligibleRoles: handler.eligibleRoles,
+    }).allowed;
+  }
+
+  private decisions(tx: Tx, requestId: string): Promise<DecisionRow[]> {
     return tx
       .select()
       .from(schema.approvalDecision)

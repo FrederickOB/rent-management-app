@@ -90,6 +90,7 @@ export function TemplateEditor({
         templateId: template.id,
         content: forApi(content),
         changeNote: note.trim() || null,
+        baseVersion: template.latest.version,
       });
       setTemplate(saved);
       setContent(saved.latest.content);

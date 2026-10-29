@@ -302,6 +302,45 @@ describe('TL-05 template versions keep their fixed clauses', () => {
   });
 });
 
+describe('TL-05 a version published while someone edits is not overwritten', () => {
+  it('refuses a publish from an older version, and accepts one from the latest', async () => {
+    const content = STARTER_TEMPLATES.residential;
+    const withUse = (body: string) => ({
+      sections: [
+        {
+          ...content.sections[0]!,
+          clauses: content.sections[0]!.clauses.map((c) => (c.key === 'use' ? { ...c, body } : c)),
+        },
+        ...content.sections.slice(1),
+      ],
+    });
+    const template = await s.templates.create(admin, {
+      name: 'Two editors',
+      kind: 'custom',
+      content,
+    });
+    expect(template.latest.version).toBe(1);
+    // Two people open version 1; the first publishes version 2.
+    const first = await s.templates.publish(admin, template.id, {
+      content: withUse('The tenant uses the premises as a home, first edit.'),
+      baseVersion: 1,
+    });
+    expect(first.latest.version).toBe(2);
+    await expect(
+      s.templates.publish(admin, template.id, {
+        content: withUse('The tenant uses the premises as a home, second edit.'),
+        baseVersion: 1,
+      }),
+    ).rejects.toMatchObject({ status: 409, code: 'template_changed' });
+    expect((await s.templates.get(admin, template.id)).latest.version).toBe(2);
+    const second = await s.templates.publish(admin, template.id, {
+      content: withUse('The tenant uses the premises as a home, second edit.'),
+      baseVersion: 2,
+    });
+    expect(second.latest.version).toBe(3);
+  });
+});
+
 describe('TL-06 rent schedule', () => {
   it('generates the schedule when a lease is signed: monthly, anchored, escalated and prorated', async () => {
     const tenant = await tenantFor('Schedule Tenant');

@@ -17,6 +17,7 @@ import { COUNSEL_WARNING, wasSigned } from '@/lib/lease-view';
 import {
   BREAK_PARTY_LABELS,
   cycleLabel,
+  endedLabel,
   formatMinor,
   signerRoleLabel,
   termLabel,
@@ -278,10 +279,7 @@ export function LeaseDetail({
               <Fact label="Moved out" value={formatBusinessDate(life.moveOutDate)} />
             ) : null}
             {life.endedOn ? (
-              <Fact
-                label="Ended"
-                value={`${formatBusinessDate(life.endedOn)}${life.endReason === 'renewed' ? ', renewed' : ''}`}
-              />
+              <Fact label="Ended" value={endedLabel(life.endedOn, life.endReason)} />
             ) : null}
             {life.cancelledAt ? (
               <Fact

@@ -396,7 +396,16 @@ export const leaseTemplatesContract = {
       summary: 'Publish a new version; earlier versions never change',
     })
     .input(
-      z.object({ templateId: uuid, content: templateContentSchema, changeNote: optionalText(500) }),
+      z.object({
+        templateId: uuid,
+        content: templateContentSchema,
+        changeNote: optionalText(500),
+        /**
+         * The version the editor started from. When it is no longer the latest, the publish is
+         * refused (409 `template_changed`), so one person's changes never silently replace another's.
+         */
+        baseVersion: z.number().int().positive().optional(),
+      }),
     )
     .output(templateSchema),
   review: oc

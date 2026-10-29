@@ -353,6 +353,40 @@ describe('TL-07 one party signs as the tenant', () => {
   });
 });
 
+describe('TL-07 a person who rents signs their own lease', () => {
+  it('refuses a lease a co-occupant would sign instead of the tenant, and issues once the tenant signs too', async () => {
+    const { tenant } = await tenantWithConsent('Renting Person');
+    const spouse = await s.tenants.addContact(manager, tenant.id, {
+      kind: 'next_of_kin',
+      name: 'Spouse',
+      phone: newPhone(),
+    });
+    const landlord = {
+      role: 'landlord' as const,
+      name: 'Kofi Manager',
+      staffPersonId: manager.personId,
+    };
+    const witness = { role: 'witness' as const, name: 'A Witness', phone: newPhone() };
+    const asCoOccupant = { role: 'tenant' as const, name: 'Spouse', tenantContactId: spouse.id };
+    const draft = await draftOn('ACC-RQD-B1-08', tenant.id, () => [
+      asCoOccupant,
+      landlord,
+      witness,
+    ]);
+    await expect(s.leaseSigning.issue(manager, draft.id)).rejects.toMatchObject({
+      code: 'tenant_signer_required',
+      message: expect.stringMatching(/a person who rents signs their own lease/i),
+    });
+    expect(await statusOf(draft.id)).toBe('draft');
+
+    await s.leases.updateDraft(manager, draft.id, {
+      parties: [{ role: 'tenant', name: 'Renting Person' }, asCoOccupant, landlord, witness],
+    });
+    await s.leaseSigning.issue(manager, draft.id);
+    expect(await statusOf(draft.id)).toBe('pending_signatures');
+  });
+});
+
 describe('TL-07 staff sign only for the landlord or as witness, and only as members', () => {
   it('refuses a staff signer from outside the company, in another role, or no longer a member', async () => {
     const { tenant } = await tenantWithConsent('Staff Rules Tenant');

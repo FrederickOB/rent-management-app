@@ -1,6 +1,11 @@
 import type { LeaseDetailView } from '@rent/contracts';
 import { describe, expect, it } from 'vitest';
-import { ONE_TENANT_PROBLEM, STAFF_PART_PROBLEM, type SignerRecords } from './lease-form';
+import {
+  ONE_TENANT_PROBLEM,
+  STAFF_PART_PROBLEM,
+  TENANT_SIGNS_PROBLEM,
+  type SignerRecords,
+} from './lease-form';
 import {
   handoverProblem,
   isOpenRequest,
@@ -309,5 +314,30 @@ describe('TL-07 the send confirmation checks the signers’ records', () => {
       ONE_TENANT_PROBLEM,
       `Kofi Manager (guarantor): ${STAFF_PART_PROBLEM}`,
     ]);
+  });
+});
+
+describe('TL-07 a person who rents signs their own lease', () => {
+  const coOccupant = party({
+    id: ID(108),
+    role: 'tenant',
+    name: 'Akos Spouse',
+    tenantContactId: ID(8),
+  });
+  const others = draft().parties.slice(1);
+
+  it('stops a person’s lease that a co-occupant would sign instead of them', () => {
+    expect(issueBlockers(draft({ parties: [coOccupant, ...others] }))).toEqual([
+      TENANT_SIGNS_PROBLEM,
+    ]);
+    expect(issueBlockers(draft({ parties: [draft().parties[0]!, coOccupant, ...others] }))).toEqual(
+      [],
+    );
+  });
+
+  it('leaves a company’s signatories to sign for it', () => {
+    const company = { id: ID(4), displayName: 'Osu Traders Ltd', kind: 'company' as const };
+    const signatory = party({ role: 'signatory', name: 'Kwame Director', tenantContactId: ID(9) });
+    expect(issueBlockers(draft({ tenant: company, parties: [signatory, ...others] }))).toEqual([]);
   });
 });

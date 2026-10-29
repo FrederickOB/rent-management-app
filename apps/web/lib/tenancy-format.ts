@@ -60,6 +60,20 @@ export const BREAK_PARTY_LABELS: Record<BreakParty, string> = {
   either: 'Either party',
 };
 
+export type LeaseEndReason = NonNullable<LeaseDetailView['lifecycle']['endReason']>;
+
+/** How a lease ended, after its last day: a move-out, its renewal, or the next lease starting. */
+const END_REASON_NOTES: Record<LeaseEndReason, string> = {
+  moved_out: '',
+  renewed: ', renewed',
+  superseded: ', when the next lease on the unit started',
+};
+
+/** The "Ended" line on a lease: its last day, and why it ended when that is not a move-out. */
+export function endedLabel(endedOn: string, reason: LeaseEndReason | null): string {
+  return `${formatBusinessDate(endedOn)}${reason ? END_REASON_NOTES[reason] : ''}`;
+}
+
 export const leaseStatusLabel = (status: LeaseStatus): string => LEASE_STATUS_LABELS[status];
 export const cycleLabel = (cycle: RentCycle): string => RENT_CYCLE_LABELS[cycle];
 export const signerRoleLabel = (role: SignerRole): string => SIGNER_ROLE_LABELS[role];
