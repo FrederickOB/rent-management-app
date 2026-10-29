@@ -1,15 +1,18 @@
 name: CI
 
 on:
+  # Branches are checked through their pull requests, so a pull request is not checked twice.
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # A newer push cancels a branch's running checks; every commit on main is checked in full.
+  # A newer push cancels a pull request's running checks. Each commit on main gets a group of its
+  # own, so none is cancelled while queued and every one is checked in full.
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -48,8 +51,11 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose up -d --wait postgres seaweedfs mailpit
       - run: pnpm db:migrate
-      # pnpm test brings up the rest of Compose (fake-providers) before running the tests.
-      - run: pnpm test
+      - name: Install Chromium's headless shell for the PDF renderer tests
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+      # The test script brings up the rest of Compose (fake-providers) first. --continue goes on to
+      # turbo, so one failing package does not stop the others; `pnpm test` would reject the flag.
+      - run: pnpm run test --continue
       - name: Show service logs
         if: failure()
         run: docker compose logs --no-color
