@@ -37,9 +37,10 @@ export class PolicyService {
     return can(actor, action, resource);
   }
 
+  /** Refuses with the policy's message for people when it gives one, else the plain refusal. */
   assert(actor: Actor, action: PolicyAction, resource?: ApprovalResource): void {
     const decision = can(actor, action, resource);
-    if (!decision.allowed) throw forbidden();
+    if (!decision.allowed) throw forbidden(decision.message);
   }
 
   /** The owners and properties an actor sees; null means the whole company (AD-02). */

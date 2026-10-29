@@ -77,11 +77,22 @@ export interface ApprovalResource {
 
 export interface Decision {
   readonly allowed: boolean;
+  /** Why, for logs and tests. */
   readonly reason: string;
+  /** Why, for people: a refusal that needs explaining carries it, and the API shows it. */
+  readonly message?: string;
 }
 
 const allow = (reason: string): Decision => ({ allowed: true, reason });
-const deny = (reason: string): Decision => ({ allowed: false, reason });
+const deny = (reason: string, message?: string): Decision =>
+  message === undefined ? { allowed: false, reason } : { allowed: false, reason, message };
+
+/**
+ * Audit events carry whole rows from every table, before and after, so the log cannot be cut down
+ * to some owners or properties: a session limited to some of them does not search it (M2 S1).
+ */
+export const AUDIT_NEEDS_WHOLE_COMPANY =
+  'The audit log covers the whole company, so it is not open to people limited to some owners or properties';
 
 type Grant = 'own_company' | 'agency_client';
 
@@ -269,9 +280,11 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
       }
       if (action === 'approval.view' && actor.nominatedApprover) return allow('nominated approver');
       const allowed = STAFF_MATRIX[action];
-      return allowed.includes(staffKey(actor.role, actor.companyKind))
-        ? allow(`${actor.role} may ${action}`)
-        : deny(`${actor.role} may not ${action}`);
+      if (!allowed.includes(staffKey(actor.role, actor.companyKind)))
+        return deny(`${actor.role} may not ${action}`);
+      if (action === 'audit.search' && scopeOf(actor) !== null)
+        return deny('the audit log needs access to the whole company', AUDIT_NEEDS_WHOLE_COMPANY);
+      return allow(`${actor.role} may ${action}`);
     }
   }
 }

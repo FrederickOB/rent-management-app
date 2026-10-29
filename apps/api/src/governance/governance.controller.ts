@@ -11,9 +11,6 @@ import { Ctx, type RequestContext } from '../http/request-context';
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
-const AUDIT_NEEDS_WHOLE_COMPANY =
-  'The audit log covers the whole company, so it is not open to people limited to some owners or properties';
-
 export function toApproval({ request, decisions }: ApprovalView) {
   return {
     id: request.id,
@@ -53,10 +50,8 @@ export class GovernanceController {
     return implement(contract.audit.search).handler(async ({ input }) => {
       const actor = ctx.actor;
       if (!actor || actor.kind !== 'staff') throw forbidden();
+      // The policy also refuses a session limited to some owners or properties, with its reason.
       this.policy.assert(actor, 'audit.search');
-      // Audit events carry whole rows from every register table, before and after, so the log
-      // cannot be cut down to some owners or properties: a scoped session does not search it.
-      if (this.policy.scopeFor(actor) !== null) throw forbidden(AUDIT_NEEDS_WHOLE_COMPANY);
       const result = await this.audit.search(actor.companyId, actor.personId, {
         ...input,
         from: input.from ? new Date(input.from) : undefined,
