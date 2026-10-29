@@ -76,6 +76,8 @@ export const signingRequest = pgTable(
   (t) => [
     unique('signing_request_company_id_id_key').on(t.companyId, t.id),
     unique('signing_request_scope_key').on(t.companyId, t.propertyId, t.id),
+    // The rows under a request name its tenant, which drives tenant-scope RLS (M3 review).
+    unique('signing_request_tenant_key').on(t.companyId, t.propertyId, t.tenantId, t.id),
     foreignKey({
       name: 'signing_request_lease_fk',
       columns: [t.companyId, t.propertyId, t.tenantId, t.leaseId],
@@ -168,10 +170,23 @@ export const signer = pgTable(
     unique('signer_company_id_id_key').on(t.companyId, t.id),
     unique('signer_scope_key').on(t.companyId, t.propertyId, t.id),
     unique('signer_position_key').on(t.companyId, t.signingRequestId, t.position),
+    unique('signer_tenant_key').on(t.companyId, t.propertyId, t.tenantId, t.id),
     foreignKey({
       name: 'signer_request_fk',
       columns: [t.companyId, t.propertyId, t.signingRequestId],
       foreignColumns: [signingRequest.companyId, signingRequest.propertyId, signingRequest.id],
+    }),
+    // A signer names its request's tenant (match simple: a signer with no tenant is hidden from
+    // every tenant session, which fails closed).
+    foreignKey({
+      name: 'signer_request_tenant_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.signingRequestId],
+      foreignColumns: [
+        signingRequest.companyId,
+        signingRequest.propertyId,
+        signingRequest.tenantId,
+        signingRequest.id,
+      ],
     }),
     foreignKey({
       name: 'signer_lease_party_fk',
@@ -234,6 +249,11 @@ export const secureLink = pgTable(
       columns: [t.companyId, t.propertyId, t.signerId],
       foreignColumns: [signer.companyId, signer.propertyId, signer.id],
     }),
+    foreignKey({
+      name: 'secure_link_signer_tenant_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.signerId],
+      foreignColumns: [signer.companyId, signer.propertyId, signer.tenantId, signer.id],
+    }),
     index('secure_link_signer_idx').on(t.companyId, t.signerId),
     check(
       'secure_link_purpose_check',
@@ -280,6 +300,11 @@ export const otpChallenge = pgTable(
       foreignColumns: [signer.companyId, signer.propertyId, signer.id],
     }),
     foreignKey({
+      name: 'otp_challenge_signer_tenant_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.signerId],
+      foreignColumns: [signer.companyId, signer.propertyId, signer.tenantId, signer.id],
+    }),
+    foreignKey({
       name: 'otp_challenge_link_fk',
       columns: [t.companyId, t.propertyId, t.secureLinkId],
       foreignColumns: [secureLink.companyId, secureLink.propertyId, secureLink.id],
@@ -324,6 +349,16 @@ export const signature = pgTable(
       name: 'signature_request_fk',
       columns: [t.companyId, t.propertyId, t.signingRequestId],
       foreignColumns: [signingRequest.companyId, signingRequest.propertyId, signingRequest.id],
+    }),
+    foreignKey({
+      name: 'signature_request_tenant_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.signingRequestId],
+      foreignColumns: [
+        signingRequest.companyId,
+        signingRequest.propertyId,
+        signingRequest.tenantId,
+        signingRequest.id,
+      ],
     }),
     foreignKey({
       name: 'signature_signer_fk',
@@ -373,6 +408,16 @@ export const signingEvent = pgTable(
       name: 'signing_event_request_fk',
       columns: [t.companyId, t.propertyId, t.signingRequestId],
       foreignColumns: [signingRequest.companyId, signingRequest.propertyId, signingRequest.id],
+    }),
+    foreignKey({
+      name: 'signing_event_request_tenant_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.signingRequestId],
+      foreignColumns: [
+        signingRequest.companyId,
+        signingRequest.propertyId,
+        signingRequest.tenantId,
+        signingRequest.id,
+      ],
     }),
     foreignKey({
       name: 'signing_event_signer_fk',

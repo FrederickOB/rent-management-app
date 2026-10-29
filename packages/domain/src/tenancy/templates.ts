@@ -19,7 +19,7 @@ export const PLACEHOLDERS = {
   'unit.description': 'The unit type and features',
   'lease.startDate': 'The first day of the lease',
   'lease.endDate': 'The last day of the lease',
-  'lease.term': 'The length of the lease, in months',
+  'lease.term': 'The length of the lease, exactly: 12 months, or 12 months and 6 days',
   'rent.monthly': 'The monthly rent, such as GH₵1,500.00',
   'rent.cycle': 'How often rent is billed',
   'rent.steps': 'The rent changes during the lease',

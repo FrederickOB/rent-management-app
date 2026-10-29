@@ -478,7 +478,7 @@ export const lease = pgTable(
     ),
     check(
       'lease_end_reason_check',
-      sql`${t.endReason} is null or ${t.endReason} in ('moved_out', 'renewed')`,
+      sql`${t.endReason} is null or ${t.endReason} in ('moved_out', 'renewed', 'superseded')`,
     ),
     check('lease_currency_check', sql`${t.currency} = 'GHS'`),
   ],

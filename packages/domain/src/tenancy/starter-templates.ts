@@ -55,7 +55,7 @@ function starter(kind: StarterTemplateKind): TemplateContent {
           fact(
             'term',
             'The term',
-            'The tenancy starts on {{lease.startDate}} and ends on {{lease.endDate}} ({{lease.term}} months).',
+            'The tenancy starts on {{lease.startDate}} and ends on {{lease.endDate}} ({{lease.term}}).',
           ),
           fact(
             'rent',

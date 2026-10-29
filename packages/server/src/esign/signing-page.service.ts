@@ -7,7 +7,6 @@ import {
   SIGNING_CODE,
   SIGNING_CONSENT,
   SIGNING_LIMITS,
-  signingComplete,
   type SignerLinkPurpose,
   type SignerRole,
   type SignerStatus,
@@ -42,6 +41,7 @@ import {
   requestRow,
   revokeLinks,
   screenFor,
+  signedByAll,
   signerRow,
   signersOf,
   signingEvent,
@@ -70,11 +70,15 @@ const locked = (until: Date) =>
     { lockedUntil: until.toISOString() },
   );
 
-/** The rows behind a link, locked in the engine's order: request, signer, link. */
+/**
+ * The rows behind a link, locked in the engine's order: request, signer, link. `signers` are the
+ * request's, read under its lock, so an action and the last required signature serialise.
+ */
 interface LinkRows {
   readonly request: RequestRow;
   readonly signer: SignerRow;
   readonly link: LinkRow;
+  readonly signers: readonly SignerRow[];
 }
 
 /**
@@ -110,9 +114,9 @@ export class SigningPageService {
       throw tooMany();
     const page = await withCompany(this.database, this.context(companyId), async (tx) => {
       const rows = await this.lockRows(tx, linkId);
-      const { request, signer, link } = rows;
+      const { request, signer, link, signers } = rows;
       const now = this.clock.now();
-      const { screen, reason } = screenFor(link, signer, request, now);
+      const { screen, reason, downloadable } = screenFor(link, signer, request, now, signers);
       await tx
         .update(schema.secureLink)
         .set({
@@ -136,7 +140,6 @@ export class SigningPageService {
           await signingEvent(tx, request, 'signer.opened', now, { signerId: signer.id, client });
       }
       const company = await companyFacts(tx, companyId);
-      const signers = await signersOf(tx, request.id);
       const facts = await this.esign.documentFacts(tx, request);
       const view: SigningPageView = {
         screen,
@@ -151,6 +154,7 @@ export class SigningPageService {
           sha256: request.documentSha256,
           finalSha256: screen === 'copy' ? request.finalSha256 : null,
           html: null,
+          downloadable,
         },
         signer: {
           name: signer.name,
@@ -183,19 +187,22 @@ export class SigningPageService {
     return { ...page.view, document: { ...page.view.document, html } };
   }
 
-  /** A 5-minute link to the frozen PDF (or, on a signed-copy link, the signed copy). */
+  /**
+   * A 5-minute link to the frozen PDF (or, on a signed-copy link, the signed copy). Only a live
+   * link fetches one: a revoked or expired link fetches nothing, whatever the signer's status
+   * (review finding 4).
+   */
   async documentUrl(token: string, client: ClientInfo): Promise<string> {
     await this.limitAddress('open', client, SIGNING_LIMITS.opensPerIp);
     const { companyId, linkId } = await this.resolve(token);
     const found = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { request, signer, link } = await this.lockRows(tx, linkId);
-      const { screen } = screenFor(link, signer, request, this.clock.now());
-      const documentId =
-        screen === 'copy'
+      const { request, signer, link, signers } = await this.lockRows(tx, linkId);
+      const { screen, downloadable } = screenFor(link, signer, request, this.clock.now(), signers);
+      const documentId = !downloadable
+        ? null
+        : screen === 'copy'
           ? request.finalDocumentId
-          : screen === 'sign' || screen === 'signed'
-            ? request.documentId
-            : null;
+          : request.documentId;
       if (!documentId) throw notUsable(screen);
       const facts = await this.esign.documentFacts(tx, request);
       await signingEvent(tx, request, 'document.downloaded', this.clock.now(), {
@@ -233,9 +240,9 @@ export class SigningPageService {
     await this.limitAddress('code', client, SIGNING_LIMITS.codeSendsPerIp);
     const { companyId, linkId } = await this.resolve(token);
     const prepared = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { request, signer, link } = await this.lockRows(tx, linkId);
+      const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const now = this.clock.now();
-      const { screen } = screenFor(link, signer, request, now);
+      const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
       const lock = await this.lockState(tx, signer, now);
       if (lock) return { refused: locked(lock) };
@@ -254,13 +261,14 @@ export class SigningPageService {
             'We have sent you 3 codes in the last 15 minutes. Wait a few minutes before asking for another.',
           ),
         };
+      // Per destination across every company (one phone may sign for several landlords), in the
+      // global rate_limit table and keyed by the keyed hash, as the per-address limit is.
       const destinationHash = this.hasher.destination(destination.address);
-      const destinationSince = new Date(
-        now.getTime() - SIGNING_LIMITS.codeSendsPerDestination.windowMinutes * MINUTE_MS,
-      );
       if (
-        (await codesSince(tx, { destinationHash }, destinationSince)) >=
-        SIGNING_LIMITS.codeSendsPerDestination.count
+        !(await this.hit(
+          `esign:code:destination:${destinationHash}`,
+          SIGNING_LIMITS.codeSendsPerDestination,
+        ))
       )
         return {
           refused: new AppError(
@@ -392,9 +400,9 @@ export class SigningPageService {
 
     // 1. The code, checked without using it up: a wrong one is counted and committed.
     const checked = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { request, signer, link } = await this.lockRows(tx, linkId);
+      const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const now = this.clock.now();
-      const { screen } = screenFor(link, signer, request, now);
+      const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
       const lock = await this.lockState(tx, signer, now);
       if (lock) return { refused: locked(lock) };
@@ -475,9 +483,9 @@ export class SigningPageService {
 
     // 3. The signature and its evidence, using up the code.
     const done = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { request, signer, link } = await this.lockRows(tx, linkId);
+      const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const now = this.clock.now();
-      const { screen } = screenFor(link, signer, request, now);
+      const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
       const challenge = await latestChallenge(tx, link.id, { lock: true });
       if (
@@ -564,10 +572,7 @@ export class SigningPageService {
           documentSha256: request.documentSha256,
         },
       });
-      const all = await signersOf(tx, request.id);
-      const complete = signingComplete(
-        all.map((s) => ({ required: s.required, status: s.status as SignerStatus })),
-      );
+      const complete = signedByAll(await signersOf(tx, request.id));
       if (complete) {
         await signingEvent(tx, request, 'request.signed_by_all', now);
         await enqueueOutbox(tx, {
@@ -594,9 +599,9 @@ export class SigningPageService {
       throw invalid('reason_required', 'Say in a few words why you are declining');
     const { companyId, linkId } = await this.resolve(token);
     const result = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { request, signer, link } = await this.lockRows(tx, linkId);
+      const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const now = this.clock.now();
-      const { screen } = screenFor(link, signer, request, now);
+      const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
       await tx
         .update(schema.signer)
@@ -678,7 +683,7 @@ export class SigningPageService {
     const request = await requestRow(tx, unlockedSigner.signingRequestId, { lock: true });
     const signer = await signerRow(tx, found.signerId, { lock: true });
     const link = await linkRow(tx, linkId, { lock: true });
-    return { request, signer, link };
+    return { request, signer, link, signers: await signersOf(tx, request.id) };
   }
 
   /** The lock's end while it holds; a lock that has run its 30 minutes is lifted here. */

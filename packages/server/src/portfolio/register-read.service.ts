@@ -50,6 +50,91 @@ export const DISPLAY_STATUS_SQL = sql.raw(
   `coalesce(${LEASE_OCCUPANCY}, case u.availability when 'available' then 'vacant' else u.availability end)`,
 );
 
+/**
+ * The name the documents of a property give its landlord: today's main owner (the largest share,
+ * then the earliest reference), through the narrow database function that ignores the session's
+ * owner scope (ADR-002; M3 review finding 5). Null when the property has no owner on record today.
+ */
+export async function propertyOwnerName(
+  tx: Tx,
+  companyId: string,
+  propertyId: string,
+): Promise<string | null> {
+  const result = await tx.execute<{ name: string | null }>(
+    sql`select app.property_owner_name(${companyId}::uuid, ${propertyId}::uuid) as name`,
+  );
+  return result.rows[0]?.name ?? null;
+}
+
+/** A unit with its property, for the modules above the register (tenancy): one row, in the caller's transaction. */
+export interface UnitPlace {
+  readonly id: string;
+  readonly code: string;
+  readonly unitType: string;
+  readonly bedrooms: number | null;
+  readonly billingBand: string;
+  readonly archived: boolean;
+  readonly propertyId: string;
+  readonly propertyName: string;
+  readonly address: {
+    readonly street: string | null;
+    readonly town: string | null;
+    readonly district: string | null;
+    readonly region: string;
+    readonly ghanapostGps: string | null;
+  };
+}
+
+export async function unitPlace(tx: Tx, unitId: string): Promise<UnitPlace | null> {
+  const result = await tx.execute<{
+    id: string;
+    code: string;
+    unit_type: string;
+    bedrooms: number | null;
+    billing_band: string;
+    archived: boolean;
+    property_id: string;
+    property_name: string;
+    street: string | null;
+    town: string | null;
+    district: string | null;
+    region: string;
+    ghanapost_gps: string | null;
+  }>(
+    sql`select u.id, u.code, u.unit_type, u.bedrooms, u.billing_band, u.archived_at is not null as archived,
+          p.id as property_id, p.name as property_name, p.street, p.town, p.district, p.region, p.ghanapost_gps
+        from unit u join property p on p.company_id = u.company_id and p.id = u.property_id
+        where u.id = ${unitId}`,
+  );
+  const r = result.rows[0];
+  if (!r) return null;
+  return {
+    id: r.id,
+    code: r.code,
+    unitType: r.unit_type,
+    bedrooms: r.bedrooms,
+    billingBand: r.billing_band,
+    archived: r.archived,
+    propertyId: r.property_id,
+    propertyName: r.property_name,
+    address: {
+      street: r.street,
+      town: r.town,
+      district: r.district,
+      region: r.region,
+      ghanapostGps: r.ghanapost_gps,
+    },
+  };
+}
+
+/** The owners of a property today, in the caller's transaction (RLS and scope apply). */
+export async function currentOwnerIds(tx: Tx, propertyId: string): Promise<string[]> {
+  const result = await tx.execute<{ owner_id: string }>(
+    sql`select owner_id from property_current_ownership where property_id = ${propertyId}`,
+  );
+  return result.rows.map((r) => r.owner_id);
+}
+
 const MAX_PAGE = 500;
 
 const emptyCounts = (): StatusCounts =>

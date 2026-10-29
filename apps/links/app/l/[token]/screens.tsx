@@ -86,8 +86,20 @@ function Signers({ page }: { page: SigningPage }) {
   );
 }
 
-/** A link that no longer signs: what happened, and who to contact (plan 4.8). */
-export function Explanation({ page, done }: { page: SigningPage; done?: string | undefined }) {
+/**
+ * A link that no longer signs: what happened, and who to contact (plan 4.8). A signer who has
+ * signed can download the document they signed only while their link is live (the API says so
+ * with `downloadable`); an expired or revoked link offers nothing to download.
+ */
+export function Explanation({
+  token,
+  page,
+  done,
+}: {
+  token: string;
+  page: SigningPage;
+  done?: string | undefined;
+}) {
   const { title } = page.document;
   let heading: string;
   let body: string;
@@ -97,7 +109,11 @@ export function Explanation({ page, done }: { page: SigningPage; done?: string |
       body =
         page.reason === 'completed'
           ? `Everyone has signed ${title}. Your signed copy has been sent to you.`
-          : `You signed ${title}${page.signer.signedAt ? ` on ${when(page.signer.signedAt, page.timeZone)}` : ''}. We will send you the signed copy once everyone has signed.`;
+          : page.reason === 'cancelled'
+            ? `You signed ${title}, but the landlord then withdrew it, for example to change it. If it is sent again, you will get a new link.`
+            : page.reason === 'declined'
+              ? `You signed ${title}, but signing stopped because another signer declined. If it is sent again, you will get a new link.`
+              : `You signed ${title}${page.signer.signedAt ? ` on ${when(page.signer.signedAt, page.timeZone)}` : ''}. We will send you the signed copy once everyone has signed.`;
       break;
     case 'declined':
       heading = done === 'declined' ? 'You declined to sign' : 'You have declined to sign';
@@ -123,12 +139,23 @@ export function Explanation({ page, done }: { page: SigningPage; done?: string |
             ? `Signing ${title} stopped because one of the signers declined. If it is sent again, you will get a new link.`
             : page.reason === 'completed'
               ? `Everyone has signed ${title}.`
-              : 'Ask the landlord to send you a new link.';
+              : page.reason === 'signed_by_all'
+                ? `Everyone who must sign ${title} has signed, so it no longer needs your signature. The signed copy is being prepared.`
+                : 'Ask the landlord to send you a new link.';
   }
   return (
     <>
       <h1>{heading}</h1>
       <p className={done ? 'panel done' : undefined}>{body}</p>
+      {page.screen === 'signed' && page.document.downloadable ? (
+        <p>
+          <a href={`/l/${token}/document`}>Download the document you signed (PDF)</a>
+          <br />
+          <span className="small">
+            Its fingerprint (SHA-256): <code className="hash">{page.document.sha256}</code>
+          </span>
+        </p>
+      ) : null}
       {page.screen === 'signed' && page.signers.length > 0 ? <Signers page={page} /> : null}
       <Contact page={page} />
     </>

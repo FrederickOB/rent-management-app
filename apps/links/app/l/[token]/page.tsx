@@ -36,6 +36,6 @@ export default async function SecureLinkPage({
     case 'copy':
       return <CopyScreen token={token} page={page} />;
     default:
-      return <Explanation page={page} done={query.done} />;
+      return <Explanation token={token} page={page} done={query.done} />;
   }
 }

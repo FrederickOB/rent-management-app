@@ -9,6 +9,7 @@ import {
   rentSchedule,
   scheduledTransition,
   type ChargePeriod,
+  type HoldingOverSuccessor,
   type LeaseStatus,
   type LeaseUse,
 } from '@rent/domain/tenancy';
@@ -22,11 +23,12 @@ import { EsignService } from '../esign/esign.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
 import {
-  assertNoOverlap,
+  assertUnitFree,
   companyFacts,
   dateIn,
   leaseRow,
   leaseWriteError,
+  lockUnit,
   termsOf,
   todayIn,
   type LeaseRow,
@@ -80,6 +82,9 @@ export class LeaseLifecycleService {
    *   passed), so a paper lease for an existing tenancy is active straight away.
    */
   async markSigned(tx: Tx, input: MarkSignedInput): Promise<void> {
+    // The unit first, then the lease row: the order every path that holds a unit locks in.
+    const found = await leaseRow(tx, input.leaseId);
+    await lockUnit(tx, found.companyId, found.unitId);
     const row = await leaseRow(tx, input.leaseId, { lock: true });
     const expected: LeaseStatus = input.source === 'paper' ? 'draft' : 'pending_signatures';
     if (row.status !== expected)
@@ -89,8 +94,12 @@ export class LeaseLifecycleService {
       );
     if (input.source === 'paper' && !input.signedDocumentId)
       throw invalid('scan_required', 'Upload the signed lease');
-    await assertNoOverlap(tx, row);
     const company = await companyFacts(tx, row.companyId);
+    // A paper lease starts holding the unit now; an e-signed one has held it since it was issued.
+    await assertUnitFree(tx, row, {
+      starting: input.source === 'paper',
+      today: todayIn(this.clock, company.timeZone),
+    });
     const signedOn = dateIn(input.signedAt, company.timeZone);
     const terms = await termsOf(tx, row);
     const rules = await this.trackerRules(company.countryCode, signedOn);
@@ -176,6 +185,8 @@ export class LeaseLifecycleService {
     },
   ): Promise<void> {
     await withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
+      const found = await leaseRow(tx, input.leaseId);
+      await lockUnit(tx, companyId, found.unitId);
       const row = await leaseRow(tx, input.leaseId, { lock: true });
       if (row.signingMethod === 'esign' && row.status !== 'pending_signatures') return;
       if (
@@ -257,9 +268,11 @@ export class LeaseLifecycleService {
   }
 
   /**
-   * Moves leases on as the days pass (plan 4.7): signed leases start, leases whose renewal has
-   * started end, others hold over past their end date, and held-over leases gain a month of
-   * schedule at a time at the last rate (OQ-12). Idempotent: run twice, it changes nothing more.
+   * Moves leases on as the days pass (plan 4.7): signed leases start; leases past their end hold
+   * over, and end once their renewal, or the next lease on the unit, has started; held-over leases
+   * gain a month of schedule at a time at the last rate (OQ-12), never on a day the next lease
+   * holds (review finding 3). Each unit is locked before its leases change. Idempotent: run twice,
+   * it changes nothing more.
    */
   async advance(
     tx: Tx,
@@ -269,13 +282,15 @@ export class LeaseLifecycleService {
   ): Promise<number> {
     let changes = 0;
     const unit = filter.unitId ? sql`and l.unit_id = ${filter.unitId}` : sql``;
-    // 1. Signed leases whose start date has come (renewals first, so the old lease can end).
-    const starting = await tx.execute<{ id: string; start_date: string }>(
-      sql`select l.id, l.start_date from lease l
+    // 1. Signed leases whose start date has come (renewals and successors first, so the old
+    // lease can end).
+    const starting = await tx.execute<{ id: string; unit_id: string; start_date: string }>(
+      sql`select l.id, l.unit_id, l.start_date from lease l
           where l.company_id = ${companyId} and l.status = 'signed' and l.start_date <= ${today}::date ${unit}
           order by l.start_date`,
     );
     for (const lease of starting.rows) {
+      await lockUnit(tx, companyId, lease.unit_id);
       await this.statusReason(tx, 'Lease started');
       await tx
         .update(schema.lease)
@@ -283,63 +298,85 @@ export class LeaseLifecycleService {
         .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, 'signed')));
       changes += 1;
     }
-    // 2. Leases past their end date: ended by their renewal, or held over.
-    const ending = await tx.execute<{
+    // 2. Leases past their end date: held over, and ended once the next lease has started, after
+    // charging the days held over before it.
+    const past = await tx.execute<{
       id: string;
+      unit_id: string;
       status: LeaseStatus;
       start_date: string;
       end_date: string;
       renewal_start: string | null;
+      successor_start: string | null;
     }>(
-      sql`select l.id, l.status, l.start_date, l.end_date,
+      sql`select l.id, l.unit_id, l.status, l.start_date, l.end_date,
             (select r.start_date from lease r where r.company_id = l.company_id and r.renews_lease_id = l.id
-               and r.status in ('signed', 'active', 'ending', 'holding_over') limit 1) as renewal_start
+               and r.status in ('signed', 'active', 'ending', 'holding_over') limit 1) as renewal_start,
+            (select min(n.start_date) from lease n where n.company_id = l.company_id and n.unit_id = l.unit_id
+               and n.id <> l.id and n.start_date > l.end_date and n.renews_lease_id is distinct from l.id
+               and n.status in ('signed', 'active', 'ending', 'holding_over')) as successor_start
           from lease l
-          where l.company_id = ${companyId} and l.status in ('active', 'holding_over')
-            and l.end_date < ${today}::date ${unit}`,
+          where l.company_id = ${companyId} and l.status in ('active', 'holding_over', 'ending')
+            and l.end_date < ${today}::date ${unit}
+          order by l.end_date`,
     );
-    for (const lease of ending.rows) {
-      const next = scheduledTransition(
-        {
-          status: lease.status,
-          startDate: lease.start_date,
-          endDate: lease.end_date,
-          renewalStart: lease.renewal_start,
-        },
-        today,
-      );
-      if (!next) continue;
-      if (next.to === 'holding_over') {
-        await this.statusReason(tx, 'Holding over after the end date');
-        await tx
-          .update(schema.lease)
-          .set({
-            status: 'holding_over',
-            holdingOverSince: next.holdingOverSince,
-            updatedAt: this.clock.now(),
-          })
-          .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, 'active')));
-      } else if (next.to === 'ended') {
-        await this.statusReason(tx, 'Renewed');
+    for (const lease of past.rows) {
+      await lockUnit(tx, companyId, lease.unit_id);
+      let status = lease.status;
+      // At most two steps: held over for any gap before the next lease, then ended.
+      for (let step = 0; step < 2; step += 1) {
+        const next = scheduledTransition(
+          {
+            status,
+            startDate: lease.start_date,
+            endDate: lease.end_date,
+            renewalStart: lease.renewal_start,
+            successorStart: lease.successor_start,
+          },
+          today,
+        );
+        if (!next || next.to === 'active') break;
+        changes += 1;
+        if (next.to === 'holding_over') {
+          await this.statusReason(tx, 'Holding over after the end date');
+          await tx
+            .update(schema.lease)
+            .set({
+              status: 'holding_over',
+              holdingOverSince: next.holdingOverSince,
+              updatedAt: this.clock.now(),
+            })
+            .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, 'active')));
+          status = 'holding_over';
+          continue;
+        }
+        if (status !== 'active') changes += await this.extendHoldingOver(tx, lease.id, today);
+        await this.statusReason(
+          tx,
+          next.endReason === 'renewed' ? 'Renewed' : 'The next lease on the unit started',
+        );
         await tx
           .update(schema.lease)
           .set({
             status: 'ended',
-            endReason: 'renewed',
+            endReason: next.endReason,
             endedOn: next.endedOn,
             updatedAt: this.clock.now(),
           })
-          .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, lease.status)));
+          .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, status)));
+        break;
       }
-      changes += 1;
     }
     // 3. A month of schedule at a time for tenancies held over (OQ-12), up to today.
-    const held = await tx.execute<{ id: string }>(
-      sql`select l.id from lease l
+    const held = await tx.execute<{ id: string; unit_id: string }>(
+      sql`select l.id, l.unit_id from lease l
           where l.company_id = ${companyId} and l.status in ('holding_over', 'ending')
             and l.end_date < ${today}::date ${unit}`,
     );
-    for (const { id } of held.rows) changes += await this.extendHoldingOver(tx, id, today);
+    for (const lease of held.rows) {
+      await lockUnit(tx, companyId, lease.unit_id);
+      changes += await this.extendHoldingOver(tx, lease.id, today);
+    }
     return changes;
   }
 
@@ -447,10 +484,34 @@ export class LeaseLifecycleService {
     await tx.execute(sql`select set_config('app.status_reason', ${reason.slice(0, 300)}, true)`);
   }
 
+  /**
+   * Charges a tenancy held over up to today, never on a day the next lease on the unit holds:
+   * from that lease's start nothing is charged, and the period it cuts short waits until it has
+   * started (it may yet be recalled or cancelled), then is prorated (review finding 3).
+   */
   private async extendHoldingOver(tx: Tx, leaseId: string, today: string): Promise<number> {
     const row = await leaseRow(tx, leaseId);
     const terms = await termsOf(tx, row);
-    return this.insertPeriods(tx, row, holdingOverSchedule(terms, today), 'holding_over');
+    const next = await tx.execute<{ start_date: string; status: LeaseStatus }>(
+      sql`select start_date, status from lease
+          where company_id = ${row.companyId} and unit_id = ${row.unitId} and id <> ${row.id}
+            and start_date > ${row.endDate}::date
+            and status in ('pending_signatures', 'signed', 'active', 'ending', 'holding_over')
+          order by start_date limit 1`,
+    );
+    const found = next.rows[0];
+    const successor: HoldingOverSuccessor | null = found
+      ? {
+          start: found.start_date,
+          started: !(['pending_signatures', 'signed'] as LeaseStatus[]).includes(found.status),
+        }
+      : null;
+    return this.insertPeriods(
+      tx,
+      row,
+      holdingOverSchedule(terms, today, successor),
+      'holding_over',
+    );
   }
 
   private async insertPeriods(

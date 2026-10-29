@@ -58,6 +58,7 @@ import {
   companyFacts,
   requestRow,
   revokeLinks,
+  signedByAll,
   signerRow,
   signersOf,
   signingEvent,
@@ -391,14 +392,16 @@ export class EsignService {
     const request = await requestRow(tx, input.signingRequestId, { lock: true });
     const signer = await signerRow(tx, input.signerId, { lock: true });
     if (signer.signingRequestId !== request.id) throw notFound('Signer');
-    this.assertLinkable(request, signer, 'sign');
+    this.assertLinkable(request, signer, 'sign', await signersOf(tx, request.id));
     return this.mint(tx, request, signer, 'sign', { createdBy: input.createdBy, via: 'handover' });
   }
 
   /**
    * The link a message carries (the messaging module's `sign` and `signed_copy` link resolvers),
    * made at send time so the raw token is never stored (plan 4.8). Refuses with a 409 when what it
-   * links to has closed, which the send job records as "not sent".
+   * links to has closed, which the send job records as "not sent". The signer's earlier link keeps
+   * working until this message is sent (messageLinkSent), so a reminder that fails never leaves
+   * them without one (review finding 10).
    */
   async messageLinkUrl(
     companyId: string,
@@ -410,8 +413,58 @@ export class EsignService {
       const found = await signerRow(tx, signerId);
       const request = await requestRow(tx, found.signingRequestId, { lock: true });
       const signer = await signerRow(tx, signerId, { lock: true });
-      this.assertLinkable(request, signer, purpose);
+      this.assertLinkable(request, signer, purpose, await signersOf(tx, request.id));
       return (await this.mint(tx, request, signer, purpose, { messageId, via: 'message' })).url;
+    });
+  }
+
+  /**
+   * A message carrying a signer's new link was sent: their earlier links of that purpose stop
+   * working, in the transaction that records the send. If the new link was replaced meanwhile (a
+   * hand-over, the tenant app) or its request closed, nothing changes. The request is locked
+   * first, in the engine's order, so this never crosses a signer acting at the same moment.
+   */
+  async messageLinkSent(
+    tx: Tx,
+    signerId: string,
+    messageId: string,
+    purpose: SignerLinkPurpose,
+  ): Promise<void> {
+    await requestRow(tx, (await signerRow(tx, signerId)).signingRequestId, { lock: true });
+    const [sent] = await tx
+      .select({ id: schema.secureLink.id })
+      .from(schema.secureLink)
+      .where(
+        and(
+          eq(schema.secureLink.signerId, signerId),
+          eq(schema.secureLink.messageId, messageId),
+          eq(schema.secureLink.purpose, purpose),
+          sql`${schema.secureLink.revokedAt} is null`,
+        ),
+      )
+      .orderBy(desc(schema.secureLink.createdAt))
+      .limit(1);
+    if (!sent) return;
+    await revokeLinks(tx, { signerId, purpose }, 'superseded', this.clock.now(), sent.id);
+  }
+
+  /**
+   * A message meant to carry a signer's new link was not sent: that link reached nobody, so it is
+   * revoked, and the link the signer already has keeps working.
+   */
+  async messageLinkNotSent(tx: Tx, signerId: string, messageId: string): Promise<void> {
+    const signer = await signerRow(tx, signerId);
+    const request = await requestRow(tx, signer.signingRequestId, { lock: true });
+    const now = this.clock.now();
+    const revoked = await tx.execute<{ id: string }>(
+      sql`update secure_link set revoked_at = ${now}, revoke_reason = 'not_delivered'
+          where signer_id = ${signerId} and message_id = ${messageId} and revoked_at is null
+          returning id`,
+    );
+    if (revoked.rows.length === 0) return;
+    await signingEvent(tx, request, 'link.not_delivered', now, {
+      signerId,
+      data: { linkIds: revoked.rows.map((r) => r.id), messageId },
     });
   }
 
@@ -425,7 +478,7 @@ export class EsignService {
       const request = await requestRow(tx, found.signingRequestId, { lock: true });
       const signer = await signerRow(tx, signerId, { lock: true });
       if (!signsAsTenant(signer.subjectType)) throw notFound('Signer');
-      this.assertLinkable(request, signer, 'sign');
+      this.assertLinkable(request, signer, 'sign', await signersOf(tx, request.id));
       return this.mint(tx, request, signer, 'sign', { via: 'tenant_app' });
     });
   }
@@ -445,7 +498,12 @@ export class EsignService {
     };
   }
 
-  private assertLinkable(request: RequestRow, signer: SignerRow, purpose: SignerLinkPurpose) {
+  private assertLinkable(
+    request: RequestRow,
+    signer: SignerRow,
+    purpose: SignerLinkPurpose,
+    signers: readonly SignerRow[],
+  ) {
     if (purpose === 'signed_copy') {
       if (request.status !== 'completed')
         throw conflict('link_unavailable', 'The signed copy is not ready');
@@ -460,6 +518,11 @@ export class EsignService {
       );
     if (signer.status !== 'pending')
       throw conflict('link_unavailable', 'This person has already signed or declined');
+    if (signedByAll(signers))
+      throw conflict(
+        'link_unavailable',
+        'Everyone who must sign has signed; the signed copy is being prepared',
+      );
   }
 
   private async mint(
@@ -477,8 +540,10 @@ export class EsignService {
     const token = newToken();
     const days = purpose === 'sign' ? SIGNING_LINK_DAYS : SIGNED_COPY_LINK_DAYS;
     const expiresAt = new Date(now.getTime() + days * DAY_MS);
-    // A newer link to the same signer revokes the last (plan 4.8).
-    await revokeLinks(tx, { signerId: signer.id, purpose }, 'superseded', now);
+    // A newer link to the same signer revokes the last (plan 4.8): at once for a hand-over or the
+    // tenant app, which staff or the tenant hold themselves; for a message only once it is sent.
+    if (options.via !== 'message')
+      await revokeLinks(tx, { signerId: signer.id, purpose }, 'superseded', now);
     const [link] = await tx
       .insert(schema.secureLink)
       .values({
@@ -591,6 +656,16 @@ export class EsignService {
     return withCompany(this.database, ctx, async (tx) => {
       const current = await requestRow(tx, requestId, { lock: true });
       if (current.status !== 'pending') return 'skipped';
+      // Under the request's lock, the signatures must be exactly those on the certificate. No
+      // action is accepted once everyone required has signed (review finding 9), so this holds;
+      // if it ever did not, the job fails and is retried with a fresh certificate.
+      const present = await tx
+        .select({ signerId: schema.signature.signerId })
+        .from(schema.signature)
+        .where(eq(schema.signature.signingRequestId, requestId));
+      const certified = new Set(signed.map((x) => x.id));
+      if (present.length !== certified.size || present.some((p) => !certified.has(p.signerId)))
+        throw new Error('A signature changed while the signed copy was prepared; finalising again');
       const now = this.clock.now();
       const finalDocumentId = await this.documents.recordWriteOnce(tx, file, {
         kind: 'signed_pdf',
@@ -678,17 +753,11 @@ export class EsignService {
       { companyId, actorKind: 'system' },
       async (tx) => {
         const found = await requestRow(tx, requestId);
-        const events = await tx
-          .select({ data: schema.auditEvent.data })
-          .from(schema.auditEvent)
-          .where(
-            and(
-              eq(schema.auditEvent.action, 'signing.completed'),
-              eq(schema.auditEvent.recordId, requestId),
-            ),
-          );
-        const data = events[0]?.data as
-          { finalSha256?: string; documentSha256?: string } | undefined;
+        const data = (await this.audit.eventData(tx, {
+          action: 'signing.completed',
+          recordType: 'signing_request',
+          recordId: requestId,
+        })) as { finalSha256?: string; documentSha256?: string } | null;
         return {
           request: found,
           audited: found.finalSha256
@@ -741,8 +810,13 @@ export class EsignService {
         .orderBy(asc(schema.signer.signingRequestId), asc(schema.signer.position));
       let sent = 0;
       const factsByRequest = new Map<string, DocumentFacts>();
+      const complete = new Map<string, boolean>();
       for (const { signer, request } of rows) {
         if (!request.openedAt) continue;
+        // Optional signers are not reminded once everyone who must sign has signed.
+        if (!complete.has(request.id))
+          complete.set(request.id, signedByAll(await signersOf(tx, request.id)));
+        if (complete.get(request.id)) continue;
         const due = dueSigningReminders(now.getTime() - request.openedAt.getTime(), hours);
         if (due.length === 0) continue;
         const prefix = `${SIGNING_REMINDERS_JOB}:${signer.id}:`;
@@ -846,7 +920,8 @@ export class EsignService {
       frozenDocument: request.documentId !== null,
       signedDocument: request.finalDocumentId !== null,
       signers: signers.map((s): SignerProgress => {
-        const own = links.filter((l) => l.signerId === s.id);
+        // A link whose message was never sent reached nobody: it is not link activity.
+        const own = links.filter((l) => l.signerId === s.id && l.revokeReason !== 'not_delivered');
         const last = own.find((l) => l.purpose === 'sign') ?? null;
         return {
           id: s.id,

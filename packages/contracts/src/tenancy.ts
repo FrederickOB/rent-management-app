@@ -4,6 +4,7 @@ import { MESSAGE_CHANNELS } from '@rent/domain/messaging';
 import {
   BREAK_PARTIES,
   ID_TYPES,
+  LEASE_END_REASONS,
   LEASE_STATUSES,
   LEASE_USES,
   PLACEHOLDERS,
@@ -536,7 +537,7 @@ export const leaseSchema = z.object({
     endingNote: z.string().nullable(),
     moveOutDate: isoDate.nullable(),
     endedOn: isoDate.nullable(),
-    endReason: z.enum(['moved_out', 'renewed']).nullable(),
+    endReason: z.enum(LEASE_END_REASONS).nullable(),
     cancelledAt: iso.nullable(),
     cancelReason: z.string().nullable(),
   }),

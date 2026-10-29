@@ -933,10 +933,11 @@ export class RegisterImportService {
         )
       ).rows.map((m) => [m.key, m]),
     );
-    // Units a lease holds, reserved or occupied (PB-09): as in the register, their availability
-    // can only become "available" or "under repair".
+    // Units a lease holds, out for signature, reserved or occupied (PB-09): as in the register,
+    // their availability can only become "available" or "under repair", so the dry run says what
+    // the commit will (M3 review finding 2).
     const held = new Set(
-      (await tx.execute<{ unit_id: string }>(sql`select unit_id from unit_occupancy`)).rows.map(
+      (await tx.execute<{ unit_id: string }>(sql`select unit_id from unit_lease_hold`)).rows.map(
         (u) => u.unit_id,
       ),
     );

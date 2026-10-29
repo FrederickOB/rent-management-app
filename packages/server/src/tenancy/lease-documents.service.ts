@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, isNull, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import { and, asc, eq, isNull, schema, withCompany, type Database, type Tx } from '@rent/db';
 import { leaseV1, renderTemplateHtml } from '@rent/documents';
 import type { SignerRole } from '@rent/domain/esign';
 import type { Actor } from '@rent/domain/policy';
@@ -15,6 +15,7 @@ import { conflict, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
+import { propertyOwnerName, unitPlace } from '../portfolio/register-read.service';
 import { companyFacts, leaseRow, termsOf } from './lease-records';
 import { LeaseTemplatesService } from './lease-templates.service';
 
@@ -52,29 +53,16 @@ export class LeaseDocumentsService {
     const { version, template } = await this.templates.version(tx, lease.templateVersionId);
     const company = await companyFacts(tx, lease.companyId);
     const terms = await termsOf(tx, lease);
-    const place = await tx.execute<{
-      unit_code: string;
-      unit_type: UnitType;
-      bedrooms: number | null;
-      property_name: string;
-      street: string | null;
-      town: string | null;
-      district: string | null;
-      region: string;
-      ghanapost_gps: string | null;
-      owner_name: string | null;
-    }>(
-      sql`select u.code as unit_code, u.unit_type, u.bedrooms, p.name as property_name, p.street, p.town,
-            p.district, p.region, p.ghanapost_gps,
-            (select coalesce(o.legal_name, o.display_name) from property_current_ownership c
-               join owner o on o.company_id = c.company_id and o.id = c.owner_id
-               where c.company_id = p.company_id and c.property_id = p.id
-               order by c.share_bps desc, o.reference limit 1) as owner_name
-          from unit u join property p on p.company_id = u.company_id and p.id = u.property_id
-          where u.id = ${lease.unitId}`,
-    );
-    const where = place.rows[0];
+    const where = await unitPlace(tx, lease.unitId);
     if (!where) throw notFound('Unit');
+    // The landlord is the property's owner today, whatever owners the person drafting may see
+    // (review finding 5): a manager scoped to the property must not make the agency the landlord.
+    const ownerName = await propertyOwnerName(tx, lease.companyId, lease.propertyId);
+    if (!ownerName && company.kind === 'agency')
+      throw conflict(
+        'property_without_owner',
+        'This property has no owner on record today. Record its owner in the register before preparing the lease.',
+      );
     const [tenant] = await tx
       .select()
       .from(schema.tenant)
@@ -98,7 +86,7 @@ export class LeaseDocumentsService {
       .orderBy(asc(schema.leaseParty.position));
     const guarantor = parties.find((p) => p.partyRole === 'guarantor')?.name ?? null;
     const unitDescription = [
-      UNIT_TYPE_LABELS[where.unit_type],
+      UNIT_TYPE_LABELS[where.unitType as UnitType],
       where.bedrooms ? `${where.bedrooms} bedroom${where.bedrooms === 1 ? '' : 's'}` : null,
     ]
       .filter(Boolean)
@@ -106,18 +94,24 @@ export class LeaseDocumentsService {
     const data = buildLeaseDocument(version.content as TemplateContent, {
       title: documentTitle(template.name, template.starterKind),
       reference: `L-${lease.id}`,
-      landlordName: where.owner_name ?? company.legalName,
+      landlordName: ownerName ?? company.legalName,
       agentName: company.kind === 'agency' ? company.displayName : null,
       tenantName: tenant.legalName ?? tenant.displayName,
       tenantPhone: tenant.phone,
       tenantEmail: tenant.email,
       signatoryNames: signatories.map((s) => s.name),
       guarantorName: guarantor,
-      propertyName: where.property_name,
-      propertyAddress: [where.street, where.town, where.district, where.region, where.ghanapost_gps]
+      propertyName: where.propertyName,
+      propertyAddress: [
+        where.address.street,
+        where.address.town,
+        where.address.district,
+        where.address.region,
+        where.address.ghanapostGps,
+      ]
         .filter(Boolean)
         .join(', '),
-      unitCode: where.unit_code,
+      unitCode: where.code,
       unitDescription,
       terms,
       servicePhones: lease.servicePhones,

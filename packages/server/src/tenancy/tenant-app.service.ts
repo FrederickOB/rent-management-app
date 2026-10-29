@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { sql, withCompany, withSystem, type Database, type Tx } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import type { LeaseStatus, RentCycle } from '@rent/domain/tenancy';
+import { companyRecord } from '../companies/companies.service';
 import { forbidden, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
@@ -255,9 +256,6 @@ export class TenantAppService {
   }
 
   private async landlordName(tx: Tx, companyId: string): Promise<string> {
-    const rows = await tx.execute<{ display_name: string }>(
-      sql`select display_name from company where id = ${companyId}`,
-    );
-    return rows.rows[0]?.display_name ?? '';
+    return (await companyRecord(tx, companyId))?.displayName ?? '';
   }
 }

@@ -1,5 +1,10 @@
 import { asc, desc, eq, schema, sql, type Tx } from '@rent/db';
-import { maskEmail, type SignerLinkPurpose } from '@rent/domain/esign';
+import {
+  maskEmail,
+  signingComplete,
+  type SignerLinkPurpose,
+  type SignerStatus,
+} from '@rent/domain/esign';
 import { maskPhone } from '@rent/domain/phone';
 import { parseCompanySettings, type CompanySettings } from '@rent/domain/settings';
 import { notFound } from '../core/errors';
@@ -18,8 +23,11 @@ export type ChallengeRow = typeof schema.otpChallenge.$inferSelect;
 const TENANT_SELF: ReadonlySet<string> = new Set(['tenant']);
 export const signsAsTenant = (subjectType: string): boolean => TENANT_SELF.has(subjectType);
 
-/** Why a link was revoked: a newer one went to the signer, the request closed, or it expired. */
-export type RevokeReason = 'superseded' | 'request_closed' | 'expired';
+/**
+ * Why a link was revoked: a newer one went to the signer, the request closed, it expired, or the
+ * message meant to carry it was never sent (so it reached nobody).
+ */
+export type RevokeReason = 'superseded' | 'request_closed' | 'expired' | 'not_delivered';
 
 export async function requestRow(
   tx: Tx,
@@ -78,20 +86,29 @@ export async function latestChallenge(
   return row ?? null;
 }
 
-/** Codes sent since `since`, for one link or one destination (the send limits, plan 4.8). */
+/**
+ * Codes sent for one link since `since` (the per-link send limit, plan 4.8). The per-destination
+ * limit counts across every company, in the global rate_limit table (signing-page.service).
+ */
 export async function codesSince(
   tx: Tx,
-  where: { readonly linkId?: string; readonly destinationHash?: string },
+  where: { readonly linkId: string },
   since: Date,
 ): Promise<number> {
-  const conditions = [sql`created_at > ${since}`];
-  if (where.linkId) conditions.push(sql`secure_link_id = ${where.linkId}`);
-  if (where.destinationHash) conditions.push(sql`destination_hash = ${where.destinationHash}`);
   const result = await tx.execute<{ n: number }>(
-    sql`select count(*)::int as n from otp_challenge where ${sql.join(conditions, sql` and `)}`,
+    sql`select count(*)::int as n from otp_challenge
+        where created_at > ${since} and secure_link_id = ${where.linkId}`,
   );
   return result.rows[0]?.n ?? 0;
 }
+
+/**
+ * Whether everyone who must sign has signed (review finding 9). From then on the request takes
+ * no further sign, decline or code action from anyone, an optional signer included, until it is
+ * finalised. Read under the request row lock, so it serialises with the last signature.
+ */
+export const signedByAll = (signers: readonly SignerRow[]): boolean =>
+  signingComplete(signers.map((s) => ({ required: s.required, status: s.status as SignerStatus })));
 
 export interface CompanyFacts {
   readonly id: string;
@@ -131,13 +148,20 @@ export function codeDestination(
   return null;
 }
 
-/** What a link's page shows (plan 4.8): only `sign` accepts any action. */
+/**
+ * What a link's page shows (plan 4.8): only `sign` accepts any action. `downloadable` says
+ * whether the link may fetch a PDF now: the frozen document on `sign`, the signed copy on `copy`,
+ * and the document a signer signed on `signed`, only while that link is live: never on a
+ * revoked or expired link, whatever the signer's status (review finding 4).
+ */
 export function screenFor(
   link: LinkRow,
   signer: SignerRow,
   request: RequestRow,
   now: Date,
-): { screen: LinkScreen; reason: LinkReason } {
+  signers: readonly SignerRow[],
+): { screen: LinkScreen; reason: LinkReason; downloadable: boolean } {
+  const live = !link.revokedAt && link.expiresAt.getTime() > now.getTime();
   const closed = (): LinkReason =>
     request.status === 'cancelled'
       ? 'cancelled'
@@ -149,21 +173,29 @@ export function screenFor(
             ? 'preparing'
             : null;
   const revoked = (): LinkReason => (link.revokeReason === 'superseded' ? 'superseded' : null);
+  const show = (screen: LinkScreen, reason: LinkReason = null, downloadable = false) => ({
+    screen,
+    reason,
+    downloadable,
+  });
   if ((link.purpose as SignerLinkPurpose) === 'signed_copy') {
-    if (link.revokedAt) return { screen: 'revoked', reason: revoked() };
-    if (link.expiresAt.getTime() <= now.getTime()) return { screen: 'expired', reason: null };
-    if (request.status === 'completed') return { screen: 'copy', reason: null };
-    return { screen: 'closed', reason: closed() };
+    if (link.revokedAt) return show('revoked', revoked());
+    if (!live) return show('expired');
+    if (request.status === 'completed') return show('copy', null, true);
+    return show('closed', closed());
   }
-  // A signer who has signed or declined is told so, whatever happened to the link since.
-  if (signer.status === 'signed')
-    return { screen: 'signed', reason: request.status === 'completed' ? 'completed' : null };
-  if (signer.status === 'declined') return { screen: 'declined', reason: null };
-  if (request.status !== 'pending') return { screen: 'closed', reason: closed() };
-  if (link.revokedAt) return { screen: 'revoked', reason: revoked() };
-  if (link.usedAt) return { screen: 'signed', reason: null };
-  if (link.expiresAt.getTime() <= now.getTime()) return { screen: 'expired', reason: null };
-  return { screen: 'sign', reason: null };
+  // A signer who has signed or declined is told so, whatever happened to the link since, with
+  // what became of the request (completed, withdrawn or declined). Their document downloads only
+  // while the link is live.
+  if (signer.status === 'signed') return show('signed', closed(), live);
+  if (signer.status === 'declined') return show('declined');
+  if (request.status !== 'pending') return show('closed', closed());
+  // Everyone who must sign has: nobody else signs, declines or asks for a code (finding 9).
+  if (signedByAll(signers)) return show('closed', 'signed_by_all');
+  if (link.revokedAt) return show('revoked', revoked());
+  if (link.usedAt) return show('signed');
+  if (!live) return show('expired');
+  return show('sign', null, true);
 }
 
 /** Records a step on the signing timeline (append-only), at the server's time. */

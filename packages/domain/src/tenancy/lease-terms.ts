@@ -2,6 +2,7 @@ import {
   addDays,
   addMonths,
   compareDates,
+  daysBetween,
   parseBusinessDate,
   toIsoDate,
   type BusinessDate,
@@ -239,4 +240,41 @@ export function rentOn(
 /** The whole term in months, rounded up: what the advance rules and the formal-lease rule read. */
 export function termMonths(terms: Pick<LeaseTerms, 'periodCount'>): number {
   return terms.periodCount;
+}
+
+/** A term exactly: whole rent periods (months anchored on the start), then the days left. */
+export interface TermLength {
+  readonly months: number;
+  readonly days: number;
+}
+
+/**
+ * The exact length of a term from its first to its last day, both included: the whole months
+ * counted from the start as the rent periods are (31 January, 28 February...), then the days
+ * after the last whole month. 1 November to 6 November a year later is 12 months and 6 days.
+ */
+export function termLength(startDate: string, endDate: string): TermLength {
+  const start = parseBusinessDate(startDate);
+  const end = parseBusinessDate(endDate);
+  if (compareDates(end, start) < 0)
+    throw new DomainError('lease.end_before_start', 'The lease must end after it starts');
+  let months = 0;
+  while (compareDates(fullPeriodEnd(start, months), end) <= 0) {
+    months += 1;
+    if (months > MAX_TERM_MONTHS)
+      throw new DomainError(
+        'lease.term_too_long',
+        `A lease can run at most ${MAX_TERM_MONTHS / 12} years`,
+      );
+  }
+  return { months, days: daysBetween(periodStart(start, months), end) + 1 };
+}
+
+/** A term in words for documents: "12 months", "12 months and 6 days", "20 days". */
+export function formatTerm(term: TermLength): string {
+  const parts = [
+    term.months > 0 ? `${term.months} month${term.months === 1 ? '' : 's'}` : null,
+    term.days > 0 ? `${term.days} day${term.days === 1 ? '' : 's'}` : null,
+  ].filter((p): p is string => p !== null);
+  return parts.join(' and ');
 }

@@ -42,8 +42,13 @@ export type LinkScreen = (typeof LINK_SCREENS)[number];
 export const signingPageSchema = z.object({
   /** What the page shows. Only `sign` accepts any action; the rest explain. */
   screen: z.enum(LINK_SCREENS),
-  /** For `revoked` and `closed`: a newer link went out, or the request was withdrawn, declined or completed. */
-  reason: z.enum(['superseded', 'cancelled', 'declined', 'completed', 'preparing']).nullable(),
+  /**
+   * For `revoked`, `closed` and `signed`: a newer link went out, the request was withdrawn,
+   * declined or completed, or everyone who must sign has signed (`signed_by_all`).
+   */
+  reason: z
+    .enum(['superseded', 'cancelled', 'declined', 'completed', 'preparing', 'signed_by_all'])
+    .nullable(),
   purpose: z.enum(['sign', 'signed_copy']),
   /** Who to contact: the landlord or agency, and the landlord's signatory on the request. */
   landlord: z.object({
@@ -63,6 +68,11 @@ export const signingPageSchema = z.object({
     finalSha256: z.string().nullable(),
     /** The document's words as HTML (no scripts, no styles), on the `sign` screen only. */
     html: z.string().nullable(),
+    /**
+     * Whether this link downloads a PDF now: the document being signed, the document a signer
+     * signed while their link is live, or the signed copy. Never on a revoked or expired link.
+     */
+    downloadable: z.boolean(),
   }),
   signer: z.object({
     name: z.string(),

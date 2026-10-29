@@ -2,10 +2,13 @@ import { Inject, Injectable } from '@nestjs/common';
 import { schema, sql, withCompany, type Database, type Tx } from '@rent/db';
 import { addDays, formatBusinessDate, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { isPlatformRole, type Actor, type StaffRole } from '@rent/domain/policy';
+import { verificationWarning, type VerificationStatus } from '@rent/domain/rules';
 import {
   dueReminderSteps,
   dueRenewalReminders,
+  formatTerm,
   reminderToSend,
+  termLength,
   type ReminderStep,
 } from '@rent/domain/tenancy';
 import type { Clock } from '../core/clock';
@@ -13,6 +16,7 @@ import { queueMessage } from '../core/messages';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { activeMembers } from '../identity/memberships';
 import { PolicyService } from '../policy/policy.service';
+import { currentOwnerIds } from '../portfolio/register-read.service';
 import { companyFacts, todayIn, type CompanyFacts } from './lease-records';
 import { uuidArray } from './tenants.service';
 
@@ -27,26 +31,38 @@ type LeaseFacts = {
   readonly unit_code: string;
   readonly property_name: string;
   readonly tenant_name: string;
+  readonly start_date: string;
   readonly end_date: string;
   readonly rent_control_deadline: string | null;
   readonly stamp_deadline: string | null;
   readonly formal_practitioner: string | null;
   readonly formal_wet_signed_document_id: string | null;
   readonly formal_registered_on: string | null;
-  readonly period_count: number;
+  /** The verification of the rule version each tracker used (CLAUDE.md section 7). */
+  readonly rent_control_status: VerificationStatus | null;
+  readonly stamp_status: VerificationStatus | null;
+  readonly formal_status: VerificationStatus | null;
 };
 
 const LEASE_FACTS = sql`select l.id, l.property_id, u.code as unit_code, p.name as property_name,
-    coalesce(t.display_name, '') as tenant_name, l.end_date, l.rent_control_deadline, l.stamp_deadline,
-    l.formal_practitioner, l.formal_wet_signed_document_id, l.formal_registered_on,
-    (select count(*)::int from charge_period c where c.company_id = l.company_id and c.lease_id = l.id
-       and c.charge_type = 'rent' and c.source = 'schedule') as period_count
+    coalesce(t.display_name, '') as tenant_name, l.start_date, l.end_date, l.rent_control_deadline,
+    l.stamp_deadline, l.formal_practitioner, l.formal_wet_signed_document_id, l.formal_registered_on,
+    (select r.verification_status from rule r where r.id = l.rent_control_rule_id) as rent_control_status,
+    (select r.verification_status from rule r where r.id = l.stamp_rule_id) as stamp_status,
+    (select r.verification_status from rule r where r.id = l.formal_rule_id) as formal_status
   from lease l
   join unit u on u.company_id = l.company_id and u.id = l.unit_id
   join property p on p.company_id = l.company_id and p.id = l.property_id
   left join tenant t on t.company_id = l.company_id and t.id = l.tenant_id`;
 
-const UNVERIFIED = 'This period comes from the rules table and is unverified: counsel to confirm.';
+/**
+ * The warning a reminder carries about its period, from the verification of the rule version
+ * the lease recorded: none once that rule is verified, never assumed (CLAUDE.md section 7).
+ */
+function ruleNote(status: VerificationStatus | null): string {
+  const warning = verificationWarning(status ?? 'unverified');
+  return warning ? `This period comes from the rules table and is ${warning}.` : '';
+}
 
 /**
  * Staff reminders (M3 plan 4.10, 4.11 and 4.17): renewals at 90, 60 and 30 days, and the Rent
@@ -102,7 +118,7 @@ export class TenancyRemindersService {
         );
         sent += await this.remind(tx, company, lease, RENT_CONTROL_REMINDERS_JOB, due, () => ({
           subject: `Rent Control registration: ${lease.unit_code}`,
-          body: `Register the lease for ${lease.unit_code} at ${lease.property_name} (${lease.tenant_name}) with Rent Control by ${formatBusinessDate(lease.rent_control_deadline!)}, then record the registration number and date on the lease. ${UNVERIFIED} (OQ-52) Rent collection is not affected.`,
+          body: `Register the lease for ${lease.unit_code} at ${lease.property_name} (${lease.tenant_name}) with Rent Control by ${formatBusinessDate(lease.rent_control_deadline!)}, then record the registration number and date on the lease. ${ruleNote(lease.rent_control_status)} (OQ-52) Rent collection is not affected.`,
         }));
       }
       return sent;
@@ -125,7 +141,7 @@ export class TenancyRemindersService {
         );
         sent += await this.remind(tx, company, lease, STAMPING_REMINDERS_JOB, due, () => ({
           subject: `Stamp the tenancy agreement: ${lease.unit_code}`,
-          body: `The tenancy agreement for ${lease.unit_code} at ${lease.property_name} (${lease.tenant_name}) is due to be stamped by ${formatBusinessDate(lease.stamp_deadline!)}. Upload the stamped copy and its date on the lease. ${UNVERIFIED} (OQ-45)`,
+          body: `The tenancy agreement for ${lease.unit_code} at ${lease.property_name} (${lease.tenant_name}) is due to be stamped by ${formatBusinessDate(lease.stamp_deadline!)}. Upload the stamped copy and its date on the lease. ${ruleNote(lease.stamp_status)} (OQ-45)`,
         }));
       }
       return sent;
@@ -158,7 +174,7 @@ export class TenancyRemindersService {
           [{ key: `week-${week}`, date: week }],
           () => ({
             subject: `Formal lease needed: ${lease.unit_code}`,
-            body: `The lease for ${lease.unit_code} at ${lease.property_name} (${lease.tenant_name}) runs for ${lease.period_count} months, longer than the writing exemption, so it takes the formal path. Still to record: ${missing.join(', ')}. ${UNVERIFIED} (OQ-44) Nothing is blocked.`,
+            body: `The lease for ${lease.unit_code} at ${lease.property_name} (${lease.tenant_name}) runs for ${formatTerm(termLength(lease.start_date, lease.end_date))}, longer than the writing exemption, so it takes the formal path. Still to record: ${missing.join(', ')}. ${ruleNote(lease.formal_status)} (OQ-44) Nothing is blocked.`,
           }),
         );
       }
@@ -226,10 +242,7 @@ export class TenancyRemindersService {
    * the users of the property's owner. The policy decides; no role is compared here.
    */
   private async recipients(tx: Tx, company: CompanyFacts, propertyId: string): Promise<string[]> {
-    const owners = await tx.execute<{ owner_id: string }>(
-      sql`select owner_id from property_current_ownership where property_id = ${propertyId}`,
-    );
-    const ownerIds = new Set(owners.rows.map((r) => r.owner_id));
+    const ownerIds = new Set(await currentOwnerIds(tx, propertyId));
     const people = new Set<string>();
     for (const m of await activeMembers(tx)) {
       if (isPlatformRole(m.role)) continue;

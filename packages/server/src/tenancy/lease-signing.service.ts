@@ -19,12 +19,33 @@ import { personContact } from '../identity/person-directory';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { LeaseDocumentsService } from './lease-documents.service';
 import { LeaseLifecycleService } from './lease-lifecycle.service';
-import { assertNoOverlap, leaseRow, leaseWriteError, type LeaseRow } from './lease-records';
+import {
+  assertStaffParties,
+  assertUnitFree,
+  companyFacts,
+  leaseRow,
+  leaseWriteError,
+  lockUnit,
+  todayIn,
+  type LeaseRow,
+} from './lease-records';
 import { LeasesService } from './leases.service';
 import type { LeaseLimitedView, LeaseView } from './tenancy.types';
 
 /** The signer role of the tenant signing for themselves (a signer role, not a staff role). */
 const TENANT_ITSELF: ReadonlySet<string> = new Set<SignerRole>(['tenant']);
+
+/**
+ * Who must sign, whatever the client sent (review finding 1): the tenant or the company tenant's
+ * signatories, and the landlord's signer; the witness when the lease requires one. Other parties,
+ * such as a guarantor, keep the flag the draft gives them.
+ */
+const ALWAYS_REQUIRED: ReadonlySet<string> = new Set<SignerRole>([
+  'tenant',
+  'signatory',
+  'landlord',
+]);
+const WITNESS: ReadonlySet<string> = new Set<SignerRole>(['witness']);
 
 /**
  * Sending a lease for e-signature (TL-07; M3 plan 4.7 and 4.8): issuing freezes the terms,
@@ -57,6 +78,9 @@ export class LeaseSigningService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'lease.manage');
     await withCompany(this.database, staffContext(staff), async (tx) => {
+      // The unit first, then the lease row: the order every path that holds a unit locks in.
+      const found = await leaseRow(tx, leaseId);
+      await lockUnit(tx, found.companyId, found.unitId);
       const row = await leaseRow(tx, leaseId, { lock: true });
       if (row.status !== 'draft')
         throw conflict('lease_not_draft', 'Only a draft lease can be sent for signature');
@@ -65,7 +89,11 @@ export class LeaseSigningService {
           'lease_without_template',
           'This lease was recorded from paper and has no document to sign',
         );
-      await assertNoOverlap(tx, row);
+      const company = await companyFacts(tx, row.companyId);
+      await assertUnitFree(tx, row, {
+        starting: true,
+        today: todayIn(this.clock, company.timeZone),
+      });
       const signers = await this.signersOf(tx, row);
       const { renderRequestId } = await this.leaseDocuments.requestPdf(tx, leaseId, staff.personId);
       try {
@@ -190,6 +218,20 @@ export class LeaseSigningService {
         'witness_required',
         'Add the witness who will sign: your company asks for a witness on every lease',
       );
+    // Only one party signs as the tenant itself; anyone else signing with them is on record as
+    // one of the tenant's contacts, with their own phone and email (review finding 11).
+    const asTenant = parties.filter(
+      (p) => TENANT_ITSELF.has(p.partyRole) && !p.tenantContactId && !p.staffPersonId,
+    );
+    if (asTenant.length > 1)
+      throw invalid(
+        'tenant_signer_once',
+        'Only one signer can sign as the tenant. Add co-occupants as the tenant’s contacts, then choose them as signers',
+      );
+    await assertStaffParties(
+      tx,
+      parties.map((p) => ({ role: p.partyRole, name: p.name, staffPersonId: p.staffPersonId })),
+    );
     const [tenant] = await tx
       .select()
       .from(schema.tenant)
@@ -241,7 +283,10 @@ export class LeaseSigningService {
         name: p.name,
         phone,
         email,
-        required: p.required,
+        required:
+          ALWAYS_REQUIRED.has(p.partyRole) ||
+          (WITNESS.has(p.partyRole) && row.witnessRequired) ||
+          p.required,
         isTestContact,
       });
     }

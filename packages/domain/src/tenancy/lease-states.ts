@@ -50,8 +50,12 @@ export function checkLeaseTransition(from: LeaseStatus, to: LeaseStatus): void {
 export const OCCUPYING_STATUSES: readonly LeaseStatus[] = ['active', 'ending', 'holding_over'];
 /** Between signature and start the unit is reserved (prd-issues 22). */
 export const RESERVING_STATUSES: readonly LeaseStatus[] = ['signed'];
-/** Leases in these states hold the unit, so no two of them may overlap on one unit. */
+/**
+ * Leases in these states hold the unit, so no two of them may overlap on one unit. A lease out
+ * for signature holds it too, so a completed signing never finds the unit taken (review finding 2).
+ */
 export const HOLDING_STATUSES: readonly LeaseStatus[] = [
+  'pending_signatures',
   'signed',
   'active',
   'ending',

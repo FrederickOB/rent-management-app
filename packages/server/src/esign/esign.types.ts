@@ -45,8 +45,12 @@ export interface ClientInfo {
 /** What a link's page shows. Only `sign` accepts any action. */
 export type LinkScreen = 'sign' | 'signed' | 'declined' | 'copy' | 'expired' | 'revoked' | 'closed';
 
-/** Why a link no longer signs: a newer link went out, or the request closed. */
-export type LinkReason = 'superseded' | 'cancelled' | 'declined' | 'completed' | 'preparing' | null;
+/**
+ * Why a link no longer signs: a newer link went out, the request closed, or everyone who must
+ * sign has signed (`signed_by_all`, review finding 9).
+ */
+export type LinkReason =
+  'superseded' | 'cancelled' | 'declined' | 'completed' | 'preparing' | 'signed_by_all' | null;
 
 /** Who to contact about a link: the company and the landlord's signatory on the request. */
 export interface LandlordContact {
@@ -84,6 +88,11 @@ export interface SigningPageView {
     readonly finalSha256: string | null;
     /** The document's words as HTML, from the same template and data as the PDF. */
     readonly html: string | null;
+    /**
+     * Whether this link downloads a PDF now: the frozen document while signing, the document a
+     * signer signed while their link is live, the signed copy on a copy link (review finding 4).
+     */
+    readonly downloadable: boolean;
   };
   readonly signer: {
     readonly name: string;

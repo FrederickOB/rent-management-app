@@ -40,10 +40,15 @@ export interface RecipientResolver {
 
 /**
  * Makes the link a message carries, at send time and outside any transaction, so its raw token
- * is never stored (CLAUDE.md section 9). The e-signing phase adds the `sign` resolver.
+ * is never stored (CLAUDE.md section 9). The e-signing phase adds the `sign` resolver. `sent` and
+ * `notSent` run in the transaction that records how the send went: a new link replaces the
+ * recipient's earlier one only once it is sent, and one that was never sent is withdrawn, so a
+ * failed reminder never costs a signer their working link (M3 review finding 10).
  */
 export interface LinkResolver {
   url(companyId: string, targetId: string, messageId: string): Promise<string>;
+  sent?(tx: Tx, companyId: string, targetId: string, messageId: string): Promise<void>;
+  notSent?(tx: Tx, companyId: string, targetId: string, messageId: string): Promise<void>;
 }
 
 type EventRow = typeof schema.messageEvent.$inferSelect;
@@ -183,8 +188,9 @@ export class MessagingService {
 
     const address = reach.addresses[channel]!;
     let body = request.body;
+    const link = request.link ? (this.links.get(request.link.purpose) ?? null) : null;
     if (request.link) {
-      const resolver = this.links.get(request.link.purpose);
+      const resolver = link;
       if (!resolver) return this.finish(companyId, request, 'not_sent', 'link_unavailable');
       let url: string;
       try {
@@ -207,26 +213,31 @@ export class MessagingService {
               subject: request.subject ?? this.config.APP_NAME,
               text: body,
             });
-      await withCompany(this.database, ctx, (tx) =>
-        this.event(tx, companyId, request.messageId, {
+      await withCompany(this.database, ctx, async (tx) => {
+        await this.event(tx, companyId, request.messageId, {
           status: 'sent',
           channel,
           provider: result.provider,
           providerMessageId: result.providerMessageId,
           destinationMasked: mask(channel, address),
-        }),
-      );
+        });
+        if (request.link && link?.sent)
+          await link.sent(tx, companyId, request.link.targetId, request.messageId);
+      });
       return 'sent';
     } catch (error) {
       const retryable = !(error instanceof ProviderError) || error.retryable;
-      await withCompany(this.database, ctx, (tx) =>
-        this.event(tx, companyId, request.messageId, {
+      await withCompany(this.database, ctx, async (tx) => {
+        await this.event(tx, companyId, request.messageId, {
           status: 'failed',
           channel,
           reason: retryable ? 'provider_error' : 'provider_refused',
           destinationMasked: mask(channel, address),
-        }),
-      );
+        });
+        // This attempt's link reached nobody; a retry, or the next channel, makes a fresh one.
+        if (request.link && link?.notSent)
+          await link.notSent(tx, companyId, request.link.targetId, request.messageId);
+      });
       // A retryable failure is tried again after a pause; the next channel only once this one
       // has failed five times or refused outright.
       if (retryable && failures.count[channel] + 1 < SENDS_PER_CHANNEL) throw error;

@@ -665,6 +665,52 @@ describe('TL-07 expired or reused signing link is rejected', () => {
     await expect(s.signingPage.open('x'.repeat(43), PHONE)).rejects.toMatchObject({ status: 404 });
     await expect(s.signingPage.open('short', PHONE)).rejects.toMatchObject({ status: 404 });
   });
+
+  it('serves a signer the document they signed only while their link is live', async () => {
+    const extra = await propertyWithUnits(s, manager, {
+      areaCode: 'ACC',
+      propertyPart: 'SGX',
+      ownerId,
+      units: [{ unitType: 'apartment', count: 1, bedrooms: 2 }],
+    });
+    Object.assign(units, extra.units);
+    const lease = await issued('ACC-SGX-B1-01');
+    const tenantToken = linkSentTo(lease.tenantPhone);
+    await signWith(tenantToken, lease.tenantPhone);
+    // Live: the signed page offers the frozen document, and it downloads.
+    expect(await s.signingPage.open(tenantToken, PHONE)).toMatchObject({
+      screen: 'signed',
+      document: { downloadable: true },
+    });
+    const live = await s.signingPage.documentUrl(tenantToken, PHONE);
+    const request = await requestRow(lease.requestId);
+    expect(sha256Hex((await ctx.storage.openDownload(live)).body)).toBe(request.documentSha256);
+
+    // Expired: 30 days on, the page explains without a download, and none is served.
+    ctx.clock.advance(30 * DAY + MINUTE);
+    try {
+      expect(await s.signingPage.open(tenantToken, PHONE)).toMatchObject({
+        screen: 'signed',
+        document: { downloadable: false },
+      });
+      await expect(s.signingPage.documentUrl(tenantToken, PHONE)).rejects.toMatchObject({
+        code: 'link_not_usable',
+      });
+    } finally {
+      ctx.clock.advance(-(30 * DAY + MINUTE));
+    }
+
+    // Revoked: once the lease is recalled, the link explains what happened, without a download.
+    await s.leaseSigning.recall(manager, lease.leaseId, 'The rent was wrong');
+    expect(await s.signingPage.open(tenantToken, PHONE)).toMatchObject({
+      screen: 'signed',
+      reason: 'cancelled',
+      document: { downloadable: false, html: null },
+    });
+    await expect(s.signingPage.documentUrl(tenantToken, PHONE)).rejects.toMatchObject({
+      code: 'link_not_usable',
+    });
+  });
 });
 
 describe('TL-07 one-time code brute force is rate-limited', () => {

@@ -767,3 +767,80 @@ describe('AD-07 audit of tenants', () => {
     expect(timeline.map((e) => e.action)).toEqual(['tenant.update', 'tenant.insert']);
   });
 });
+
+describe('TL-01 a tenant’s person link stays out of the audit log and the timeline', () => {
+  it('records the person link only as changed, and never shows it to staff', async () => {
+    const { tenant } = await s.tenants.create(manager, {
+      kind: 'individual',
+      displayName: 'Linked Tenant',
+      phone: '+233200000081',
+    });
+    await s.tenants.update(manager, tenant.id, { phone: '+233200000082' });
+    const people = await withCompany(
+      ctx.database,
+      { companyId: agencyId, actorKind: 'system' },
+      async (tx) =>
+        (
+          await tx.execute<{ id: string }>(
+            sql`select id from person where phone_number in ('+233200000081', '+233200000082')`,
+          )
+        ).rows.map((r) => r.id),
+    );
+    expect(people).toHaveLength(2);
+    const events = await withCompany(
+      ctx.database,
+      { companyId: agencyId, actorKind: 'system' },
+      (tx) =>
+        tx.execute<{
+          action: string;
+          data: {
+            before?: Record<string, unknown>;
+            after?: Record<string, unknown>;
+            redacted_changed?: string[];
+          };
+        }>(
+          sql`select action, data from audit_event where record_type = 'tenant' and record_id = ${tenant.id} order by seq`,
+        ),
+    );
+    expect(events.rows.map((e) => e.action)).toEqual(['tenant.insert', 'tenant.update']);
+    expect(events.rows[0]!.data.after?.person_id).toBe('[redacted]');
+    expect(events.rows[1]!.data.before?.person_id).toBe('[redacted]');
+    expect(events.rows[1]!.data.redacted_changed).toEqual(
+      expect.arrayContaining(['phone', 'person_id']),
+    );
+    for (const id of people) expect(JSON.stringify(events.rows)).not.toContain(id);
+
+    // An event written before the redaction, simulated here, is shown without the link too.
+    await withCompany(
+      ctx.database,
+      { companyId: agencyId, personId: manager.personId, actorKind: 'staff' },
+      (tx) =>
+        ctx.audit.append(tx, {
+          companyId: agencyId,
+          action: 'tenant.update',
+          recordType: 'tenant',
+          recordId: tenant.id,
+          data: {
+            before: { id: tenant.id, person_id: people[0] },
+            after: { id: tenant.id, person_id: people[1] },
+          },
+        }),
+    );
+    const timeline = await s.tenants.timeline(manager, tenant.id);
+    expect(timeline).toHaveLength(3);
+    const search = await ctx.audit.search(agencyId, manager.personId, {
+      recordType: 'tenant',
+      recordId: tenant.id,
+      limit: 10,
+    });
+    for (const id of people) {
+      expect(JSON.stringify(timeline)).not.toContain(id);
+      expect(JSON.stringify(search.events)).not.toContain(id);
+    }
+    expect(timeline[0]!.data).toMatchObject({
+      before: { person_id: '[redacted]' },
+      after: { person_id: '[redacted]' },
+      redacted_changed: ['person_id'],
+    });
+  });
+});

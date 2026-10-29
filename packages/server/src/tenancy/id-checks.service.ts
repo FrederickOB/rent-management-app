@@ -7,7 +7,7 @@ import { AppError, conflict, invalid, notFound } from '../core/errors';
 import { queueMessage } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE, IDENTITY_VERIFICATION_PORT } from '../core/tokens';
-import { staffActor } from '../companies/companies.service';
+import { companyRecord, staffActor } from '../companies/companies.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import type { IdCheckView } from './tenancy.types';
 import { idCheckView, TenantsService } from './tenants.service';
@@ -238,10 +238,7 @@ export class IdChecksService {
     companyId: string,
     check: typeof schema.idCheck.$inferSelect,
   ): Promise<void> {
-    const [company] = await tx
-      .select({ senderName: schema.company.senderName })
-      .from(schema.company)
-      .where(eq(schema.company.id, companyId));
+    const company = await companyRecord(tx, companyId);
     await queueMessage(tx, companyId, {
       recipient: { type: 'tenant', tenantId: check.tenantId },
       purpose: 'id_check_link',

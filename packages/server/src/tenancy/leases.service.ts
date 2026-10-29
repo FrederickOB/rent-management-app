@@ -25,12 +25,14 @@ import { DomainError } from '@rent/domain/errors';
 import { SIGNER_ROLES, type SignerRole } from '@rent/domain/esign';
 import { normalisePhone } from '@rent/domain/phone';
 import type { Actor } from '@rent/domain/policy';
+import { verificationWarning } from '@rent/domain/rules';
 import {
   advanceOutcome,
   checkAdvance,
   checkLeaseTerms,
   renewalStartDate,
   rentOn,
+  type LeaseEndReason,
   type LeaseStatus,
   type LeaseTerms,
   type LeaseUse,
@@ -46,11 +48,15 @@ import { sqlStateOf } from '../core/db-errors';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, LEASE_FILE_UPLOAD } from '../documents/documents.service';
+import { activeMemberIds } from '../identity/memberships';
 import { PolicyService, staffContext } from '../policy/policy.service';
+import { unitPlace } from '../portfolio/register-read.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
 import { LeaseLifecycleService } from './lease-lifecycle.service';
 import {
+  assertStaffParties,
   companyFacts,
+  lastChargedDay,
   leaseRow,
   leaseWriteError,
   termsOf,
@@ -295,10 +301,7 @@ export class LeasesService {
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const row = await leaseRow(tx, leaseId);
       if (!detailed) {
-        const [unit] = await tx
-          .select({ code: schema.unit.code })
-          .from(schema.unit)
-          .where(eq(schema.unit.id, row.unitId));
+        const unit = await unitPlace(tx, row.unitId);
         return {
           access: 'limited',
           id: row.id,
@@ -428,6 +431,8 @@ export class LeasesService {
         if (!latest) throw notFound('Template');
         templateVersionId = latest.id;
       }
+      const parties = patch.parties ? checkParties(patch.parties) : null;
+      if (parties) await assertStaffParties(tx, parties);
       try {
         await tx
           .update(schema.lease)
@@ -445,12 +450,7 @@ export class LeasesService {
             updatedAt: this.clock.now(),
           })
           .where(eq(schema.lease.id, leaseId));
-        await this.replaceChildren(
-          tx,
-          row,
-          terms,
-          patch.parties ? checkParties(patch.parties) : null,
-        );
+        await this.replaceChildren(tx, row, terms, parties);
       } catch (error) {
         throw leaseWriteError(error);
       }
@@ -551,13 +551,25 @@ export class LeasesService {
       if (existing.length > 0) throw conflict('renewal_exists', 'This lease already has a renewal');
       const company = await companyFacts(tx, old.companyId);
       const terms = await termsOf(tx, old);
-      const start = renewalStartDate(terms, todayIn(this.clock, company.timeZone));
+      // After the last day already charged, so a renewal of a lease held over never charges a
+      // day twice (review finding 3).
+      const start = renewalStartDate(
+        terms,
+        todayIn(this.clock, company.timeZone),
+        await lastChargedDay(tx, old.id),
+      );
       const end = toIsoDate(addDays(addMonths(parseBusinessDate(start), terms.periodCount), -1));
-      const parties = await tx
+      const all = await tx
         .select()
         .from(schema.leaseParty)
         .where(eq(schema.leaseParty.leaseId, leaseId))
         .orderBy(asc(schema.leaseParty.position));
+      // A staff signer who has since left the company is not copied; staff choose another.
+      const members = await activeMemberIds(
+        tx,
+        all.flatMap((p) => (p.staffPersonId ? [p.staffPersonId] : [])),
+      );
+      const parties = all.filter((p) => !p.staffPersonId || members.has(p.staffPersonId));
       let templateId: string | null = null;
       if (old.templateVersionId) {
         const { template } = await this.templates.version(tx, old.templateVersionId);
@@ -775,11 +787,8 @@ export class LeasesService {
     options: { readonly paper?: boolean; readonly renewsLeaseId?: string } = {},
   ): Promise<string> {
     const company = await companyFacts(tx, staff.companyId);
-    const [unit] = await tx
-      .select()
-      .from(schema.unit)
-      .where(and(eq(schema.unit.id, input.unitId), isNull(schema.unit.archivedAt)));
-    if (!unit) throw notFound('Unit');
+    const unit = await unitPlace(tx, input.unitId);
+    if (!unit || unit.archived) throw notFound('Unit');
     const [tenant] = await tx
       .select()
       .from(schema.tenant)
@@ -800,6 +809,7 @@ export class LeasesService {
       templateVersionId = latest.id;
     }
     const parties = checkParties(input.parties ?? (await this.defaultParties(tx, staff, tenant)));
+    await assertStaffParties(tx, parties);
     const servicePhones = (input.servicePhones ?? (tenant.phone ? [tenant.phone] : [])).map((p) =>
       normalisePhone(p),
     );
@@ -985,12 +995,15 @@ export class LeasesService {
     const outcome = advanceOutcome(check, policy);
     const rule =
       check.rule === 'monthly_or_shorter' ? short : check.rule === 'over_six_months' ? long : null;
-    if (outcome.refuse)
+    if (outcome.refuse) {
+      // The warning comes from the rule version used, never assumed (CLAUDE.md section 7).
+      const warning = rule ? verificationWarning(rule.verificationStatus) : null;
       throw new AppError(
         422,
         'advance_over_limit',
-        `These terms ask for ${check.monthsDemanded} months’ rent in advance; your company’s setting refuses more than ${check.limitMonths} for a lease of this length (Act 220 s.25(5), unverified: counsel to confirm).`,
+        `These terms ask for ${check.monthsDemanded} months’ rent in advance; your company’s setting refuses more than ${check.limitMonths} for a lease of this length (Act 220 s.25(5)${warning ? `, ${warning}` : ''}).`,
       );
+    }
     return {
       columns: {
         advanceMonthsDemanded: check.monthsDemanded,
@@ -1040,17 +1053,7 @@ export class LeasesService {
     const tx = target as Tx;
     const row = leaseIdOrRow;
     const terms = await termsOf(tx, row);
-    const [place] = await tx
-      .select({ code: schema.unit.code, propertyName: schema.property.name })
-      .from(schema.unit)
-      .innerJoin(
-        schema.property,
-        and(
-          eq(schema.property.companyId, schema.unit.companyId),
-          eq(schema.property.id, schema.unit.propertyId),
-        ),
-      )
-      .where(eq(schema.unit.id, row.unitId));
+    const place = await unitPlace(tx, row.unitId);
     const [tenant] = await tx
       .select({ displayName: schema.tenant.displayName, kind: schema.tenant.kind })
       .from(schema.tenant)
@@ -1158,7 +1161,7 @@ export class LeasesService {
         endingNote: row.endingNote,
         moveOutDate: row.moveOutDate,
         endedOn: row.endedOn,
-        endReason: (row.endReason as 'moved_out' | 'renewed' | null) ?? null,
+        endReason: (row.endReason as LeaseEndReason | null) ?? null,
         cancelledAt: row.cancelledAt,
         cancelReason: row.cancelReason,
       },

@@ -786,3 +786,55 @@ describe('PR-08 import zip bombs', () => {
     ]);
   });
 });
+
+describe('PB-09 import of a unit a lease out for signature holds', () => {
+  it('reports at the dry run an availability the unit cannot take while the lease waits for signatures', async () => {
+    const s = tenancyServices(ctx);
+    const today = toIsoDate(businessDateOf(instantFrom(ctx.clock.now()), 'Africa/Accra'));
+    const start = toIsoDate(addMonths(parseBusinessDate(today), 1));
+    const unitId = (
+      await propertyWithUnits(s, admin, {
+        areaCode: 'ACC',
+        propertyPart: 'PND',
+        ownerId: ownerA,
+        units: [{ unitType: 'single_room', count: 1 }],
+      })
+    ).units['ACC-PND-B1-01']!;
+    const tenant = (await s.tenants.create(admin, { kind: 'individual', displayName: 'Pending' }))
+      .tenant;
+    const draft = await s.leases.createDraft(admin, {
+      unitId,
+      tenantId: tenant.id,
+      startDate: start,
+      endDate: toIsoDate(addDays(addMonths(parseBusinessDate(start), 12), -1)),
+      monthlyRentMinor: 150_000,
+      cycle: 'monthly',
+      noticeDays: 30,
+      parties: [
+        { role: 'tenant', name: 'Pending', phone: '+233200009911' },
+        { role: 'landlord', name: 'Admin', staffPersonId: admin.personId },
+        { role: 'witness', name: 'A Witness', phone: '+233200009912' },
+      ],
+    });
+    await s.leaseSigning.issue(admin, draft.id);
+    const refused = await dryRun(
+      admin,
+      await workbook(
+        [],
+        [
+          {
+            'Property code': 'ACC-PND',
+            'Block code': 'B1',
+            Unit: '01',
+            'Unit type': 'Single room',
+            Availability: 'Not lettable',
+          },
+        ],
+      ),
+    );
+    expect(refused.status).toBe('invalid');
+    expect(issuesAt(refused.report)('Units', 2)).toEqual([
+      expect.objectContaining({ column: 'Availability' }),
+    ]);
+  });
+});

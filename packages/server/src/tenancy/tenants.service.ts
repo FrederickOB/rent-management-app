@@ -33,6 +33,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { AuditService } from '../audit/audit.service';
 import { staffActor, type StaffActor } from '../companies/companies.service';
 import type { FieldCipher } from '../core/crypto/field-cipher';
+import { sqlStateOf } from '../core/db-errors';
 import { conflict, invalid, notFound } from '../core/errors';
 import { DATABASE, FIELD_CIPHER } from '../core/tokens';
 import { PolicyService, staffContext } from '../policy/policy.service';
@@ -365,22 +366,32 @@ export class TenantsService {
     return { tenant: (await this.get(staff, tenantId)) as TenantDetail, duplicates };
   }
 
-  /** Archives a tenant who holds no lease; the record and its history stay. */
+  /**
+   * Archives a tenant who holds no lease; the record and its history stay. The database checks
+   * every lease of the tenant, including those outside a scoped person's view (review finding 8).
+   */
   async archive(actor: Actor | null, tenantId: string): Promise<void> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'tenant.manage');
+    const held = () =>
+      conflict('tenant_has_lease', 'This tenant has a lease, so the record stays open');
     await withCompany(this.database, staffContext(staff), async (tx) => {
-      const held = await tx.execute<{ n: number }>(
+      const leases = await tx.execute<{ n: number }>(
         sql`select count(*)::int as n from lease where tenant_id = ${tenantId}
             and status in ('pending_signatures', 'signed', 'active', 'ending', 'holding_over')`,
       );
-      if ((held.rows[0]?.n ?? 0) > 0)
-        throw conflict('tenant_has_lease', 'This tenant has a lease, so the record stays open');
-      const rows = await tx
-        .update(schema.tenant)
-        .set({ archivedAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(schema.tenant.id, tenantId), isNull(schema.tenant.archivedAt)))
-        .returning({ id: schema.tenant.id });
+      if ((leases.rows[0]?.n ?? 0) > 0) throw held();
+      let rows: { id: string }[];
+      try {
+        rows = await tx
+          .update(schema.tenant)
+          .set({ archivedAt: new Date(), updatedAt: new Date() })
+          .where(and(eq(schema.tenant.id, tenantId), isNull(schema.tenant.archivedAt)))
+          .returning({ id: schema.tenant.id });
+      } catch (error) {
+        if (sqlStateOf(error) === 'RA033') throw held();
+        throw error;
+      }
       if (rows.length === 0) throw notFound('Tenant');
     });
   }

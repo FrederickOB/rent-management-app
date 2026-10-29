@@ -799,10 +799,14 @@ export class RegisterService {
     });
   }
 
-  /** Whether a lease holds the unit (signed, active, ending or holding over), from the view. */
+  /**
+   * Whether a lease holds the unit (out for signature, signed, active, ending or holding over),
+   * from the view the tenancy migration publishes. A lease waiting for signatures holds it too,
+   * so its signing never finds the unit archived or not lettable (M3 review finding 2).
+   */
   private async heldByLease(tx: Tx, unitId: string): Promise<boolean> {
     const result = await tx.execute<{ held: boolean }>(
-      sql`select exists (select 1 from unit_occupancy where unit_id = ${unitId}) as held`,
+      sql`select exists (select 1 from unit_lease_hold where unit_id = ${unitId}) as held`,
     );
     return result.rows[0]?.held === true;
   }

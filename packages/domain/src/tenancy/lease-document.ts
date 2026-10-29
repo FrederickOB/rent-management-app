@@ -1,7 +1,13 @@
 import { formatBusinessDate } from '../dates';
 import { SIGNER_ROLE_LABELS, type SignerRole } from '../esign/signing';
 import { format, money } from '../money';
-import { RENT_CYCLE_LABELS, type BreakParty, type LeaseTerms } from './lease-terms';
+import {
+  formatTerm,
+  RENT_CYCLE_LABELS,
+  termLength,
+  type BreakParty,
+  type LeaseTerms,
+} from './lease-terms';
 import {
   fillPlaceholders,
   placeholdersIn,
@@ -86,7 +92,7 @@ export function leasePlaceholderValues(facts: LeaseDocumentFacts): Record<Placeh
     'unit.description': facts.unitDescription,
     'lease.startDate': formatBusinessDate(t.startDate),
     'lease.endDate': formatBusinessDate(t.endDate),
-    'lease.term': String(t.periodCount),
+    'lease.term': formatTerm(termLength(t.startDate, t.endDate)),
     'rent.monthly': amount(t.monthlyRentMinor),
     'rent.cycle': RENT_CYCLE_LABELS[t.cycle].toLowerCase(),
     'rent.steps': steps.length > 0 ? steps.join('\n') : 'The rent does not change during the term.',
@@ -102,6 +108,14 @@ export function leasePlaceholderValues(facts: LeaseDocumentFacts): Record<Placeh
     'electronicService.contacts': joinNames(contacts),
   };
 }
+
+/**
+ * `{{lease.term}}` once printed the number of rent periods, so template versions published before
+ * it printed the exact term say "{{lease.term}} months". Versions never change (TL-05), so their
+ * wording is read as `{{lease.term}}`, which now carries its own unit: "12 months and 6 days".
+ */
+const LEGACY_TERM = /\{\{\s*lease\.term\s*\}\}\s+months?\b/g;
+const withExactTerm = (body: string) => body.replace(LEGACY_TERM, '{{lease.term}}');
 
 /**
  * Fills a template version from the lease's facts. A clause the law does not require, built only
@@ -125,7 +139,10 @@ export function buildLeaseDocument(
             const used = placeholdersIn(clause.body) as Placeholder[];
             return !(used.length > 0 && used.every((p) => OPTIONAL_FACTS.has(p) && !values[p]));
           })
-          .map((clause) => ({ title: clause.title, text: fillPlaceholders(clause.body, values) })),
+          .map((clause) => ({
+            title: clause.title,
+            text: fillPlaceholders(withExactTerm(clause.body), values),
+          })),
       }))
       .filter((section) => section.clauses.length > 0),
     signers: facts.parties.map((p) => ({ role: SIGNER_ROLE_LABELS[p.role], name: p.name })),

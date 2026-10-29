@@ -9,7 +9,7 @@ import type { MessagingService, Reach } from './messaging.service';
  * the signer is: a tenant or tenant contact needs consent recorded on the channel (CM-09), the
  * company's own staff need none, and anyone else has none on record, so staff hand the link over
  * in person (decision 2). Links are made by the e-signing engine at send time, so the raw token
- * is never stored.
+ * is never stored, and replace the signer's earlier link once the message carrying them is sent.
  */
 export function registerSigningRecipients(
   messaging: MessagingService,
@@ -58,12 +58,15 @@ export function registerSigningRecipients(
       };
     },
   });
-  messaging.useLinks('sign', {
-    url: (companyId, signerId, messageId) =>
-      esign.messageLinkUrl(companyId, signerId, messageId, 'sign'),
-  });
-  messaging.useLinks('signed_copy', {
-    url: (companyId, signerId, messageId) =>
-      esign.messageLinkUrl(companyId, signerId, messageId, 'signed_copy'),
-  });
+  // A message's link replaces the signer's earlier one only once the message is sent; a link
+  // whose message was never sent is withdrawn instead (M3 review finding 10).
+  for (const purpose of ['sign', 'signed_copy'] as const)
+    messaging.useLinks(purpose, {
+      url: (companyId, signerId, messageId) =>
+        esign.messageLinkUrl(companyId, signerId, messageId, purpose),
+      sent: (tx, _companyId, signerId, messageId) =>
+        esign.messageLinkSent(tx, signerId, messageId, purpose),
+      notSent: (tx, _companyId, signerId, messageId) =>
+        esign.messageLinkNotSent(tx, signerId, messageId),
+    });
 }

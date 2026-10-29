@@ -3,6 +3,7 @@ import type { MessageChannel } from '@rent/domain/messaging';
 import type {
   BreakParty,
   IdType,
+  LeaseEndReason,
   LeaseStatus,
   LeaseUse,
   RentCycle,
@@ -335,7 +336,7 @@ export interface LeaseView {
     readonly endingNote: string | null;
     readonly moveOutDate: string | null;
     readonly endedOn: string | null;
-    readonly endReason: 'moved_out' | 'renewed' | null;
+    readonly endReason: LeaseEndReason | null;
     readonly cancelledAt: Date | null;
     readonly cancelReason: string | null;
   };

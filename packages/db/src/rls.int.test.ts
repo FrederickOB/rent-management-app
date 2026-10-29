@@ -389,3 +389,125 @@ describe('NFR-SEC company context', () => {
     }
   });
 });
+
+describe('NFR-SEC tenant sessions', () => {
+  it('limits every company-scoped table to the tenant’s own rows, or keeps it from tenant sessions', async () => {
+    const policies = await runSql<{
+      tablename: string;
+      policyname: string;
+      permissive: string;
+      qual: string | null;
+    }>(
+      db.ownerUrl,
+      "select tablename, policyname, permissive, qual from pg_policies where schemaname = 'public'",
+    );
+    // Tables only: the views are security invoker, so their tables' policies apply to them.
+    const tables = (
+      await runSql<{ relname: string }>(
+        db.ownerUrl,
+        `select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relkind in ('r', 'p') and exists (
+           select 1 from information_schema.columns k where k.table_schema = 'public'
+             and k.table_name = c.relname and k.column_name = 'company_id')
+         union select 'company' order by 1`,
+      )
+    ).map((r) => r.relname);
+    expect(tables.length).toBeGreaterThan(40);
+    for (const table of tables) {
+      const restrictive = policies.filter(
+        (p) => p.tablename === table && p.permissive === 'RESTRICTIVE',
+      );
+      const staffOnly = restrictive.some(
+        (p) => p.policyname === 'no_tenant_session' && p.qual === '(app.tenant_scope() IS NULL)',
+      );
+      const tenantScoped = restrictive.some(
+        (p) => p.policyname !== 'no_tenant_session' && /tenant_scope\(/.test(p.qual ?? ''),
+      );
+      // A tenant session is in its landlord's company: it reads that one company row.
+      expect(
+        staffOnly || tenantScoped || table === 'company',
+        `${table} must be staff-only (no_tenant_session) or limited to the tenant's rows`,
+      ).toBe(true);
+    }
+  });
+
+  it('shows a tenant nothing of the staff-only tables, and the register only through its lease', async () => {
+    const tenantId = (
+      await runSql<{ id: string }>(db.superuserUrl, 'select id from tenant where company_id = $1', [
+        companyA,
+      ])
+    )[0]!.id;
+    // Another unit on the tenant's property, with no lease.
+    await inContext(app, { companyId: companyA }, () =>
+      app.query(
+        `insert into unit (company_id, property_id, block_id, code, label, unit_type, billing_band)
+         select company_id, property_id, id, 'ACC-LEG-B1-02', '02', 'single_room', 'single_room' from block where company_id = $1`,
+        [companyA],
+      ),
+    );
+    const staffOnly = (
+      await runSql<{ tablename: string }>(
+        db.ownerUrl,
+        "select tablename from pg_policies where schemaname = 'public' and policyname = 'no_tenant_session' order by 1",
+      )
+    ).map((r) => r.tablename);
+    expect(staffOnly).toEqual(
+      expect.arrayContaining([
+        'audit_event',
+        'outbox_event',
+        'membership',
+        'approval_request',
+        'approval_decision',
+        'processed_job',
+        'upload_intent',
+        'company_key',
+        'unit_status_event',
+        'property_ownership',
+        'meter',
+        'property_file',
+        'owner',
+      ]),
+    );
+    const database = createDatabase(db.appUrl, { max: 1 });
+    try {
+      const seen = await withCompany(
+        database,
+        { companyId: companyA, actorKind: 'tenant', tenantScope: { tenantIds: [tenantId] } },
+        async (tx) => {
+          const count = async (table: string) =>
+            (await tx.execute<{ n: number }>(sql.raw(`select count(*)::int as n from ${table}`)))
+              .rows[0]!.n;
+          const counts: Record<string, number> = {};
+          for (const table of staffOnly) counts[table] = await count(table);
+          const codes = async (table: string) =>
+            (
+              await tx.execute<{ code: string }>(sql.raw(`select code from ${table} order by code`))
+            ).rows.map((r) => r.code);
+          const documents = await tx.execute<{ id: string }>(sql`select id from document`);
+          const leases = await tx.execute<{ signed_document_id: string }>(
+            sql`select signed_document_id from lease`,
+          );
+          return {
+            counts,
+            units: await codes('unit'),
+            properties: await codes('property'),
+            companies: (await tx.execute(sql`select id from company`)).rows.length,
+            documents: documents.rows.map((r) => r.id),
+            signedCopies: leases.rows.map((r) => r.signed_document_id),
+            renders: await count('document_render_request'),
+          };
+        },
+      );
+      expect(staffOnly.length).toBeGreaterThan(10);
+      expect(Object.entries(seen.counts).filter(([, n]) => n > 0)).toEqual([]);
+      expect(seen.units).toEqual(['ACC-LEG-B1-01']);
+      expect(seen.properties).toEqual(['ACC-LEG']);
+      expect(seen.companies).toBe(1);
+      // Only the documents of its own lease: here, the signed copy.
+      expect(seen.documents).toEqual(seen.signedCopies);
+      expect(seen.renders).toBe(0);
+    } finally {
+      await database.close();
+    }
+  });
+});
