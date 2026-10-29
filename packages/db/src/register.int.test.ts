@@ -365,3 +365,51 @@ describe('PR-05 meter links in the database', () => {
     expect(await link('shared', 'W-2')).toBeNull();
   });
 });
+
+describe('NFR-SEC scope policy coverage', () => {
+  it('has the restrictive property_scope policy on every register table, and owner_scope on owner', async () => {
+    const policies = await runSql<{
+      tablename: string;
+      policyname: string;
+      permissive: string;
+      cmd: string;
+      qual: string | null;
+      with_check: string | null;
+    }>(
+      db.ownerUrl,
+      `select tablename, policyname, permissive, cmd, qual, with_check from pg_policies
+       where schemaname = 'public' and policyname in ('property_scope', 'owner_scope')`,
+    );
+    const policyOn = (table: string, name: string) =>
+      policies.find((p) => p.tablename === table && p.policyname === name);
+    const scoped: Record<string, string> = {
+      property: 'id',
+      property_ownership: 'property_id',
+      block: 'property_id',
+      unit: 'property_id',
+      unit_status_event: 'property_id',
+      meter: 'property_id',
+      unit_meter: 'property_id',
+      property_file: 'property_id',
+    };
+    for (const [table, column] of Object.entries(scoped)) {
+      // Restrictive, for every command, and without WITH CHECK, so the same test guards writes.
+      expect(policyOn(table, 'property_scope'), table).toEqual({
+        tablename: table,
+        policyname: 'property_scope',
+        permissive: 'RESTRICTIVE',
+        cmd: 'ALL',
+        qual: `app.in_property_scope(${column})`,
+        with_check: null,
+      });
+    }
+    expect(policyOn('owner', 'owner_scope')).toEqual({
+      tablename: 'owner',
+      policyname: 'owner_scope',
+      permissive: 'RESTRICTIVE',
+      cmd: 'ALL',
+      qual: 'app.in_owner_scope(id)',
+      with_check: null,
+    });
+  });
+});

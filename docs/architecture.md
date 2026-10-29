@@ -943,8 +943,8 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `documents.render-pdf` | event: document requested | document id | 5, backoff from 30 s | M1 |
 | `approvals.expire-requests` | hourly | request id + expiry | 3 | M1 |
 | `portfolio.process-property-file` | event: photo or paper uploaded | property file id | 5, backoff from 30 s | M2 |
-| `portfolio.import-validate` | event: import dry run requested | import id + request time | 3 | M2 |
-| `portfolio.import-commit` | event: import committed | import id | 3 | M2 |
+| `portfolio.import-validate` | event: import dry run requested | import id + request time | 3, then the import is marked failed | M2 |
+| `portfolio.import-commit` | event: import committed | import id + the check it follows (validated at) | 3, then the import is marked failed | M2 |
 | `housekeeping.expire-links-and-codes` | hourly | run hour | 3 | M3 |
 | `identity.verify-id` | event: ID captured | tenant id + attempt | 5, then manual review | M3 |
 | `tenancy.lease-transitions` | daily 00:05 | lease id + transition + date | 5 | M3 |

@@ -104,6 +104,38 @@ export function describeStorageContract(name: string, setup: () => Promise<Stora
       });
     });
 
+    it('listVersions lists every version and delete marker of exactly one key, so all can be removed', async () => {
+      const k = key('original');
+      const put = (target: string, text: string) =>
+        h.storage.put({
+          bucket: h.buckets.files,
+          key: target,
+          body: Buffer.from(text),
+          contentType: 'image/jpeg',
+        });
+      const first = await put(k, 'first upload');
+      const second = await put(k, 'second upload');
+      const marker = await h.storage.delete({ bucket: h.buckets.files, key: k });
+      await put(`${k}-longer`, 'a key that shares the prefix');
+      const versions = await h.storage.listVersions({ bucket: h.buckets.files, key: k });
+      expect(versions.map((v) => v.versionId).sort()).toEqual(
+        [first.versionId, second.versionId, marker.versionId].sort(),
+      );
+      expect(versions.filter((v) => v.deleteMarker).map((v) => v.versionId)).toEqual([
+        marker.versionId,
+      ]);
+      for (const v of versions)
+        await h.storage.delete({
+          bucket: h.buckets.files,
+          key: k,
+          versionId: v.versionId ?? undefined,
+        });
+      expect(await h.storage.listVersions({ bucket: h.buckets.files, key: k })).toEqual([]);
+      expect(
+        await h.storage.listVersions({ bucket: h.buckets.files, key: `${k}-longer` }),
+      ).toHaveLength(1);
+    });
+
     it('a write-once object cannot be replaced', async () => {
       const k = key('receipt');
       const original = await writeOnce(k, pdf('original'));

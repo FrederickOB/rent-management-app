@@ -1,9 +1,21 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, isNull, schema, withCompany, type Database, type Tx } from '@rent/db';
+import {
+  addToOwnerScope,
+  and,
+  asc,
+  eq,
+  isNull,
+  isScoped,
+  schema,
+  withCompany,
+  type Database,
+  type Tx,
+} from '@rent/db';
 import { isValidTimeZone } from '@rent/domain/dates';
 import { normalisePhone } from '@rent/domain/phone';
 import type { Actor } from '@rent/domain/policy';
 import { checkOwnerReference, type OwnerKind } from '@rent/domain/portfolio';
+import { v7 as uuidv7 } from 'uuid';
 import { isUniqueViolation } from '../core/db-errors';
 import { conflict, invalid, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
@@ -39,7 +51,8 @@ export interface OwnerInput {
 
 type OwnerRow = typeof schema.owner.$inferSelect;
 
-const view = (r: OwnerRow): OwnerView => ({
+/** `notes` are internal to the people who manage owners (owner.manage); others get null. */
+const view = (r: OwnerRow, options: { readonly notes: boolean }): OwnerView => ({
   id: r.id,
   reference: r.reference,
   kind: r.kind as OwnerKind,
@@ -49,7 +62,7 @@ const view = (r: OwnerRow): OwnerView => ({
   email: r.email,
   residenceCountry: r.residenceCountry,
   timeZone: r.timeZone,
-  notes: r.notes,
+  notes: options.notes ? r.notes : null,
   archived: r.archivedAt !== null,
   createdAt: r.createdAt,
 });
@@ -105,7 +118,8 @@ export class OwnersService {
         .where(options.includeArchived ? undefined : isNull(schema.owner.archivedAt))
         .orderBy(asc(schema.owner.displayName)),
     );
-    return rows.map(view);
+    const notes = this.seesNotes(staff);
+    return rows.map((r) => view(r, { notes }));
   }
 
   async get(actor: Actor | null, ownerId: string): Promise<OwnerView> {
@@ -115,7 +129,12 @@ export class OwnersService {
       tx.select().from(schema.owner).where(eq(schema.owner.id, ownerId)),
     );
     if (!row) throw notFound('Owner');
-    return view(row);
+    return view(row, { notes: this.seesNotes(staff) });
+  }
+
+  /** Owner notes are internal: only people who manage owners read them (N5). */
+  private seesNotes(staff: ReturnType<typeof staffActor>): boolean {
+    return this.policy.can(staff, 'owner.manage').allowed;
   }
 
   async create(actor: Actor | null, input: OwnerInput): Promise<OwnerView> {
@@ -123,12 +142,17 @@ export class OwnersService {
     this.policy.assert(staff, 'owner.manage');
     const values = checked(input);
     try {
-      const [row] = await withCompany(this.database, staffContext(staff), async (tx) =>
-        tx
+      const [row] = await withCompany(this.database, staffContext(staff), async (tx) => {
+        // An owner-scoped person sees only their owners (owner_scope policy); the new record
+        // joins this transaction's scope so it can be written and returned.
+        const id = uuidv7();
+        await addToOwnerScope(tx, id);
+        return tx
           .insert(schema.owner)
           .values({
+            id,
             companyId: staff.companyId,
-            reference: values.reference ?? (await this.nextReference(tx)),
+            reference: values.reference ?? (await this.nextReference(tx, staff.companyId)),
             kind: input.kind,
             displayName: values.displayName!,
             legalName: values.legalName ?? null,
@@ -138,9 +162,9 @@ export class OwnersService {
             timeZone: values.timeZone ?? 'Africa/Accra',
             notes: values.notes ?? null,
           })
-          .returning(),
-      );
-      return view(row!);
+          .returning();
+      });
+      return view(row!, { notes: true });
     } catch (error) {
       if (isUniqueViolation(error, 'owner_reference_key'))
         throw conflict('owner_reference_taken', 'Another owner already has that reference');
@@ -165,7 +189,7 @@ export class OwnersService {
           .returning(),
       );
       if (!row) throw notFound('Owner');
-      return view(row);
+      return view(row, { notes: true });
     } catch (error) {
       if (isUniqueViolation(error, 'owner_reference_key'))
         throw conflict('owner_reference_taken', 'Another owner already has that reference');
@@ -188,15 +212,14 @@ export class OwnersService {
   /**
    * A landlord's own owner record, made from the company profile the first time a property is
    * added. Runs inside the caller's transaction. Null when the company has several owners.
+   *
+   * A scoped session sees only its own owners, so it never creates the record: it gets its one
+   * owner, or null. Two first properties added at once both end up with the one OWN-01.
    */
   async landlordOwner(tx: Tx, companyId: string): Promise<string | null> {
-    const owners = await tx
-      .select({ id: schema.owner.id })
-      .from(schema.owner)
-      .where(isNull(schema.owner.archivedAt))
-      .limit(2);
+    const owners = await this.liveOwners(tx);
     if (owners.length === 1) return owners[0]!.id;
-    if (owners.length > 1) return null;
+    if (owners.length > 1 || (await isScoped(tx))) return null;
     const [company] = await tx
       .select({ legalName: schema.company.legalName, displayName: schema.company.displayName })
       .from(schema.company)
@@ -210,13 +233,29 @@ export class OwnersService {
         displayName: company?.displayName ?? 'Landlord',
         legalName: company?.legalName ?? null,
       })
+      .onConflictDoNothing({ target: [schema.owner.companyId, schema.owner.reference] })
       .returning({ id: schema.owner.id });
-    return row!.id;
+    if (row) return row.id;
+    // Another request made it first (it waited for that one to commit); use theirs.
+    const again = await this.liveOwners(tx);
+    return again.length === 1 ? again[0]!.id : null;
+  }
+
+  private liveOwners(tx: Tx) {
+    return tx
+      .select({ id: schema.owner.id })
+      .from(schema.owner)
+      .where(isNull(schema.owner.archivedAt))
+      .limit(2);
   }
 
   /** The next free OWN-nn reference. */
-  private async nextReference(tx: Tx): Promise<string> {
-    const rows = await tx.select({ reference: schema.owner.reference }).from(schema.owner);
+  private async nextReference(tx: Tx, companyId: string): Promise<string> {
+    // References are unique across the company, but a scoped session sees only its owners.
+    const all = (db: Tx) => db.select({ reference: schema.owner.reference }).from(schema.owner);
+    const rows = (await isScoped(tx))
+      ? await withCompany(this.database, { companyId, actorKind: 'system' }, all)
+      : await all(tx);
     let highest = 0;
     for (const { reference } of rows) {
       const match = /^OWN-(\d+)$/.exec(reference);

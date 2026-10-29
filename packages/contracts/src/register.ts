@@ -4,6 +4,7 @@ import {
   AVAILABILITY,
   BILLING_BANDS,
   DISPLAY_STATUSES,
+  MAX_UNITS_PER_REQUEST,
   METER_TYPES,
   OWNER_KINDS,
   PROPERTY_PAPER_MAX_BYTES,
@@ -178,6 +179,14 @@ const unitBatchSchema = z.object({
   amenities: z.array(z.enum(AMENITIES)).optional(),
 });
 
+/** Units one request creates, across its blocks and batches; capped (MAX_UNITS_PER_REQUEST). */
+const unitsIn = (batches: readonly { count: number }[] | undefined) =>
+  (batches ?? []).reduce((sum, batch) => sum + batch.count, 0);
+const withinUnitCap = (total: number) => total <= MAX_UNITS_PER_REQUEST;
+const unitCapMessage = {
+  message: `Add at most ${MAX_UNITS_PER_REQUEST.toLocaleString('en-GB')} units at a time`,
+};
+
 const addressSchema = z.object({
   ghanapostGps: optionalText(20),
   region: z.string().trim().min(2).max(60),
@@ -340,27 +349,38 @@ export const registerContract = {
       summary: 'A property with its blocks and units in bulk (PR-01)',
     })
     .input(
-      z.object({
-        portfolioId: uuid.nullable().optional(),
-        areaCode: z.string().trim().min(2).max(4),
-        propertyPart: z.string().trim().min(2).max(4),
-        name: z.string().trim().min(2).max(120),
-        propertyType: z.enum(PROPERTY_TYPES),
-        use: z.enum(PROPERTY_USES),
-        ownerId: uuid.nullable().optional(),
-        address: addressSchema,
-        blocks: z
-          .array(
-            z.object({
-              code: blockCode,
-              name: optionalText(60),
-              units: z.array(unitBatchSchema).max(20).optional(),
-            }),
-          )
-          .max(50)
-          .optional(),
-        units: z.array(unitBatchSchema).max(20).optional(),
-      }),
+      z
+        .object({
+          portfolioId: uuid.nullable().optional(),
+          areaCode: z.string().trim().min(2).max(4),
+          propertyPart: z.string().trim().min(2).max(4),
+          name: z.string().trim().min(2).max(120),
+          propertyType: z.enum(PROPERTY_TYPES),
+          use: z.enum(PROPERTY_USES),
+          ownerId: uuid.nullable().optional(),
+          address: addressSchema,
+          blocks: z
+            .array(
+              z.object({
+                code: blockCode,
+                name: optionalText(60),
+                units: z.array(unitBatchSchema).max(20).optional(),
+              }),
+            )
+            .max(50)
+            .optional(),
+          units: z.array(unitBatchSchema).max(20).optional(),
+        })
+        .refine(
+          // Units go into the blocks given, or into the default block when there are none.
+          (v) =>
+            withinUnitCap(
+              v.blocks?.length
+                ? v.blocks.reduce((sum, b) => sum + unitsIn(b.units), 0)
+                : unitsIn(v.units),
+            ),
+          unitCapMessage,
+        ),
     )
     .output(propertyDetailSchema),
   updateProperty: oc
@@ -387,12 +407,14 @@ export const registerContract = {
   addBlock: oc
     .route({ method: 'POST', path: '/properties/{propertyId}/blocks' })
     .input(
-      z.object({
-        propertyId: uuid,
-        code: blockCode,
-        name: optionalText(60),
-        units: z.array(unitBatchSchema).max(20).optional(),
-      }),
+      z
+        .object({
+          propertyId: uuid,
+          code: blockCode,
+          name: optionalText(60),
+          units: z.array(unitBatchSchema).max(20).optional(),
+        })
+        .refine((v) => withinUnitCap(unitsIn(v.units)), unitCapMessage),
     )
     .output(propertyDetailSchema),
   renameBlock: oc
@@ -405,7 +427,11 @@ export const registerContract = {
       path: '/blocks/{blockId}/units',
       summary: 'Units in bulk by type and count',
     })
-    .input(z.object({ blockId: uuid, batches: z.array(unitBatchSchema).min(1).max(20) }))
+    .input(
+      z
+        .object({ blockId: uuid, batches: z.array(unitBatchSchema).min(1).max(20) })
+        .refine((v) => withinUnitCap(unitsIn(v.batches)), unitCapMessage),
+    )
     .output(z.object({ unitIds: z.array(uuid) })),
   listUnits: oc
     .route({

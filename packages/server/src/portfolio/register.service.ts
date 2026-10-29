@@ -1,5 +1,15 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, isNull, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import {
+  addToPropertyScope,
+  and,
+  eq,
+  isNull,
+  schema,
+  sql,
+  withCompany,
+  type Database,
+  type Tx,
+} from '@rent/db';
 import {
   businessDateOf,
   compareDates,
@@ -16,6 +26,7 @@ import {
   checkGhanaPostGps,
   checkMapPin,
   checkStatusReason,
+  checkUnitsPerRequest,
   DEFAULT_BLOCK_CODE,
   defaultBandFor,
   freePropertyPart,
@@ -31,9 +42,10 @@ import {
   type UnitType,
 } from '@rent/domain/portfolio';
 import type { AddressLookupPort, GhanaPostAddress } from '@rent/integrations';
+import { v7 as uuidv7 } from 'uuid';
 import type { Clock } from '../core/clock';
-import { isUniqueViolation } from '../core/db-errors';
-import { conflict, invalid, notFound } from '../core/errors';
+import { isUniqueViolation, withRegisterChecks } from '../core/db-errors';
+import { conflict, forbidden, invalid, notFound } from '../core/errors';
 import { ADDRESS_LOOKUP_PORT, CLOCK, DATABASE } from '../core/tokens';
 import { staffActor } from '../companies/companies.service';
 import { OwnersService } from '../companies/owners.service';
@@ -61,6 +73,11 @@ const text = (value: string | null | undefined, max: number): string | null => {
   if (v.length > max) throw invalid('text_too_long', `Use at most ${max} characters`);
   return v;
 };
+
+/** Said to a scoped person who names an owner outside their scope (AD-02). */
+const OUTSIDE_SCOPE = 'You can add and move properties only for the owners you manage';
+
+const unitsIn = (batches: readonly UnitBatch[] | undefined) => (batches ?? []).map((b) => b.count);
 
 function checkName(name: string, what: string): string {
   const v = name.trim();
@@ -250,6 +267,14 @@ export class RegisterService {
     this.policy.assert(staff, 'register.manage');
     const code = propertyCode(input.areaCode, input.propertyPart);
     const name = checkName(input.name, 'property');
+    checkUnitsPerRequest([
+      ...unitsIn(input.blocks?.length ? undefined : input.units),
+      ...(input.blocks ?? []).flatMap((b) => unitsIn(b.units)),
+    ]);
+    return withRegisterChecks(() => this.createPropertyIn(staff, input, code, name));
+  }
+
+  private createPropertyIn(staff: StaffActor, input: NewProperty, code: string, name: string) {
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const address = await this.checkAddress(tx, staff.companyId, input.address);
       const ownerId = await this.ownerFor(tx, staff, input.ownerId ?? null);
@@ -284,7 +309,11 @@ export class RegisterService {
     });
   }
 
-  /** Inserts a property, turning a taken code into a conflict with a free suggestion. */
+  /**
+   * Inserts a property, turning a taken code into a conflict with a free suggestion. In a scoped
+   * session the new id joins the transaction's scope first, so the restrictive scope policy lets
+   * it, its ownership, blocks and units be written (AD-02); callers check the owner beforehand.
+   */
   async insertProperty(
     tx: Tx,
     companyId: string,
@@ -319,9 +348,11 @@ export class RegisterService {
         suggestion ? { suggestedCode: `${area}-${suggestion}` } : undefined,
       );
     }
-    const [row] = await tx
-      .insert(schema.property)
-      .values({
+    const id = uuidv7();
+    await addToPropertyScope(tx, id);
+    try {
+      await tx.insert(schema.property).values({
+        id,
         companyId,
         portfolioId: values.portfolioId,
         code: values.code,
@@ -330,14 +361,27 @@ export class RegisterService {
         propertyType: values.propertyType,
         use: values.use,
         ...values.address,
-      })
-      .returning({ id: schema.property.id });
-    return row!.id;
+      });
+    } catch (error) {
+      // Taken at the same moment by someone else, or by a property this person cannot see.
+      if (isUniqueViolation(error, 'property_code_key'))
+        throw conflict(
+          'property_code_taken',
+          `${values.code} is already used. Choose another property code.`,
+        );
+      throw error;
+    }
+    return id;
   }
 
-  /** The owner of a new property: the one named, or a landlord's own owner record. */
+  /**
+   * The owner of a new property: the one named, or a landlord's own owner record. A scoped person
+   * may name only an owner in their scope (AD-02); otherwise the request is refused.
+   */
   private async ownerFor(tx: Tx, staff: StaffActor, ownerId: string | null): Promise<string> {
+    const scope = this.policy.scopeFor(staff);
     if (ownerId) {
+      if (scope && !scope.ownerIds.includes(ownerId)) throw forbidden(OUTSIDE_SCOPE);
       const [found] = await tx
         .select({ id: schema.owner.id })
         .from(schema.owner)
@@ -347,6 +391,7 @@ export class RegisterService {
     }
     if (staff.companyKind === 'agency')
       throw invalid('owner_required', 'Choose the owner of this property');
+    if (scope && scope.ownerIds.length === 0) throw forbidden(OUTSIDE_SCOPE);
     const own = await this.owners.landlordOwner(tx, staff.companyId);
     if (!own) throw invalid('owner_required', 'Choose the owner of this property');
     return own;
@@ -437,38 +482,56 @@ export class RegisterService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'owner.manage');
     const from = parseBusinessDate(input.effectiveFrom);
-    await withCompany(this.database, staffContext(staff), async (tx) => {
-      const [property] = await tx
-        .select({ id: schema.property.id })
-        .from(schema.property)
-        .where(and(eq(schema.property.id, propertyId), isNull(schema.property.archivedAt)));
-      if (!property) throw notFound('Property');
-      const ownerId = await this.ownerFor(tx, staff, input.ownerId);
-      const [latest] = await tx
-        .select({ effectiveFrom: sql<string>`max(${schema.propertyOwnership.effectiveFrom})` })
-        .from(schema.propertyOwnership)
-        .where(eq(schema.propertyOwnership.propertyId, propertyId));
-      if (latest?.effectiveFrom && compareDates(from, parseBusinessDate(latest.effectiveFrom)) <= 0)
-        throw invalid(
-          'ownership_date',
-          `Choose a date after ${latest.effectiveFrom}, the last change`,
-        );
-      await this.insertOwnership(tx, staff, propertyId, ownerId, toIsoDate(from));
-    });
+    await withRegisterChecks(() =>
+      withCompany(this.database, staffContext(staff), async (tx) => {
+        // Locked, so two changes at once cannot both pass the date check and double the shares.
+        const [property] = await tx
+          .select({ id: schema.property.id })
+          .from(schema.property)
+          .where(and(eq(schema.property.id, propertyId), isNull(schema.property.archivedAt)))
+          .for('update');
+        if (!property) throw notFound('Property');
+        const ownerId = await this.ownerFor(tx, staff, input.ownerId);
+        const [latest] = await tx
+          .select({ effectiveFrom: sql<string>`max(${schema.propertyOwnership.effectiveFrom})` })
+          .from(schema.propertyOwnership)
+          .where(eq(schema.propertyOwnership.propertyId, propertyId));
+        if (
+          latest?.effectiveFrom &&
+          compareDates(from, parseBusinessDate(latest.effectiveFrom)) <= 0
+        )
+          throw invalid(
+            'ownership_date',
+            `Choose a date after ${latest.effectiveFrom}, the last change`,
+          );
+        await this.insertOwnership(tx, staff, propertyId, ownerId, toIsoDate(from));
+      }),
+    );
   }
 
-  /** Archives an owner who no longer owns any property (AD-02). */
+  /**
+   * Archives an owner who owns no property today and takes none over later (AD-02): a change of
+   * owner dated in the future still needs them.
+   */
   async archiveOwner(actor: Actor | null, ownerId: string): Promise<void> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'owner.manage');
     await withCompany(this.database, staffContext(staff), async (tx) => {
       const held = await tx.execute<{ n: number }>(
-        sql`select count(*)::int as n from property_current_ownership c
-            join property p on p.company_id = c.company_id and p.id = c.property_id
-            where c.owner_id = ${ownerId} and p.archived_at is null`,
+        sql`select count(*)::int as n from property p
+            where p.archived_at is null and (
+              exists (select 1 from property_current_ownership c
+                      where c.company_id = p.company_id and c.property_id = p.id
+                        and c.owner_id = ${ownerId})
+              or exists (select 1 from property_ownership o
+                         where o.company_id = p.company_id and o.property_id = p.id
+                           and o.owner_id = ${ownerId} and o.effective_from > current_date))`,
       );
       if ((held.rows[0]?.n ?? 0) > 0)
-        throw invalid('owner_has_properties', 'Move or archive this owner’s properties first');
+        throw invalid(
+          'owner_has_properties',
+          'Move or archive this owner’s properties first, including any they take over on a later date',
+        );
       await this.owners.archive(staff, ownerId, tx);
     });
   }
@@ -512,6 +575,7 @@ export class RegisterService {
   ): Promise<string> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.manage');
+    checkUnitsPerRequest(unitsIn(input.units));
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const property = await this.liveProperty(tx, propertyId);
       const block = await this.insertBlock(tx, staff.companyId, propertyId, {
@@ -551,7 +615,8 @@ export class RegisterService {
 
   /**
    * Creates units in bulk by type and count (PR-01): numbers continue after the highest ever used
-   * in the block, archived units included, so a code is never handed out twice.
+   * in the block, archived units included, so a code is never handed out twice. The block row is
+   * locked first, so two requests numbering the same block take turns.
    */
   async insertUnits(
     tx: Tx,
@@ -560,6 +625,11 @@ export class RegisterService {
     block: { id: string; code: string },
     batches: readonly UnitBatch[],
   ): Promise<string[]> {
+    await tx
+      .select({ id: schema.block.id })
+      .from(schema.block)
+      .where(eq(schema.block.id, block.id))
+      .for('update');
     const used = await tx
       .select({ label: schema.unit.label })
       .from(schema.unit)
@@ -585,8 +655,17 @@ export class RegisterService {
       }
     }
     if (values.length === 0) return [];
-    const rows = await tx.insert(schema.unit).values(values).returning({ id: schema.unit.id });
-    return rows.map((r) => r.id);
+    try {
+      const rows = await tx.insert(schema.unit).values(values).returning({ id: schema.unit.id });
+      return rows.map((r) => r.id);
+    } catch (error) {
+      if (isUniqueViolation(error, 'unit_code_key') || isUniqueViolation(error, 'unit_label_key'))
+        throw conflict(
+          'unit_numbers_taken',
+          'Someone added units to this block at the same time. Reload the page and try again.',
+        );
+      throw error;
+    }
   }
 
   async addUnits(
@@ -596,6 +675,7 @@ export class RegisterService {
   ): Promise<string[]> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.manage');
+    checkUnitsPerRequest(unitsIn(batches));
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const [block] = await tx
         .select({

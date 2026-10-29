@@ -36,6 +36,11 @@ export interface JobDefinition<T = unknown> {
   /** Cron expression in Africa/Accra time, for scheduled system jobs. */
   readonly cron?: string;
   handle(payload: T, ctx: JobContext): Promise<void>;
+  /**
+   * Runs once the job has failed its last retry (or expired), after the dead-letter alert, so
+   * the work it was doing can be marked failed instead of looking busy for ever. Idempotent.
+   */
+  onDeadLetter?(payload: T, ctx: { readonly logger: AppLogger }): Promise<void>;
 }
 
 export const defineJob = <T>(definition: JobDefinition<T>): JobDefinition<T> => definition;

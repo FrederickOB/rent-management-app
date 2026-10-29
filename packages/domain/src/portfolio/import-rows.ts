@@ -112,6 +112,9 @@ export interface MeterImportValue {
   readonly supplier: string;
 }
 
+/** Optional unit cells whose blank means "leave it as it is" for a unit that already exists. */
+export type UnitOptionalCell = 'bedrooms' | 'amenities' | 'floor' | 'description' | 'availability';
+
 export interface UnitImportRow {
   readonly row: number;
   readonly propertyCode: string;
@@ -121,12 +124,15 @@ export interface UnitImportRow {
   /** The full unit code the row describes. */
   readonly code: string;
   readonly type: UnitType;
+  /** The values below are what a new unit gets: blank cells take the defaults. */
   readonly bedrooms: number | null;
   readonly amenities: Amenity[];
   readonly floor: string | null;
   readonly description: string | null;
   readonly availability: Availability;
   readonly meters: MeterImportValue[];
+  /** The optional cells left blank, which an existing unit keeps as they are (PR-08). */
+  readonly blankCells: readonly UnitOptionalCell[];
 }
 
 /** A cell as trimmed text; numbers keep their digits, empty cells are null. */
@@ -380,6 +386,7 @@ export function checkUnitRows(
     }
     issues.push(...r.issues);
     if (r.issues.length || !code || !propertyCode || !blockCode || !label || !type) continue;
+    const blankCells = UNIT_OPTIONAL_CELLS.filter((cell) => cellText(values[cell]) == null);
     out.push({
       row,
       propertyCode,
@@ -394,7 +401,92 @@ export function checkUnitRows(
       description,
       availability,
       meters,
+      blankCells,
     });
   }
   return { rows: out, issues };
+}
+
+const UNIT_OPTIONAL_CELLS: readonly UnitOptionalCell[] = [
+  'bedrooms',
+  'amenities',
+  'floor',
+  'description',
+  'availability',
+];
+
+/** The property fields an import row can change (PR-08). */
+export interface PropertyImportFields {
+  readonly name: string;
+  readonly type: PropertyType;
+  readonly use: PropertyUse;
+  readonly gps: string | null;
+  readonly region: string;
+  readonly district: string | null;
+  readonly mmda: string | null;
+  readonly town: string | null;
+  readonly street: string | null;
+  readonly pin: MapPin | null;
+}
+
+/**
+ * What a row leaves on a property that already exists (PR-08). A blank optional cell keeps the
+ * property's value, so re-importing a sheet with empty columns never wipes an address or a pin.
+ * Required cells (name, type, use, region) always come from the row.
+ */
+export function propertyFieldsAfterImport(
+  existing: PropertyImportFields,
+  row: PropertyImportRow,
+): PropertyImportFields {
+  return {
+    name: row.name,
+    type: row.type,
+    use: row.use,
+    region: row.region,
+    gps: row.gps ?? existing.gps,
+    district: row.district ?? existing.district,
+    mmda: row.mmda ?? existing.mmda,
+    town: row.town ?? existing.town,
+    street: row.street ?? existing.street,
+    pin: row.pin ?? existing.pin,
+  };
+}
+
+/** The unit fields an import row can change (PR-08). */
+export interface UnitImportFields {
+  readonly type: UnitType;
+  readonly bedrooms: number | null;
+  readonly amenities: readonly Amenity[];
+  readonly floor: string | null;
+  readonly description: string | null;
+  readonly availability: Availability;
+}
+
+/**
+ * What a row leaves on a unit that already exists (PR-08). A blank optional cell keeps the unit's
+ * value: an empty Availability column never resets a unit under repair to available. Blank
+ * bedrooms keep the count while it still fits the unit type, and clear it when it does not.
+ */
+export function unitFieldsAfterImport(
+  existing: UnitImportFields,
+  row: UnitImportRow,
+): UnitImportFields {
+  const blank = (cell: UnitOptionalCell) => row.blankCells.includes(cell);
+  let bedrooms = row.bedrooms;
+  if (blank('bedrooms')) {
+    try {
+      bedrooms = checkBedrooms(row.type, existing.bedrooms);
+    } catch (error) {
+      if (!(error instanceof DomainError)) throw error;
+      bedrooms = null;
+    }
+  }
+  return {
+    type: row.type,
+    bedrooms,
+    amenities: blank('amenities') ? existing.amenities : row.amenities,
+    floor: blank('floor') ? existing.floor : row.floor,
+    description: blank('description') ? existing.description : row.description,
+    availability: blank('availability') ? existing.availability : row.availability,
+  };
 }

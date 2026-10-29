@@ -70,6 +70,24 @@ export function parseUnitCode(
 export const MAX_BULK_UNITS = 200;
 
 /**
+ * The most units one request may create, across all its blocks and batches. Each unit is audited,
+ * and audited writes take the company's audit chain head one after another, so an unbounded
+ * request would hold up every audited write in the company. Bigger registers go in over several
+ * requests, or through the Excel import, which has its own row limit (PR-08).
+ */
+export const MAX_UNITS_PER_REQUEST = 5_000;
+
+/** Refuses a request that would create more than MAX_UNITS_PER_REQUEST units. */
+export function checkUnitsPerRequest(counts: readonly number[]): void {
+  const total = counts.reduce((sum, count) => sum + count, 0);
+  if (total > MAX_UNITS_PER_REQUEST)
+    throw new DomainError(
+      'unit.too_many',
+      `Add at most ${MAX_UNITS_PER_REQUEST.toLocaleString('en-GB')} units at a time. Add the rest afterwards, or import them from a spreadsheet.`,
+    );
+}
+
+/**
  * Labels for `count` new units in a block: numbers after the highest number ever used there,
  * archived units included, so a number is never handed out twice. Two digits at least.
  */

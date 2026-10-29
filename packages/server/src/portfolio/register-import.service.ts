@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, isNull, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
 import { DomainError } from '@rent/domain/errors';
-import type { Actor } from '@rent/domain/policy';
+import type { Actor, ScopeIds } from '@rent/domain/policy';
 import {
   AMENITY_LABELS,
   AVAILABILITY_LABELS,
@@ -17,15 +17,23 @@ import {
   parsePropertyCode,
   PROPERTY_COLUMNS,
   PROPERTY_TYPE_LABELS,
+  propertyFieldsAfterImport,
   REGISTER_IMPORT_MAX_BYTES,
   UNIT_COLUMNS,
   UNIT_TYPE_LABELS,
+  unitFieldsAfterImport,
   WHOLE_PROPERTY_BPS,
   XLSX_CONTENT_TYPE,
+  type Amenity,
   type Availability,
   type ImportIssue,
+  type PropertyImportFields,
   type PropertyImportRow,
+  type PropertyType,
+  type PropertyUse,
+  type UnitImportFields,
   type UnitImportRow,
+  type UnitType,
   type Utility,
 } from '@rent/domain/portfolio';
 import type { StoragePort } from '@rent/integrations';
@@ -42,7 +50,7 @@ import { DocumentsService, type UploadPurpose } from '../documents/documents.ser
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { MetersService } from './meters.service';
 import { RegisterService } from './register.service';
-import { declaredUncompressedSize } from './zip-guard';
+import { declaredUncompressedSize, inflatedSize } from './zip-guard';
 
 export const REGISTER_IMPORT_UPLOAD: UploadPurpose = {
   purpose: 'register_import',
@@ -55,6 +63,26 @@ export const COMMIT_IMPORT_JOB = 'portfolio.import-commit';
 /** An .xlsx is a zip; refuse one that would unpack to more than this (zip bombs). */
 const MAX_UNCOMPRESSED_BYTES = 50_000_000;
 const MAX_REPORTED_ISSUES = 500;
+
+/** Shown when a job gave up after its last retry. The commit is one transaction, so nothing changed. */
+const COMMIT_ABANDONED = 'The import could not be completed, and nothing was changed.';
+const VALIDATION_ABANDONED = 'The file could not be checked.';
+
+/**
+ * The scope an import job runs with (AD-02): the person's, captured by the policy when they
+ * started the check or the commit. Null means the whole company.
+ */
+export interface ImportJobOptions {
+  readonly scope?: ScopeIds | null;
+}
+
+export interface CommitJobOptions extends ImportJobOptions {
+  /**
+   * The check this commit was started from: its validatedAt time in milliseconds. A commit job
+   * left over from an earlier check does nothing.
+   */
+  readonly attempt?: number;
+}
 
 export interface ImportCounts {
   readonly create: number;
@@ -102,14 +130,28 @@ interface ExistingUnit {
   availability: string;
 }
 
+/**
+ * Property codes and meter numbers taken anywhere in the company, archived and out-of-scope ones
+ * included. Both are unique across the company, so a scoped import must not plan to create one
+ * that exists where it cannot see. Only the fact that each is taken is used.
+ */
+interface Taken {
+  readonly propertyCodes: ReadonlySet<string>;
+  readonly meterKeys: ReadonlySet<string>;
+}
+
 interface Plan {
   readonly propertiesToCreate: PropertyImportRow[];
-  readonly propertiesToUpdate: { id: string; row: PropertyImportRow }[];
+  readonly propertiesToUpdate: {
+    id: string;
+    before: PropertyImportFields;
+    next: PropertyImportFields;
+  }[];
   propertiesUnchanged: number;
   readonly ownerByProperty: Map<string, string | 'landlord'>;
   readonly blocksToCreate: Map<string, { propertyCode: string; code: string; name: string | null }>;
   readonly unitsToCreate: UnitImportRow[];
-  readonly unitsToUpdate: { unit: ExistingUnit; row: UnitImportRow }[];
+  readonly unitsToUpdate: { unit: ExistingUnit; next: UnitImportFields }[];
   unitsUnchanged: number;
   readonly metersToCreate: Map<
     string,
@@ -125,6 +167,57 @@ const meterKey = (utility: string, supplier: string, number: string) =>
 const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
 const samePin = (a: string | null, b: string | null) =>
   (a === null && b === null) || (a !== null && b !== null && Number(a) === Number(b));
+
+/** Said for a row about a property outside the person's scope; it reveals nothing more (AD-02). */
+const notYours = (code: string) => `${code} is not a property you can manage`;
+
+type PropertyRecord = typeof schema.property.$inferSelect;
+
+const propertyFields = (p: PropertyRecord): PropertyImportFields => ({
+  name: p.name,
+  type: p.propertyType as PropertyType,
+  use: p.use as PropertyUse,
+  gps: p.ghanapostGps,
+  region: p.region,
+  district: p.district,
+  mmda: p.mmda,
+  town: p.town,
+  street: p.street,
+  pin:
+    p.latitude !== null && p.longitude !== null
+      ? { latitude: p.latitude, longitude: p.longitude }
+      : null,
+});
+
+const addressChanged = (a: PropertyImportFields, b: PropertyImportFields) =>
+  !same(a.gps, b.gps) ||
+  a.region !== b.region ||
+  !same(a.district, b.district) ||
+  !same(a.mmda, b.mmda) ||
+  !same(a.town, b.town) ||
+  !same(a.street, b.street) ||
+  !samePin(a.pin?.latitude ?? null, b.pin?.latitude ?? null) ||
+  !samePin(a.pin?.longitude ?? null, b.pin?.longitude ?? null);
+
+const propertyChanged = (a: PropertyImportFields, b: PropertyImportFields) =>
+  a.name !== b.name || a.type !== b.type || a.use !== b.use || addressChanged(a, b);
+
+const unitFields = (u: ExistingUnit): UnitImportFields => ({
+  type: u.unitType as UnitType,
+  bedrooms: u.bedrooms,
+  amenities: u.amenities as Amenity[],
+  floor: u.floor,
+  description: u.description,
+  availability: u.availability as Availability,
+});
+
+const unitChanged = (a: UnitImportFields, b: UnitImportFields) =>
+  a.type !== b.type ||
+  !same(a.bedrooms, b.bedrooms) ||
+  a.amenities.join(',') !== b.amenities.join(',') ||
+  !same(a.floor, b.floor) ||
+  !same(a.description, b.description) ||
+  a.availability !== b.availability;
 
 /** Maps a sheet's header row to column keys and returns its non-empty rows. */
 function mapSheet(
@@ -162,7 +255,8 @@ function mapSheet(
  * The Excel import of properties and units (PR-08; M2 plan 4.9): a template, a dry run that
  * lists every problem by sheet, row and column, and a commit that applies the whole file in one
  * transaction. Rows match existing records by code, so importing the same file again changes
- * nothing, and an import never changes a code or deletes anything.
+ * nothing, and an import never changes a code or deletes anything. Both jobs run with the scope
+ * of the person who started them, so a scoped manager imports only their owners' properties.
  */
 @Injectable()
 export class RegisterImportService {
@@ -253,6 +347,7 @@ export class RegisterImportService {
   async startValidation(actor: Actor | null, importId: string): Promise<RegisterImportView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.import');
+    const scope = this.policy.scopeFor(staff);
     await withCompany(this.database, staffContext(staff), async (tx) => {
       const found = await this.mine(tx, staff.personId, importId);
       if (!['uploaded', 'invalid', 'validated', 'failed'].includes(found.status))
@@ -264,45 +359,51 @@ export class RegisterImportService {
       await enqueueOutbox(tx, {
         companyId: staff.companyId,
         type: VALIDATE_IMPORT_JOB,
-        payload: { importId },
+        payload: { importId, scope },
         idempotencyKey: `${VALIDATE_IMPORT_JOB}:${importId}:${this.clock.now().getTime()}`,
       });
     });
     return this.get(staff, importId);
   }
 
-  /** Commits a validated import (worker job). The same person who checked it commits it. */
+  /**
+   * Commits a validated import (worker job). The same person who checked it commits it. The job
+   * is keyed by the check it follows: committing one check twice runs once, and an import
+   * checked again after a failed commit can still be committed.
+   */
   async startCommit(actor: Actor | null, importId: string): Promise<RegisterImportView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.import');
+    const scope = this.policy.scopeFor(staff);
     await withCompany(this.database, staffContext(staff), async (tx) => {
       const found = await this.mine(tx, staff.personId, importId);
-      if (found.status !== 'validated')
+      if (found.status !== 'validated' || !found.validatedAt)
         throw invalid(
           'import_not_validated',
           'Check the file, and fix every problem, before importing it',
         );
+      const attempt = found.validatedAt.getTime();
       await tx
         .update(schema.registerImport)
-        .set({ status: 'committing', updatedAt: new Date() })
+        .set({ status: 'committing', error: null, updatedAt: new Date() })
         .where(eq(schema.registerImport.id, importId));
       await enqueueOutbox(tx, {
         companyId: staff.companyId,
         type: COMMIT_IMPORT_JOB,
-        payload: { importId },
-        idempotencyKey: `${COMMIT_IMPORT_JOB}:${importId}`,
+        payload: { importId, attempt, scope },
+        idempotencyKey: `${COMMIT_IMPORT_JOB}:${importId}:${attempt}`,
       });
     });
     return this.get(staff, importId);
   }
 
+  /** An import and its report, for the person who uploaded it only. */
   async get(actor: Actor | null, importId: string): Promise<RegisterImportView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.import');
-    const [row] = await withCompany(this.database, staffContext(staff), (tx) =>
-      tx.select().from(schema.registerImport).where(eq(schema.registerImport.id, importId)),
+    const row = await withCompany(this.database, staffContext(staff), (tx) =>
+      this.mine(tx, staff.personId, importId),
     );
-    if (!row) throw notFound('Import');
     return {
       id: row.id,
       status: row.status as ImportStatus,
@@ -326,15 +427,25 @@ export class RegisterImportService {
 
   // Worker jobs -----------------------------------------------------------------------------
 
-  /** The dry run: reads the file and checks every row; writes only the report. */
-  async validate(companyId: string, importId: string): Promise<void> {
+  /**
+   * The dry run: reads the file and checks every row, under the scope of the person who started
+   * it (AD-02); writes only the report.
+   */
+  async validate(
+    companyId: string,
+    importId: string,
+    options: ImportJobOptions = {},
+  ): Promise<void> {
     const loaded = await this.load(companyId, importId, 'validating');
     if (!loaded) return;
     const { row, file, sha256 } = loaded;
+    const taken = await this.takenInCompany(companyId);
+    const scope = options.scope ?? null;
     const report = await withCompany(
       this.database,
-      { companyId, actorKind: 'system' },
-      async (tx) => (await this.check(tx, companyId, row.fileName, file, sha256)).report,
+      { companyId, personId: row.createdBy, actorKind: 'system', scope },
+      async (tx) =>
+        (await this.check(tx, companyId, row.fileName, file, sha256, { taken, scope })).report,
     );
     await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
       tx
@@ -346,19 +457,27 @@ export class RegisterImportService {
           validatedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(schema.registerImport.id, importId)),
+        .where(
+          and(
+            eq(schema.registerImport.id, importId),
+            eq(schema.registerImport.status, 'validating'),
+          ),
+        ),
     );
   }
 
   /**
-   * Applies a validated import in one transaction, as the person who started it. The file is
-   * checked again first: if its bytes or the register changed and a row no longer passes, nothing
-   * is written and the import goes back to "invalid" with the new report.
+   * Applies a validated import in one transaction, as the person who started it and under their
+   * scope. The file is checked again first: if its bytes or the register changed and a row no
+   * longer passes, nothing is written and the import goes back to "invalid" with the new report.
+   * Any other failure rolls everything back and the job retries; after the last retry the import
+   * is marked failed (commitAbandoned).
    */
-  async commit(companyId: string, importId: string): Promise<void> {
+  async commit(companyId: string, importId: string, options: CommitJobOptions = {}): Promise<void> {
     const loaded = await this.load(companyId, importId, 'committing');
     if (!loaded) return;
     const { row, file, sha256 } = loaded;
+    if (!this.isAttempt(row, options.attempt)) return;
     if (row.fileSha256 && row.fileSha256 !== sha256) {
       await this.finish(
         companyId,
@@ -366,13 +485,29 @@ export class RegisterImportService {
         'failed',
         null,
         'The file changed after it was checked',
+        {
+          from: 'committing',
+        },
       );
       return;
     }
-    const ctx = { companyId, personId: row.createdBy, actorKind: 'system' as const };
+    const taken = await this.takenInCompany(companyId);
+    const scope = options.scope ?? null;
+    const ctx = { companyId, personId: row.createdBy, actorKind: 'system' as const, scope };
     const outcome = await withCompany(this.database, ctx, async (tx) => {
-      const { plan, report } = await this.check(tx, companyId, row.fileName, file, sha256);
-      if (report.issueCount > 0) return { report, committed: false };
+      // Locked and read again, so a job delivered twice applies the import once.
+      const [current] = await tx
+        .select()
+        .from(schema.registerImport)
+        .where(eq(schema.registerImport.id, importId))
+        .for('update');
+      if (!current || current.status !== 'committing' || !this.isAttempt(current, options.attempt))
+        return { outcome: 'skipped' as const };
+      const { plan, report } = await this.check(tx, companyId, row.fileName, file, sha256, {
+        taken,
+        scope,
+      });
+      if (report.issueCount > 0) return { outcome: 'invalid' as const, report };
       await this.register.withStatusReason(
         tx,
         `Imported from ${row.fileName ?? 'a spreadsheet'}`,
@@ -383,9 +518,51 @@ export class RegisterImportService {
         .update(schema.registerImport)
         .set({ status: 'committed', report, committedAt: new Date(), updatedAt: new Date() })
         .where(eq(schema.registerImport.id, importId));
-      return { report, committed: true };
+      return { outcome: 'committed' as const };
     });
-    if (!outcome.committed) await this.finish(companyId, importId, 'invalid', outcome.report, null);
+    if (outcome.outcome === 'invalid')
+      await this.finish(companyId, importId, 'invalid', outcome.report, null, {
+        from: 'committing',
+      });
+  }
+
+  /**
+   * The commit job failed its last retry (the job's dead-letter step). The commit is one
+   * transaction, so nothing was written; the import says so and can be checked again.
+   */
+  async commitAbandoned(companyId: string, importId: string, attempt?: number): Promise<void> {
+    await this.abandon(companyId, importId, 'committing', COMMIT_ABANDONED, attempt);
+  }
+
+  /** The check job failed its last retry: the import can be checked again. */
+  async validationAbandoned(companyId: string, importId: string): Promise<void> {
+    await this.abandon(companyId, importId, 'validating', VALIDATION_ABANDONED);
+  }
+
+  private async abandon(
+    companyId: string,
+    importId: string,
+    status: ImportStatus,
+    error: string,
+    attempt?: number,
+  ): Promise<void> {
+    await withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(schema.registerImport)
+        .where(eq(schema.registerImport.id, importId))
+        .for('update');
+      if (!current || current.status !== status || !this.isAttempt(current, attempt)) return;
+      await tx
+        .update(schema.registerImport)
+        .set({ status: 'failed', error, updatedAt: new Date() })
+        .where(eq(schema.registerImport.id, importId));
+    });
+  }
+
+  /** Whether an import is still at the check a commit job was started from. */
+  private isAttempt(row: { validatedAt: Date | null }, attempt: number | undefined): boolean {
+    return attempt === undefined || row.validatedAt?.getTime() === attempt;
   }
 
   private async load(companyId: string, importId: string, status: ImportStatus) {
@@ -396,11 +573,15 @@ export class RegisterImportService {
     const bucket = this.config.S3_BUCKET_FILES;
     const head = await this.storage.head({ bucket, key: row.storageKey });
     if (!head) {
-      await this.finish(companyId, importId, 'failed', null, 'The file was not uploaded');
+      await this.finish(companyId, importId, 'failed', null, 'The file was not uploaded', {
+        from: status,
+      });
       return null;
     }
     if (head.size > REGISTER_IMPORT_UPLOAD.maxBytes) {
-      await this.finish(companyId, importId, 'failed', null, 'The file is larger than 5 MB');
+      await this.finish(companyId, importId, 'failed', null, 'The file is larger than 5 MB', {
+        from: status,
+      });
       return null;
     }
     const file = await this.storage.get({
@@ -417,13 +598,36 @@ export class RegisterImportService {
     status: ImportStatus,
     report: ImportReport | null,
     error: string | null,
+    options: { readonly from: ImportStatus },
   ): Promise<void> {
     await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
       tx
         .update(schema.registerImport)
         .set({ status, ...(report ? { report } : {}), error, updatedAt: new Date() })
-        .where(eq(schema.registerImport.id, importId)),
+        .where(
+          and(
+            eq(schema.registerImport.id, importId),
+            eq(schema.registerImport.status, options.from),
+          ),
+        ),
     );
+  }
+
+  /**
+   * Every property code and meter number in the company, archived ones and those outside any
+   * scope included (see Taken). Read without a scope; only membership of the sets is used.
+   */
+  private async takenInCompany(companyId: string): Promise<Taken> {
+    return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
+      const properties = await tx.select({ code: schema.property.code }).from(schema.property);
+      const meters = await tx.execute<{ key: string }>(
+        sql`select utility || '|' || lower(supplier) || '|' || meter_number as key from meter`,
+      );
+      return {
+        propertyCodes: new Set(properties.map((p) => p.code)),
+        meterKeys: new Set(meters.rows.map((m) => m.key)),
+      };
+    });
   }
 
   /** Parses the workbook and checks every row against the domain rules and the register. */
@@ -433,6 +637,7 @@ export class RegisterImportService {
     fileName: string | null,
     file: Buffer,
     sha256: string,
+    context: { readonly taken: Taken; readonly scope: ScopeIds | null },
   ): Promise<{ plan: Plan; report: ImportReport }> {
     const issues: ImportIssue[] = [];
     const sheets = await this.readSheets(file, issues);
@@ -446,10 +651,15 @@ export class RegisterImportService {
       ...properties.issues,
       ...units.issues,
     );
-    const plan = await this.plan(tx, companyId, properties.rows, units.rows, issues, {
-      properties: sheets.properties.rows,
-      units: sheets.units.rows,
-    });
+    const plan = await this.plan(
+      tx,
+      companyId,
+      properties.rows,
+      units.rows,
+      issues,
+      { properties: sheets.properties.rows, units: sheets.units.rows },
+      { taken: context.taken, scoped: context.scope !== null },
+    );
     issues.sort((a, b) => a.sheet.localeCompare(b.sheet) || (a.row ?? 0) - (b.row ?? 0));
     return {
       plan,
@@ -480,13 +690,21 @@ export class RegisterImportService {
     const none = { rows: [] as SheetRows, issues: [] as ImportIssue[] };
     const whole = (message: string) =>
       issues.push({ sheet: 'File', row: null, column: null, message });
+    const tooLarge = 'This workbook is too large once unpacked';
+    // A fast first pass on the sizes the zip declares, then the sizes it really inflates to,
+    // since a crafted file can understate them.
     const size = declaredUncompressedSize(file);
     if (size === null) {
       whole('This is not an Excel workbook (.xlsx)');
       return { properties: none, units: none };
     }
     if (size > MAX_UNCOMPRESSED_BYTES) {
-      whole('This workbook is too large once unpacked');
+      whole(tooLarge);
+      return { properties: none, units: none };
+    }
+    const inflated = inflatedSize(file, MAX_UNCOMPRESSED_BYTES);
+    if (!inflated.ok) {
+      whole(inflated.problem === 'too_large' ? tooLarge : 'This workbook could not be read');
       return { properties: none, units: none };
     }
     let workbook: { sheet: string; data: unknown[][] }[];
@@ -523,7 +741,11 @@ export class RegisterImportService {
     };
   }
 
-  /** The database checks: owners, existing codes, blocks, availability changes and meter links. */
+  /**
+   * The database checks: owners, existing codes, blocks, availability changes and meter links.
+   * It reads the register through the job's scope, so a scoped person's rows can name only the
+   * properties and owners they manage; anything else is a row error that reveals nothing more.
+   */
   private async plan(
     tx: Tx,
     companyId: string,
@@ -531,9 +753,15 @@ export class RegisterImportService {
     unitRows: UnitImportRow[],
     issues: ImportIssue[],
     raw: { properties: SheetRows; units: SheetRows },
+    context: { readonly taken: Taken; readonly scoped: boolean },
   ): Promise<Plan> {
+    const { taken, scoped } = context;
     const issue = (sheet: string, row: number, column: string, message: string) =>
       issues.push({ sheet, row, column, message });
+    const unknownOwner = (reference: string) =>
+      scoped
+        ? `${reference} is not an owner you can manage`
+        : `No owner has the reference ${reference}`;
     const [company] = await tx
       .select({ kind: schema.company.kind })
       .from(schema.company)
@@ -549,6 +777,9 @@ export class RegisterImportService {
     const existingProperties = new Map(
       (await tx.select().from(schema.property)).map((p) => [p.code, p]),
     );
+    // A code that exists in the company but not in what this person can see.
+    const outOfScope = (code: string) =>
+      !existingProperties.has(code) && taken.propertyCodes.has(code);
     const currentOwners = new Map(
       (
         await tx.execute<{ property_id: string; owner_id: string }>(
@@ -571,11 +802,14 @@ export class RegisterImportService {
     const P = IMPORT_SHEETS.properties;
     for (const row of propertyRows) {
       const existing = existingProperties.get(row.code);
+      if (outOfScope(row.code)) {
+        issue(P, row.row, 'Property code', notYours(row.code));
+        continue;
+      }
       let ownerId: string | 'landlord' | null = null;
       if (row.ownerReference) {
         ownerId = owners.get(row.ownerReference) ?? null;
-        if (!ownerId)
-          issue(P, row.row, 'Owner reference', `No owner has the reference ${row.ownerReference}`);
+        if (!ownerId) issue(P, row.row, 'Owner reference', unknownOwner(row.ownerReference));
       } else if (company?.kind === 'agency') {
         if (!existing)
           issue(
@@ -587,7 +821,11 @@ export class RegisterImportService {
       } else if (owners.size > 1) {
         if (!existing)
           issue(P, row.row, 'Owner reference', 'Required: this company has several owners');
-      } else ownerId = owners.values().next().value ?? 'landlord';
+      } else if (owners.size === 1) ownerId = owners.values().next().value!;
+      else if (!scoped) ownerId = 'landlord';
+      else if (!existing)
+        // A scoped person never creates the landlord's own owner record.
+        issue(P, row.row, 'Owner reference', 'You can add a property only for an owner you manage');
       if (existing) {
         if (existing.archivedAt) {
           issue(P, row.row, 'Property code', `Property ${row.code} is archived`);
@@ -600,19 +838,11 @@ export class RegisterImportService {
             'Owner reference',
             'Change a property’s owner on its page, with the date of the change',
           );
-        const changed =
-          !same(existing.name, row.name) ||
-          !same(existing.propertyType, row.type) ||
-          !same(existing.use, row.use) ||
-          !same(existing.ghanapostGps, row.gps) ||
-          !same(existing.region, row.region) ||
-          !same(existing.district, row.district) ||
-          !same(existing.mmda, row.mmda) ||
-          !same(existing.town, row.town) ||
-          !same(existing.street, row.street) ||
-          !samePin(existing.latitude, row.pin?.latitude ?? null) ||
-          !samePin(existing.longitude, row.pin?.longitude ?? null);
-        if (changed) plan.propertiesToUpdate.push({ id: existing.id, row });
+        // Blank optional cells leave the property as it is (re-import).
+        const before = propertyFields(existing);
+        const next = propertyFieldsAfterImport(before, row);
+        if (propertyChanged(before, next))
+          plan.propertiesToUpdate.push({ id: existing.id, before, next });
         else plan.propertiesUnchanged += 1;
       } else {
         plan.propertiesToCreate.push(row);
@@ -625,12 +855,13 @@ export class RegisterImportService {
     const checkedRows = new Set(propertyRows.map((r) => r.row));
     for (const { row, values } of raw.properties) {
       if (checkedRows.has(row)) continue;
+      const code = cellText(values.code)?.toUpperCase();
+      if (code && outOfScope(code)) issue(P, row, 'Property code', notYours(code));
       const text = cellText(values.owner);
       if (!text) continue;
       try {
         const reference = checkOwnerReference(text);
-        if (!owners.has(reference))
-          issue(P, row, 'Owner reference', `No owner has the reference ${reference}`);
+        if (!owners.has(reference)) issue(P, row, 'Owner reference', unknownOwner(reference));
       } catch {
         // The domain checks already reported the format.
       }
@@ -641,15 +872,18 @@ export class RegisterImportService {
       // A property row with problems of its own: its units are not reported twice.
       ...raw.properties
         .map((r) => cellText(r.values.code)?.toUpperCase())
-        .filter((c): c is string => !!c),
+        .filter((c): c is string => !!c && !outOfScope(c)),
     ]);
+    const U = IMPORT_SHEETS.units;
     const checkedUnits = new Set(unitRows.map((r) => r.row));
     for (const { row, values } of raw.units) {
       if (checkedUnits.has(row)) continue;
       const code = cellText(values.property)?.toUpperCase();
-      if (code && parsePropertyCode(code) && !knownProperties.has(code))
+      if (!code || !parsePropertyCode(code)) continue;
+      if (outOfScope(code)) issue(U, row, 'Property code', notYours(code));
+      else if (!knownProperties.has(code))
         issue(
-          IMPORT_SHEETS.units,
+          U,
           row,
           'Property code',
           `Property ${code} is not on the Properties sheet or in the register`,
@@ -681,25 +915,29 @@ export class RegisterImportService {
           .from(schema.unit)
       ).map((u) => [u.code, u]),
     );
+    // Archived meters too: their numbers stay taken (meter_number_key covers them).
     const meters = new Map(
       (
         await tx.execute<{
           key: string;
           type: string;
           property_code: string;
+          archived: boolean;
           unit_codes: string[];
         }>(
           sql`select m.utility || '|' || lower(m.supplier) || '|' || m.meter_number as key, m.meter_type as type,
-                p.code as property_code,
+                p.code as property_code, m.archived_at is not null as archived,
                 array(select u.code from unit_meter um join unit u on u.company_id = um.company_id and u.id = um.unit_id
                       where um.company_id = m.company_id and um.meter_id = m.id) as unit_codes
-              from meter m join property p on p.company_id = m.company_id and p.id = m.property_id
-              where m.archived_at is null`,
+              from meter m join property p on p.company_id = m.company_id and p.id = m.property_id`,
         )
       ).rows.map((m) => [m.key, m]),
     );
-    const U = IMPORT_SHEETS.units;
     for (const row of unitRows) {
+      if (outOfScope(row.propertyCode)) {
+        issue(U, row.row, 'Property code', notYours(row.propertyCode));
+        continue;
+      }
       if (!knownProperties.has(row.propertyCode)) {
         issue(
           U,
@@ -726,9 +964,12 @@ export class RegisterImportService {
         continue;
       }
       if (existing) {
-        if (existing.availability !== row.availability) {
+        // Blank optional cells leave the unit as it is: a blank availability never resets it.
+        const before = unitFields(existing);
+        const next = unitFieldsAfterImport(before, row);
+        if (existing.availability !== next.availability) {
           try {
-            checkAvailabilityChange(existing.availability as Availability, row.availability, {
+            checkAvailabilityChange(existing.availability as Availability, next.availability, {
               occupied: false,
             });
           } catch (error) {
@@ -736,28 +977,26 @@ export class RegisterImportService {
             issue(U, row.row, 'Availability', error.message);
           }
         }
-        const changed =
-          !same(existing.unitType, row.type) ||
-          !same(existing.bedrooms, row.bedrooms) ||
-          existing.amenities.join(',') !== row.amenities.join(',') ||
-          !same(existing.floor, row.floor) ||
-          !same(existing.description, row.description) ||
-          !same(existing.availability, row.availability);
-        if (changed) plan.unitsToUpdate.push({ unit: existing, row });
+        if (unitChanged(before, next)) plan.unitsToUpdate.push({ unit: existing, next });
         else plan.unitsUnchanged += 1;
       } else plan.unitsToCreate.push(row);
       for (const m of row.meters) {
         const key = meterKey(m.utility, m.supplier, m.number);
+        const column = m.utility === 'electricity' ? 'Electricity meter' : 'Water meter';
         const found = meters.get(key);
+        if (found?.archived) {
+          issue(U, row.row, column, 'An archived meter has this number. Use another number.');
+          continue;
+        }
+        if (!found && taken.meterKeys.has(key)) {
+          // In the company, but on a property this person cannot see.
+          issue(U, row.row, column, 'This meter belongs to another property');
+          continue;
+        }
         const planned = plan.metersToCreate.get(key);
         const type = found?.type ?? planned?.type ?? m.type;
         if (found && found.property_code !== row.propertyCode) {
-          issue(
-            U,
-            row.row,
-            m.utility === 'electricity' ? 'Electricity meter' : 'Water meter',
-            'This meter belongs to another property',
-          );
+          issue(U, row.row, column, 'This meter belongs to another property');
           continue;
         }
         if (type !== m.type) {
@@ -781,12 +1020,7 @@ export class RegisterImportService {
         links.add(row.code);
         plan.meterLinks.set(key, links);
         if (type !== 'shared' && links.size > 1)
-          issue(
-            U,
-            row.row,
-            m.utility === 'electricity' ? 'Electricity meter' : 'Water meter',
-            'Only a shared meter can serve more than one unit',
-          );
+          issue(U, row.row, column, 'Only a shared meter can serve more than one unit');
       }
     }
     return plan;
@@ -836,23 +1070,26 @@ export class RegisterImportService {
         recordedBy: personId,
       });
     }
-    for (const { id, row } of plan.propertiesToUpdate) {
-      const address = await this.register.checkAddress(tx, companyId, {
-        ghanapostGps: row.gps,
-        region: row.region,
-        district: row.district,
-        mmda: row.mmda,
-        town: row.town,
-        street: row.street,
-        latitude: row.pin?.latitude ?? null,
-        longitude: row.pin?.longitude ?? null,
-      });
+    for (const { id, before, next } of plan.propertiesToUpdate) {
+      // The address is written only when it changed, so its source (lookup or manual) stays.
+      const address = addressChanged(before, next)
+        ? await this.register.checkAddress(tx, companyId, {
+            ghanapostGps: next.gps,
+            region: next.region,
+            district: next.district,
+            mmda: next.mmda,
+            town: next.town,
+            street: next.street,
+            latitude: next.pin?.latitude ?? null,
+            longitude: next.pin?.longitude ?? null,
+          })
+        : {};
       await tx
         .update(schema.property)
         .set({
-          name: row.name,
-          propertyType: row.type,
-          use: row.use,
+          name: next.name,
+          propertyType: next.type,
+          use: next.use,
           ...address,
           updatedAt: new Date(),
         })
@@ -891,20 +1128,20 @@ export class RegisterImportService {
           amenities: row.amenities,
         })),
       );
-    for (const { unit, row } of plan.unitsToUpdate) {
-      const typeChanged = unit.unitType !== row.type;
+    for (const { unit, next } of plan.unitsToUpdate) {
+      const typeChanged = unit.unitType !== next.type;
       await tx
         .update(schema.unit)
         .set({
-          unitType: row.type,
-          bedrooms: row.bedrooms,
+          unitType: next.type,
+          bedrooms: next.bedrooms,
           ...(typeChanged
-            ? { billingBand: defaultBandFor(row.type), bandOverrideReason: null }
+            ? { billingBand: defaultBandFor(next.type), bandOverrideReason: null }
             : {}),
-          amenities: row.amenities,
-          floor: row.floor,
-          description: row.description,
-          availability: row.availability,
+          amenities: [...next.amenities],
+          floor: next.floor,
+          description: next.description,
+          availability: next.availability,
           updatedAt: new Date(),
         })
         .where(eq(schema.unit.id, unit.id));

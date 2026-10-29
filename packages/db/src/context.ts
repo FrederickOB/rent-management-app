@@ -72,6 +72,35 @@ export async function withCompany<T>(
 }
 
 /**
+ * Adds a property this transaction is about to create to a scoped session's property scope, so
+ * the restrictive scope policy lets the session write it and read it back (AD-02). The id must
+ * be generated before the insert. An unscoped session is left as it is: unset means everything.
+ * Callers check first that the actor may create it (for example, for an owner in their scope).
+ */
+export async function addToPropertyScope(tx: Tx, propertyId: string): Promise<void> {
+  assertUuid(propertyId, 'propertyId');
+  await tx.execute(sql`select set_config('app.property_scope',
+      (app.property_scope() || ${propertyId}::uuid)::text, true)
+    where app.property_scope() is not null`);
+}
+
+/** The same for an owner record this transaction is about to create (AD-02). */
+export async function addToOwnerScope(tx: Tx, ownerId: string): Promise<void> {
+  assertUuid(ownerId, 'ownerId');
+  await tx.execute(sql`select set_config('app.owner_scope',
+      (app.owner_scope() || ${ownerId}::uuid)::text, true)
+    where app.owner_scope() is not null`);
+}
+
+/** Whether this transaction runs with an owner and property scope (AD-02). */
+export async function isScoped(tx: Tx): Promise<boolean> {
+  const result = await tx.execute<{ scoped: boolean }>(
+    sql`select app.property_scope() is not null as scoped`,
+  );
+  return result.rows[0]?.scoped === true;
+}
+
+/**
  * A transaction with no company context, for global tables and the narrow system functions of
  * ADR-002 (schedulers, membership lookup at sign-in, company onboarding, the outbox relay).
  * Company-scoped tables return no rows here, because RLS fails closed.

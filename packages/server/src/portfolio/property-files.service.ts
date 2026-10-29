@@ -11,7 +11,8 @@ import type { StoragePort } from '@rent/integrations';
 import sharp from 'sharp';
 import type { Clock } from '../core/clock';
 import type { AppConfig } from '../core/config';
-import { forbidden, invalid, notFound } from '../core/errors';
+import { isUniqueViolation } from '../core/db-errors';
+import { conflict, forbidden, invalid, notFound } from '../core/errors';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, CONFIG, DATABASE, STORAGE_PORT } from '../core/tokens';
 import { staffActor } from '../companies/companies.service';
@@ -40,6 +41,8 @@ export const PROPERTY_FILE_CATEGORIES = [
   'other',
 ] as const;
 export type PropertyFileCategory = (typeof PROPERTY_FILE_CATEGORIES)[number];
+
+const alreadyAdded = () => conflict('upload_already_added', 'This file has already been added');
 
 const purposeFor = (category: PropertyFileCategory) =>
   category === 'photo' ? PROPERTY_PHOTO_UPLOAD : PROPERTY_PAPER_UPLOAD;
@@ -131,31 +134,40 @@ export class PropertyFilesService {
     this.policy.assert(staff, 'property_file.upload');
     const purpose = purposeFor(input.category).purpose;
     const id = await withCompany(this.database, staffContext(staff), async (tx) => {
+      // Locked, so the same upload confirmed twice at once is added once.
       const [intent] = await tx
         .select()
         .from(schema.uploadIntent)
-        .where(eq(schema.uploadIntent.id, input.uploadId));
+        .where(eq(schema.uploadIntent.id, input.uploadId))
+        .for('update');
       if (!intent || intent.createdBy !== staff.personId || intent.purpose !== purpose)
         throw notFound('Upload');
-      if (intent.status !== 'pending' || intent.expiresAt.getTime() < this.clock.now().getTime())
+      if (intent.status !== 'pending') throw alreadyAdded();
+      if (intent.expiresAt.getTime() < this.clock.now().getTime())
         throw invalid('upload_expired', 'That upload has expired; upload the file again');
       const [property] = await tx
         .select({ id: schema.property.id })
         .from(schema.property)
         .where(and(eq(schema.property.id, propertyId), isNull(schema.property.archivedAt)));
       if (!property) throw notFound('Property');
-      const [row] = await tx
-        .insert(schema.propertyFile)
-        .values({
-          companyId: staff.companyId,
-          propertyId,
-          category: input.category,
-          uploadIntentId: intent.id,
-          caption: input.caption?.trim().slice(0, 200) || null,
-          originalFilename: input.fileName?.trim().slice(0, 200) || null,
-          uploadedBy: staff.personId,
-        })
-        .returning({ id: schema.propertyFile.id });
+      let row: { id: string } | undefined;
+      try {
+        [row] = await tx
+          .insert(schema.propertyFile)
+          .values({
+            companyId: staff.companyId,
+            propertyId,
+            category: input.category,
+            uploadIntentId: intent.id,
+            caption: input.caption?.trim().slice(0, 200) || null,
+            originalFilename: input.fileName?.trim().slice(0, 200) || null,
+            uploadedBy: staff.personId,
+          })
+          .returning({ id: schema.propertyFile.id });
+      } catch (error) {
+        if (isUniqueViolation(error, 'property_file_upload_key')) throw alreadyAdded();
+        throw error;
+      }
       await tx
         .update(schema.uploadIntent)
         .set({ status: 'confirmed' })
@@ -174,7 +186,8 @@ export class PropertyFilesService {
   /**
    * The worker's job (PR-04). Checks the bytes against the declared type, re-encodes images
    * without metadata and deletes the original upload, fingerprints PDFs, and marks the file
-   * ready. Replaying it after success changes nothing.
+   * ready. Replaying it after success changes nothing, except that it finishes deleting an
+   * original a failed run left behind: the original may carry the GPS position of the photo.
    */
   async process(companyId: string, propertyFileId: string): Promise<void> {
     const ctx = { companyId, actorKind: 'system' as const };
@@ -183,18 +196,34 @@ export class PropertyFilesService {
         .select()
         .from(schema.propertyFile)
         .where(eq(schema.propertyFile.id, propertyFileId));
-      if (!file || file.status !== 'processing') return null;
+      if (!file) return null;
       const [intent] = await tx
         .select()
         .from(schema.uploadIntent)
         .where(eq(schema.uploadIntent.id, file.uploadIntentId));
-      return intent ? { file, intent } : null;
+      if (!intent) return null;
+      // The original is kept only when it is the stored file itself (a PDF paper).
+      const [kept] = file.documentId
+        ? await tx
+            .select({ storageKey: schema.document.storageKey })
+            .from(schema.document)
+            .where(eq(schema.document.id, file.documentId))
+        : [];
+      return { file, intent, originalKept: kept?.storageKey === intent.storageKey };
     });
     if (!loaded) return;
     const { file, intent } = loaded;
     const bucket = this.config.S3_BUCKET_FILES;
+    if (file.status !== 'processing') {
+      if (!loaded.originalKept) await this.discardOriginal(bucket, intent.storageKey);
+      return;
+    }
     const head = await this.storage.head({ bucket, key: intent.storageKey });
-    const fail = (reason: string) => this.markFailed(companyId, file.id, intent.id, reason);
+    const fail = async (reason: string) => {
+      await this.markFailed(companyId, file.id, intent.id, reason);
+      // A refused upload is never used, and may be a photo with its location.
+      await this.discardOriginal(bucket, intent.storageKey);
+    };
     if (!head) return fail('The file was not uploaded');
     if (head.size > intent.maxBytes) return fail('The file is larger than allowed');
     const original = await this.storage.get({
@@ -287,8 +316,16 @@ export class PropertyFilesService {
         .where(eq(schema.uploadIntent.id, intent.id));
     });
     // The original image may carry the GPS position where it was taken: keep only the re-encoded copy.
-    if (actual !== 'application/pdf' && head.versionId)
-      await this.storage.delete({ bucket, key: intent.storageKey, versionId: head.versionId });
+    if (actual !== 'application/pdf') await this.discardOriginal(bucket, intent.storageKey);
+  }
+
+  /**
+   * Deletes every version of an upload's original, so nothing of it remains, however many times
+   * it was uploaded. Safe to repeat: a retry after a failed delete finishes the job.
+   */
+  private async discardOriginal(bucket: string, key: string): Promise<void> {
+    for (const version of await this.storage.listVersions({ bucket, key }))
+      await this.storage.delete({ bucket, key, versionId: version.versionId ?? undefined });
   }
 
   private async markFailed(companyId: string, fileId: string, intentId: string, reason: string) {

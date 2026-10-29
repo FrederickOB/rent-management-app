@@ -18,7 +18,7 @@ import {
   type MeterType,
   type Utility,
 } from '@rent/domain/portfolio';
-import { isUniqueViolation } from '../core/db-errors';
+import { isUniqueViolation, withRegisterChecks } from '../core/db-errors';
 import { conflict, invalid, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
 import { staffActor } from '../companies/companies.service';
@@ -50,11 +50,13 @@ export class MetersService {
     const unitIds = [...new Set(input.unitIds ?? [])];
     checkMeterUnits(input.meterType, unitIds.length);
     try {
-      return await withCompany(this.database, staffContext(staff), async (tx) => {
-        const meterId = await this.insert(tx, staff.companyId, propertyId, input);
-        await this.link(tx, staff.companyId, propertyId, meterId, unitIds);
-        return meterId;
-      });
+      return await withRegisterChecks(() =>
+        withCompany(this.database, staffContext(staff), async (tx) => {
+          const meterId = await this.insert(tx, staff.companyId, propertyId, input);
+          await this.link(tx, staff.companyId, propertyId, meterId, unitIds);
+          return meterId;
+        }),
+      );
     } catch (error) {
       if (isUniqueViolation(error, 'meter_number_key')) throw taken();
       throw error;
@@ -107,28 +109,30 @@ export class MetersService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.manage');
     try {
-      await withCompany(this.database, staffContext(staff), async (tx) => {
-        const meter = await this.live(tx, meterId);
-        if (patch.meterType && patch.meterType !== meter.meterType) {
-          const links = await tx
-            .select({ id: schema.unitMeter.id })
-            .from(schema.unitMeter)
-            .where(eq(schema.unitMeter.meterId, meterId));
-          checkMeterUnits(patch.meterType, links.length);
-        }
-        await tx
-          .update(schema.meter)
-          .set({
-            ...(patch.supplier !== undefined ? { supplier: checkSupplier(patch.supplier) } : {}),
-            ...(patch.meterNumber !== undefined
-              ? { meterNumber: checkMeterNumber(patch.meterNumber) }
-              : {}),
-            ...(patch.meterType ? { meterType: patch.meterType } : {}),
-            ...(patch.notes !== undefined ? { notes: patch.notes?.trim() || null } : {}),
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.meter.id, meterId));
-      });
+      await withRegisterChecks(() =>
+        withCompany(this.database, staffContext(staff), async (tx) => {
+          const meter = await this.live(tx, meterId);
+          if (patch.meterType && patch.meterType !== meter.meterType) {
+            const links = await tx
+              .select({ id: schema.unitMeter.id })
+              .from(schema.unitMeter)
+              .where(eq(schema.unitMeter.meterId, meterId));
+            checkMeterUnits(patch.meterType, links.length);
+          }
+          await tx
+            .update(schema.meter)
+            .set({
+              ...(patch.supplier !== undefined ? { supplier: checkSupplier(patch.supplier) } : {}),
+              ...(patch.meterNumber !== undefined
+                ? { meterNumber: checkMeterNumber(patch.meterNumber) }
+                : {}),
+              ...(patch.meterType ? { meterType: patch.meterType } : {}),
+              ...(patch.notes !== undefined ? { notes: patch.notes?.trim() || null } : {}),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.meter.id, meterId));
+        }),
+      );
     } catch (error) {
       if (isUniqueViolation(error, 'meter_number_key')) throw taken();
       throw error;
@@ -140,27 +144,29 @@ export class MetersService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.manage');
     const wanted = [...new Set(unitIds)];
-    await withCompany(this.database, staffContext(staff), async (tx) => {
-      const meter = await this.live(tx, meterId);
-      checkMeterUnits(meter.meterType as MeterType, wanted.length);
-      await tx
-        .delete(schema.unitMeter)
-        .where(
-          and(
-            eq(schema.unitMeter.meterId, meterId),
-            wanted.length ? notInArray(schema.unitMeter.unitId, wanted) : undefined,
-          ),
-        );
-      if (wanted.length) {
-        const units = await tx
-          .select({ id: schema.unit.id })
-          .from(schema.unit)
-          .where(and(inArray(schema.unit.id, wanted), isNull(schema.unit.archivedAt)));
-        if (units.length !== wanted.length)
-          throw invalid('meter_unit', 'Choose units from the list');
-      }
-      await this.link(tx, staff.companyId, meter.propertyId, meterId, wanted);
-    });
+    await withRegisterChecks(() =>
+      withCompany(this.database, staffContext(staff), async (tx) => {
+        const meter = await this.live(tx, meterId);
+        checkMeterUnits(meter.meterType as MeterType, wanted.length);
+        await tx
+          .delete(schema.unitMeter)
+          .where(
+            and(
+              eq(schema.unitMeter.meterId, meterId),
+              wanted.length ? notInArray(schema.unitMeter.unitId, wanted) : undefined,
+            ),
+          );
+        if (wanted.length) {
+          const units = await tx
+            .select({ id: schema.unit.id })
+            .from(schema.unit)
+            .where(and(inArray(schema.unit.id, wanted), isNull(schema.unit.archivedAt)));
+          if (units.length !== wanted.length)
+            throw invalid('meter_unit', 'Choose units from the list');
+        }
+        await this.link(tx, staff.companyId, meter.propertyId, meterId, wanted);
+      }),
+    );
   }
 
   async archive(actor: Actor | null, meterId: string): Promise<void> {
