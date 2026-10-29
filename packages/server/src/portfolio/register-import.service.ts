@@ -933,6 +933,13 @@ export class RegisterImportService {
         )
       ).rows.map((m) => [m.key, m]),
     );
+    // Units a lease holds, reserved or occupied (PB-09): as in the register, their availability
+    // can only become "available" or "under repair".
+    const held = new Set(
+      (await tx.execute<{ unit_id: string }>(sql`select unit_id from unit_occupancy`)).rows.map(
+        (u) => u.unit_id,
+      ),
+    );
     for (const row of unitRows) {
       if (outOfScope(row.propertyCode)) {
         issue(U, row.row, 'Property code', notYours(row.propertyCode));
@@ -970,7 +977,7 @@ export class RegisterImportService {
         if (existing.availability !== next.availability) {
           try {
             checkAvailabilityChange(existing.availability as Availability, next.availability, {
-              occupied: false,
+              occupied: held.has(existing.id),
             });
           } catch (error) {
             if (!(error instanceof DomainError)) throw error;
