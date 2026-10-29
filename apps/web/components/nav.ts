@@ -31,6 +31,31 @@ const ITEMS: readonly NavItem[] = [
     description: 'Add or update properties and units from a spreadsheet.',
     needs: 'register.import',
   },
+  // M3: tenants, leases, templates and approvals (plan section 4.16).
+  {
+    href: '/tenants',
+    label: 'Tenants',
+    description: 'Tenants and their contacts, consent, ID checks and tenancies.',
+    needs: 'tenant.view',
+  },
+  {
+    href: '/leases',
+    label: 'Leases',
+    description: 'Lease drafts, signed leases, renewals and leases ending soon.',
+    needs: 'lease.view',
+  },
+  {
+    href: '/lease-templates',
+    label: 'Lease templates',
+    description: 'The clauses your leases are built from, by version.',
+    needs: 'lease.view_terms',
+  },
+  {
+    href: '/approvals',
+    label: 'Approvals',
+    description: 'Requests that need a second person, such as cancelling a signed lease.',
+    needs: 'approval.view',
+  },
   {
     href: '/settings/company',
     label: 'Company settings',

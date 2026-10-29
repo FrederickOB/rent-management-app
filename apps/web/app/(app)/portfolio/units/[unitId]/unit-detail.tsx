@@ -19,6 +19,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
+import { UnitLeases } from './unit-leases';
 import { useApp } from '@/components/app-context';
 import { ConfirmBox } from '@/components/confirm-box';
 import { PageHeader } from '@/components/page-header';
@@ -52,6 +53,9 @@ type Notice = { readonly tone: 'success' | 'error'; readonly text: string } | nu
 export interface UnitPermissions {
   readonly manage: boolean;
   readonly overrideBand: boolean;
+  /** lease.view and lease.manage (M3): the unit's leases, and drafting one. */
+  readonly seeLeases?: boolean;
+  readonly draftLease?: boolean;
 }
 
 /**
@@ -181,6 +185,8 @@ export function UnitDetail({
           </CardBody>
         </Card>
       )}
+
+      {can.seeLeases ? <UnitLeases unit={unit} canDraft={Boolean(can.draftLease) && live} /> : null}
 
       <AvailabilityCard unit={unit} canChange={can.manage && live} onSaved={saved} />
       <BandCard unit={unit} canOverride={can.overrideBand && live} onSaved={saved} />
@@ -386,7 +392,7 @@ function AvailabilityCard({
   readonly canChange: boolean;
   readonly onSaved: (next: UnitDetailView, text: string) => void;
 }) {
-  const choices = availabilityChoices(unit.availability, unit.status);
+  const choices = availabilityChoices(unit.availability, unit.status, unit.occupancy);
   const [open, setOpen] = useState(false);
   const [to, setTo] = useState<Availability | ''>('');
   const [reason, setReason] = useState('');

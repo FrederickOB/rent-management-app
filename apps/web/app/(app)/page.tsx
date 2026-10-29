@@ -9,7 +9,15 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { companyKindLabel, roleLabel } from '@/lib/format';
 import { allowed } from '@/lib/policy';
 import { totalOf } from '@/lib/register-format';
-import { getCompany, getMe, loadPropertyList, loadUnitCounts } from '@/lib/server/session';
+import { formatBusinessDate } from '@/lib/business-dates';
+import {
+  getCompany,
+  getMe,
+  loadExpiring,
+  loadPropertyList,
+  loadUnitCounts,
+} from '@/lib/server/session';
+import { daysLeftLabel, leaseStatusLabel } from '@/lib/tenancy-format';
 
 export default async function HomePage() {
   // The layout has already checked the session; these calls are cached for this request.
@@ -25,6 +33,9 @@ export default async function HomePage() {
     properties?.ok && units?.ok
       ? { properties: properties.data.rows.length, counts: units.data.counts }
       : null;
+  // TL-09: leases ending in the next 90 days, with their renewals (M3 plan 4.10).
+  const expiring = allowed(me, 'lease.view') ? await loadExpiring(90) : null;
+  const ending = expiring?.ok ? expiring.data : null;
 
   return (
     <>
@@ -75,6 +86,50 @@ export default async function HomePage() {
               ))}
             </ul>
           </CardBody>
+        </Card>
+      ) : null}
+      {ending ? (
+        <Card data-testid="expiring-summary">
+          <CardHeader
+            title="Leases ending in the next 90 days"
+            description={
+              ending.length === 0
+                ? 'None. Renewal reminders go out before each lease ends.'
+                : `${ending.length} ${ending.length === 1 ? 'lease ends' : 'leases end'} soon; ${ending.filter((l) => l.renewal).length} with a renewal.`
+            }
+          />
+          {ending.length ? (
+            <CardBody>
+              <ul className="divide-y divide-slate-100 text-sm" aria-label="Leases ending soon">
+                {ending.slice(0, 5).map((lease) => (
+                  <li
+                    key={lease.id}
+                    data-testid="expiring-lease"
+                    className="flex flex-wrap items-baseline justify-between gap-2 py-2"
+                  >
+                    <Link
+                      href={`/leases/${lease.id}`}
+                      className="font-medium underline underline-offset-2"
+                    >
+                      <span className="font-mono">{lease.unitCode}</span> {lease.tenantName}
+                    </Link>
+                    <span className="text-slate-700">
+                      Ends {formatBusinessDate(lease.endDate)} ({daysLeftLabel(lease.daysLeft)})
+                      {lease.renewal
+                        ? ` · renewal ${leaseStatusLabel(lease.renewal.status).toLowerCase()}`
+                        : ''}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <Link
+                href="/leases/expiring"
+                className="inline-flex min-h-11 items-center text-sm font-medium underline underline-offset-2"
+              >
+                See every lease ending soon
+              </Link>
+            </CardBody>
+          ) : null}
         </Card>
       ) : null}
       <ul className="grid gap-4 sm:grid-cols-2">

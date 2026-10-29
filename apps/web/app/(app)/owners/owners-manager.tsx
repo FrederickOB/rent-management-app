@@ -5,6 +5,7 @@ import { OWNER_KINDS } from '@rent/domain/portfolio';
 import Link from 'next/link';
 import { useId, useState, type FormEvent } from 'react';
 import { ConfirmBox } from '@/components/confirm-box';
+import { ReasonForm } from '@/components/reason-form';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -145,7 +146,8 @@ function OwnerItem({
   readonly linkedUsers: readonly LinkedUser[] | null;
   readonly onChanged: (text: string) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<'view' | 'edit' | 'archive'>('view');
+  const [mode, setMode] = useState<'view' | 'edit' | 'archive' | 'reveal'>('view');
+  const [tin, setTin] = useState<string | null>(null);
   const [properties, setProperties] = useState<readonly PropertyRowView[] | 'loading' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -198,6 +200,30 @@ function OwnerItem({
           <p className="text-slate-700">
             {country ? `Lives in ${country}` : 'Country not recorded'} · Time zone {owner.timeZone}
           </p>
+          <p className="text-slate-700" data-testid="owner-tax">
+            {owner.lettingBusiness ? 'Lets property as a business' : 'Not a letting business'} ·{' '}
+            {owner.vatRegistered ? 'VAT registered' : 'Not VAT registered'} ·{' '}
+            {owner.tinMasked ? (
+              <>
+                TIN <span className="font-mono">{owner.tinMasked}</span>
+              </>
+            ) : (
+              'No TIN recorded'
+            )}
+          </p>
+          {tin ? (
+            <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900">
+              TIN: <strong className="font-mono">{tin}</strong>. Who saw it and why is in the audit
+              log.{' '}
+              <button
+                type="button"
+                className="font-medium underline underline-offset-2"
+                onClick={() => setTin(null)}
+              >
+                Hide
+              </button>
+            </p>
+          ) : null}
           {owner.notes ? <p className="break-words text-slate-600">{owner.notes}</p> : null}
           {linkedUsers ? (
             <div data-testid="linked-users" className="text-slate-700">
@@ -258,11 +284,39 @@ function OwnerItem({
               >
                 Archive
               </Button>
+              {owner.tinMasked && !tin ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Show the TIN of ${owner.displayName}`}
+                  onClick={() => {
+                    setError(null);
+                    setMode('reveal');
+                  }}
+                >
+                  Show the TIN
+                </Button>
+              ) : null}
             </>
           ) : null}
         </div>
       </div>
       {error ? <Alert tone="error">{error}</Alert> : null}
+      {mode === 'reveal' ? (
+        <ReasonForm
+          label={`Show the TIN of ${owner.displayName}`}
+          intro="Say why you need the full TIN. Who saw it, when and why is kept in the audit log; the number is not."
+          minLength={10}
+          maxLength={300}
+          submitText="Show the TIN"
+          onSubmit={async (reason) => {
+            const revealed = await api().owners.revealTin({ ownerId: owner.id, reason });
+            setTin(revealed.tin);
+            setMode('view');
+          }}
+          onCancel={() => setMode('view')}
+        />
+      ) : null}
       {mode === 'archive' ? (
         <ConfirmBox
           label={`Confirm archiving ${owner.displayName}`}
@@ -461,6 +515,45 @@ function OwnerForm({
         onChange={(event) => set('notes', event.target.value)}
         className="[&_textarea]:font-sans"
       />
+      <fieldset className="space-y-3">
+        <legend className="text-sm font-medium text-slate-800">Tax</legend>
+        <p className="text-sm text-slate-600">
+          Rent tax and VAT on commercial rent read these. Whether a rule applies is set in the
+          platform&rsquo;s legal rules, not here.
+        </p>
+        <CheckboxField
+          label="Lets property as a business"
+          checked={draft.lettingBusiness}
+          onChange={(event) => set('lettingBusiness', event.target.checked)}
+        />
+        <CheckboxField
+          label="Registered for VAT"
+          checked={draft.vatRegistered}
+          onChange={(event) => set('vatRegistered', event.target.checked)}
+        />
+        <TextField
+          label={initial?.tinMasked ? `TIN (on file: ${initial.tinMasked})` : 'TIN (optional)'}
+          hint={
+            initial?.tinMasked
+              ? 'Leave blank to keep the TIN on file. It is stored encrypted and shown masked.'
+              : 'An individual’s TIN is their Ghana Card number. Stored encrypted and shown masked.'
+          }
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={20}
+          value={draft.tin}
+          error={errors.tin}
+          disabled={draft.removeTin}
+          onChange={(event) => set('tin', event.target.value.toUpperCase())}
+        />
+        {initial?.tinMasked ? (
+          <CheckboxField
+            label="Remove the TIN on file"
+            checked={draft.removeTin}
+            onChange={(event) => set('removeTin', event.target.checked)}
+          />
+        ) : null}
+      </fieldset>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" pending={pending}>
           {submitText}

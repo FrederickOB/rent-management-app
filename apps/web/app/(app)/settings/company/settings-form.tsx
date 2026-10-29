@@ -6,10 +6,17 @@ import { useState, type FormEvent } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
-import { SelectField, TextField } from '@/components/ui/field';
+import { CheckboxField, SelectField, TextField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { formatIntegerList, parseInteger, parseIntegerList } from '@/lib/integers';
+import {
+  parseTenancySettings,
+  TENANCY_DEFAULTS,
+  tenancyValuesOf,
+  type TenancySettingsErrors,
+  type TenancySettingsValues,
+} from '@/lib/tenancy-settings';
 
 type Settings = CompanyProfile['settings'];
 type Policy = Settings['advanceRentPolicy'];
@@ -106,6 +113,11 @@ export function SettingsForm({
   const router = useRouter();
   const [values, setValues] = useState<Values>(() => toValues(company.settings));
   const [errors, setErrors] = useState<Errors>({});
+  // M3: leases and signing (decision 4; plan 4.8 and 4.11).
+  const [tenancy, setTenancy] = useState<TenancySettingsValues>(() =>
+    tenancyValuesOf(company.settings),
+  );
+  const [tenancyErrors, setTenancyErrors] = useState<TenancySettingsErrors>({});
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -114,18 +126,28 @@ export function SettingsForm({
     setValues((current) => ({ ...current, [key]: value }));
     setSaved(false);
   };
+  const setLease = <K extends keyof TenancySettingsValues>(
+    key: K,
+    value: TenancySettingsValues[K],
+  ) => {
+    setTenancy((current) => ({ ...current, [key]: value }));
+    setSaved(false);
+  };
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const { settings, errors: found } = parse(values);
+    const leases = parseTenancySettings(tenancy);
     setErrors(found);
+    setTenancyErrors(leases.errors);
     setProblem(null);
     setSaved(false);
-    if (Object.keys(found).length > 0) return;
+    if (Object.keys(found).length > 0 || Object.keys(leases.errors).length > 0) return;
     setPending(true);
     try {
-      const updated = await api().company.updateSettings(settings);
+      const updated = await api().company.updateSettings({ ...settings, ...leases.settings });
       setValues(toValues(updated.settings));
+      setTenancy(tenancyValuesOf(updated.settings));
       setSaved(true);
       router.refresh();
     } catch (failure) {
@@ -140,7 +162,7 @@ export function SettingsForm({
   return (
     <Card>
       <CardHeader
-        title="Reminders and approvals"
+        title="Reminders, approvals and leases"
         description="Product settings for this company. Each one starts with the platform's recommended default."
       />
       <CardBody>
@@ -148,7 +170,7 @@ export function SettingsForm({
           {problem ? <Alert tone="error">{problem}</Alert> : null}
           {saved ? <Alert tone="success">Settings saved.</Alert> : null}
           <fieldset disabled={!canEdit} className="space-y-4">
-            <legend className="sr-only">Reminders and approvals</legend>
+            <legend className="sr-only">Reminders, approvals and leases</legend>
             <TextField
               label="Rent reminders (days from the due date)"
               hint="When tenants are reminded about rent. Negative numbers are days before the due date, 0 is the due date and positive numbers are days after it. Default: -7, 0, 3, 7, 14."
@@ -169,6 +191,13 @@ export function SettingsForm({
               value={values.renewalReminderDays}
               error={errors.renewalReminderDays}
               onChange={(event) => set('renewalReminderDays', event.target.value)}
+            />
+            <TextField
+              label="Signing reminders (hours after the links go out)"
+              hint={`When someone who has not signed a lease yet is reminded, each time with a fresh link. Default: ${TENANCY_DEFAULTS.signingReminderHours}.`}
+              value={tenancy.signingReminderHours}
+              error={tenancyErrors.signingReminderHours}
+              onChange={(event) => setLease('signingReminderHours', event.target.value)}
             />
             <SelectField
               label="Advance rent over the limit"
@@ -198,6 +227,35 @@ export function SettingsForm({
                 onChange={(event) => set('approvalCoolingOffHours', event.target.value)}
               />
             </div>
+            <fieldset className="space-y-4 border-t border-slate-200 pt-4">
+              <legend className="pt-4 text-sm font-semibold text-slate-900">Leases</legend>
+              <CheckboxField
+                label="A witness signs every lease"
+                hint="New drafts start with this; each draft can change it. Default: on."
+                checked={tenancy.witnessRequired}
+                onChange={(event) => setLease('witnessRequired', event.target.checked)}
+              />
+              <CheckboxField
+                label="Track Rent Control registration for commercial leases too"
+                hint="Residential leases are always tracked. Default: off."
+                checked={tenancy.rentControlCommercial}
+                onChange={(event) => setLease('rentControlCommercial', event.target.checked)}
+              />
+              <TextField
+                label="Rent Control reminders (days before the deadline)"
+                hint={`Then weekly until the registration is recorded. The deadline itself comes from the legal rules. Default: ${TENANCY_DEFAULTS.rentControlReminderDaysBefore}.`}
+                value={tenancy.rentControlReminderDaysBefore}
+                error={tenancyErrors.rentControlReminderDaysBefore}
+                onChange={(event) => setLease('rentControlReminderDaysBefore', event.target.value)}
+              />
+              <TextField
+                label="Stamping reminders (days before the deadline)"
+                hint={`Then weekly until a stamped copy is recorded. The deadline itself comes from the legal rules. Default: ${TENANCY_DEFAULTS.stampingReminderDaysBefore}.`}
+                value={tenancy.stampingReminderDaysBefore}
+                error={tenancyErrors.stampingReminderDaysBefore}
+                onChange={(event) => setLease('stampingReminderDaysBefore', event.target.value)}
+              />
+            </fieldset>
           </fieldset>
           {canEdit ? (
             <Button type="submit" pending={pending}>

@@ -55,6 +55,16 @@ export const PAPER_UPLOAD: UploadRule = {
   types: PROPERTY_PAPER_TYPES,
   maxBytes: PROPERTY_PAPER_MAX_BYTES,
 };
+/**
+ * Lease papers (M3 decision 7, OQ-44, OQ-45): the signed paper scan, the stamped copy and the
+ * formal lease. The API’s upload contract accepts these types, up to 20 MB, and checks them again.
+ */
+export const LEASE_PAPER_UPLOAD: UploadRule = {
+  types: ['application/pdf', 'image/jpeg', 'image/png'],
+  maxBytes: 20_000_000,
+  noun: 'a PDF, JPEG or PNG file',
+};
+
 export const REGISTER_IMPORT_UPLOAD: UploadRule = {
   types: [XLSX_CONTENT_TYPE],
   maxBytes: REGISTER_IMPORT_MAX_BYTES,

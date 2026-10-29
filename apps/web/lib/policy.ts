@@ -28,7 +28,9 @@ export function actorOf(me: Me): Actor | null {
         membershipId: active.membershipId,
         role: role.data,
         nominatedApprover: active.nominatedApprover,
-        scope: {},
+        // The membership's owners and properties (AD-02), so the policy can refuse what the API
+        // refuses a scoped session, such as the audit log.
+        scope: active.scope ?? {},
         authMethod,
       };
     }
