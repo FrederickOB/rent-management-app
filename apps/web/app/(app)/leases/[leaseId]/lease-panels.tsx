@@ -11,6 +11,7 @@ import { api } from '@/lib/api';
 import { openFetchedLink } from '@/lib/browser-files';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
+import { COUNSEL_WARNING, otherWarnings, stillTracked } from '@/lib/lease-view';
 import { formatMinor } from '@/lib/tenancy-format';
 import { ProjectedSchedule } from '../projected-schedule';
 
@@ -75,9 +76,11 @@ export function LeaseSchedule({
       <CardHeader
         title="Rent schedule"
         description={
-          signed
-            ? 'Monthly periods from the first day of the lease. Invoices group them by the billing cycle.'
-            : 'Recorded when the lease is signed. Until then, this is what the terms would make.'
+          !signed
+            ? 'Recorded when the lease is signed. Until then, this is what the terms would make.'
+            : stillTracked(lease)
+              ? 'Monthly periods from the first day of the lease. Invoices group them by the billing cycle.'
+              : 'Monthly periods recorded when the lease was signed. The lease is no longer in force.'
         }
       />
       <CardBody>
@@ -134,8 +137,15 @@ export function LeaseSchedule({
 /**
  * The lease document as its PDF will read (TL-05), rendered by the API from the template and the
  * lease's data. It shows in a sandboxed frame: no scripts run in it and it cannot reach this page.
+ * On a draft, the counsel-review warning shows here, once, from the lease itself.
  */
-export function LeasePreview({ leaseId }: { readonly leaseId: string }) {
+export function LeasePreview({
+  leaseId,
+  counselWarning,
+}: {
+  readonly leaseId: string;
+  readonly counselWarning: boolean;
+}) {
   const [preview, setPreview] = useState<{ html: string; warnings: string[] } | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -164,8 +174,13 @@ export function LeasePreview({ leaseId }: { readonly leaseId: string }) {
         }
       />
       <CardBody>
+        {counselWarning ? (
+          <Alert tone="warning" title="Not reviewed by a lawyer">
+            {COUNSEL_WARNING}
+          </Alert>
+        ) : null}
         {problem ? <Alert tone="error">{problem}</Alert> : null}
-        {preview?.warnings.map((warning) => (
+        {otherWarnings(preview?.warnings ?? []).map((warning) => (
           <Alert key={warning} tone="warning">
             {warning}
           </Alert>

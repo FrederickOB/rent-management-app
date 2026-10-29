@@ -14,7 +14,15 @@ import { TextAreaField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { openFetchedLink } from '@/lib/browser-files';
 import { toProblem } from '@/lib/errors';
-import { formatDate } from '@/lib/format';
+import { formatTime } from '@/lib/format';
+import {
+  signerContact,
+  signerContactLine,
+  signerRecordsOf,
+  type SignerRecords,
+} from '@/lib/lease-form';
+import { allowed } from '@/lib/policy';
+import { useRequestGate } from '@/lib/request-gate';
 import {
   handoverProblem,
   isOpenRequest,
@@ -77,8 +85,40 @@ function ProblemAlert({
 }
 
 /**
- * The confirmation before a draft goes out for signing (TL-07; plan 4.8): who signs, and that the
- * terms freeze. What the lease itself shows is checked first; the API checks everything again.
+ * The records the signers are linked to, read when the confirmation opens so it shows where links
+ * and codes will actually go. Whatever cannot be read stays null, and the API checks it on send.
+ */
+function useSignerRecords(lease: LeaseDetailView): SignerRecords | null {
+  const { me } = useApp();
+  const listsStaff = allowed(me, 'membership.view');
+  const [records, setRecords] = useState<SignerRecords | null>(null);
+  useEffect(() => {
+    let current = true;
+    const tenant = api()
+      .tenants.get({ tenantId: lease.tenant.id })
+      .then((t) => (t.access === 'full' ? t : null))
+      .catch(() => null);
+    const staff = listsStaff
+      ? api()
+          .memberships.list()
+          .catch(() => null)
+      : Promise.resolve(null);
+    void Promise.all([tenant, staff]).then(([t, members]) => {
+      if (current) setRecords(signerRecordsOf(t, members));
+    });
+    return () => {
+      current = false;
+    };
+  }, [lease.tenant.id, listsStaff]);
+  return records;
+}
+
+/**
+ * The confirmation before a draft goes out for signing (TL-07; plan 4.8): who signs, where each
+ * one's link and codes will go, and that the terms freeze. A signer linked to a record (the
+ * tenant, a contact, a member of staff) is shown with the phone and email on that record, which
+ * the API uses. What the lease and those records show is checked first; the API checks it all
+ * again.
  */
 export function IssueForSigning({
   lease,
@@ -89,7 +129,8 @@ export function IssueForSigning({
   readonly onChanged: Changed;
   readonly onCancel: () => void;
 }) {
-  const blockers = issueBlockers(lease);
+  const records = useSignerRecords(lease);
+  const blockers = issueBlockers(lease, records ?? undefined);
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<SigningProblem | null>(null);
 
@@ -123,6 +164,7 @@ export function IssueForSigning({
       <ul
         className="divide-y divide-slate-200 rounded-md border border-slate-200 bg-white"
         aria-label="Who signs"
+        aria-busy={records === null || undefined}
       >
         {lease.parties.map((p) => (
           <li
@@ -137,8 +179,10 @@ export function IssueForSigning({
                 {p.required ? '' : ', optional'}
               </span>
             </span>
-            <span className="text-slate-600">
-              {[p.phone, p.email].filter(Boolean).join(' · ') || 'From their record'}
+            <span className="break-words text-slate-600" data-testid="issue-signer-contact">
+              {records === null
+                ? 'Checking the details on record…'
+                : signerContactLine(signerContact(p, records))}
             </span>
           </li>
         ))}
@@ -160,7 +204,11 @@ export function IssueForSigning({
       ) : null}
       {problem ? <ProblemAlert problem={problem} leaseId={lease.id} /> : null}
       <div className="flex flex-wrap gap-2">
-        <Button pending={pending} disabled={blockers.length > 0} onClick={() => void send()}>
+        <Button
+          pending={pending}
+          disabled={blockers.length > 0 || records === null}
+          onClick={() => void send()}
+        >
           Send for signing
         </Button>
         <Button variant="ghost" onClick={onCancel}>
@@ -210,10 +258,20 @@ function Fingerprint({
   );
 }
 
+/** The QR code of a link, or null when it cannot be drawn: the link is then copied instead. */
+async function qrOf(url: string): Promise<string | null> {
+  try {
+    return await toDataURL(url, { margin: 1, width: 240, errorCorrectionLevel: 'M' });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * A single-use link for one signer, handed over in person (decision 2): shown as a QR code and in
- * a field to copy. It replaces the signer's earlier link. It lives only in this panel's state and
- * is gone when the panel closes; it is never logged, stored or put in the address bar.
+ * a field to copy. It replaces the signer's earlier link, so once it is made it is always shown,
+ * even if its QR code cannot be drawn. It lives only in this panel's state and is gone when the
+ * panel closes; it is never logged, stored or put in the address bar.
  */
 function HandoverPanel({
   requestId,
@@ -228,7 +286,11 @@ function HandoverPanel({
 }) {
   const { timeZone } = useApp();
   const fieldId = useId();
-  const [link, setLink] = useState<{ url: string; expiresAt: string; qr: string } | null>(null);
+  const [link, setLink] = useState<{
+    url: string;
+    expiresAt: string;
+    qr: string | null;
+  } | null>(null);
   const [pending, setPending] = useState(false);
   const [copied, setCopied] = useState(false);
   const [problem, setProblem] = useState<SigningProblem | null>(null);
@@ -241,8 +303,8 @@ function HandoverPanel({
         signingRequestId: requestId,
         signerId: signer.id,
       });
-      const qr = await toDataURL(issued.url, { margin: 1, width: 240, errorCorrectionLevel: 'M' });
-      setLink({ url: issued.url, expiresAt: issued.expiresAt, qr });
+      // The signer's earlier link is already revoked: show this one whatever happens to the QR.
+      setLink({ url: issued.url, expiresAt: issued.expiresAt, qr: await qrOf(issued.url) });
       onIssued();
     } catch (failure) {
       setProblem(handoverProblem(toProblem(failure)));
@@ -276,17 +338,26 @@ function HandoverPanel({
       {link ? (
         <>
           <p className="text-slate-800">
-            Let {signer.name} scan the code with their phone, or copy the link and give it to them
-            yourself. It is for {signer.name} only and works until{' '}
-            {formatDate(link.expiresAt, timeZone)}. Any earlier link to them no longer works.
+            {link.qr
+              ? `Let ${signer.name} scan the code with their phone, or copy the link and give it to them yourself.`
+              : `Copy the link and give it to ${signer.name} yourself.`}{' '}
+            It is for {signer.name} only and works until{' '}
+            <span data-testid="handover-expiry">{formatTime(link.expiresAt, timeZone)}</span>. Any
+            earlier link to them no longer works.
           </p>
-          <img
-            src={link.qr}
-            alt={`QR code of the signing link for ${signer.name}`}
-            width={240}
-            height={240}
-            className="rounded-md border border-slate-200 bg-white"
-          />
+          {link.qr ? (
+            <img
+              src={link.qr}
+              alt={`QR code of the signing link for ${signer.name}`}
+              width={240}
+              height={240}
+              className="rounded-md border border-slate-200 bg-white"
+            />
+          ) : (
+            <Alert tone="warning">
+              The QR code could not be drawn. The link below works: copy it for {signer.name}.
+            </Alert>
+          )}
           <div className="space-y-1">
             <label htmlFor={fieldId} className="block text-sm font-medium text-slate-800">
               Signing link for {signer.name}
@@ -413,6 +484,8 @@ export function SigningPanel({
   const [recalling, setRecalling] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const waiting = lease.status === 'pending_signatures';
+  // Polls, the Refresh button and a hand-over can overlap: only the newest reply is shown.
+  const gate = useRequestGate();
   // The latest callback, so a new one on each render of the page does not restart the polling.
   const changed = useRef(onChanged);
   useEffect(() => {
@@ -420,8 +493,10 @@ export function SigningPanel({
   });
 
   const load = useCallback(async () => {
+    const current = gate.begin();
     try {
       const next = await api().leases.signing({ leaseId: lease.id });
+      if (!current()) return;
       setProgress(next);
       setProblem(null);
       setNow(new Date());
@@ -429,24 +504,41 @@ export function SigningPanel({
       // it to draft); once it has moved, the page shows it.
       if (waiting && next && !isOpenRequest(next.status)) {
         const view = await api().leases.get({ leaseId: lease.id });
-        if (view.access === 'full' && view.status !== lease.status)
+        if (current() && view.access === 'full' && view.status !== lease.status)
           changed.current(view, DONE_NOTES[next.status] ?? REQUEST_STATUS_LABELS[next.status]);
       }
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      if (current()) setProblem(toProblem(failure).message);
     }
-  }, [lease.id, lease.status, waiting]);
+  }, [gate, lease.id, lease.status, waiting]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return gate.cancel;
+  }, [gate, load]);
   const live = waiting || (progress ? isOpenRequest(progress.status) : false);
   useInterval(() => void load(), live ? SIGNING_POLL_MS : null);
   useOnVisible(() => {
     if (live) void load();
   });
 
-  if (progress === undefined) return problem ? <Alert tone="error">{problem}</Alert> : null;
+  if (progress === undefined)
+    return problem ? (
+      <Card data-testid="signing">
+        <CardHeader
+          title="Signing"
+          description="The signing progress could not be loaded. Refresh to try again."
+          actions={
+            <Button size="sm" variant="secondary" onClick={() => void load()}>
+              Refresh
+            </Button>
+          }
+        />
+        <CardBody>
+          <Alert tone="error">{problem}</Alert>
+        </CardBody>
+      </Card>
+    ) : null;
   if (progress === null) return null;
 
   const open = isOpenRequest(progress.status) && waiting;

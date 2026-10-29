@@ -1,3 +1,4 @@
+import { leasesContract } from '@rent/contracts';
 import {
   PROPERTY_PAPER_MAX_BYTES,
   PROPERTY_PAPER_TYPES,
@@ -57,13 +58,19 @@ export const PAPER_UPLOAD: UploadRule = {
 };
 /**
  * Lease papers (M3 decision 7, OQ-44, OQ-45): the signed paper scan, the stamped copy and the
- * formal lease. The API’s upload contract accepts these types, up to 20 MB, and checks them again.
+ * formal lease. The types and the size limit are read from the API's upload contract
+ * (`POST /lease-uploads` in packages/contracts), which the API checks again; no other shared
+ * constant holds them.
  */
-export const LEASE_PAPER_UPLOAD: UploadRule = {
-  types: ['application/pdf', 'image/jpeg', 'image/png'],
-  maxBytes: 20_000_000,
-  noun: 'a PDF, JPEG or PNG file',
-};
+function leasePaperRule(): UploadRule {
+  const input = leasesContract.createUpload['~orpc'].inputSchema;
+  const maxBytes = input?.shape.sizeBytes.maxValue;
+  if (!input || !maxBytes || !Number.isFinite(maxBytes))
+    throw new Error('The lease-upload contract has no file types or size limit');
+  return { types: input.shape.contentType.options, maxBytes };
+}
+
+export const LEASE_PAPER_UPLOAD: UploadRule = leasePaperRule();
 
 export const REGISTER_IMPORT_UPLOAD: UploadRule = {
   types: [XLSX_CONTENT_TYPE],

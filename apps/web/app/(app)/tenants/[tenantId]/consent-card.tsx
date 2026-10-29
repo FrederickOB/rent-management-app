@@ -12,11 +12,15 @@ import { toProblem } from '@/lib/errors';
 import { CONSENT_VERSION, consentWording, type ConsentDraft } from '@/lib/tenant-form';
 
 const CHANNEL_NAMES: Record<MessageChannel, string> = { sms: 'SMS', email: 'Email' };
+const BY_CHANNEL: Record<MessageChannel, string> = { sms: 'by SMS', email: 'by email' };
+
+type Confirming = { readonly channel: MessageChannel; readonly action: 'grant' | 'withdraw' };
 
 /**
  * Consent per channel (CM-09; decision 2). Each grant or withdrawal is a new record with the
- * consent text's version; nothing is overwritten. Without consent on a channel, the business
- * sends nothing on it; one-time codes the person asks for are exempt.
+ * consent text's version; nothing is overwritten, so both are confirmed before they are recorded.
+ * Without consent on a channel, the business sends nothing on it; one-time codes the person asks
+ * for are exempt.
  */
 export function ConsentRows({
   consent,
@@ -32,7 +36,7 @@ export function ConsentRows({
   readonly who: string;
   readonly onRecord: (channel: MessageChannel, action: 'grant' | 'withdraw') => Promise<void>;
 }) {
-  const [confirming, setConfirming] = useState<MessageChannel | null>(null);
+  const [confirming, setConfirming] = useState<Confirming | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,14 +70,13 @@ export function ConsentRows({
                     No {channel === 'sms' ? 'phone' : 'email'} on file
                   </span>
                 ) : null}
-                {canManage && confirming !== channel ? (
+                {canManage && confirming?.channel !== channel ? (
                   granted ? (
                     <Button
                       size="sm"
                       variant="ghost"
-                      pending={pending}
                       aria-label={`Record that ${who} withdrew ${CHANNEL_NAMES[channel]} consent`}
-                      onClick={() => void record(channel, 'withdraw')}
+                      onClick={() => setConfirming({ channel, action: 'withdraw' })}
                     >
                       Record a withdrawal
                     </Button>
@@ -82,14 +85,40 @@ export function ConsentRows({
                       size="sm"
                       variant="secondary"
                       aria-label={`Record ${CHANNEL_NAMES[channel]} consent for ${who}`}
-                      onClick={() => setConfirming(channel)}
+                      onClick={() => setConfirming({ channel, action: 'grant' })}
                     >
                       Record consent
                     </Button>
                   ) : null
                 ) : null}
               </div>
-              {confirming === channel ? (
+              {confirming?.channel === channel && confirming.action === 'withdraw' ? (
+                <div
+                  role="group"
+                  aria-label={`Confirm ${CHANNEL_NAMES[channel]} withdrawal`}
+                  className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-red-900"
+                >
+                  <p>
+                    Record that {who} no longer agrees to messages {BY_CHANNEL[channel]}? The
+                    withdrawal is kept for good: nothing more is sent {BY_CHANNEL[channel]} until
+                    they agree again, and that is recorded as a new consent.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      pending={pending}
+                      onClick={() => void record(channel, 'withdraw')}
+                    >
+                      They withdrew it
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {confirming?.channel === channel && confirming.action === 'grant' ? (
                 <div
                   role="group"
                   aria-label={`Confirm ${CHANNEL_NAMES[channel]} consent`}

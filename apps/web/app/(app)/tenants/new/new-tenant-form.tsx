@@ -17,15 +17,13 @@ import {
   tenantErrors,
   type TenantDraft,
 } from '@/lib/tenant-form';
-import { ConsentFields, ContactFields, TenantDetailsFields } from '../tenant-fields';
-
-type Duplicate = Awaited<ReturnType<ReturnType<typeof api>['tenants']['duplicates']>>[number];
-
-const MATCHED_ON: Record<Duplicate['matchedOn'], string> = {
-  phone: 'the same phone number',
-  id_number: 'the same ID number',
-  tin: 'the same TIN',
-};
+import {
+  ConsentFields,
+  ContactFields,
+  DuplicateTenants,
+  TenantDetailsFields,
+  type DuplicateTenant,
+} from '../tenant-fields';
 
 /**
  * The new-tenant form (TL-01 to TL-04; decision 2). Before saving it checks for tenants with the
@@ -37,7 +35,7 @@ export function NewTenantForm() {
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [duplicates, setDuplicates] = useState<readonly Duplicate[] | null>(null);
+  const [duplicates, setDuplicates] = useState<readonly DuplicateTenant[] | null>(null);
   const errors = tried ? tenantErrors(draft) : {};
   const kinds = CONTACT_KINDS_FOR[draft.kind];
 
@@ -184,30 +182,23 @@ export function NewTenantForm() {
       </Card>
 
       {duplicates?.length ? (
-        <Alert tone="warning" title="This may be a tenant you already have">
-          <ul className="list-disc space-y-1 pl-5">
-            {duplicates.map((d) => (
-              <li key={`${d.tenantId}-${d.matchedOn}`}>
-                <Link
-                  href={`/tenants/${d.tenantId}`}
-                  className="font-medium underline underline-offset-2"
-                >
-                  {d.displayName}
-                </Link>{' '}
-                has {MATCHED_ON[d.matchedOn]}.
-              </li>
-            ))}
-          </ul>
+        <DuplicateTenants duplicates={duplicates}>
           <div className="mt-3 flex flex-wrap gap-2">
             <Button variant="secondary" pending={pending} onClick={() => void save(true)}>
               Add as a new tenant anyway
             </Button>
           </div>
-        </Alert>
+        </DuplicateTenants>
       ) : null}
 
       {tried && hasErrors(errors) ? (
         <Alert tone="error">Some details need attention. They are marked above.</Alert>
+      ) : null}
+      {/* The refusal again by the button, so it is seen on a phone without scrolling back up. */}
+      {problem ? (
+        <Alert tone="error" live={false}>
+          {problem}
+        </Alert>
       ) : null}
       <div className="flex flex-wrap gap-2">
         <Button type="submit" pending={pending}>

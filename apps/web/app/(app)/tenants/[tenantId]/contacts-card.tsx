@@ -12,6 +12,7 @@ import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { CONTACT_KIND_LABELS, CONTACT_KINDS_FOR } from '@/lib/tenancy-format';
 import {
+  consentChangeNotes,
   contactCreateInput,
   contactDraftOf,
   contactPatch,
@@ -19,7 +20,7 @@ import {
   emptyContact,
   type ContactDraft,
 } from '@/lib/tenant-form';
-import { ContactFields } from '../tenant-fields';
+import { ConsentChangeNotes, ContactFields } from '../tenant-fields';
 import { ConsentRows } from './consent-card';
 
 /**
@@ -224,6 +225,7 @@ function EditContact({
   const [error, setError] = useState<string | null>(null);
   // Consent is recorded on its own below the contact, so it is not checked here.
   const problems = contactProblems({ ...draft, consent: { sms: false, email: false } });
+  const consentNotes = consentChangeNotes(contact, draft, contact.name);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -260,6 +262,7 @@ function EditContact({
         onChange={setDraft}
         withConsent={false}
       />
+      <ConsentChangeNotes notes={consentNotes} />
       <div className="flex flex-wrap gap-2">
         <Button type="submit" pending={pending}>
           Save contact

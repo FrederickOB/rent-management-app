@@ -51,6 +51,9 @@ interface Values {
 
 type Errors = Partial<Record<keyof Values, string>>;
 
+/** A default from the domain's settings (TENANCY_DEFAULTS), in words. */
+const onOff = (on: boolean): string => (on ? 'on' : 'off');
+
 const toValues = (s: Settings): Values => ({
   rentReminderOffsetsDays: formatIntegerList(s.rentReminderOffsetsDays),
   noticeReminderOffsetsHours: formatIntegerList(s.noticeReminderOffsetsHours),
@@ -231,13 +234,13 @@ export function SettingsForm({
               <legend className="pt-4 text-sm font-semibold text-slate-900">Leases</legend>
               <CheckboxField
                 label="A witness signs every lease"
-                hint="New drafts start with this; each draft can change it. Default: on."
+                hint={`New drafts start with this; each draft can change it. Default: ${onOff(TENANCY_DEFAULTS.witnessRequired)}.`}
                 checked={tenancy.witnessRequired}
                 onChange={(event) => setLease('witnessRequired', event.target.checked)}
               />
               <CheckboxField
                 label="Track Rent Control registration for commercial leases too"
-                hint="Residential leases are always tracked. Default: off."
+                hint={`Residential leases are always tracked. Default: ${onOff(TENANCY_DEFAULTS.rentControlCommercial)}.`}
                 checked={tenancy.rentControlCommercial}
                 onChange={(event) => setLease('rentControlCommercial', event.target.checked)}
               />

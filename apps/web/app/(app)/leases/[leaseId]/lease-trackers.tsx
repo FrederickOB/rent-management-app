@@ -3,7 +3,7 @@
 import type { LeaseDetailView } from '@rent/contracts';
 import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useApp } from '@/components/app-context';
-import { FileField } from '@/components/file-field';
+import { LeasePaperField } from '@/components/lease-paper-field';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,9 +12,10 @@ import { TextField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
-import { uploadLeasePaper } from '@/lib/lease-upload';
+import { leasePaperProblems, uploadLeasePaper } from '@/lib/lease-upload';
+import { stillTracked } from '@/lib/lease-view';
 import { daysLeftLabel, ruleNote } from '@/lib/tenancy-format';
-import { fileProblem, LEASE_PAPER_UPLOAD, StorageUploadError } from '@/lib/upload';
+import { StorageUploadError } from '@/lib/upload';
 import { parseBusinessDate, daysBetween } from '@rent/domain/dates';
 
 type Trackers = LeaseDetailView['trackers'];
@@ -99,14 +100,18 @@ export function LeaseTrackers({
   const { timeZone } = useApp();
   const today = todayIn(timeZone);
   const { rentControl, stamping, formalLease } = lease.trackers;
-  const live = !['ended', 'terminated', 'cancelled'].includes(lease.status);
+  const live = stillTracked(lease);
   const manage = canManage && live;
 
   return (
     <Card data-testid="lease-trackers">
       <CardHeader
         title="Registration and stamping"
-        description="Reminders continue until each one is recorded. None of this stops rent being collected."
+        description={
+          live
+            ? 'Reminders continue until each one is recorded. None of this stops rent being collected.'
+            : 'This lease is no longer in force, so no more reminders go out. What was recorded stays.'
+        }
       />
       <CardBody>
         <Tracker
@@ -277,22 +282,20 @@ function StampingForm({
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [date, setDate] = useState(today);
+  const [noIdCopy, setNoIdCopy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [tickError, setTickError] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     const file = input.current?.files?.[0];
-    if (!file) {
-      setError('Choose the stamped copy.');
-      return;
-    }
-    const problem = fileProblem(file, LEASE_PAPER_UPLOAD);
-    if (problem) {
-      setError(problem);
-      return;
-    }
+    const paper = leasePaperProblems(file, { noIdCopy, missing: 'Choose the stamped copy.' });
+    setFileError(paper.file);
+    setTickError(paper.tick);
+    if (!file || paper.file || paper.tick) return;
     try {
       setStatus('Uploading…');
       const uploadId = await uploadLeasePaper(file, lease.id);
@@ -319,11 +322,18 @@ function StampingForm({
           value={date}
           onChange={(event) => setDate(event.target.value)}
         />
-        <FileField
+        <LeasePaperField
           ref={input}
           label="Stamped copy"
-          rule={LEASE_PAPER_UPLOAD}
           disabled={status !== null}
+          error={fileError}
+          required
+          noIdCopy={noIdCopy}
+          onNoIdCopy={(next) => {
+            setNoIdCopy(next);
+            setTickError(null);
+          }}
+          tickError={tickError}
         />
       </div>
       <Button type="submit" variant="secondary" pending={status !== null}>
@@ -347,20 +357,21 @@ function FormalLeaseForm({
   const [practitioner, setPractitioner] = useState(formal.practitioner ?? '');
   const [registeredOn, setRegisteredOn] = useState(formal.registeredOn ?? '');
   const [number, setNumber] = useState(formal.registrationNumber ?? '');
+  const [noIdCopy, setNoIdCopy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [tickError, setTickError] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     const file = input.current?.files?.[0];
-    if (file) {
-      const problem = fileProblem(file, LEASE_PAPER_UPLOAD);
-      if (problem) {
-        setError(problem);
-        return;
-      }
-    }
+    // The wet-signed copy is optional; when one is chosen, it is checked like any lease paper.
+    const paper = leasePaperProblems(file, { noIdCopy });
+    setFileError(paper.file);
+    setTickError(paper.tick);
+    if (paper.file || paper.tick) return;
     try {
       setStatus(file ? 'Uploading…' : 'Saving…');
       const wetSignedUploadId = file ? await uploadLeasePaper(file, lease.id) : undefined;
@@ -373,6 +384,9 @@ function FormalLeaseForm({
         registrationNumber: number.trim() || null,
       });
       setStatus(null);
+      // The copy is recorded: clear the picker, so saving again does not send it a second time.
+      if (input.current) input.current.value = '';
+      setNoIdCopy(false);
       onChanged(next, 'Saved the formal lease details.');
     } catch (failure) {
       setStatus(null);
@@ -393,11 +407,17 @@ function FormalLeaseForm({
           value={practitioner}
           onChange={(event) => setPractitioner(event.target.value)}
         />
-        <FileField
+        <LeasePaperField
           ref={input}
           label="Wet-signed copy (optional)"
-          rule={LEASE_PAPER_UPLOAD}
           disabled={status !== null}
+          error={fileError}
+          noIdCopy={noIdCopy}
+          onNoIdCopy={(next) => {
+            setNoIdCopy(next);
+            setTickError(null);
+          }}
+          tickError={tickError}
         />
         <TextField
           label="Registered with the Lands Commission on (optional)"

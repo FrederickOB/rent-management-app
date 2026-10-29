@@ -4,6 +4,7 @@ import type { LeaseDetailView } from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
 import Link from 'next/link';
 import { useCallback, useState } from 'react';
+import { AdvanceFlagAlert } from '@/components/advance-flag';
 import { useApp } from '@/components/app-context';
 import { PageHeader } from '@/components/page-header';
 import { LeaseStatusBadge, PaperBadge } from '@/components/tenancy-badges';
@@ -12,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { formatDate, formatTime } from '@/lib/format';
+import { COUNSEL_WARNING, wasSigned } from '@/lib/lease-view';
 import {
   BREAK_PARTY_LABELS,
   cycleLabel,
@@ -19,7 +21,6 @@ import {
   signerRoleLabel,
   termLabel,
 } from '@/lib/tenancy-format';
-import { COUNSEL_WARNING } from '../lease-builder';
 import { LeaseActions } from './lease-actions';
 import { LeaseDocuments, LeasePreview, LeaseSchedule } from './lease-panels';
 import { SigningPanel } from './lease-signing';
@@ -42,16 +43,6 @@ const SAVED_NOTES: Record<string, string> = {
     'This is the renewal: a draft that starts the day after the current lease ends, at the last rent. Set the new terms, then it is issued for the tenant to sign.',
   paper: 'Recorded the lease signed on paper.',
 };
-
-/** Leases that have been signed, on paper or electronically: their trackers and schedule exist. */
-const SIGNED_STATES: readonly LeaseDetailView['status'][] = [
-  'signed',
-  'active',
-  'ending',
-  'holding_over',
-  'ended',
-  'terminated',
-];
 
 function Breadcrumb({ code }: { readonly code: string }) {
   return (
@@ -105,7 +96,8 @@ export function LeaseDetail({
   const [lease, setLease] = useState(initial);
   const [notice, setNotice] = useState<string | null>(saved ? (SAVED_NOTES[saved] ?? null) : null);
   const t = lease.terms;
-  const signed = SIGNED_STATES.includes(lease.status);
+  // Signed on paper or electronically, even if cancelled since: its trackers and schedule exist.
+  const signed = wasSigned(lease);
   const draft = lease.status === 'draft';
   const life = lease.lifecycle;
 
@@ -130,19 +122,9 @@ export function LeaseDetail({
       </div>
 
       {notice ? <Alert tone="success">{notice}</Alert> : null}
-      {lease.advanceFlag ? (
-        <Alert tone="warning" title="Advance rent over the limit">
-          These terms ask for {lease.advanceFlag.monthsDemanded} months&rsquo; rent in advance; the
-          limit for a lease of this length is {lease.advanceFlag.limitMonths} months (Act 220
-          s.25(5)).{' '}
-          {lease.advanceFlag.rule?.warning ||
-          lease.advanceFlag.rule?.verificationStatus !== 'verified'
-            ? 'This rule is not yet verified by counsel.'
-            : ''}{' '}
-          Your company records it and flags it here.
-        </Alert>
-      ) : null}
-      {lease.counselReviewWarning ? (
+      {lease.advanceFlag ? <AdvanceFlagAlert flag={lease.advanceFlag} /> : null}
+      {/* A draft shows the warning once, with its document preview below. */}
+      {lease.counselReviewWarning && !draft ? (
         <Alert tone="warning" title="Not reviewed by a lawyer">
           {COUNSEL_WARNING}
         </Alert>
@@ -259,7 +241,9 @@ export function LeaseDetail({
       {lease.template ? (
         <SigningPanel lease={lease} canManage={can.manage} onChanged={changed} />
       ) : null}
-      {draft ? <LeasePreview leaseId={lease.id} /> : null}
+      {draft ? (
+        <LeasePreview leaseId={lease.id} counselWarning={lease.counselReviewWarning} />
+      ) : null}
       {signed ? <LeaseDocuments lease={lease} /> : null}
       {signed ? <LeaseTrackers lease={lease} canManage={can.manage} onChanged={changed} /> : null}
 

@@ -2,7 +2,15 @@ import type { LeaseDetailView, SigningProgress } from '@rent/contracts';
 import { SIGNER_ROLE_LABELS } from '@rent/domain/esign';
 import type { Problem } from './errors';
 import { formatDate, formatTime } from './format';
-import { signsAs } from './lease-form';
+import {
+  ONE_TENANT_PROBLEM,
+  partyLink,
+  signerContact,
+  signsAs,
+  STAFF_PART_PROBLEM,
+  staffMaySignAs,
+  type SignerRecords,
+} from './lease-form';
 import { hasCode } from './register-format';
 
 // The signing screens in the web app (TL-07; plan 4.8 and 4.16): sending a draft for signature,
@@ -30,11 +38,12 @@ export const isOpenRequest = (status: RequestStatus): boolean =>
 // Sending for signature ---------------------------------------------------------------------------
 
 /**
- * What would stop this draft being sent, as far as the lease itself shows (the API checks it all
- * again when it is sent). Only the API knows a tenant's or contact's phone on record, so a signer
- * linked to a record is never flagged here.
+ * What would stop this draft being sent, as far as the lease and the records this screen could
+ * read show (the API checks it all again when it is sent). A signer linked to a record takes the
+ * phone and email on that record, so they are checked there when `records` has it; without it,
+ * only the API knows them, and such a signer is not flagged.
  */
-export function issueBlockers(lease: LeaseDetailView): string[] {
+export function issueBlockers(lease: LeaseDetailView, records?: SignerRecords): string[] {
   const problems: string[] = [];
   const parties = lease.parties;
   if (!lease.template)
@@ -48,11 +57,35 @@ export function issueBlockers(lease: LeaseDetailView): string[] {
     problems.push(
       'Add the witness who will sign, or untick “A witness signs this lease” in the draft.',
     );
+  // Only one signer signs as the tenant from the tenant's record; anyone else who lives there
+  // signs from their own contact record.
+  if (parties.filter((p) => partyLink(p) === 'tenant_record').length > 1)
+    problems.push(ONE_TENANT_PROBLEM);
   for (const party of parties) {
-    const onRecord = party.tenantContactId || party.staffPersonId || signsAs([party], 'tenant');
-    if (!onRecord && !party.phone && !party.email)
+    const part = SIGNER_ROLE_LABELS[party.role].toLowerCase();
+    if (party.staffPersonId && !staffMaySignAs(party.role))
+      problems.push(`${party.name} (${part}): ${STAFF_PART_PROBLEM}`);
+    const link = partyLink(party);
+    if (!link) {
+      if (!party.phone && !party.email)
+        problems.push(
+          `Add a phone or email for ${party.name} (${part}), so they can get their link and code.`,
+        );
+      continue;
+    }
+    if (!records) continue;
+    const contact = signerContact(party, records);
+    if (contact.from === 'missing')
       problems.push(
-        `Add a phone or email for ${party.name} (${SIGNER_ROLE_LABELS[party.role].toLowerCase()}), so they can get their link and code.`,
+        contact.link === 'contact'
+          ? `${party.name} (${part}) is no longer one of the tenant’s contacts. Remove them from the signers in the draft.`
+          : `${party.name} (${part}) is no longer an active member of your company. Remove them from the signers in the draft.`,
+      );
+    else if (contact.from === 'record' && !contact.phone && !contact.email)
+      problems.push(
+        link === 'tenant_record'
+          ? `Add a phone or email to the tenant’s record, so ${party.name} can get their link and code.`
+          : `Add a phone or email to ${party.name}’s record (${part}), so they can get their link and code.`,
       );
   }
   return problems;
@@ -98,12 +131,14 @@ const ISSUE_PROBLEMS: Readonly<Record<string, SigningProblem>> = {
     message: 'This lease was recorded from paper, so it has no document to send for signing.',
     fix: null,
   },
+  tenant_signer_once: { message: ONE_TENANT_PROBLEM, fix: 'edit_draft' },
 };
 
 /** Codes whose own message names the signer, so it is kept, with what to do about it. */
 const NAMED_PROBLEMS: Readonly<Record<string, string>> = {
   signer_contact: 'Add their phone or email in the draft, then send it again.',
   party_contact: 'Remove them from the signers in the draft, or add them as a contact again.',
+  party_staff: 'Change who signs in the draft, then send it again.',
 };
 
 /** A refusal of "Send for signing" in plain words, with what to fix. */

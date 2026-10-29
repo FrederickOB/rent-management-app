@@ -1,10 +1,15 @@
 import { expect, test, type Download, type Page } from '@playwright/test';
+import { DEV_LINKS_API_KEY, LINKS_API_KEY_HEADER } from '@rent/contracts';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import {
   codeEmailedTo,
   codeTextedTo,
+  handoverPath,
+  issuedLease,
   MANAGER,
+  managerApi,
+  newProperty,
   pathOf,
   waitForSms,
 } from '../../links/e2e/signing-support';
@@ -24,11 +29,13 @@ interface Draft {
 /**
  * A tenant who agreed to SMS, optionally with a guarantor who did too, and a draft lease for them
  * on a new unit, made through the API as the signed-in manager. The lease starts in two months.
+ * `witnessRequired` sets the witness rule on the draft itself, so a test never depends on the
+ * company's default, which the settings spec changes while it runs.
  */
 async function draftLease(
   page: Page,
   tag: string,
-  options: { readonly guarantor: boolean },
+  options: { readonly guarantor: boolean; readonly witnessRequired?: boolean },
 ): Promise<Draft> {
   const { units } = await newPropertyWithUnits(page, 1);
   const tenant = { name: `Abla Signer ${tag} (e2e)`, phone: freshPhone() };
@@ -65,6 +72,9 @@ async function draftLease(
       monthlyRentMinor: 120_000,
       cycle: 'monthly',
       noticeDays: 30,
+      ...(options.witnessRequired === undefined
+        ? {}
+        : { witnessRequired: options.witnessRequired }),
     },
   });
   expect(lease.status(), await lease.text()).toBe(200);
@@ -122,9 +132,9 @@ test.describe('TL-07 issuing and signing', () => {
     const tag = unique();
     const witness = { name: `Esi Witness ${tag} (e2e)`, phone: freshPhone() };
     await signIn(page, PEOPLE.managerOne.email);
-    const lease = await draftLease(page, tag, { guarantor: true });
+    const lease = await draftLease(page, tag, { guarantor: true, witnessRequired: true });
 
-    // The company asks for a witness on every lease: the draft cannot go without one.
+    // This draft asks for a witness: it cannot go without one.
     await page.goto(`/leases/${lease.leaseId}`);
     await ready(page, 'Send for signing');
     await page.getByRole('button', { name: 'Send for signing' }).click();
@@ -293,6 +303,55 @@ test.describe('TL-07 issuing and signing', () => {
       await expect(links.locator('form')).toHaveCount(0);
     } finally {
       await signer.close();
+    }
+  });
+
+  test('a signer declines: the lease page follows, shows the decline with its reason, and the lease is a draft again', async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const tag = unique();
+    const tenantName = `Kojo Decliner ${tag} (e2e)`;
+    const reason = `The rent is higher than we agreed ${tag}`;
+    // Made through the API as the links e2e does: the tenant (by SMS), the manager for the
+    // landlord and a witness, issued and opened by the worker.
+    const api = await managerApi();
+    try {
+      const [unit] = await newProperty(api, 1);
+      const lease = await issuedLease(api, unit!.id, tenantName);
+      await signIn(page, PEOPLE.managerOne.email);
+      await page.goto(`/leases/${lease.leaseId}`);
+      const signing = page.getByTestId('signing');
+      await expect(signing.getByTestId('signing-status')).toHaveText('Out for signature');
+
+      // The tenant declines with a reason, through the links API as apps/links calls it.
+      const token = (await handoverPath(api, lease, 'tenant')).slice('/l/'.length);
+      const declined = await api.post('/links/decline', {
+        headers: { [LINKS_API_KEY_HEADER]: DEV_LINKS_API_KEY },
+        data: { token, client: { ip: '127.0.0.1', userAgent: 'web e2e (decline)' }, reason },
+      });
+      expect(declined.status(), await declined.text()).toBe(200);
+
+      // The page checks again on its own and shows the lease back to draft.
+      await expect(page.getByTestId('lease-status').first()).toHaveText('Draft', {
+        timeout: 90_000,
+      });
+      await expect(page.getByText('A signer declined. The lease is back to draft.')).toBeVisible();
+      await expect(signing).toContainText('Last signing request');
+      await expect(signing.getByTestId('signing-status')).toHaveText('Declined');
+      await expect(signing).toContainText(reason);
+      const tenantRow = signing.getByTestId('signer').filter({ hasText: tenantName });
+      await expect(tenantRow.getByTestId('signer-state')).toHaveText('Declined');
+      await expect(tenantRow).toContainText(reason);
+      // The others did not sign, and the closed request offers no links.
+      await expect(
+        signing.getByTestId('signer').filter({ hasText: MANAGER.name }).getByTestId('signer-state'),
+      ).toHaveText('Did not sign');
+      await expect(signing.getByRole('button', { name: /^Hand over/ })).toHaveCount(0);
+      await expect(signing.getByRole('button', { name: 'Recall the lease' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Send for signing' })).toBeVisible();
+    } finally {
+      await api.dispose();
     }
   });
 });

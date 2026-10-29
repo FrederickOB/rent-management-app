@@ -75,6 +75,10 @@ test.describe('TL-01, TL-03 and CM-09 tenants with consent per channel', () => {
     await consent
       .getByRole('button', { name: 'Record that the tenant withdrew SMS consent' })
       .click();
+    // A withdrawal is kept for good, so it is confirmed first, as a grant is.
+    const withdrawal = consent.getByRole('group', { name: 'Confirm SMS withdrawal' });
+    await expect(withdrawal).toContainText('kept for good');
+    await withdrawal.getByRole('button', { name: 'They withdrew it' }).click();
     await expect(consent.getByTestId('consent-sms')).toContainText('Not agreed');
 
     // Every grant and withdrawal is its own record, on the timeline.
@@ -176,5 +180,27 @@ test.describe('TL-02 ID numbers', () => {
     } finally {
       await books.close();
     }
+
+    // A revealed number belongs to the number it was asked for: opening the edit form hides it,
+    // and the corrected number on file stays masked.
+    await identity.getByRole('button', { name: 'Show the ID number' }).click();
+    const again = identity.getByRole('form', { name: 'Show the ID number' });
+    await again.getByLabel('Reason').fill(`Checking the number before correcting it ${tag}`);
+    await again.getByRole('button', { name: 'Show the number' }).click();
+    await expect(identity.getByTestId('revealed-number')).toContainText(number);
+    await page.getByRole('button', { name: 'Edit details' }).click();
+    await expect(identity.getByTestId('revealed-number')).toHaveCount(0);
+    await expect(page.getByText(number)).toHaveCount(0);
+    const corrected = ghanaCardNumber();
+    const edit = page.getByRole('form', { name: 'Edit details' });
+    await edit.getByLabel(/^Ghana Card number/).fill(corrected);
+    await edit.getByRole('button', { name: 'Save details' }).click();
+    await expect(page.getByText(`Saved ${name}.`)).toBeVisible();
+    await expect(identity.getByTestId('id-masked')).toHaveText(
+      `GHA-*******${corrected.slice(11, 13)}-${corrected.slice(-1)}`,
+    );
+    await expect(identity.getByTestId('revealed-number')).toHaveCount(0);
+    await expect(page.getByText(number)).toHaveCount(0);
+    await expect(page.getByText(corrected)).toHaveCount(0);
   });
 });

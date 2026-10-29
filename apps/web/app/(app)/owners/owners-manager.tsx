@@ -120,7 +120,9 @@ export function OwnersManager({
             <ul className="divide-y divide-slate-100">
               {shown.map((owner) => (
                 <OwnerItem
-                  key={owner.id}
+                  // A revealed TIN belongs to the TIN it was asked for: a new TIN on file starts
+                  // the row afresh, hiding it (M3 plan 4.13).
+                  key={`${owner.id}:${owner.tinMasked ?? ''}`}
                   owner={owner}
                   canManage={canManage}
                   linkedUsers={linkedUsers ? (linkedUsers[owner.id] ?? []) : null}
@@ -268,6 +270,8 @@ function OwnerItem({
                 aria-label={`Edit ${owner.displayName}`}
                 onClick={() => {
                   setError(null);
+                  // The TIN may be changed in the form, so a revealed one is hidden first.
+                  setTin(null);
                   setMode('edit');
                 }}
               >

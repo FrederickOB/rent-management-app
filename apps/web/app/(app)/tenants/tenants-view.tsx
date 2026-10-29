@@ -10,6 +10,7 @@ import { CheckboxField, SelectField, TextField } from '@/components/ui/field';
 import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { useRequestGate } from '@/lib/request-gate';
 import { ID_STATUS_LABELS, TENANT_KIND_LABELS, type IdStatus } from '@/lib/tenancy-format';
 import { consentSummary } from '@/lib/tenant-form';
 
@@ -36,6 +37,8 @@ export function TenantsView({
   const [idStatus, setIdStatus] = useState<IdStatus | ''>('');
   const [rows, setRows] = useState<readonly Row[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // A reply for an older search or filter never replaces the newer one.
+  const gate = useRequestGate();
 
   useEffect(() => {
     const id = window.setTimeout(() => setQuery(search), SEARCH_DELAY_MS);
@@ -43,22 +46,25 @@ export function TenantsView({
   }, [search]);
 
   const load = useCallback(async () => {
+    const current = gate.begin();
     try {
       const list = await api().tenants.list({
         search: query.trim() || undefined,
         ...(activeOnly ? { withActiveLease: 'true' } : {}),
         ...(idStatus && details ? { idStatus } : {}),
       });
+      if (!current()) return;
       setRows(list);
       setProblem(null);
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      if (current()) setProblem(toProblem(failure).message);
     }
-  }, [query, activeOnly, idStatus, details]);
+  }, [gate, query, activeOnly, idStatus, details]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return gate.cancel;
+  }, [gate, load]);
 
   return (
     <Card>

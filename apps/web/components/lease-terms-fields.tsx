@@ -1,6 +1,7 @@
 'use client';
 
 import { BREAK_PARTIES, RENT_CYCLES, type LeaseUse } from '@rent/domain/tenancy';
+import { useId } from 'react';
 import {
   endAfterMonths,
   newKey,
@@ -39,6 +40,13 @@ export function LeaseTermsFields({
     onChange({ ...draft, [key]: value });
   const setBreak = (patch: Partial<BreakDraft>) =>
     draft.breakClause && onChange({ ...draft, breakClause: { ...draft.breakClause, ...patch } });
+  // The rent-change and break-clause problems are shown once for their group, and each of the
+  // group's inputs points to it, so assistive technology reads it with the field.
+  const baseId = useId();
+  const stepsErrorId = `${baseId}-steps-error`;
+  const breakErrorId = `${baseId}-break-error`;
+  const stepsTie = errors.steps ? { describedBy: stepsErrorId, invalid: true } : {};
+  const breakTie = errors.breakClause ? { describedBy: breakErrorId, invalid: true } : {};
 
   return (
     <div className="space-y-4">
@@ -152,7 +160,11 @@ export function LeaseTermsFields({
         <p className="text-sm text-slate-600">
           Each change starts on the first day of a rent period, after the start of the lease.
         </p>
-        {errors.steps ? <p className="text-sm font-medium text-red-700">{errors.steps}</p> : null}
+        {errors.steps ? (
+          <p id={stepsErrorId} className="text-sm font-medium text-red-700">
+            {errors.steps}
+          </p>
+        ) : null}
         {draft.steps.map((step, index) => (
           <div
             key={step.key}
@@ -164,6 +176,7 @@ export function LeaseTermsFields({
               label="From"
               type="date"
               value={step.effectiveFrom}
+              {...stepsTie}
               onChange={(event) =>
                 set(
                   'steps',
@@ -177,6 +190,7 @@ export function LeaseTermsFields({
               label="New monthly rent (GH₵)"
               inputMode="decimal"
               value={step.monthlyRent}
+              {...stepsTie}
               onChange={(event) =>
                 set(
                   'steps',
@@ -229,7 +243,9 @@ export function LeaseTermsFields({
           }
         />
         {errors.breakClause ? (
-          <p className="text-sm font-medium text-red-700">{errors.breakClause}</p>
+          <p id={breakErrorId} className="text-sm font-medium text-red-700">
+            {errors.breakClause}
+          </p>
         ) : null}
         {draft.breakClause ? (
           <div className="grid gap-4 sm:grid-cols-3">
@@ -237,12 +253,14 @@ export function LeaseTermsFields({
               label="Can break from"
               type="date"
               value={draft.breakClause.fromDate}
+              {...breakTie}
               onChange={(event) => setBreak({ fromDate: event.target.value })}
             />
             <SelectField
               label="Who may break"
               value={draft.breakClause.party}
               options={BREAK_PARTIES.map((p) => ({ value: p, label: BREAK_PARTY_LABELS[p] }))}
+              {...breakTie}
               onChange={(event) => {
                 const party = BREAK_PARTIES.find((p) => p === event.target.value);
                 if (party) setBreak({ party });
@@ -252,6 +270,7 @@ export function LeaseTermsFields({
               label="Break notice (days)"
               inputMode="numeric"
               value={draft.breakClause.noticeDays}
+              {...breakTie}
               onChange={(event) =>
                 setBreak({ noticeDays: event.target.value.replace(/\D/g, '').slice(0, 4) })
               }

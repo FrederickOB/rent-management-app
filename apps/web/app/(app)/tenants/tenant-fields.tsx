@@ -2,6 +2,9 @@
 
 import type { MessageChannel } from '@rent/domain/messaging';
 import { ID_TYPES } from '@rent/domain/tenancy';
+import Link from 'next/link';
+import type { ReactNode } from 'react';
+import { Alert } from '@/components/ui/alert';
 import { CheckboxField, SelectField, TextAreaField, TextField } from '@/components/ui/field';
 import {
   CONTACT_KIND_LABELS,
@@ -12,11 +15,67 @@ import {
 import {
   CONSENT_VERSION,
   consentWording,
+  DUPLICATE_MATCH_LABELS,
   type ConsentDraft,
   type ContactDraft,
   type TenantDraft,
   type TenantErrors,
 } from '@/lib/tenant-form';
+
+export interface DuplicateTenant {
+  readonly tenantId: string;
+  readonly displayName: string;
+  readonly matchedOn: keyof typeof DUPLICATE_MATCH_LABELS;
+}
+
+/**
+ * Tenants who share a phone, ID number or TIN with the one being saved (plan 4.3): a warning with
+ * a link to each, never a block.
+ */
+export function DuplicateTenants({
+  duplicates,
+  children,
+}: {
+  readonly duplicates: readonly DuplicateTenant[];
+  /** What to do about it, such as "Add as a new tenant anyway". */
+  readonly children?: ReactNode;
+}) {
+  return (
+    <Alert tone="warning" title="This may be a tenant you already have">
+      <ul className="list-disc space-y-1 pl-5">
+        {duplicates.map((d) => (
+          <li key={`${d.tenantId}-${d.matchedOn}`}>
+            <Link
+              href={`/tenants/${d.tenantId}`}
+              className="font-medium underline underline-offset-2"
+            >
+              {d.displayName}
+            </Link>{' '}
+            has {DUPLICATE_MATCH_LABELS[d.matchedOn]}.
+          </li>
+        ))}
+      </ul>
+      {children}
+    </Alert>
+  );
+}
+
+/**
+ * Reminders when a phone or email with consent on record is changed (CM-09): the consent stays
+ * with the channel, so staff check the person agreed at the new number or address.
+ */
+export function ConsentChangeNotes({ notes }: { readonly notes: readonly string[] }) {
+  if (notes.length === 0) return null;
+  return (
+    <Alert tone="info" title="Consent on record">
+      <ul className="list-disc space-y-1 pl-5">
+        {notes.map((note) => (
+          <li key={note}>{note}</li>
+        ))}
+      </ul>
+    </Alert>
+  );
+}
 
 /**
  * A tenant's details (TL-01, TL-02, TL-04). People get an occupation and an ID number; companies

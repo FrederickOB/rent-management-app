@@ -1,5 +1,6 @@
 import type { LeaseDetailView } from '@rent/contracts';
 import { describe, expect, it } from 'vitest';
+import { ONE_TENANT_PROBLEM, STAFF_PART_PROBLEM, type SignerRecords } from './lease-form';
 import {
   handoverProblem,
   isOpenRequest,
@@ -249,5 +250,64 @@ describe('TL-07 signing progress', () => {
     expect(isOpenRequest('preparing')).toBe(true);
     expect(isOpenRequest('completed')).toBe(false);
     expect(shortHash('a'.repeat(32) + 'b'.repeat(32))).toBe('aaaaaaaa…bbbbbbbb');
+  });
+});
+
+describe('TL-07 the send confirmation checks the signers’ records', () => {
+  const records: SignerRecords = {
+    tenant: { name: 'Ama Mensah', kind: 'individual', phone: '+233200000099', email: null },
+    contacts: [{ id: ID(8), kind: 'guarantor', name: 'Yaa Guarantor', phone: null, email: null }],
+    staff: [
+      {
+        personId: ID(7),
+        name: 'Kofi Manager',
+        email: 'kofi@demo.invalid',
+        phoneMasked: null,
+        roleLabel: 'Property manager',
+      },
+    ],
+  };
+
+  it('sends a draft whose linked signers have a phone or email on their record', () => {
+    expect(issueBlockers(draft(), records)).toEqual([]);
+  });
+
+  it('names a linked signer whose record has no phone or email, or is gone', () => {
+    const blockers = issueBlockers(
+      draft({
+        parties: [
+          ...draft().parties,
+          party({ id: ID(103), role: 'guarantor', name: 'Yaa Guarantor', tenantContactId: ID(8) }),
+          party({ id: ID(104), role: 'guarantor', name: 'Old Guarantor', tenantContactId: ID(9) }),
+          party({ id: ID(105), role: 'witness', name: 'Gone Manager', staffPersonId: ID(10) }),
+        ],
+      }),
+      records,
+    );
+    expect(blockers).toEqual([
+      'Add a phone or email to Yaa Guarantor’s record (guarantor), so they can get their link and code.',
+      'Old Guarantor (guarantor) is no longer one of the tenant’s contacts. Remove them from the signers in the draft.',
+      'Gone Manager (witness) is no longer an active member of your company. Remove them from the signers in the draft.',
+    ]);
+    const noTenantPhone = { ...records, tenant: { ...records.tenant!, phone: null } };
+    expect(issueBlockers(draft(), noTenantPhone)).toEqual([
+      'Add a phone or email to the tenant’s record, so Ama Mensah can get their link and code.',
+    ]);
+  });
+
+  it('refuses a second tenant and a member of staff in a part staff do not sign in', () => {
+    const blockers = issueBlockers(
+      draft({
+        parties: [
+          ...draft().parties,
+          party({ id: ID(106), role: 'tenant', name: 'Akos Spouse', phone: '+233244000002' }),
+          party({ id: ID(107), role: 'guarantor', name: 'Kofi Manager', staffPersonId: ID(7) }),
+        ],
+      }),
+    );
+    expect(blockers).toEqual([
+      ONE_TENANT_PROBLEM,
+      `Kofi Manager (guarantor): ${STAFF_PART_PROBLEM}`,
+    ]);
   });
 });

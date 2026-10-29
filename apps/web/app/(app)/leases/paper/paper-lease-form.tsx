@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
-import { FileField } from '@/components/file-field';
+import { LeasePaperField } from '@/components/lease-paper-field';
 import { LeasePartiesEditor } from '@/components/lease-parties-editor';
 import { LeaseTermsFields } from '@/components/lease-terms-fields';
 import { TenantPicker, UnitPicker } from '@/components/record-pickers';
@@ -19,14 +19,14 @@ import {
   emptyParty,
   emptyTerms,
   partiesInput,
-  partyErrors,
+  partyProblems,
   termsFromDraft,
   type PartyDraft,
   type TermsDraft,
 } from '@/lib/lease-form';
-import { uploadLeasePaper } from '@/lib/lease-upload';
+import { leasePaperProblems, uploadLeasePaper } from '@/lib/lease-upload';
 import type { PickedTenant, PickedUnit } from '@/lib/record-picks';
-import { fileProblem, LEASE_PAPER_UPLOAD, StorageUploadError } from '@/lib/upload';
+import { StorageUploadError } from '@/lib/upload';
 import { ProjectedSchedule } from '../projected-schedule';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -63,11 +63,13 @@ export function PaperLeaseForm({
   const [status, setStatus] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [noIdCopy, setNoIdCopy] = useState(false);
+  const [tickError, setTickError] = useState<string | null>(null);
 
   const fallbackUse = unit?.commercial ? 'commercial' : 'residential';
   const checked = useMemo(() => termsFromDraft(terms, fallbackUse), [terms, fallbackUse]);
   const errors = tried ? checked.errors : {};
-  const pErrors = tried ? partyErrors(parties, { paper: true, today }) : {};
+  const pProblems = tried ? partyProblems(parties, { paper: true, today }) : {};
   const signedProblem = !ISO_DATE.test(signedOn)
     ? 'Choose the date the lease was signed'
     : signedOn > today
@@ -84,18 +86,19 @@ export function PaperLeaseForm({
     event.preventDefault();
     setTried(true);
     setProblem(null);
-    setScanError(null);
     const file = scan.current?.files?.[0];
-    const fileError = file ? fileProblem(file, LEASE_PAPER_UPLOAD) : 'Upload the signed lease.';
-    if (fileError) setScanError(fileError);
+    const paper = leasePaperProblems(file, { noIdCopy, missing: 'Upload the signed lease.' });
+    setScanError(paper.file);
+    setTickError(paper.tick);
     if (
       !unit ||
       !tenant ||
       !checked.input ||
       signedProblem ||
       parties.length === 0 ||
-      Object.keys(partyErrors(parties, { paper: true, today })).length ||
-      fileError ||
+      Object.keys(partyProblems(parties, { paper: true, today })).length ||
+      paper.file ||
+      paper.tick ||
       !file
     )
       return;
@@ -182,7 +185,7 @@ export function PaperLeaseForm({
           <LeasePartiesEditor
             paper
             parties={parties}
-            errors={pErrors}
+            problems={pProblems}
             onChange={(next) => {
               setPartiesTouched(true);
               setParties(next);
@@ -191,17 +194,29 @@ export function PaperLeaseForm({
           {tried && parties.length === 0 ? (
             <p className="text-sm font-medium text-red-700">Say who signed the lease.</p>
           ) : null}
-          <FileField
+          <LeasePaperField
             ref={scan}
             label="The signed lease (scan or photo)"
-            rule={LEASE_PAPER_UPLOAD}
             disabled={working}
             error={scanError}
+            required
+            noIdCopy={noIdCopy}
+            onNoIdCopy={(next) => {
+              setNoIdCopy(next);
+              setTickError(null);
+            }}
+            tickError={tickError}
           />
         </CardBody>
       </Card>
 
       {status ? <Alert tone="info">{status}</Alert> : null}
+      {/* The refusal again by the button, so it is seen on a phone without scrolling back up. */}
+      {problem ? (
+        <Alert tone="error" live={false}>
+          {problem}
+        </Alert>
+      ) : null}
       {tried && !working && !problem ? (
         <p className="text-sm text-slate-600">Check the fields marked above.</p>
       ) : null}

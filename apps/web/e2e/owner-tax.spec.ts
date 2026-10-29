@@ -48,6 +48,21 @@ test.describe('M3 plan 4.13 owner tax fields', () => {
     await expect(latest).toContainText(`Filing the owner’s rent tax return ${tag}`);
     await expect(page.getByText(tin)).toHaveCount(0);
 
+    // A revealed TIN belongs to the TIN it was asked for: opening the edit form hides it.
+    await nav(page).getByRole('link', { name: 'Owners' }).click();
+    await row.getByRole('button', { name: `Show the TIN of ${name}` }).click();
+    const again = row.getByRole('form', { name: `Show the TIN of ${name}` });
+    await again.getByLabel('Reason').fill(`Checking the TIN before an edit ${tag}`);
+    await again.getByRole('button', { name: 'Show the TIN' }).click();
+    await expect(row.getByText(tin)).toBeVisible();
+    await row.getByRole('button', { name: `Edit ${name}` }).click();
+    await expect(page.getByText(tin)).toHaveCount(0);
+    await row
+      .getByRole('form', { name: 'Save owner' })
+      .getByRole('button', { name: 'Cancel' })
+      .click();
+    await expect(page.getByText(tin)).toHaveCount(0);
+
     // Not a letting business any more; the record stays, archived.
     await nav(page).getByRole('link', { name: 'Owners' }).click();
     await row.getByRole('button', { name: `Edit ${name}` }).click();

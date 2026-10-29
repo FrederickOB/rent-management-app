@@ -4,6 +4,7 @@ import type { LeaseDetailView, TemplateRowView } from '@rent/contracts';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState, type FormEvent } from 'react';
+import { AdvanceFlagAlert } from '@/components/advance-flag';
 import { useApp } from '@/components/app-context';
 import { LeasePartiesEditor } from '@/components/lease-parties-editor';
 import { LeaseTermsFields } from '@/components/lease-terms-fields';
@@ -18,20 +19,29 @@ import type { PickedTenant, PickedUnit } from '@/lib/record-picks';
 import { toProblem } from '@/lib/errors';
 import {
   emptyTerms,
+  NO_RECORDS,
   partiesInput,
   partyDraftsOf,
-  partyErrors,
+  partyProblems,
   serviceContacts,
   signsAs,
   termsDraftOf,
   termsFromDraft,
   type PartyDraft,
+  type SignerRecords,
   type TermsDraft,
 } from '@/lib/lease-form';
+import { COUNSEL_WARNING } from '@/lib/lease-view';
+import { tenancyValuesOf } from '@/lib/tenancy-settings';
 import { ProjectedSchedule } from './projected-schedule';
 
-export const COUNSEL_WARNING =
-  'This template version has not been reviewed by your lawyer. Its legal clauses may still read “Wording to be supplied by your lawyer.” (OQ-53)';
+/** The hint under "A witness signs this lease", from the company's own setting. */
+function witnessHint(companyAsks: boolean | null): string {
+  if (companyAsks === null) return 'Tick this if a witness signs this lease.';
+  return companyAsks
+    ? 'Your company asks for a witness on every lease. You can turn it off for this lease.'
+    : 'Your company does not ask for a witness. Tick this if one signs this lease.';
+}
 
 /** The template a lease would use: the one chosen, or the starter for its use. */
 function templateFor(
@@ -45,23 +55,27 @@ function templateFor(
 
 /**
  * The lease builder (TL-05, TL-06; plan 4.16): unit, tenant, template and terms, saved as a draft.
- * Editing a draft adds the signers and the electronic-service contacts. Issuing it for signing is
- * the e-signing step, which comes later.
+ * Editing a draft adds the signers, the witness flag and the electronic-service contacts; the
+ * lease page sends it for signing.
  */
 export function LeaseBuilder({
   lease,
   initialUnit = null,
   initialTenant = null,
   templates,
+  records = NO_RECORDS,
 }: {
   /** The draft being edited; absent for a new lease. */
   readonly lease?: LeaseDetailView;
   readonly initialUnit?: PickedUnit | null;
   readonly initialTenant?: PickedTenant | null;
   readonly templates: readonly TemplateRowView[];
+  /** When editing: the records the signers can be linked to, as far as they could be read. */
+  readonly records?: SignerRecords;
 }) {
   const router = useRouter();
-  const { timeZone } = useApp();
+  const { timeZone, company } = useApp();
+  const companyAsksWitness = company ? tenancyValuesOf(company.settings).witnessRequired : null;
   const editing = lease !== undefined;
   const [unit, setUnit] = useState<PickedUnit | null>(initialUnit);
   const [tenant, setTenant] = useState<PickedTenant | null>(initialTenant);
@@ -72,7 +86,9 @@ export function LeaseBuilder({
   const [parties, setParties] = useState<PartyDraft[]>(() => (lease ? partyDraftsOf(lease) : []));
   const [phones, setPhones] = useState(lease?.servicePhones.join('\n') ?? '');
   const [emails, setEmails] = useState(lease?.serviceEmails.join('\n') ?? '');
-  const [witnessRequired, setWitnessRequired] = useState(lease?.witnessRequired ?? true);
+  const [witnessRequired, setWitnessRequired] = useState(
+    lease?.witnessRequired ?? companyAsksWitness ?? true,
+  );
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -81,7 +97,7 @@ export function LeaseBuilder({
   const fallbackUse = editing ? lease.use : unitUse;
   const checked = useMemo(() => termsFromDraft(terms, fallbackUse), [terms, fallbackUse]);
   const errors = tried ? checked.errors : {};
-  const pErrors = tried && editing ? partyErrors(parties) : {};
+  const pProblems = tried && editing ? partyProblems(parties, { records }) : {};
   const service = serviceContacts(phones, emails);
   const use = terms.use || fallbackUse;
   const template = templateFor(templates, templateId, use);
@@ -101,7 +117,8 @@ export function LeaseBuilder({
     setProblem(null);
     if (!checked.input) return;
     if (!editing && (!unit || !tenant)) return;
-    if (editing && (Object.keys(partyErrors(parties)).length || service.problem)) return;
+    if (editing && (Object.keys(partyProblems(parties, { records })).length || service.problem))
+      return;
     setPending(true);
     try {
       if (editing) {
@@ -110,7 +127,7 @@ export function LeaseBuilder({
           ...checked.input,
           // Only a different template is sent: the draft keeps the version it was built from.
           ...(templateId && templateId !== lease.template?.templateId ? { templateId } : {}),
-          parties: partiesInput(parties),
+          parties: partiesInput(parties, { witnessRequired }),
           servicePhones: service.phones,
           serviceEmails: service.emails,
           witnessRequired,
@@ -139,6 +156,7 @@ export function LeaseBuilder({
       className="space-y-6"
     >
       {problem ? <Alert tone="error">{problem}</Alert> : null}
+      {editing && lease.advanceFlag ? <AdvanceFlagAlert flag={lease.advanceFlag} saved /> : null}
       {editing ? null : (
         <Card>
           <CardHeader
@@ -225,14 +243,21 @@ export function LeaseBuilder({
             <CardBody>
               <CheckboxField
                 label="A witness signs this lease"
-                hint="Your company signs every lease with a witness unless you turn this off."
+                hint={witnessHint(companyAsksWitness)}
                 checked={witnessRequired}
                 onChange={(event) => setWitnessRequired(event.target.checked)}
               />
               {noWitness ? (
                 <Alert tone="info">Add the witness below before the lease is issued.</Alert>
               ) : null}
-              <LeasePartiesEditor parties={parties} errors={pErrors} onChange={setParties} />
+              <LeasePartiesEditor
+                parties={parties}
+                problems={pProblems}
+                onChange={setParties}
+                records={records}
+                tenant={{ name: lease.tenant.displayName, kind: lease.tenant.kind }}
+                witnessRequired={witnessRequired}
+              />
             </CardBody>
           </Card>
           <Card>
@@ -265,8 +290,14 @@ export function LeaseBuilder({
         </>
       ) : null}
 
-      {tried && (!checked.input || Object.keys(pErrors).length) ? (
+      {tried && (!checked.input || Object.keys(pProblems).length) ? (
         <Alert tone="error">Some details need attention. They are marked above.</Alert>
+      ) : null}
+      {/* The refusal again by the button, so it is seen on a phone without scrolling back up. */}
+      {problem ? (
+        <Alert tone="error" live={false}>
+          {problem}
+        </Alert>
       ) : null}
       <div className="flex flex-wrap gap-2">
         <Button type="submit" pending={pending}>

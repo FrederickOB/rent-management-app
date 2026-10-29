@@ -11,6 +11,7 @@ import { SelectField, TextField } from '@/components/ui/field';
 import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { useRequestGate } from '@/lib/request-gate';
 import { leaseStatusLabel, rentLabel, termLabel } from '@/lib/tenancy-format';
 
 const SEARCH_DELAY_MS = 300;
@@ -24,6 +25,8 @@ export function LeasesView({ detailed }: { readonly detailed: boolean }) {
   const [status, setStatus] = useState<LeaseStatus | ''>('');
   const [rows, setRows] = useState<readonly Row[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // A reply for an older search or status never replaces the newer one.
+  const gate = useRequestGate();
 
   useEffect(() => {
     const id = window.setTimeout(() => setQuery(search), SEARCH_DELAY_MS);
@@ -31,22 +34,24 @@ export function LeasesView({ detailed }: { readonly detailed: boolean }) {
   }, [search]);
 
   const load = useCallback(async () => {
+    const current = gate.begin();
     try {
-      setRows(
-        await api().leases.list({
-          search: query.trim() || undefined,
-          ...(status ? { status } : {}),
-        }),
-      );
+      const list = await api().leases.list({
+        search: query.trim() || undefined,
+        ...(status ? { status } : {}),
+      });
+      if (!current()) return;
+      setRows(list);
       setProblem(null);
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      if (current()) setProblem(toProblem(failure).message);
     }
-  }, [query, status]);
+  }, [gate, query, status]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return gate.cancel;
+  }, [gate, load]);
 
   return (
     <Card>

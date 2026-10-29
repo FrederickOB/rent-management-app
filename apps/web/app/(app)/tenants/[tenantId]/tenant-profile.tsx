@@ -18,13 +18,19 @@ import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { TENANT_KIND_LABELS, termLabel } from '@/lib/tenancy-format';
 import {
+  consentChangeNotes,
   hasErrors,
   tenantDraftOf,
   tenantErrors,
   tenantPatch,
   type TenantDraft,
 } from '@/lib/tenant-form';
-import { TenantDetailsFields } from '../tenant-fields';
+import {
+  ConsentChangeNotes,
+  DuplicateTenants,
+  TenantDetailsFields,
+  type DuplicateTenant,
+} from '../tenant-fields';
 import { ConsentCard } from './consent-card';
 import { ContactsCard } from './contacts-card';
 import { IdentityCard } from './identity-card';
@@ -102,11 +108,20 @@ export function TenantProfile({
     created ? { tone: 'success', text: `Added ${initial.displayName}.` } : null,
   );
   const [editing, setEditing] = useState(false);
+  const [duplicates, setDuplicates] = useState<readonly DuplicateTenant[]>([]);
   const [archiving, setArchiving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [timelineVersion, setTimelineVersion] = useState(0);
   const live = !tenant.archived;
   const company = tenant.kind === 'company';
+  // A number shown after a reveal belongs to the number it was asked for (TL-02): the identity
+  // card starts afresh, hiding it, when the number on file changes or the edit form opens.
+  const revealScope = [
+    editing ? 'editing' : 'viewing',
+    tenant.identity.type ?? '',
+    tenant.identity.masked ?? '',
+    tenant.tinMasked ?? '',
+  ].join('|');
 
   async function refresh(text?: string) {
     try {
@@ -170,7 +185,13 @@ export function TenantProfile({
             ) : null}
             {can.manage && !editing ? (
               <>
-                <Button variant="secondary" onClick={() => setEditing(true)}>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setDuplicates([]);
+                    setEditing(true);
+                  }}
+                >
                   Edit details
                 </Button>
                 <Button
@@ -187,6 +208,7 @@ export function TenantProfile({
       </div>
 
       {notice ? <Alert tone={notice.tone}>{notice.text}</Alert> : null}
+      {duplicates.length ? <DuplicateTenants duplicates={duplicates} /> : null}
       {archiving ? (
         <ConfirmBox
           label={`Confirm archiving ${tenant.displayName}`}
@@ -203,15 +225,16 @@ export function TenantProfile({
       {editing ? (
         <EditDetails
           tenant={tenant}
-          onSaved={(next, duplicates) => {
+          onSaved={(next, found) => {
             setTenant(next);
             setEditing(false);
             setNotice({
               tone: 'success',
-              text: duplicates.length
-                ? `Saved. Another tenant has the same ${duplicates.join(' or ')}: check you do not have them twice.`
+              text: found.length
+                ? `Saved ${next.displayName}. Check below that you do not have them twice.`
                 : `Saved ${next.displayName}.`,
             });
+            setDuplicates(found);
             setTimelineVersion((v) => v + 1);
           }}
           onCancel={() => setEditing(false)}
@@ -239,7 +262,12 @@ export function TenantProfile({
         </Card>
       )}
 
-      <IdentityCard tenant={tenant} can={can} onChanged={(text) => refresh(text)} />
+      <IdentityCard
+        key={revealScope}
+        tenant={tenant}
+        can={can}
+        onChanged={(text) => refresh(text)}
+      />
       <ConsentCard
         tenant={tenant}
         canManage={can.manage && live}
@@ -290,7 +318,7 @@ function EditDetails({
   onCancel,
 }: {
   readonly tenant: TenantDetailView;
-  readonly onSaved: (next: TenantDetailView, duplicates: string[]) => void;
+  readonly onSaved: (next: TenantDetailView, duplicates: readonly DuplicateTenant[]) => void;
   readonly onCancel: () => void;
 }) {
   const [draft, setDraft] = useState<TenantDraft>(() => tenantDraftOf(tenant));
@@ -300,6 +328,7 @@ function EditDetails({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const errors = tried ? tenantErrors(draft) : {};
+  const consentNotes = consentChangeNotes(tenant, draft, 'the tenant');
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -314,9 +343,10 @@ function EditDetails({
     setPending(true);
     try {
       const saved = await api().tenants.update({ tenantId: tenant.id, ...patch });
-      onSaved(saved.tenant, [
-        ...new Set(saved.duplicates.map((d) => d.matchedOn.replace('_', ' '))),
-      ]);
+      onSaved(
+        saved.tenant,
+        saved.duplicates.filter((d) => d.tenantId !== tenant.id),
+      );
     } catch (failure) {
       setError(toProblem(failure).message);
       setPending(false);
@@ -338,6 +368,7 @@ function EditDetails({
             onChange={setDraft}
             stored={{ idMasked: tenant.identity.masked, tinMasked: tenant.tinMasked }}
           />
+          <ConsentChangeNotes notes={consentNotes} />
           {tenant.kind === 'individual' && tenant.identity.masked ? (
             <CheckboxField
               label="Remove the ID number on file"

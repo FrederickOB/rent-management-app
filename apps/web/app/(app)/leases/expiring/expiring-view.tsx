@@ -12,6 +12,7 @@ import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
+import { useRequestGate } from '@/lib/request-gate';
 import { daysLeftLabel } from '@/lib/tenancy-format';
 
 type Row = Awaited<ReturnType<ReturnType<typeof api>['leases']['expiring']>>[number];
@@ -31,19 +32,25 @@ export function ExpiringView({
   const [rows, setRows] = useState<readonly Row[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // A reply for an earlier window never replaces the one chosen since.
+  const gate = useRequestGate();
 
   const load = useCallback(async () => {
+    const current = gate.begin();
     try {
-      setRows(await api().leases.expiring({ days }));
+      const list = await api().leases.expiring({ days });
+      if (!current()) return;
+      setRows(list);
       setProblem(null);
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      if (current()) setProblem(toProblem(failure).message);
     }
-  }, [days]);
+  }, [gate, days]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return gate.cancel;
+  }, [gate, load]);
 
   async function renew(row: Row) {
     setBusy(row.id);

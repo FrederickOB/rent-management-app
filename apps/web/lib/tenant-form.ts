@@ -338,6 +338,44 @@ export function consentChanges(
     .map((channel) => ({ channel, action: after[channel] ? 'grant' : 'withdraw' }));
 }
 
+/** What a possible duplicate shares with the tenant being saved (plan 4.3). */
+export const DUPLICATE_MATCH_LABELS: Record<'phone' | 'id_number' | 'tin', string> = {
+  phone: 'the same phone number',
+  id_number: 'the same ID number',
+  tin: 'the same TIN',
+};
+
+const samePhone = (stored: string | null, typed: string): boolean =>
+  (stored ?? '') === (typed.trim() ? (e164(typed) ?? typed.trim()) : '');
+const sameEmail = (stored: string | null, typed: string): boolean =>
+  (stored ?? '').toLowerCase() === typed.trim().toLowerCase();
+
+/**
+ * What to tell staff when they change a phone or email that has consent on record (CM-09).
+ * Consent is kept by channel, so it stays when the number or address changes: staff should make
+ * sure the person agreed to messages at the new one. Wording only; nothing is changed for them.
+ */
+export function consentChangeNotes(
+  stored: {
+    readonly phone: string | null;
+    readonly email: string | null;
+    readonly consent: ConsentDraft;
+  },
+  typed: { readonly phone: string; readonly email: string },
+  who: string,
+): string[] {
+  const notes: string[] = [];
+  if (stored.consent.sms && typed.phone.trim() && !samePhone(stored.phone, typed.phone))
+    notes.push(
+      `The SMS consent on record stays with the new phone number. Make sure ${who} agreed to messages at that number.`,
+    );
+  if (stored.consent.email && typed.email.trim() && !sameEmail(stored.email, typed.email))
+    notes.push(
+      `The email consent on record stays with the new email address. Make sure ${who} agreed to messages at that address.`,
+    );
+  return notes;
+}
+
 /** `SMS and email`, `SMS`, or `No channel` for a consent state. */
 export function consentSummary(consent: ConsentDraft): string {
   const channels = [consent.sms ? 'SMS' : null, consent.email ? 'email' : null].filter(Boolean);

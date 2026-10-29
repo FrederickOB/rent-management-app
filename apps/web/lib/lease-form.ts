@@ -1,7 +1,7 @@
-import type { LeaseDetailView } from '@rent/contracts';
+import type { LeaseDetailView, MembershipRow, TenantDetailView } from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
 import { addDays, addMonths, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
-import type { SignerRole } from '@rent/domain/esign';
+import { SIGNER_ROLES, type SignerRole } from '@rent/domain/esign';
 import { format, money, parseAmount } from '@rent/domain/money';
 import {
   checkLeaseTerms,
@@ -13,6 +13,8 @@ import {
   type RentCycle,
 } from '@rent/domain/tenancy';
 import { isRecord } from './errors';
+import { roleLabel } from './format';
+import type { ContactKind, TenantKind } from './tenancy-format';
 import { e164 } from './tenant-form';
 
 // The lease forms (TL-06; M3 plan 4.6): the builder, the draft editor and the paper lease. Terms
@@ -309,29 +311,316 @@ export function signsAs(
   return parties.map((p) => p.role).includes(part);
 }
 
-/** Problems with the signers, by party key; `paper` checks the signing dates against `today`. */
+// Signers and their records (plan 4.8). When a lease is sent, the API takes a signer's phone and
+// email from the record they are linked to: the tenant's own record for the tenant, the contact's
+// for anyone added from the tenant's contacts (a guarantor, a signatory, someone else who lives
+// there), the person's for a member of staff. Only someone not on record signs with what was
+// typed for them. Each falls back to the signer's own details where the record has none, as the
+// API does.
+
+/** What record a signer's phone and email come from; null for someone not on record. */
+export type PartyLink = 'tenant_record' | 'contact' | 'staff' | null;
+
+type Linkable = Pick<PartyDraft, 'role' | 'tenantContactId' | 'staffPersonId'>;
+
+/** The record a signer is linked to, in the order the API looks: contact, staff, the tenant. */
+export function partyLink(party: Linkable): PartyLink {
+  if (party.tenantContactId) return 'contact';
+  if (party.staffPersonId) return 'staff';
+  return signsAs([party], 'tenant') ? 'tenant_record' : null;
+}
+
+export interface ContactRecord {
+  readonly id: string;
+  readonly kind: ContactKind;
+  readonly name: string;
+  readonly phone: string | null;
+  readonly email: string | null;
+}
+
+export interface StaffRecord {
+  readonly personId: string;
+  readonly name: string;
+  readonly email: string | null;
+  /** The API lists staff phones masked; the full number stays on their record. */
+  readonly phoneMasked: string | null;
+  readonly roleLabel: string;
+}
+
+/**
+ * The records this screen could read, each null when it could not: the lease's tenant, the
+ * tenant's contacts that are not archived, and the company's active members (only for people who
+ * may list them).
+ */
+export interface SignerRecords {
+  readonly tenant: {
+    readonly name: string;
+    readonly kind: TenantKind;
+    readonly phone: string | null;
+    readonly email: string | null;
+  } | null;
+  readonly contacts: readonly ContactRecord[] | null;
+  readonly staff: readonly StaffRecord[] | null;
+}
+
+export const NO_RECORDS: SignerRecords = { tenant: null, contacts: null, staff: null };
+
+/** The records from what the API returned; a null input could not be read. */
+export function signerRecordsOf(
+  tenant: Pick<TenantDetailView, 'displayName' | 'kind' | 'phone' | 'email' | 'contacts'> | null,
+  memberships:
+    | readonly Pick<
+        MembershipRow,
+        'personId' | 'name' | 'email' | 'phoneMasked' | 'role' | 'status'
+      >[]
+    | null,
+): SignerRecords {
+  return {
+    tenant: tenant
+      ? { name: tenant.displayName, kind: tenant.kind, phone: tenant.phone, email: tenant.email }
+      : null,
+    contacts: tenant
+      ? tenant.contacts
+          .filter((c) => !c.archived)
+          .map((c) => ({ id: c.id, kind: c.kind, name: c.name, phone: c.phone, email: c.email }))
+      : null,
+    staff: memberships
+      ? memberships
+          .filter((m) => m.status === 'active')
+          .map((m) => ({
+            personId: m.personId,
+            name: m.name,
+            email: m.email,
+            phoneMasked: m.phoneMasked,
+            roleLabel: roleLabel(m.role),
+          }))
+      : null,
+  };
+}
+
+/**
+ * Where a signer's link and codes will go when the lease is sent:
+ * - `record`: from the record they are linked to (its phone and email, else their own);
+ * - `typed`: someone not on record, with the phone and email typed for them;
+ * - `unknown`: linked to a record this screen could not read; the API reads it when it is sent;
+ * - `missing`: linked to a contact who is archived, or a person no longer active in the company.
+ */
+export type SignerContact =
+  | {
+      readonly from: 'record' | 'typed';
+      readonly phone: string | null;
+      readonly email: string | null;
+    }
+  | { readonly from: 'unknown' }
+  | { readonly from: 'missing'; readonly link: 'contact' | 'staff' };
+
+type Contactable = Linkable & {
+  readonly phone: string | null;
+  readonly email: string | null;
+};
+
+export function signerContact(party: Contactable, records: SignerRecords): SignerContact {
+  const own = { phone: party.phone || null, email: party.email || null };
+  const fromRecord = (phone: string | null, email: string | null): SignerContact => ({
+    from: 'record',
+    phone: phone ?? own.phone,
+    email: email ?? own.email,
+  });
+  switch (partyLink(party)) {
+    case 'contact': {
+      if (!records.contacts) return { from: 'unknown' };
+      const contact = records.contacts.find((c) => c.id === party.tenantContactId);
+      return contact
+        ? fromRecord(contact.phone, contact.email)
+        : { from: 'missing', link: 'contact' };
+    }
+    case 'staff': {
+      if (!records.staff) return { from: 'unknown' };
+      const person = records.staff.find((s) => s.personId === party.staffPersonId);
+      return person
+        ? fromRecord(person.phoneMasked, person.email)
+        : { from: 'missing', link: 'staff' };
+    }
+    case 'tenant_record':
+      return records.tenant
+        ? fromRecord(records.tenant.phone, records.tenant.email)
+        : { from: 'unknown' };
+    case null:
+      return { from: 'typed', ...own };
+  }
+}
+
+/** Where a signer's link and codes go, in words, for the editor and the send confirmation. */
+export function signerContactLine(contact: SignerContact): string {
+  switch (contact.from) {
+    case 'record': {
+      const where = [contact.phone, contact.email].filter(Boolean).join(' · ');
+      return where ? `${where} (from their record)` : 'No phone or email on their record';
+    }
+    case 'typed':
+      return [contact.phone, contact.email].filter(Boolean).join(' · ') || 'No phone or email';
+    case 'unknown':
+      return 'The phone and email on their record';
+    case 'missing':
+      return contact.link === 'contact'
+        ? 'No longer one of the tenant’s contacts'
+        : 'No longer an active member of your company';
+  }
+}
+
+/** Signers who always sign before a lease takes effect (the backend enforces it too). */
+const ALWAYS_SIGNS: Record<SignerRole, boolean> = {
+  tenant: true,
+  signatory: true,
+  landlord: true,
+  guarantor: false,
+  witness: false,
+};
+
+/**
+ * Whether this signer must sign whatever the draft says: the tenant, a signatory, the landlord's
+ * signer, and a witness when the lease asks for one.
+ */
+export function mustSign(party: Pick<PartyDraft, 'role'>, witnessRequired: boolean): boolean {
+  return ALWAYS_SIGNS[party.role] || (witnessRequired && signsAs([party], 'witness'));
+}
+
+/** The parts a member of staff may sign in: for the landlord, or as a witness. */
+const STAFF_PARTS: Record<SignerRole, boolean> = {
+  tenant: false,
+  signatory: false,
+  landlord: true,
+  guarantor: false,
+  witness: true,
+};
+export const STAFF_SIGNER_ROLES: readonly SignerRole[] = SIGNER_ROLES.filter((r) => STAFF_PARTS[r]);
+export const staffMaySignAs = (role: SignerRole): boolean => STAFF_PARTS[role];
+
+/**
+ * The parts someone not on record may be added in. The tenant always signs from their record, so
+ * they are added as the tenant, never typed in.
+ */
+const TYPED_PARTS: Record<SignerRole, boolean> = {
+  tenant: false,
+  signatory: true,
+  landlord: true,
+  guarantor: true,
+  witness: true,
+};
+export const TYPED_SIGNER_ROLES: readonly SignerRole[] = SIGNER_ROLES.filter((r) => TYPED_PARTS[r]);
+
+/**
+ * The parts a tenant's contact may sign in, by the kind of tenant. Someone else who lives there
+ * signs as the tenant from their own contact record, so their link and codes go to their phone.
+ */
+const CONTACT_PARTS: Record<TenantKind, readonly SignerRole[]> = {
+  individual: ['tenant', 'guarantor', 'witness'],
+  company: ['signatory', 'guarantor', 'witness'],
+};
+
+/** The part a contact usually signs in, by kind; staff can choose another of CONTACT_PARTS. */
+const CONTACT_USUAL_PART: Record<ContactKind, SignerRole> = {
+  signatory: 'signatory',
+  guarantor: 'guarantor',
+  next_of_kin: 'witness',
+  employer: 'witness',
+  finance: 'witness',
+};
+
+/** The parts a contact of this tenant may sign in. */
+export function contactParts(kind: TenantKind | null): readonly SignerRole[] {
+  return kind ? CONTACT_PARTS[kind] : ['guarantor', 'witness'];
+}
+
+/** The part a contact is offered first: the usual one for their kind, if this tenant allows it. */
+export function usualContactPart(contact: ContactRecord, kind: TenantKind | null): SignerRole {
+  const parts = contactParts(kind);
+  const usual = CONTACT_USUAL_PART[contact.kind];
+  return parts.includes(usual) ? usual : (parts.at(-1) ?? 'witness');
+}
+
+export const ONE_TENANT_PROBLEM =
+  'Only one signer signs as the tenant from the tenant’s record. Add anyone else who lives there as one of the tenant’s contacts, then add them from the contacts.';
+export const STAFF_PART_PROBLEM =
+  'A member of your staff signs only for the landlord or as a witness.';
+
+/** Which field a signer's problem belongs to, so the screen can tie it to that input. */
+export type PartyField = 'role' | 'name' | 'phone' | 'email' | 'paperSignedOn' | 'record';
+
+export interface PartyProblem {
+  readonly field: PartyField;
+  readonly message: string;
+}
+
+export type PartyProblems = Readonly<Record<string, PartyProblem>>;
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Problems with the signers, by party key, each with the field it belongs to. `paper` checks the
+ * signing dates against `today`. Unless it is paper, only one signer may sign as the tenant from
+ * the tenant's record, as the API requires when the lease is sent. With `records`, a signer linked
+ * to a record that is gone (an archived contact, a person no longer active in the company) is a
+ * problem too.
+ */
+export function partyProblems(
+  parties: readonly PartyDraft[],
+  options: {
+    readonly paper?: boolean;
+    readonly today?: string;
+    readonly records?: SignerRecords | null;
+  } = {},
+): PartyProblems {
+  const problems: Record<string, PartyProblem> = {};
+  let tenantSigns = false;
+  for (const p of parties) {
+    const name = p.name.trim();
+    const asTenantItself = !options.paper && partyLink(p) === 'tenant_record';
+    const problem = (field: PartyField, message: string) => {
+      problems[p.key] = { field, message };
+    };
+    if (name.length < 2 || name.length > 160) problem('name', 'Enter the signer’s name');
+    else if (p.phone.trim() && !e164(p.phone)) problem('phone', 'Enter a valid phone number');
+    else if (p.email.trim() && !EMAIL.test(p.email.trim()))
+      problem('email', 'Enter a valid email address');
+    else if (options.paper && p.paperSignedOn && !ISO_DATE.test(p.paperSignedOn))
+      problem('paperSignedOn', 'Choose the date this person signed');
+    else if (options.paper && options.today && p.paperSignedOn > options.today)
+      problem('paperSignedOn', 'A signing date cannot be in the future');
+    else if (tenantSigns && asTenantItself) problem('role', ONE_TENANT_PROBLEM);
+    else if (p.staffPersonId && !STAFF_PARTS[p.role]) problem('role', STAFF_PART_PROBLEM);
+    else if (options.records) {
+      const contact = signerContact(p, options.records);
+      if (contact.from === 'missing')
+        problem(
+          'record',
+          contact.link === 'contact'
+            ? `${name} is no longer one of the tenant’s contacts. Remove them, or add them as a contact again.`
+            : `${name} is no longer an active member of your company. Remove them, or add someone else.`,
+        );
+    }
+    if (asTenantItself) tenantSigns = true;
+  }
+  return problems;
+}
+
+/** Problems with the signers, by party key, in words. */
 export function partyErrors(
   parties: readonly PartyDraft[],
   options: { readonly paper?: boolean; readonly today?: string } = {},
 ): PartyErrors {
-  const errors: Record<string, string> = {};
-  for (const p of parties) {
-    const name = p.name.trim();
-    if (name.length < 2 || name.length > 160) errors[p.key] = 'Enter the signer’s name';
-    else if (p.phone.trim() && !e164(p.phone)) errors[p.key] = 'Enter a valid phone number';
-    else if (p.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email.trim()))
-      errors[p.key] = 'Enter a valid email address';
-    else if (options.paper && p.paperSignedOn && !ISO_DATE.test(p.paperSignedOn))
-      errors[p.key] = 'Choose the date this person signed';
-    else if (options.paper && options.today && p.paperSignedOn > options.today)
-      errors[p.key] = 'A signing date cannot be in the future';
-  }
-  return errors;
+  return Object.fromEntries(
+    Object.entries(partyProblems(parties, options)).map(([key, p]) => [key, p.message]),
+  );
 }
 
+/**
+ * The signers as the API takes them. Those who always sign are sent as required whatever the
+ * draft says, so an older draft cannot carry one as optional.
+ */
 export function partiesInput(
   parties: readonly PartyDraft[],
-  options: { readonly paper?: boolean } = {},
+  options: { readonly paper?: boolean; readonly witnessRequired?: boolean } = {},
 ): PartyInput[] {
   return parties.map((p) => ({
     role: p.role,
@@ -340,9 +629,70 @@ export function partiesInput(
     email: p.email.trim() || null,
     tenantContactId: p.tenantContactId,
     staffPersonId: p.staffPersonId,
-    required: p.required,
+    required: p.required || mustSign(p, options.witnessRequired ?? false),
     ...(options.paper ? { paperSignedOn: p.paperSignedOn || null } : {}),
   }));
+}
+
+/** The tenant signing for themselves, from their record (an individual tenant). */
+export function tenantSigner(records: SignerRecords, name: string): PartyDraft {
+  return {
+    ...emptyParty('tenant', records.tenant?.name ?? name),
+    phone: records.tenant?.phone ?? '',
+    email: records.tenant?.email ?? '',
+  };
+}
+
+/** Whether the tenant can be added as a signer: a person, not yet signing. */
+export function canAddTenant(kind: TenantKind | null, parties: readonly PartyDraft[]): boolean {
+  return kind === 'individual' && !parties.some((p) => partyLink(p) === 'tenant_record');
+}
+
+/** The tenant's contacts who are not signing yet. */
+export function contactChoices(
+  records: SignerRecords,
+  parties: readonly PartyDraft[],
+): ContactRecord[] {
+  return (records.contacts ?? []).filter((c) => !parties.some((p) => p.tenantContactId === c.id));
+}
+
+/**
+ * One of the tenant's contacts as a signer, in a part a contact of this tenant may take; null for
+ * any other part (a contact never signs for the landlord).
+ */
+export function contactSigner(
+  contact: ContactRecord,
+  role: SignerRole,
+  kind: TenantKind | null,
+): PartyDraft | null {
+  if (!contactParts(kind).includes(role)) return null;
+  return {
+    ...emptyParty(role, contact.name),
+    phone: contact.phone ?? '',
+    email: contact.email ?? '',
+    tenantContactId: contact.id,
+  };
+}
+
+/** Active members of staff who are not signing yet. */
+export function staffChoices(
+  records: SignerRecords,
+  parties: readonly PartyDraft[],
+): StaffRecord[] {
+  return (records.staff ?? []).filter((s) => !parties.some((p) => p.staffPersonId === s.personId));
+}
+
+/**
+ * A member of staff as a signer, for the landlord or as a witness. Their phone stays on their
+ * record (the API lists it masked), and the API reads it when the lease is sent.
+ */
+export function staffSigner(person: StaffRecord, role: SignerRole): PartyDraft | null {
+  if (!STAFF_PARTS[role]) return null;
+  return {
+    ...emptyParty(role, person.name),
+    email: person.email ?? '',
+    staffPersonId: person.personId,
+  };
 }
 
 /** Phones or emails typed one per line or separated by commas. */

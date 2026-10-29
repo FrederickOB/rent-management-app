@@ -31,6 +31,7 @@ import { formatBusinessDate } from '@/lib/business-dates';
 import { cn } from '@/lib/cn';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
+import { useRequestGate } from '@/lib/request-gate';
 
 type Which = 'open' | 'closed';
 
@@ -80,10 +81,16 @@ export function ApprovalsView({ names }: { readonly names: readonly [string, str
   const [notice, setNotice] = useState<string | null>(null);
   const people = useMemo(() => new Map(names), [names]);
   const tabRefs = useRef<Record<Which, HTMLButtonElement | null>>({ open: null, closed: null });
+  // A reply for the other tab, or an older reload, is dropped: switching to "Closed" mid-load
+  // never shows waiting requests with their Approve buttons.
+  const gate = useRequestGate();
 
   function choose(tab: Which) {
+    if (tab === which) return;
+    gate.cancel();
     setWhich(tab);
     setRows(null);
+    setSubjects(new Map());
     setNotice(null);
   }
 
@@ -96,22 +103,26 @@ export function ApprovalsView({ names }: { readonly names: readonly [string, str
   }
 
   const load = useCallback(async () => {
+    const current = gate.begin();
     try {
       const list = await api().approvals.list({ status: which });
+      if (!current()) return;
       setRows(list);
       setProblem(null);
       const described = await Promise.all(
         list.map(async (r) => [r.id, await describe(r)] as const),
       );
+      if (!current()) return;
       setSubjects(new Map(described.filter((d): d is readonly [string, Subject] => d[1] !== null)));
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      if (current()) setProblem(toProblem(failure).message);
     }
-  }, [which]);
+  }, [gate, which]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return gate.cancel;
+  }, [gate, load]);
 
   const changed = async (text: string) => {
     setNotice(text);

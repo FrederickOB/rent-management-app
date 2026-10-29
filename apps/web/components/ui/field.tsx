@@ -22,22 +22,41 @@ export interface FieldProps {
   readonly label: ReactNode;
   readonly hint?: ReactNode;
   readonly error?: string | null;
+  /**
+   * The id of a message shown elsewhere that describes this control, such as a problem shown
+   * once for a group of fields (a signer, a rent change).
+   */
+  readonly describedBy?: string;
+  /** Marks the control invalid when the problem is shown elsewhere (`describedBy`). */
+  readonly invalid?: boolean;
   readonly className?: string;
   readonly children: (control: ControlProps) => ReactNode;
 }
 
 /** A label, the control, a hint and an error, wired together for assistive technology. */
-export function Field({ label, hint, error, className, children }: FieldProps) {
+export function Field({
+  label,
+  hint,
+  error,
+  describedBy: elsewhere,
+  invalid,
+  className,
+  children,
+}: FieldProps) {
   const id = useId();
   const hintId = hint ? `${id}-hint` : undefined;
   const errorId = error ? `${id}-error` : undefined;
-  const describedBy = [hintId, errorId].filter(Boolean).join(' ') || undefined;
+  const describedBy = [hintId, errorId, elsewhere].filter(Boolean).join(' ') || undefined;
   return (
     <div className={cn('space-y-1', className)}>
       <label htmlFor={id} className="block text-sm font-medium text-slate-800">
         {label}
       </label>
-      {children({ id, 'aria-describedby': describedBy, 'aria-invalid': error ? true : undefined })}
+      {children({
+        id,
+        'aria-describedby': describedBy,
+        'aria-invalid': error || invalid ? true : undefined,
+      })}
       {hint ? (
         <p id={hintId} className="text-sm text-slate-600">
           {hint}
@@ -55,9 +74,24 @@ export function Field({ label, hint, error, className, children }: FieldProps) {
 type TextFieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'id'> &
   Omit<FieldProps, 'children'>;
 
-export function TextField({ label, hint, error, className, ...input }: TextFieldProps) {
+export function TextField({
+  label,
+  hint,
+  error,
+  describedBy,
+  invalid,
+  className,
+  ...input
+}: TextFieldProps) {
   return (
-    <Field label={label} hint={hint} error={error} className={className}>
+    <Field
+      label={label}
+      hint={hint}
+      error={error}
+      describedBy={describedBy}
+      invalid={invalid}
+      className={className}
+    >
       {(control) => <input {...control} {...input} className={controlClass} />}
     </Field>
   );
@@ -66,9 +100,24 @@ export function TextField({ label, hint, error, className, ...input }: TextField
 type TextAreaFieldProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'id'> &
   Omit<FieldProps, 'children'>;
 
-export function TextAreaField({ label, hint, error, className, ...textarea }: TextAreaFieldProps) {
+export function TextAreaField({
+  label,
+  hint,
+  error,
+  describedBy,
+  invalid,
+  className,
+  ...textarea
+}: TextAreaFieldProps) {
   return (
-    <Field label={label} hint={hint} error={error} className={className}>
+    <Field
+      label={label}
+      hint={hint}
+      error={error}
+      describedBy={describedBy}
+      invalid={invalid}
+      className={className}
+    >
       {(control) => (
         <textarea {...control} {...textarea} className={cn(controlClass, 'font-mono')} />
       )}
@@ -85,12 +134,21 @@ export function SelectField({
   label,
   hint,
   error,
+  describedBy,
+  invalid,
   className,
   options,
   ...select
 }: SelectFieldProps) {
   return (
-    <Field label={label} hint={hint} error={error} className={className}>
+    <Field
+      label={label}
+      hint={hint}
+      error={error}
+      describedBy={describedBy}
+      invalid={invalid}
+      className={className}
+    >
       {(control) => (
         <select {...control} {...select} className={controlClass}>
           {options.map((option) => (
@@ -107,17 +165,20 @@ export function SelectField({
 type CheckboxFieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'id' | 'type'> & {
   readonly label: ReactNode;
   readonly hint?: ReactNode;
+  readonly error?: string | null;
 };
 
-export function CheckboxField({ label, hint, className, ...input }: CheckboxFieldProps) {
+export function CheckboxField({ label, hint, error, className, ...input }: CheckboxFieldProps) {
   const id = useId();
   const hintId = hint ? `${id}-hint` : undefined;
+  const errorId = error ? `${id}-error` : undefined;
   return (
     <div className={cn('flex items-start gap-3', className)}>
       <input
         id={id}
         type="checkbox"
-        aria-describedby={hintId}
+        aria-describedby={[hintId, errorId].filter(Boolean).join(' ') || undefined}
+        aria-invalid={error ? true : undefined}
         className="mt-0.5 size-5 shrink-0 rounded border-slate-400"
         {...input}
       />
@@ -128,6 +189,11 @@ export function CheckboxField({ label, hint, className, ...input }: CheckboxFiel
         {hint ? (
           <p id={hintId} className="text-sm text-slate-600">
             {hint}
+          </p>
+        ) : null}
+        {error ? (
+          <p id={errorId} className="text-sm font-medium text-red-700">
+            {error}
           </p>
         ) : null}
       </div>
