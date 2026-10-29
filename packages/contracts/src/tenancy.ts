@@ -14,9 +14,8 @@ import { z } from 'zod';
 import { approvalSchema } from './approvals';
 
 /**
- * Tenants, leases and templates (TL-01 to TL-06, TL-09, PB-09, TX-05, AR-05; M3 plan 4.15).
- * Amounts are integer pesewas in `*Minor` fields. Issuing for e-signature arrives with the
- * e-signing phase.
+ * Tenants, leases, templates and e-signing (TL-01 to TL-07, TL-09, PB-09, TX-05, AR-05; M3 plan
+ * 4.15). Amounts are integer pesewas in `*Minor` fields. The signing pages' own API is in links.ts.
  */
 const uuid = z.string().uuid();
 const iso = z.string().datetime();
@@ -620,6 +619,76 @@ const presignedUpload = z.object({
   expiresAt: iso,
 });
 
+// E-signing (TL-07) ------------------------------------------------------------------------------
+
+const SIGNER_STATUSES = ['pending', 'signed', 'declined'] as const;
+
+export const signingProgressSchema = z.object({
+  requestId: uuid,
+  /** preparing (the PDF is rendering), pending (out for signature), completed, declined or cancelled. */
+  status: z.enum(['preparing', 'pending', 'completed', 'declined', 'cancelled']),
+  createdAt: iso,
+  openedAt: iso.nullable(),
+  completedAt: iso.nullable(),
+  declinedAt: iso.nullable(),
+  declineReason: z.string().nullable(),
+  cancelledAt: iso.nullable(),
+  cancelReason: z.string().nullable(),
+  /** SHA-256 of the frozen PDF the signers sign, once it exists. */
+  documentSha256: z.string().nullable(),
+  /** SHA-256 of the signed copy with its certificate, once everyone has signed. */
+  finalSha256: z.string().nullable(),
+  frozenDocument: z.boolean(),
+  signedDocument: z.boolean(),
+  signers: z.array(
+    z.object({
+      id: uuid,
+      role: z.enum(SIGNER_ROLES),
+      roleLabel: z.string(),
+      name: z.string(),
+      phoneMasked: z.string().nullable(),
+      emailMasked: z.string().nullable(),
+      /** Where their code goes: the phone, or the email for a signatory with only an email. */
+      codeChannel: z.enum(['sms', 'email']),
+      required: z.boolean(),
+      position: z.number().int(),
+      status: z.enum(SIGNER_STATUSES),
+      firstOpenedAt: iso.nullable(),
+      lastOpenedAt: iso.nullable(),
+      signedAt: iso.nullable(),
+      declinedAt: iso.nullable(),
+      declineReason: z.string().nullable(),
+      /** Set while five wrong codes keep signing locked. */
+      lockedUntil: iso.nullable(),
+      /** The newest signing link: sent by message, handed over by staff, or opened from the app. Null: none yet (no consented channel: hand one over). */
+      lastLink: z
+        .object({
+          createdAt: iso,
+          expiresAt: iso,
+          via: z.enum(['message', 'handover', 'tenant_app']),
+          openedAt: iso.nullable(),
+        })
+        .nullable(),
+      copySent: z.boolean(),
+    }),
+  ),
+});
+export type SigningProgress = z.infer<typeof signingProgressSchema>;
+
+export const issuedLinkSchema = z.object({ url: z.string().url(), expiresAt: iso });
+
+export const signingRequestsContract = {
+  handoverLink: oc
+    .route({
+      method: 'POST',
+      path: '/signing-requests/{signingRequestId}/signers/{signerId}/link',
+      summary:
+        'A single-use signing link to show as a QR code or copy, for a signer with no consented channel (decision 2); it replaces the signer’s earlier link',
+    })
+    .input(z.object({ signingRequestId: uuid, signerId: uuid }))
+    .output(issuedLinkSchema),
+};
+
 export const leasesContract = {
   list: oc
     .route({ method: 'GET', path: '/leases' })
@@ -789,6 +858,39 @@ export const leasesContract = {
     .route({ method: 'GET', path: '/leases/{leaseId}/files/{which}/download' })
     .input(z.object({ leaseId: uuid, which: z.enum(['signed', 'stamped', 'formal']) }))
     .output(z.object({ url: z.string() })),
+  issue: oc
+    .route({
+      method: 'POST',
+      path: '/leases/{leaseId}/issue',
+      summary:
+        'Send a draft for e-signature (TL-07): terms frozen, document rendered, links sent to each signer once the PDF exists',
+    })
+    .input(z.object({ leaseId: uuid }))
+    .output(leaseSchema),
+  recall: oc
+    .route({
+      method: 'POST',
+      path: '/leases/{leaseId}/recall',
+      summary: 'Recall a lease from signature: links revoked, the lease back to draft',
+    })
+    .input(z.object({ leaseId: uuid, reason: optionalText(500) }))
+    .output(leaseSchema),
+  signing: oc
+    .route({
+      method: 'GET',
+      path: '/leases/{leaseId}/signing',
+      summary: 'The latest signing request and each signer’s progress; null if never issued',
+    })
+    .input(z.object({ leaseId: uuid }))
+    .output(signingProgressSchema.nullable()),
+  signingDocument: oc
+    .route({
+      method: 'GET',
+      path: '/leases/{leaseId}/signing/document',
+      summary: 'A 5-minute link to the frozen PDF the signers sign, or the signed copy',
+    })
+    .input(z.object({ leaseId: uuid, which: z.enum(['frozen', 'signed']).default('frozen') }))
+    .output(z.object({ url: z.string() })),
   cancelSigned: oc
     .route({
       method: 'POST',
@@ -833,6 +935,28 @@ export const tenancyDetailSchema = tenancyCardSchema.extend({
 });
 export type TenancyDetailView = z.infer<typeof tenancyDetailSchema>;
 
+export const tenantSigningSchema = z.object({
+  signingRequestId: uuid,
+  leaseId: uuid,
+  status: z.enum(['preparing', 'pending', 'completed', 'declined', 'cancelled']),
+  title: z.string(),
+  sentAt: iso.nullable(),
+  landlord: landlordSchema,
+  /** The lease as the tenant app shows it elsewhere; null only if it cannot be read. */
+  tenancy: tenancyCardSchema.nullable(),
+  /** The tenant's own signer: sign through POST /me/signing/{signer.id}/link. */
+  signer: z.object({
+    id: uuid,
+    name: z.string(),
+    status: z.enum(SIGNER_STATUSES),
+    signedAt: iso.nullable(),
+  }),
+  signers: z.array(
+    z.object({ roleLabel: z.string(), name: z.string(), status: z.enum(SIGNER_STATUSES) }),
+  ),
+});
+export type TenantSigningView = z.infer<typeof tenantSigningSchema>;
+
 export const tenantAppContract = {
   tenancies: oc
     .route({
@@ -853,4 +977,20 @@ export const tenantAppContract = {
     })
     .input(z.object({ documentId: uuid }))
     .output(z.object({ url: z.string() })),
+  signing: oc
+    .route({
+      method: 'GET',
+      path: '/me/signing',
+      summary: 'Leases out for the signed-in tenant’s own signature, by landlord (TL-07)',
+    })
+    .output(z.array(tenantSigningSchema)),
+  signingLink: oc
+    .route({
+      method: 'POST',
+      path: '/me/signing/{signerId}/link',
+      summary:
+        'A fresh signing link for the tenant’s own signer, to open in the app’s browser; it replaces the link sent by message',
+    })
+    .input(z.object({ signerId: uuid }))
+    .output(issuedLinkSchema),
 };

@@ -18,10 +18,15 @@ import { GovernanceController } from './governance/governance.controller';
 import { toORPCError } from './http/errors';
 import { ActorGuard, PermissionGuard } from './http/guards';
 import { HealthController } from './health/health.controller';
+import { LinksController } from './links/links.controller';
 import { OpenApiController } from './health/openapi.controller';
 import { MeController } from './me/me.controller';
 import { RegisterController } from './register/register.controller';
-import { TenancyController, TenantAppController } from './tenancy/tenancy.controller';
+import {
+  SigningRequestsController,
+  TenancyController,
+  TenantAppController,
+} from './tenancy/tenancy.controller';
 
 @Module({})
 export class AppModule {
@@ -62,6 +67,8 @@ export class AppModule {
         RegisterController,
         TenancyController,
         TenantAppController,
+        SigningRequestsController,
+        LinksController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

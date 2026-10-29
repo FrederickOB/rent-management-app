@@ -6,5 +6,6 @@ export * from './lease-templates.service';
 export * from './lease-documents.service';
 export * from './lease-lifecycle.service';
 export * from './leases.service';
+export * from './lease-signing.service';
 export * from './tenancy-reminders.service';
 export * from './tenant-app.service';

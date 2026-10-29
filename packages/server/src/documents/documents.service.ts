@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
+import { renderTemplateHtml, sha256Hex, verifyFingerprint, type Branding } from '@rent/documents';
 import { businessDateOf, instantFrom } from '@rent/domain/dates';
 import type { StoragePort } from '@rent/integrations';
 import sharp from 'sharp';
@@ -14,6 +15,49 @@ import { AuditService } from '../audit/audit.service';
 import { RulesService } from '../rules/rules.service';
 
 export const RENDER_PDF_JOB = 'documents.render-pdf';
+/**
+ * Emitted in the transaction that records a rendered PDF, so whoever asked for it (the e-signing
+ * engine, M3) acts once the document and its SHA-256 exist (architecture section 9).
+ */
+export const DOCUMENT_RENDERED_EVENT = 'documents.rendered';
+
+/** Renders a complete HTML document to PDF bytes: the worker's Chromium pool, or a test's. */
+export type PdfRender = (html: string) => Promise<Buffer>;
+
+/** A file stored write-once in the evidence bucket, to be recorded in the caller's transaction. */
+export interface WriteOnceFile {
+  readonly companyId: string;
+  readonly bucket: string;
+  readonly storageKey: string;
+  readonly storageVersionId: string;
+  readonly contentType: string;
+  readonly bytes: Buffer;
+  readonly sha256: string;
+  readonly retentionMode: 'GOVERNANCE' | 'COMPLIANCE';
+  readonly retainUntil: Date;
+}
+
+/** A render request and, once rendered, its document (ADR-006). */
+export interface RenderedDocument {
+  readonly renderRequestId: string;
+  readonly status: string;
+  readonly templateKey: string;
+  readonly templateVersion: number;
+  readonly data: Record<string, unknown>;
+  readonly requestedBy: string | null;
+  readonly documentId: string | null;
+  readonly sha256: string | null;
+}
+
+/** A stored document's bytes, checked against its recorded SHA-256. */
+export interface DocumentFile {
+  readonly documentId: string;
+  readonly bytes: Buffer;
+  readonly contentType: string;
+  readonly sha256: string;
+  /** False when the stored bytes no longer hash to the recorded fingerprint. */
+  readonly intact: boolean;
+}
 const DOWNLOAD_SECONDS = 300;
 const UPLOAD_SECONDS = 600;
 
@@ -77,7 +121,11 @@ export class DocumentsService {
     @Inject(RulesService) private readonly rules: RulesService,
   ) {}
 
-  async downloadUrl(companyId: string, documentId: string): Promise<string | null> {
+  async downloadUrl(
+    companyId: string,
+    documentId: string,
+    filename?: string,
+  ): Promise<string | null> {
     const [doc] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
       tx
         .select()
@@ -90,6 +138,202 @@ export class DocumentsService {
       key: doc.storageKey,
       versionId: doc.storageVersionId ?? undefined,
       expiresInSeconds: DOWNLOAD_SECONDS,
+      ...(filename ? { filename } : {}),
+    });
+  }
+
+  /**
+   * A stored document's bytes, re-hashed and compared with the fingerprint recorded when it was
+   * stored (M1 verifyFingerprint). Callers check first that the reader may see the document.
+   */
+  async documentFile(companyId: string, documentId: string): Promise<DocumentFile | null> {
+    const [doc] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+      tx
+        .select()
+        .from(schema.document)
+        .where(and(eq(schema.document.companyId, companyId), eq(schema.document.id, documentId))),
+    );
+    if (!doc) return null;
+    const bytes = await this.storage.get({
+      bucket: doc.bucket,
+      key: doc.storageKey,
+      versionId: doc.storageVersionId ?? undefined,
+    });
+    return {
+      documentId: doc.id,
+      bytes,
+      contentType: doc.contentType,
+      sha256: doc.sha256,
+      intact: verifyFingerprint(bytes, doc.sha256),
+    };
+  }
+
+  /**
+   * Stores bytes write-once in the evidence bucket, under Object Lock for the retention in the
+   * rules table, and checks the store kept exactly them. Runs outside any transaction; the caller
+   * records the file with recordWriteOnce in its own.
+   */
+  async storeWriteOnce(input: {
+    readonly companyId: string;
+    readonly countryCode: string;
+    readonly key: string;
+    readonly bytes: Buffer;
+    readonly contentType: string;
+  }): Promise<WriteOnceFile> {
+    const retention = await this.evidenceRetention(input.countryCode);
+    const stored = await this.storage.putWriteOnce({
+      bucket: this.config.S3_BUCKET_EVIDENCE,
+      key: input.key,
+      body: input.bytes,
+      contentType: input.contentType,
+      retainUntil: retention.retainUntil,
+      mode: retention.mode,
+    });
+    const sha256 = sha256Hex(input.bytes);
+    if (stored.sha256 !== sha256) throw new Error('Stored bytes do not match what was written');
+    return {
+      companyId: input.companyId,
+      bucket: this.config.S3_BUCKET_EVIDENCE,
+      storageKey: input.key,
+      storageVersionId: stored.versionId,
+      contentType: input.contentType,
+      bytes: input.bytes,
+      sha256,
+      retentionMode: retention.mode,
+      retainUntil: retention.retainUntil,
+    };
+  }
+
+  /** Records a file from storeWriteOnce as a write-once document, in the caller's transaction. */
+  async recordWriteOnce(
+    tx: Tx,
+    file: WriteOnceFile,
+    meta: {
+      readonly kind: string;
+      readonly templateKey?: string | null;
+      readonly templateVersion?: number | null;
+      readonly dataSnapshot?: Record<string, unknown> | null;
+      readonly createdBy?: string | null;
+    },
+  ): Promise<string> {
+    return this.insertDocument(tx, {
+      companyId: file.companyId,
+      kind: meta.kind,
+      contentType: file.contentType,
+      bytes: file.bytes,
+      bucket: file.bucket,
+      storageKey: file.storageKey,
+      storageVersionId: file.storageVersionId,
+      writeOnce: true,
+      retentionMode: file.retentionMode,
+      retainUntil: file.retainUntil,
+      templateKey: meta.templateKey ?? null,
+      templateVersion: meta.templateVersion ?? null,
+      dataSnapshot: meta.dataSnapshot ?? null,
+      createdBy: meta.createdBy ?? null,
+    });
+  }
+
+  /** A render request and its document, in the caller's transaction. */
+  async renderedDocument(tx: Tx, renderRequestId: string): Promise<RenderedDocument | null> {
+    const [request] = await tx
+      .select()
+      .from(schema.documentRenderRequest)
+      .where(eq(schema.documentRenderRequest.id, renderRequestId));
+    if (!request) return null;
+    const [doc] = request.documentId
+      ? await tx
+          .select({ id: schema.document.id, sha256: schema.document.sha256 })
+          .from(schema.document)
+          .where(eq(schema.document.id, request.documentId))
+      : [];
+    return {
+      renderRequestId: request.id,
+      status: request.status,
+      templateKey: request.templateKey,
+      templateVersion: request.templateVersion,
+      data: request.data as Record<string, unknown>,
+      requestedBy: request.requestedBy,
+      documentId: doc?.id ?? null,
+      sha256: doc?.sha256 ?? null,
+    };
+  }
+
+  /**
+   * The `documents.render-pdf` job (ADR-006; architecture section 10): renders a frozen template
+   * and data snapshot to PDF, stores it write-once with the retention from the rules table, and
+   * records its fingerprint, emitting documents.rendered in the same transaction. A retry after
+   * success does nothing. Returns the document id.
+   */
+  async renderRequested(
+    companyId: string,
+    renderRequestId: string,
+    render: PdfRender,
+    requestId?: string,
+  ): Promise<string | null> {
+    const ctx = { companyId, actorKind: 'system' as const, requestId: requestId ?? null };
+    const { request, company } = await withCompany(this.database, ctx, async (tx) => {
+      const [found] = await tx
+        .select()
+        .from(schema.documentRenderRequest)
+        .where(eq(schema.documentRenderRequest.id, renderRequestId));
+      const [owner] = await tx
+        .select()
+        .from(schema.company)
+        .where(eq(schema.company.id, companyId));
+      return { request: found, company: owner };
+    });
+    if (!request || !company) throw new Error('Render request or company not found');
+    if (request.status === 'rendered') return request.documentId; // a retry after success
+
+    const branding: Branding = {
+      senderName: company.senderName,
+      primaryColour: company.primaryColour,
+      accentColour: company.accentColour,
+    };
+    const html = renderTemplateHtml(
+      request.templateKey,
+      request.templateVersion,
+      request.data,
+      branding,
+    );
+    const pdf = await render(html);
+    const file = await this.storeWriteOnce({
+      companyId,
+      countryCode: company.countryCode,
+      key: `documents/${companyId}/${renderRequestId}.pdf`,
+      bytes: pdf,
+      contentType: 'application/pdf',
+    });
+    return withCompany(this.database, ctx, async (tx) => {
+      const documentId = await this.recordWriteOnce(tx, file, {
+        kind: 'pdf',
+        templateKey: request.templateKey,
+        templateVersion: request.templateVersion,
+        dataSnapshot: request.data as Record<string, unknown>,
+        createdBy: request.requestedBy,
+      });
+      await tx
+        .update(schema.documentRenderRequest)
+        .set({
+          status: 'rendered',
+          documentId,
+          attempts: request.attempts + 1,
+          updatedAt: this.clock.now(),
+        })
+        .where(eq(schema.documentRenderRequest.id, renderRequestId));
+      await enqueueOutbox(tx, {
+        companyId,
+        type: DOCUMENT_RENDERED_EVENT,
+        payload: {
+          renderRequestId,
+          documentId,
+          sha256: file.sha256,
+          templateKey: request.templateKey,
+        },
+        idempotencyKey: `${DOCUMENT_RENDERED_EVENT}:${renderRequestId}`,
+      });
+      return documentId;
     });
   }
 

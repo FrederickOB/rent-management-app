@@ -18,6 +18,7 @@ import type { Clock } from '../core/clock';
 import { conflict, invalid } from '../core/errors';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
+import { EsignService } from '../esign/esign.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
 import {
@@ -64,6 +65,7 @@ export class LeaseLifecycleService {
     @Inject(RulesService) private readonly rules: RulesService,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(EsignService) private readonly esign: EsignService,
   ) {}
 
   /**
@@ -158,13 +160,17 @@ export class LeaseLifecycleService {
 
   /**
    * A signing request completed (TL-07). The e-signing module sits below tenancy in the layer
-   * map, so it reports completion as an outbox event and this consumer marks the lease signed.
-   * Idempotent: a lease already signed electronically is left alone.
+   * map, so it reports completion as an outbox event (signing.completed) and this consumer marks
+   * the lease signed. Idempotent: a lease already signed electronically is left alone. When the
+   * event names its request, the request's state is checked in the e-signing engine (tenancy
+   * cannot read its tables): it must be this lease's, completed, with no newer request out, so a
+   * late event never acts on a lease that was re-issued.
    */
   async onSigningCompleted(
     companyId: string,
     input: {
       readonly leaseId: string;
+      readonly signingRequestId?: string | null;
       readonly completedAt: Date;
       readonly finalDocumentId: string;
     },
@@ -172,6 +178,11 @@ export class LeaseLifecycleService {
     await withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
       const row = await leaseRow(tx, input.leaseId, { lock: true });
       if (row.signingMethod === 'esign' && row.status !== 'pending_signatures') return;
+      if (
+        input.signingRequestId &&
+        !(await this.eventStillApplies(tx, row.id, input.signingRequestId, 'completed'))
+      )
+        return;
       await this.markSigned(tx, {
         leaseId: input.leaseId,
         signedAt: input.completedAt,
@@ -181,11 +192,38 @@ export class LeaseLifecycleService {
     });
   }
 
-  /** A signer declined (TL-07): the e-signing module reports it like completion, and the lease goes back to draft. */
-  async onSigningDeclined(companyId: string, input: { readonly leaseId: string }): Promise<void> {
-    await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
-      this.returnToDraft(tx, input.leaseId, 'declined'),
-    );
+  /**
+   * A signer declined (TL-07): the e-signing module closed the request in the transaction that
+   * emitted signing.declined, and the lease goes back to draft, once. A late event for a request
+   * that has since been replaced is ignored.
+   */
+  async onSigningDeclined(
+    companyId: string,
+    input: { readonly leaseId: string; readonly signingRequestId?: string | null },
+  ): Promise<void> {
+    await withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
+      const row = await leaseRow(tx, input.leaseId, { lock: true });
+      if (row.status !== 'pending_signatures') return;
+      if (
+        input.signingRequestId &&
+        !(await this.eventStillApplies(tx, row.id, input.signingRequestId, 'declined'))
+      )
+        return;
+      await this.returnToDraft(tx, input.leaseId, 'declined');
+    });
+  }
+
+  /** Whether an e-signing event about `requestId` still speaks for the lease (see above). */
+  private async eventStillApplies(
+    tx: Tx,
+    leaseId: string,
+    requestId: string,
+    expected: 'completed' | 'declined',
+  ): Promise<boolean> {
+    const state = await this.esign.requestState(tx, requestId);
+    if (!state || state.leaseId !== leaseId || state.status !== expected) return false;
+    const open = await this.esign.openRequestFor(tx, leaseId);
+    return open === null;
   }
 
   /**

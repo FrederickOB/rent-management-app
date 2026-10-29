@@ -938,6 +938,7 @@ sequenceDiagram
 - **Evidence per signature.** Typed name or drawn image, consent text version, server time, verified phone or email, IP address, user agent, document SHA-256.
 - **Certificate page.** Signer names, roles, timestamps, verification method, IP and device, and the original document's SHA-256. The final PDF's own hash is recorded in the database and the audit chain, and sent to every party with their copy.
 - **Failure paths.** An expired or reused token shows an explanation page and the landlord's contact. Too many code attempts lock signing for 30 minutes. A lease signer may decline (lease returns to Draft); a notice cannot be declined, only left unsigned, which the ladder handles.
+- **The links API (M3).** `apps/links` calls the API server to server (`/links/open`, `/document`, `/code`, `/sign`, `/decline`) with a shared key in `x-links-key` (`LINKS_API_KEY`, required in production), passing the browser's address and device as evidence; the token is the only authorisation for the page. On the page the signer asks for the code first, then submits the code, the typed name or drawing and the consent tick together. A signer's signed copy goes out on a link of its own (`signed_copy`). The signed copy is the frozen PDF with the certificate appended as an incremental update, so the frozen document's bytes stay a prefix of it.
 
 ## 10. Job catalogue
 
@@ -953,15 +954,18 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `portfolio.process-property-file` | event: photo or paper uploaded | property file id | 5, backoff from 30 s | M2 |
 | `portfolio.import-validate` | event: import dry run requested | import id + request time | 3, then the import is marked failed | M2 |
 | `portfolio.import-commit` | event: import committed | import id + the check it follows (validated at) | 3, then the import is marked failed | M2 |
-| `housekeeping.expire-links-and-codes` | hourly | run hour | 3 | M3 |
+| `housekeeping.expire-links-and-codes` | hourly: revokes expired links and links of closed requests, lifts finished code locks | run hour | 3 | M3 |
 | `identity.verify-id` | event: ID captured | tenant id + attempt | 5, then manual review | M3 |
 | `tenancy.lease-transitions` | daily 00:05 | lease id + transition + date | 5 | M3 |
 | `tenancy.renewal-reminders` | daily 08:00 | lease id + days before (90, 60, 30) | 3 | M3 |
 | `tenancy.rent-control-reminders` | daily 08:00 | lease id + reminder step | 3 | M3 |
 | `tenancy.stamping-reminders` | daily 08:00 | lease id + reminder step | 3 | M3 |
 | `tenancy.formal-lease-reminders` | weekly | lease id + week | 3 | M3 (terms over three years; OQ-44) |
-| `esign.signing-reminders` | every 15 min | signer id + ladder step | 3 | M3 |
+| `esign.signing-reminders` | every 15 min, one company job per 15-minute slot | signer id + ladder step | 3 | M3 |
 | `esign.finalise` | event: last signature | signing request id | 5 | M3 |
+| `documents.rendered` | event: a PDF is recorded with its SHA-256 (emitted by `documents.render-pdf`); opens the signing request and queues its links | render request id | 5 | M3 |
+| `signing.completed` | event: a signing request finalised; marks the lease signed (`LeaseLifecycleService.onSigningCompleted`) | signing request id | 5 | M3 |
+| `signing.declined` | event: a signer declined; returns the lease to draft (`onSigningDeclined`) | signing request id | 5 | M3 |
 | `billing.generate-invoices` | daily 00:10 | lease id + cycle start | 5 | M4a |
 | `billing.accrue-periods` | daily 00:20, after invoices; catches up any missed day | invoice line id | 5, alert | M4a |
 | `billing.subledger-check` | nightly 03:00 | company + date | 3, alert on mismatch | M4a |

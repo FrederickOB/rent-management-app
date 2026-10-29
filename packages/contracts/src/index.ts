@@ -1,6 +1,7 @@
 import { approvalsContract } from './approvals';
 import { auditContract } from './audit';
 import { companyContract } from './company';
+import { linksContract } from './links';
 import { meContract } from './me';
 import { membershipsContract } from './memberships';
 import {
@@ -13,6 +14,7 @@ import { rulesContract } from './rules';
 import {
   leasesContract,
   leaseTemplatesContract,
+  signingRequestsContract,
   tenantAppContract,
   tenantsContract,
 } from './tenancy';
@@ -20,6 +22,7 @@ import {
 export * from './approvals';
 export * from './audit';
 export * from './company';
+export * from './links';
 export * from './me';
 export * from './memberships';
 export * from './register';
@@ -41,7 +44,9 @@ export const contract = {
   tenants: tenantsContract,
   leaseTemplates: leaseTemplatesContract,
   leases: leasesContract,
+  signingRequests: signingRequestsContract,
   tenantApp: tenantAppContract,
+  links: linksContract,
 };
 
 export type Contract = typeof contract;

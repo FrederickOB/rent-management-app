@@ -1,8 +1,9 @@
 /**
  * Accra demo dataset (CLAUDE.md section 14). M1 seeded companies and users; M2 adds owners,
  * properties, units, meters and each person's scope; M3 adds tenants and their leases, recorded
- * as signed on paper (decision 7). Money arrives in M4a. Every person is fictional and flagged as
- * a test contact, and only fake providers are configured locally, so nothing is ever sent.
+ * as signed on paper (decision 7), and one lease out for e-signing. Money arrives in M4a. Every
+ * person is fictional and flagged as a test contact, and only fake providers are configured
+ * locally, so nothing is ever sent.
  *
  *   pnpm db:seed
  */
@@ -40,7 +41,13 @@ import {
   RegisterService,
   type NewProperty,
 } from '../src/portfolio';
-import { LeasesService, TenancyModule, TenantsService, type TenantInput } from '../src/tenancy';
+import {
+  LeaseSigningService,
+  LeasesService,
+  TenancyModule,
+  TenantsService,
+  type TenantInput,
+} from '../src/tenancy';
 
 const config = loadConfig();
 const host = new URL(config.DATABASE_URL).hostname;
@@ -925,6 +932,96 @@ async function ensureTenancies(
   return created;
 }
 
+/** The lease out for e-signing (M3 plan 4.18), on a flat no other demo or test lease uses. */
+const SIGNING_UNIT = 'ACC-ELG-B1-03';
+const SIGNING_TENANT: TenantInput = {
+  kind: 'individual',
+  displayName: 'Kojo Signing (demo)',
+  phone: '+233200000040',
+  email: 'kojo.signing@demo.invalid',
+  occupation: 'Pharmacist',
+  consent: { sms: true, email: true },
+  contacts: [
+    {
+      kind: 'guarantor',
+      name: 'Adjoa Guarantor (demo)',
+      phone: '+233200000042',
+      relationship: 'Sister',
+      consent: { sms: true },
+    },
+  ],
+};
+
+/**
+ * One lease issued for e-signing and waiting on its signatures (M3 plan 4.18): the tenant and a
+ * guarantor, both with SMS consent; the first manager for the landlord and the second as the
+ * witness, both staff, who get their links by email. The worker renders the PDF and sends the
+ * links when it runs. Idempotent: skipped once the flat has a lease.
+ */
+async function ensureSigningLease(
+  database: Database,
+  services: { tenants: TenantsService; leases: LeasesService; signing: LeaseSigningService },
+): Promise<boolean> {
+  const actor = await actorFor(database, AGENCY, 'manager.one@demo.invalid');
+  const witness = await actorFor(database, AGENCY, 'manager.two@demo.invalid');
+  const found = await withCompany(
+    database,
+    { companyId: AGENCY, actorKind: 'system' },
+    async (tx) => {
+      const [unit] = await tx
+        .select({ id: schema.unit.id })
+        .from(schema.unit)
+        .where(eq(schema.unit.code, SIGNING_UNIT));
+      const leased = unit
+        ? await tx.execute<{ id: string }>(
+            sql`select id from lease where unit_id = ${unit.id} and status <> 'cancelled' limit 1`,
+          )
+        : null;
+      const [tenant] = await tx
+        .select({ id: schema.tenant.id })
+        .from(schema.tenant)
+        .where(eq(schema.tenant.displayName, SIGNING_TENANT.displayName));
+      return { unitId: unit?.id, leased: (leased?.rows.length ?? 0) > 0, tenantId: tenant?.id };
+    },
+  );
+  if (!found.unitId || found.leased || witness.kind !== 'staff') return false;
+  const tenantId =
+    found.tenantId ??
+    (await services.tenants.create(actor, SIGNING_TENANT, { isTestContact: true })).tenant.id;
+  const today = toIsoDate(businessDateOf(instantFrom(new Date()), 'Africa/Accra'));
+  const start = toIsoDate(addMonths(parseBusinessDate(today), 1));
+  const draft = await services.leases.createDraft(actor, {
+    unitId: found.unitId,
+    tenantId,
+    startDate: start,
+    endDate: toIsoDate(addDays(addMonths(parseBusinessDate(start), 12), -1)),
+    monthlyRentMinor: 160_000,
+    cycle: 'monthly',
+    depositMinor: 320_000,
+    noticeDays: 30,
+  });
+  await services.leases.updateDraft(actor, draft.id, {
+    parties: [
+      ...draft.parties.map((p) => ({
+        role: p.role,
+        name: p.name,
+        phone: p.phone,
+        email: p.email,
+        tenantContactId: p.tenantContactId,
+        staffPersonId: p.staffPersonId,
+      })),
+      {
+        role: 'witness' as const,
+        name: 'Akosua Manager (demo)',
+        email: 'manager.two@demo.invalid',
+        staffPersonId: witness.personId,
+      },
+    ],
+  });
+  await services.signing.issue(actor, draft.id);
+  return true;
+}
+
 /** RFC 4648 base32 without padding, for the otpauth URI people add to an authenticator app. */
 function base32(text: string): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -958,12 +1055,22 @@ try {
     storage,
     cfg,
   });
+  const signing = await ensureSigningLease(database, {
+    tenants: app.get(TenantsService),
+    leases: app.get(LeasesService),
+    signing: app.get(LeaseSigningService),
+  });
   console.log(`Seeded ${COMPANIES.length} companies and ${PEOPLE.length} people.`);
   console.log(
     `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST).`,
   );
   console.log(
     `Tenancies: ${leases} new paper leases of ${TENANCIES.length}; +233 20 000 0021 rents from both companies.`,
+  );
+  console.log(
+    signing
+      ? `E-signing: ${SIGNING_UNIT} issued for signature; the worker sends the links (tenant +233 20 000 0040).`
+      : `E-signing: ${SIGNING_UNIT} already has its lease.`,
   );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(

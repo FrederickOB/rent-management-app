@@ -67,6 +67,40 @@ export function renderHtml(template: Template, data: unknown, branding: Branding
   ].join('\n');
 }
 
+/**
+ * The words of a document for a screen (TL-07; M3 plan 4.5): the same template and data as the
+ * PDF, rendered to static markup, without the letterhead around it, the fonts or the print CSS.
+ * The signing page shows this under its own strict, nonce-based policy, which refuses inline
+ * style attributes; the letterhead carries the only ones. Text is escaped as in the PDF, so the
+ * fragment holds no script and no markup from the data.
+ */
+export function renderTemplateContent(
+  key: string,
+  version: number,
+  data: unknown,
+  branding: Branding,
+  registry: TemplateRegistry = templates,
+): string {
+  const parsedBranding = brandingSchema.safeParse(branding);
+  if (!parsedBranding.success) {
+    throw new DocumentError(
+      'invalid_branding',
+      'Branding is not valid',
+      describeIssues(parsedBranding.error),
+    );
+  }
+  const markup = renderToStaticMarkup(
+    registry.get(key, version).element(data, parsedBranding.data),
+  );
+  // The letterhead wraps the content in its one <main>; text cannot contain the tag, as React
+  // escapes it.
+  const start = markup.indexOf('<main>');
+  const end = markup.lastIndexOf('</main>');
+  if (start < 0 || end < start)
+    throw new DocumentError('invalid_template', `${key} version ${version} has no letterhead`);
+  return markup.slice(start + '<main>'.length, end);
+}
+
 /** Renders a registered template by key and version, as stored with each document. */
 export function renderTemplateHtml(
   key: string,

@@ -8,6 +8,7 @@ import { RulesModule } from '../rules/rules.module';
 import { IdChecksService } from './id-checks.service';
 import { LeaseDocumentsService } from './lease-documents.service';
 import { LeaseLifecycleService } from './lease-lifecycle.service';
+import { LeaseSigningService } from './lease-signing.service';
 import { LeaseTemplatesService } from './lease-templates.service';
 import { LeasesService } from './leases.service';
 import { TenancyRemindersService } from './tenancy-reminders.service';
@@ -21,6 +22,7 @@ const SERVICES = [
   LeaseDocumentsService,
   LeaseLifecycleService,
   LeasesService,
+  LeaseSigningService,
   TenancyRemindersService,
   TenantAppService,
 ];

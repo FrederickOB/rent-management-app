@@ -200,7 +200,8 @@ export const signer = pgTable(
 
 /**
  * A secure link (CLAUDE.md section 9): 256 random bits in the URL, only the SHA-256 stored. One
- * recipient and one purpose each; signing links now, pay links in M4b and job sheets in M8.
+ * recipient and one purpose each: signing and the signed copy now (migration 0009 added the
+ * copy), pay links in M4b and job sheets in M8.
  */
 export const secureLink = pgTable(
   'secure_link',
@@ -234,8 +235,14 @@ export const secureLink = pgTable(
       foreignColumns: [signer.companyId, signer.propertyId, signer.id],
     }),
     index('secure_link_signer_idx').on(t.companyId, t.signerId),
-    check('secure_link_purpose_check', sql`${t.purpose} in ('sign', 'pay', 'job_sheet')`),
-    check('secure_link_signer_check', sql`${t.purpose} <> 'sign' or ${t.signerId} is not null`),
+    check(
+      'secure_link_purpose_check',
+      sql`${t.purpose} in ('sign', 'signed_copy', 'pay', 'job_sheet')`,
+    ),
+    check(
+      'secure_link_signer_check',
+      sql`${t.purpose} not in ('sign', 'signed_copy') or ${t.signerId} is not null`,
+    ),
     check('secure_link_token_check', sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
     check('secure_link_revoke_check', sql`(${t.revokedAt} is null) = (${t.revokeReason} is null)`),
   ],

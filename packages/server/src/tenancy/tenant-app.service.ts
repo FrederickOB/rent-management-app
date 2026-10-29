@@ -5,6 +5,8 @@ import type { LeaseStatus, RentCycle } from '@rent/domain/tenancy';
 import { forbidden, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
+import { EsignService } from '../esign/esign.service';
+import type { IssuedLink, TenantSigningRequest } from '../esign/esign.types';
 import { PolicyService } from '../policy/policy.service';
 
 type TenantActor = Extract<Actor, { kind: 'tenant' }>;
@@ -38,6 +40,15 @@ export interface TenancyDetail extends TenancyCard {
   readonly serviceChargeMonthlyMinor: number | null;
   readonly noticeDays: number;
   readonly steps: readonly { readonly effectiveFrom: string; readonly monthlyRentMinor: number }[];
+}
+
+/**
+ * A lease waiting for the tenant's signature, or for others' after theirs (GET /me/signing). The
+ * app opens the signing page in its browser with a fresh link from POST /me/signing/{signerId}/link.
+ */
+export interface TenantSigningCard extends TenantSigningRequest {
+  readonly landlord: { readonly companyId: string; readonly name: string };
+  readonly tenancy: TenancyCard | null;
 }
 
 type CardRow = {
@@ -94,6 +105,7 @@ export class TenantAppService {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(PolicyService) private readonly policy: PolicyService,
     @Inject(DocumentsService) private readonly documents: DocumentsService,
+    @Inject(EsignService) private readonly esign: EsignService,
   ) {}
 
   async tenancies(actor: Actor | null): Promise<TenancyGroup[]> {
@@ -158,6 +170,48 @@ export class TenantAppService {
       if (url) return url;
     }
     throw notFound('Document');
+  }
+
+  /**
+   * The signing requests out for the signed-in tenant's own signature, with every landlord's read
+   * under its own company context and the tenant scope (TL-07; plan 4.15).
+   */
+  async signing(actor: Actor | null): Promise<TenantSigningCard[]> {
+    const tenant = this.tenantActor(actor);
+    const cards: TenantSigningCard[] = [];
+    for (const [companyId, tenantIds] of await this.companies(tenant)) {
+      const found = await this.inCompany(tenant, companyId, tenantIds, async (tx) => {
+        const requests = await this.esign.tenantRequests(tx);
+        if (requests.length === 0) return [];
+        const name = await this.landlordName(tx, companyId);
+        const out: TenantSigningCard[] = [];
+        for (const request of requests) {
+          const rows = await tx.execute<CardRow>(
+            sql`${CARD_SELECT} where l.id = ${request.leaseId}`,
+          );
+          const row = rows.rows[0];
+          out.push({ ...request, landlord: { companyId, name }, tenancy: row ? card(row) : null });
+        }
+        return out;
+      });
+      cards.push(...found);
+    }
+    return cards;
+  }
+
+  /**
+   * A fresh signing link for the tenant's own signer, for the app to open in its browser. It
+   * replaces the link sent by message, as every newer link does (plan 4.8).
+   */
+  async signingLink(actor: Actor | null, signerId: string): Promise<IssuedLink> {
+    const tenant = this.tenantActor(actor);
+    for (const [companyId, tenantIds] of await this.companies(tenant)) {
+      const own = await this.inCompany(tenant, companyId, tenantIds, (tx) =>
+        this.esign.tenantSigner(tx, signerId),
+      );
+      if (own) return this.esign.tenantAppLink(companyId, signerId);
+    }
+    throw notFound('Signer');
   }
 
   private tenantActor(actor: Actor | null): TenantActor {

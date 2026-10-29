@@ -39,8 +39,9 @@ export const messageRequestSchema = z
     subject: z.string().trim().min(1).max(200).nullable(),
     /** Plain text. Put {{link}} where the link goes when there is one. */
     body: z.string().min(1).max(4_000),
+    /** Made at send time: a signing link or a signed copy (targets a signer), an ID capture link. */
     link: z
-      .object({ purpose: z.enum(['sign', 'id_capture']), targetId: uuid })
+      .object({ purpose: z.enum(['sign', 'signed_copy', 'id_capture']), targetId: uuid })
       .strict()
       .nullable(),
     /** The channels it may go by, in order; the consented ones are tried in this order. */

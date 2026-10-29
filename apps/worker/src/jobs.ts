@@ -26,7 +26,8 @@ const nothing = z.object({}).passthrough();
 
 const today = (clock: Clock) => toIsoDate(businessDateOf(instantFrom(clock.now())));
 
-async function companyIds(database: Database): Promise<string[]> {
+/** Every company's id, through the narrow system function (ADR-002). */
+export async function companyIds(database: Database): Promise<string[]> {
   const result = await withSystem(database, {}, (tx) =>
     tx.execute<{ id: string }>(sql`select id from app.company_ids() as id`),
   );

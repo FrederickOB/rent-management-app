@@ -7,6 +7,7 @@ import {
   IdChecksService,
   LeaseDocumentsService,
   LeaseLifecycleService,
+  LeaseSigningService,
   LeasesService,
   LeaseTemplatesService,
   TenantAppService,
@@ -18,7 +19,7 @@ import { serialize } from '../http/serialize';
 
 const ok = { ok: true as const };
 
-/** Tenants, lease templates and leases (M3 plan 4.15). Issuing for e-signature is the e-signing phase's. */
+/** Tenants, lease templates and leases (M3 plan 4.15), with issuing for e-signature (TL-07). */
 @Controller()
 export class TenancyController {
   constructor(
@@ -28,6 +29,7 @@ export class TenancyController {
     @Inject(LeasesService) private readonly leases: LeasesService,
     @Inject(LeaseLifecycleService) private readonly lifecycle: LeaseLifecycleService,
     @Inject(LeaseDocumentsService) private readonly documents: LeaseDocumentsService,
+    @Inject(LeaseSigningService) private readonly signing: LeaseSigningService,
   ) {}
 
   @Implement(contract.tenants)
@@ -183,11 +185,43 @@ export class TenancyController {
       cancelSigned: implement(contract.leases.cancelSigned).handler(async ({ input }) =>
         toApproval(await this.leases.requestCancelSigned(ctx.actor, input.leaseId, input.reason)),
       ),
+      issue: implement(contract.leases.issue).handler(async ({ input }) => {
+        await this.signing.issue(ctx.actor, input.leaseId);
+        return lease(input.leaseId);
+      }),
+      recall: implement(contract.leases.recall).handler(async ({ input }) => {
+        await this.signing.recall(ctx.actor, input.leaseId, input.reason);
+        return lease(input.leaseId);
+      }),
+      signing: implement(contract.leases.signing).handler(async ({ input }) => {
+        const progress = await this.signing.progress(ctx.actor, input.leaseId);
+        return progress ? serialize(progress) : null;
+      }),
+      signingDocument: implement(contract.leases.signingDocument).handler(async ({ input }) => ({
+        url: await this.signing.documentUrl(ctx.actor, input.leaseId, input.which),
+      })),
     };
   }
 }
 
-/** The tenant app's endpoints (TL-01): the signed-in tenant's own tenancies and documents. */
+/** Signing requests (TL-07): the hand-over link for a signer with no consented channel (decision 2). */
+@Controller()
+export class SigningRequestsController {
+  constructor(@Inject(LeaseSigningService) private readonly signing: LeaseSigningService) {}
+
+  @Implement(contract.signingRequests)
+  signingRequestsRouter(@Ctx() ctx: RequestContext) {
+    return {
+      handoverLink: implement(contract.signingRequests.handoverLink).handler(async ({ input }) =>
+        serialize(
+          await this.signing.handoverLink(ctx.actor, input.signingRequestId, input.signerId),
+        ),
+      ),
+    };
+  }
+}
+
+/** The tenant app's endpoints (TL-01, TL-07): the signed-in tenant's own tenancies, documents and signing. */
 @Controller()
 export class TenantAppController {
   constructor(@Inject(TenantAppService) private readonly app: TenantAppService) {}
@@ -205,6 +239,12 @@ export class TenantAppController {
         async ({ input }) => ({
           url: await this.app.documentUrl(ctx.actor, input.documentId),
         }),
+      ),
+      signing: implement(contract.tenantApp.signing).handler(async () =>
+        serialize(await this.app.signing(ctx.actor)),
+      ),
+      signingLink: implement(contract.tenantApp.signingLink).handler(async ({ input }) =>
+        serialize(await this.app.signingLink(ctx.actor, input.signerId)),
       ),
     };
   }

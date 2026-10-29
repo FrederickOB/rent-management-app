@@ -5,6 +5,8 @@ import {
   brandingSchema,
   mergeCompanySettings,
   parseCompanySettings,
+  signingReminderHoursOf,
+  tenancySettingsOf,
   type CompanySettings,
 } from '@rent/domain/settings';
 import { forbidden, notFound } from '../core/errors';
@@ -79,7 +81,7 @@ export class CompaniesService {
         senderName: company.senderName,
         logoUrl,
       },
-      settings: parseCompanySettings(company.settings),
+      settings: settingsInForce(parseCompanySettings(company.settings)),
     };
   }
 
@@ -143,4 +145,17 @@ export class CompaniesService {
     );
     return this.profile(staff);
   }
+}
+
+/** Stored settings with the M3 keys' defaults applied, so screens show the values in force. */
+function settingsInForce(settings: CompanySettings): CompanySettings {
+  const tenancy = tenancySettingsOf(settings);
+  return {
+    ...settings,
+    witnessRequired: tenancy.witnessRequired,
+    rentControlCommercial: tenancy.rentControlCommercial,
+    rentControlReminderDaysBefore: [...tenancy.rentControlReminderDaysBefore],
+    stampingReminderDaysBefore: [...tenancy.stampingReminderDaysBefore],
+    signingReminderHours: [...signingReminderHoursOf(settings)],
+  };
 }

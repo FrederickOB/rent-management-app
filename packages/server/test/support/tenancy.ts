@@ -12,8 +12,11 @@ import { DbKeyStore } from '../../src/core/crypto/db-key-store';
 import { FieldCipher } from '../../src/core/crypto/field-cipher';
 import { MESSAGE_SEND_JOB, messageRequestSchema } from '../../src/core/messages';
 import { DocumentsService } from '../../src/documents/documents.service';
+import { EsignService } from '../../src/esign/esign.service';
+import { SigningPageService } from '../../src/esign/signing-page.service';
 import { StepUpVerifier } from '../../src/identity/step-up';
 import { MessagingService } from '../../src/messaging/messaging.service';
+import { registerSigningRecipients } from '../../src/messaging/signing-recipients';
 import { PolicyService } from '../../src/policy/policy.service';
 import { RegisterReadService } from '../../src/portfolio/register-read.service';
 import { RegisterService } from '../../src/portfolio/register.service';
@@ -21,6 +24,7 @@ import { RulesService } from '../../src/rules/rules.service';
 import { IDENTITY_VERIFY_JOB, IdChecksService } from '../../src/tenancy/id-checks.service';
 import { LeaseDocumentsService } from '../../src/tenancy/lease-documents.service';
 import { LeaseLifecycleService } from '../../src/tenancy/lease-lifecycle.service';
+import { LeaseSigningService } from '../../src/tenancy/lease-signing.service';
 import { LeaseTemplatesService } from '../../src/tenancy/lease-templates.service';
 import { LeasesService } from '../../src/tenancy/leases.service';
 import { TenancyRemindersService } from '../../src/tenancy/tenancy-reminders.service';
@@ -61,7 +65,15 @@ export function tenancyServices(
   const idChecks = new IdChecksService(ctx.database, policy, tenants, identity, ctx.clock);
   const templates = new LeaseTemplatesService(ctx.database, policy);
   const leaseDocuments = new LeaseDocumentsService(ctx.database, policy, documents, templates);
-  const lifecycle = new LeaseLifecycleService(ctx.database, policy, rules, ctx.audit, ctx.clock);
+  const esign = new EsignService(ctx.database, ctx.config, ctx.clock, documents, ctx.audit);
+  const lifecycle = new LeaseLifecycleService(
+    ctx.database,
+    policy,
+    rules,
+    ctx.audit,
+    ctx.clock,
+    esign,
+  );
   const leases = new LeasesService(
     ctx.database,
     policy,
@@ -77,6 +89,28 @@ export function tenancyServices(
   const sms = new InMemorySms();
   const email = new InMemoryEmail();
   const messaging = new MessagingService(ctx.database, sms, email, ctx.config, tenants, idChecks);
+  registerSigningRecipients(messaging, esign, tenants);
+  const signingPage = new SigningPageService(
+    ctx.database,
+    ctx.config,
+    ctx.clock,
+    sms,
+    email,
+    documents,
+    ctx.audit,
+    esign,
+  );
+  const leaseSigning = new LeaseSigningService(
+    ctx.database,
+    policy,
+    esign,
+    leaseDocuments,
+    leases,
+    lifecycle,
+    documents,
+    ctx.audit,
+    ctx.clock,
+  );
   const owners = new OwnersService(ctx.database, policy, cipher, ctx.audit);
   return {
     policy,
@@ -91,8 +125,11 @@ export function tenancyServices(
     leaseDocuments,
     lifecycle,
     leases,
+    esign,
+    signingPage,
+    leaseSigning,
     reminders: new TenancyRemindersService(ctx.database, policy, ctx.clock),
-    tenantApp: new TenantAppService(ctx.database, policy, documents),
+    tenantApp: new TenantAppService(ctx.database, policy, documents, esign),
     sms,
     email,
     messaging,

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_SIGNING_REMINDER_HOURS } from '../esign/signing';
 
 /**
  * Company settings: product choices, not law (CLAUDE.md section 7). Defaults are the PRD's.
@@ -39,6 +40,18 @@ export const companySettingsSchema = z
       .optional(),
     /** OQ-45: days before the stamping deadline; then weekly until stamped. */
     stampingReminderDaysBefore: z.array(z.number().int().min(0).max(366)).min(1).max(12).optional(),
+    /** TL-07: hours after the signing links go out that unsigned signers are reminded. */
+    signingReminderHours: z
+      .array(
+        z
+          .number()
+          .int()
+          .min(1)
+          .max(24 * 30),
+      )
+      .min(1)
+      .max(12)
+      .optional(),
   })
   .strict();
 
@@ -68,6 +81,11 @@ export function tenancySettingsOf(settings: CompanySettings): TenancySettings {
     stampingReminderDaysBefore: settings.stampingReminderDaysBefore ?? [30, 14, 7],
     advanceRentPolicy: settings.advanceRentPolicy,
   };
+}
+
+/** Signing reminders (TL-07; M3 plan 4.8): 24 hours, 3 days and 7 days unless the company says otherwise. */
+export function signingReminderHoursOf(settings: CompanySettings): readonly number[] {
+  return settings.signingReminderHours ?? DEFAULT_SIGNING_REMINDER_HOURS;
 }
 
 export const parseCompanySettings = (value: unknown): CompanySettings =>

@@ -88,7 +88,7 @@ export const message = pgTable(
     ),
     check(
       'message_link_check',
-      sql`(${t.linkPurpose} is null or ${t.linkPurpose} in ('sign', 'id_capture')) and (${t.linkPurpose} is null) = (${t.linkTargetId} is null)`,
+      sql`(${t.linkPurpose} is null or ${t.linkPurpose} in ('sign', 'signed_copy', 'id_capture')) and (${t.linkPurpose} is null) = (${t.linkTargetId} is null)`,
     ),
     check(
       'message_channels_check',

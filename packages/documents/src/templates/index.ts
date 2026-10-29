@@ -10,7 +10,7 @@ export {
   type TemplateDefinition,
   type TemplateProps,
 } from './registry';
-export { renderHtml, renderTemplateHtml } from './render';
+export { renderHtml, renderTemplateContent, renderTemplateHtml } from './render';
 export { leaseV1, type LeaseDocumentData } from './lease';
 export { signingCertificateV1, type SigningCertificateData } from './signing-certificate';
 export { systemSampleV1, type SystemSampleData } from './system-sample';
