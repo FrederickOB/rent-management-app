@@ -122,7 +122,7 @@ flowchart TB
 | `companies` | 14 | Companies and branding, owners, management agreements, settlement accounts (AD-01, AD-02) | policy, audit, documents, identity (invites), rules |
 | `tasks` | 11 | Staff tasks, including notice-ladder caretaker tasks until the field app (CF-06) | policy |
 | `esign` | 2, 4 | Signing requests, secure links, one-time codes, evidence, certificate PDFs (TL-07; LN-02, LN-04 signing) | documents, audit |
-| `portfolio` | 1 | Portfolios, properties, blocks, units, codes, meters, amenities, import, billing bands (PR-01 to PR-10, PB-01) | companies, documents, rules, audit |
+| `portfolio` | 1 | Portfolios, properties, blocks, units, codes, meters, amenities, import, billing bands (PR-01 to PR-10, PB-01) | companies (owners), documents, rules, audit, policy |
 | `tenancy` | 2 | Tenants, ID verification, leases, templates, rent schedule, occupancy, renewals, advance-cap check (TL-01 to TL-10, TL-12, TL-13, PB-09, AR-05 check) | portfolio, esign, approvals, rules, companies |
 | `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents |
 | `payments` | 3 | Providers, pay links, webhooks, verification, matching, unmatched queue, receipts, reconciliation (BC-02 to BC-04, BC-06, BC-12, BC-14) | billing, ledger, companies, documents |
@@ -230,7 +230,8 @@ erDiagram
         text region
         text district
         text mmda
-        point map_pin
+        numeric latitude
+        numeric longitude
     }
     UNIT {
         uuid id PK
@@ -250,6 +251,14 @@ erDiagram
 ```
 
 A property without blocks gets one hidden default block, so every unit has a block. `PROPERTY_OWNERSHIP` holds a single 100% row in the MVP; joint ownership (PR-07) adds rows without a migration. Occupancy is not stored on the unit: it is derived from leases (PB-09).
+
+Built in M2 (`docs/plans/M2.md`, section 4):
+
+- **Unit codes.** Four parts, `AREA-PROP-BLOCK-UNIT` (`ACC-LEG-B2-04`). The area has 2 to 4 letters, the property part 2 to 4 letters or digits, the block 1 to 3 (default `B1`), and the unit 2 digits by default or a custom label of up to 4 characters. Codes are unique within a company, fixed once issued (column grants and a trigger) and never reused: properties, blocks and units are archived, never deleted, and bulk creation numbers after the highest number ever used in the block.
+- **Ownership.** `property_ownership` is append-only. A change adds rows with a new date; a deferred check makes the shares on each date total 10,000 basis points, and every property must have an owner. The `property_current_ownership` view (security invoker) gives today's owners.
+- **Status history.** `unit_status_event` is written only by triggers: availability changes now, occupancy from leases in M3. The application role cannot insert into it.
+- **Scope.** Register tables carry `property_id`, so the restrictive scope policies in section 11 filter them without joins.
+- **Pins** are two numeric columns, latitude and longitude, rather than `point`.
 
 ### 3.3 Tenancy
 
@@ -933,6 +942,9 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `audit.anchor-heads` | daily 01:30 | date | 5 | M1 |
 | `documents.render-pdf` | event: document requested | document id | 5, backoff from 30 s | M1 |
 | `approvals.expire-requests` | hourly | request id + expiry | 3 | M1 |
+| `portfolio.process-property-file` | event: photo or paper uploaded | property file id | 5, backoff from 30 s | M2 |
+| `portfolio.import-validate` | event: import dry run requested | import id + request time | 3 | M2 |
+| `portfolio.import-commit` | event: import committed | import id | 3 | M2 |
 | `housekeeping.expire-links-and-codes` | hourly | run hour | 3 | M3 |
 | `identity.verify-id` | event: ID captured | tenant id + attempt | 5, then manual review | M3 |
 | `tenancy.lease-transitions` | daily 00:05 | lease id + transition + date | 5 | M3 |
@@ -997,7 +1009,7 @@ Sign-in codes are not a job: the auth request sends them straight to the SMS por
     - **Schedulers** call a `SECURITY DEFINER` function that returns company ids only.
     - **Platform admin aggregates** read `SECURITY DEFINER` views that return counts and totals, never rows.
     - **Support access** sets a company context only when an active, consented, time-boxed grant exists. Every query under it is audited.
-- Defence in depth for the most sensitive tables (journal lines, documents, tenants): a second RLS predicate restricts scoped sessions (owner, caretaker, tenant) to their scope ids when `app.scope` is set.
+- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. Tenant scope follows in M3, and journal lines in M4a.
 
 ### Data protection
 

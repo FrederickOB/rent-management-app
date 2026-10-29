@@ -4,12 +4,24 @@ import type { Database, Tx } from './client';
 
 export type ActorKind = 'staff' | 'tenant' | 'platform_admin' | 'system' | 'link';
 
+/**
+ * Scope inside a company (AD-02): the owners whose properties a person sees, and the properties
+ * assigned to them. The transaction then sees only those properties and owners, through a second,
+ * restrictive RLS policy (architecture section 11).
+ */
+export interface ScopeContext {
+  readonly ownerIds: readonly string[];
+  readonly propertyIds: readonly string[];
+}
+
 /** Company context for one transaction (CLAUDE.md section 5, ADR-002). */
 export interface CompanyContext {
   readonly companyId: string;
   readonly personId?: string | null;
   readonly actorKind: ActorKind;
   readonly requestId?: string | null;
+  /** Null or absent: the whole company. */
+  readonly scope?: ScopeContext | null;
 }
 
 export type IsolationLevel = 'read committed' | 'repeatable read' | 'serializable';
@@ -38,12 +50,23 @@ export async function withCompany<T>(
   if (!ctx.companyId) throw new ContextError('A company id is required');
   assertUuid(ctx.companyId, 'companyId');
   assertUuid(ctx.personId, 'personId');
+  const scope = ctx.scope ?? null;
+  if (scope) for (const id of [...scope.ownerIds, ...scope.propertyIds]) assertUuid(id, 'scope id');
   return database.db.transaction(async (tx) => {
     await tx.execute(sql`select
       set_config('app.company_id', ${ctx.companyId}, true),
       set_config('app.person_id', ${ctx.personId ?? ''}, true),
       set_config('app.actor_kind', ${ctx.actorKind}, true),
       set_config('app.request_id', ${ctx.requestId ?? ''}, true)`);
+    if (scope) {
+      // Resolved before the property scope is set, so it reads all of the company's ownership.
+      const owners = `{${scope.ownerIds.join(',')}}`;
+      const properties = `{${scope.propertyIds.join(',')}}`;
+      await tx.execute(sql`select
+        set_config('app.property_scope',
+          app.resolve_property_scope(${owners}::uuid[], ${properties}::uuid[])::text, true),
+        set_config('app.owner_scope', ${owners}, true)`);
+    }
     return fn(tx);
   }, options);
 }

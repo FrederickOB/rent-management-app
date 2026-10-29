@@ -12,6 +12,7 @@
     "./approvals": "./src/approvals/index.ts",
     "./rules": "./src/rules/index.ts",
     "./settings": "./src/settings/index.ts",
+    "./portfolio": "./src/portfolio/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

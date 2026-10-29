@@ -1,3 +1,4 @@
+import { DomainError } from '../errors';
 import type { AuthMethod, CompanyKind, StaffRole } from './roles';
 
 /** Scope inside a company (AD-02). Filled from M2 (owners, properties). */
@@ -42,6 +43,16 @@ export const POLICY_ACTIONS = [
   'document.view',
   'rules.view',
   'rules.add',
+  // M2: the property register (plan section 4.4).
+  'owner.view',
+  'owner.manage',
+  'register.view',
+  'register.manage',
+  'register.import',
+  'unit.band_override',
+  'property_photo.view',
+  'property_paper.view',
+  'property_file.upload',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -105,6 +116,48 @@ const STAFF_MATRIX: Record<
     'caretaker',
     'adviser',
   ],
+  // M2 (plan section 4.4). Rows a scoped actor may see are limited by scopeOf() below.
+  'owner.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'owner.manage': ['owner:own_company', 'agency_admin'],
+  'register.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'register.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'register.import': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // A band sets the subscription rate (PB-01), so a manager cannot change it.
+  'unit.band_override': ['owner:own_company', 'agency_admin'],
+  'property_photo.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  // Title deeds, site plans and permits: not caretakers (M2 decision 4).
+  'property_paper.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'property_file.upload': ['owner:own_company', 'agency_admin', 'property_manager'],
 };
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
@@ -161,6 +214,73 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
         : deny(`${actor.role} may not ${action}`);
     }
   }
+}
+
+/** The owners and properties a scoped actor sees (AD-02). Matches the database's scope context. */
+export interface ScopeIds {
+  readonly ownerIds: readonly string[];
+  readonly propertyIds: readonly string[];
+}
+
+/** Whether a membership's scope must, may or does not use a list (AD-02; M2 plan section 4.4). */
+export type ScopeListUse = 'required' | 'optional' | 'unused';
+
+export interface ScopeRule {
+  readonly owners: ScopeListUse;
+  readonly properties: ScopeListUse;
+}
+
+/**
+ * Caretakers work on assigned properties only, never whole owners. An agency's client owners and
+ * advisers always see through their owners, so they need at least one. Everyone else may be
+ * limited either way, or not at all.
+ */
+export function scopeRuleFor(role: StaffRole, companyKind: CompanyKind): ScopeRule {
+  if (role === 'caretaker') return { owners: 'unused', properties: 'required' };
+  if (companyKind === 'agency' && (role === 'owner' || role === 'adviser'))
+    return { owners: 'required', properties: 'optional' };
+  return { owners: 'optional', properties: 'optional' };
+}
+
+/**
+ * A scope as it is saved for a role: the lists the role needs are checked, lists it does not use
+ * are dropped, and ids are sorted without repeats so equal scopes compare equal.
+ */
+export function checkMembershipScope(
+  role: StaffRole,
+  companyKind: CompanyKind,
+  scope: MembershipScope,
+): MembershipScope {
+  const rule = scopeRuleFor(role, companyKind);
+  const list = (use: ScopeListUse, ids: readonly string[] | undefined) =>
+    use === 'unused' ? [] : [...new Set(ids ?? [])].sort();
+  const owners = list(rule.owners, scope.owners);
+  const properties = list(rule.properties, scope.properties);
+  if (rule.owners === 'required' && owners.length === 0)
+    throw new DomainError('scope.owners_required', 'Choose at least one owner for this person');
+  if (rule.properties === 'required' && properties.length === 0)
+    throw new DomainError(
+      'scope.properties_required',
+      'Choose at least one property for this caretaker',
+    );
+  return {
+    ...(owners.length ? { owners } : {}),
+    ...(properties.length ? { properties } : {}),
+  };
+}
+
+/**
+ * The part of its company an actor sees (AD-02; M2 plan section 4.4). Null means everything.
+ * A role with a required list is scoped even before anything is assigned (then it sees nothing).
+ * Others are scoped only when their membership names owners or properties.
+ */
+export function scopeOf(actor: Actor): ScopeIds | null {
+  if (actor.kind !== 'staff') return null;
+  const rule = scopeRuleFor(actor.role, actor.companyKind);
+  const ownerIds = rule.owners === 'unused' ? [] : (actor.scope.owners ?? []);
+  const propertyIds = rule.properties === 'unused' ? [] : (actor.scope.properties ?? []);
+  const always = rule.owners === 'required' || rule.properties === 'required';
+  return always || ownerIds.length > 0 || propertyIds.length > 0 ? { ownerIds, propertyIds } : null;
 }
 
 /** The role an actor acts with, for display (never for decisions; use can()). */

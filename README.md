@@ -66,9 +66,9 @@ Created by `pnpm db:seed` (`packages/server/scripts/seed.ts`). All are fictional
 | `manager.two@demo.invalid`  | Property manager                                                                     | Osu Ridge Property Managers |
 | `new.manager@demo.invalid`  | Property manager with no TOTP yet: enrols at first sign-in; every seed run resets it | Osu Ridge Property Managers |
 | `accountant@demo.invalid`   | Accountant                                                                           | Osu Ridge Property Managers |
-| `adviser@demo.invalid`      | Adviser (read-only)                                                                  | Osu Ridge Property Managers |
-| `owner.accra@demo.invalid`  | Owner, agency client                                                                 | Osu Ridge Property Managers |
-| `owner.london@demo.invalid` | Owner, agency client living in London                                                | Osu Ridge Property Managers |
+| `adviser@demo.invalid`      | Adviser (read-only), sees owner OWN-01's properties                                  | Osu Ridge Property Managers |
+| `owner.accra@demo.invalid`  | Owner, agency client (OWN-02): sees ACC-OSU only                                     | Osu Ridge Property Managers |
+| `owner.london@demo.invalid` | Owner, agency client living in London (OWN-01): sees ACC-LEG and ACC-ELG             | Osu Ridge Property Managers |
 | `landlord@demo.invalid`     | Owner, self-managing landlord                                                        | Kwabena Owusu-Demo          |
 | `approver@demo.invalid`     | Adviser, nominated approver for the landlord                                         | Kwabena Owusu-Demo          |
 
@@ -86,7 +86,9 @@ pnpm --filter @rent/api exec node --input-type=module -e "import { generate } fr
 
 Or, with oath-toolkit installed: `oathtool --totp -b OJSW45BNMRSW23ZNORXXI4BNONSWG4TFOQWTEMBSGYWWY33DMFWA`. Each staff member also has two single-use backup codes: `demo1-backup` and `demo2-backup`.
 
-**Phone sign-in.** The tenant signs in to the tenant app with `+233 20 000 0021` (or `020 000 0021`); the caretakers use `+233 20 000 0011` and `+233 20 000 0012`. Codes go to the fake SMS provider: read them in the inbox at http://localhost:4010. A phone gets at most 3 codes in 15 minutes.
+**Phone sign-in.** The tenant signs in to the tenant app with `+233 20 000 0021` (or `020 000 0021`); the caretakers sign in to the web app at http://localhost:3701/sign-in/phone with `+233 20 000 0011` (Kojo, assigned to ACC-LEG) and `+233 20 000 0012` (Abena, assigned to ACC-OSU). Codes go to the fake SMS provider: read them in the inbox at http://localhost:4010. A phone gets at most 3 codes in 15 minutes.
+
+**Demo register (M2).** The agency manages `ACC-LEG` (a compound house in Legon: blocks B1 and B2, 12 rooms, one under repair) and `ACC-ELG` (8 flats in East Legon) for OWN-01, and `ACC-OSU` (shops in block G, offices in block F1, one not lettable) for OWN-02. The self-managing landlord has `TEM-EST` (a house in Tema). GhanaPost codes in the demo use the unused `000` area.
 
 ## Tenant app
 

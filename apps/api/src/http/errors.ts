@@ -10,13 +10,14 @@ export function toORPCError(error: unknown): unknown {
     return new ORPCError(error.code.toUpperCase(), {
       status: error.status,
       message: error.message,
+      ...(error.details ? { data: error.details } : {}),
     });
   if (error instanceof DomainError)
     return new ORPCError(error.code.toUpperCase(), { status: 422, message: error.message });
   return error;
 }
 
-/** JSON errors for everything outside the contracts: `{ code, message }`. */
+/** JSON errors for everything outside the contracts: `{ code, message, details? }`. */
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
   constructor(private readonly logger: AppLogger) {}
@@ -24,7 +25,11 @@ export class ApiExceptionFilter implements ExceptionFilter {
   catch(error: unknown, host: ArgumentsHost): void {
     const reply = host.switchToHttp().getResponse<FastifyReply>();
     if (error instanceof AppError) {
-      void reply.status(error.status).send({ code: error.code, message: error.message });
+      void reply.status(error.status).send({
+        code: error.code,
+        message: error.message,
+        ...(error.details ? { details: error.details } : {}),
+      });
       return;
     }
     if (error instanceof DomainError) {

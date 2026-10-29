@@ -1,7 +1,18 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, schema, sql, withCompany, withSystem, type Database } from '@rent/db';
+import {
+  and,
+  eq,
+  inArray,
+  schema,
+  sql,
+  withCompany,
+  withSystem,
+  type Database,
+  type Tx,
+} from '@rent/db';
 import { maskPhone, normalisePhone } from '@rent/domain/phone';
 import {
+  checkMembershipScope,
   requiresPasswordAndTotp,
   type Actor,
   type MembershipScope,
@@ -132,11 +143,22 @@ export class MembershipsService {
         .where(eq(schema.membership.id, membershipId))
         .for('update');
       if (!current || current.status === 'revoked') throw notFound('Membership');
+      // A role change is checked against the scope it will have, and a scope against the role
+      // (AD-02; M2 plan 4.4). Invites start with no scope, which sees nothing for these roles.
+      const scope =
+        patch.role || patch.scope
+          ? checkMembershipScope(
+              patch.role ?? (current.role as StaffRole),
+              staff.companyKind,
+              patch.scope ?? (current.scope as MembershipScope),
+            )
+          : undefined;
+      if (scope) await this.assertScopeInCompany(tx, scope);
       await tx
         .update(schema.membership)
         .set({
           ...(patch.role ? { role: patch.role } : {}),
-          ...(patch.scope ? { scope: patch.scope } : {}),
+          ...(scope ? { scope } : {}),
           ...(patch.nominatedApprover !== undefined
             ? { nominatedApprover: patch.nominatedApprover }
             : {}),
@@ -166,6 +188,26 @@ export class MembershipsService {
       if (rows.length === 0) throw notFound('Membership');
     });
     return this.get(staff, membershipId);
+  }
+
+  /** Every owner and property a scope names must belong to this company (RLS keeps it there). */
+  private async assertScopeInCompany(tx: Tx, scope: MembershipScope): Promise<void> {
+    const owners = scope.owners ?? [];
+    const properties = scope.properties ?? [];
+    const ownerRows = owners.length
+      ? await tx
+          .select({ id: schema.owner.id })
+          .from(schema.owner)
+          .where(inArray(schema.owner.id, [...owners]))
+      : [];
+    const propertyRows = properties.length
+      ? await tx
+          .select({ id: schema.property.id })
+          .from(schema.property)
+          .where(inArray(schema.property.id, [...properties]))
+      : [];
+    if (ownerRows.length !== owners.length || propertyRows.length !== properties.length)
+      throw invalid('scope_unknown', 'Choose owners and properties from this company');
   }
 
   private async get(staff: StaffActor, membershipId: string): Promise<CompanyMember> {

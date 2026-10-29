@@ -1,5 +1,12 @@
 import 'server-only';
-import type { CompanyProfile, MembershipRow, Me } from '@rent/contracts';
+import type {
+  CompanyProfile,
+  MembershipRow,
+  Me,
+  OwnerRow,
+  PropertyDetailView,
+  UnitDetailView,
+} from '@rent/contracts';
 import { createApiClient, type ApiClient } from '@rent/contracts/client';
 import { headers } from 'next/headers';
 import { cache } from 'react';
@@ -48,4 +55,52 @@ export async function loadMemberships(): Promise<Loaded<MembershipRow[]>> {
     if (status === 401 || status === 403 || status === 404) return { ok: false, status };
     throw error;
   }
+}
+
+/**
+ * Calls the API as this person. A refusal (403), a record that is missing or outside their
+ * scope (404) or a malformed id in the address (400) is returned, not thrown, so the page can
+ * show "not found" or "no access"; anything else is a real failure.
+ */
+async function load<T>(call: (api: ApiClient) => Promise<T>): Promise<Loaded<T>> {
+  try {
+    return { ok: true, data: await call(await serverApi()) };
+  } catch (error) {
+    const status = statusOf(error);
+    if (status === 400 || status === 401 || status === 403 || status === 404)
+      return { ok: false, status };
+    throw error;
+  }
+}
+
+type RegisterOptions = Awaited<ReturnType<ApiClient['register']['options']>>;
+type PropertyList = Awaited<ReturnType<ApiClient['register']['listProperties']>>;
+type UnitList = Awaited<ReturnType<ApiClient['register']['listUnits']>>;
+
+/** Regions, meter suppliers, portfolios and whether address lookups work (M2). */
+export const loadRegisterOptions = cache((): Promise<Loaded<RegisterOptions>> =>
+  load((api) => api.register.options()),
+);
+
+/** Owners this person may see (AD-02), archived ones too when asked. */
+export function loadOwners(includeArchived = false): Promise<Loaded<OwnerRow[]>> {
+  return load((api) => api.owners.list(includeArchived ? { includeArchived: 'true' } : {}));
+}
+
+/** Every property this person may see, with unit counts by status. */
+export function loadPropertyList(): Promise<Loaded<PropertyList>> {
+  return load((api) => api.register.listProperties({}));
+}
+
+/** Unit counts by status across everything this person may see (one row, for the counts). */
+export function loadUnitCounts(): Promise<Loaded<UnitList>> {
+  return load((api) => api.register.listUnits({ limit: 1 }));
+}
+
+export function loadProperty(propertyId: string): Promise<Loaded<PropertyDetailView>> {
+  return load((api) => api.register.getProperty({ propertyId }));
+}
+
+export function loadUnit(unitId: string): Promise<Loaded<UnitDetailView>> {
+  return load((api) => api.register.getUnit({ unitId }));
 }

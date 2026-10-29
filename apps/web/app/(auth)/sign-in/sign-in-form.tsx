@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
 import { Alert } from '@/components/ui/alert';
@@ -44,7 +45,7 @@ export function SignInForm() {
     <Card>
       <CardHeader
         title={<span className="text-xl">Sign in</span>}
-        description="For landlords, agency staff and advisers."
+        description="With your email address and password: for landlords, owners, agency staff and advisers."
       />
       <CardBody>
         <form onSubmit={submit} className="space-y-4">
@@ -71,6 +72,11 @@ export function SignInForm() {
             Sign in
           </Button>
         </form>
+        <p className="text-sm text-slate-700">
+          <Link href="/sign-in/phone" className="font-medium underline underline-offset-2">
+            Caretaker? Sign in with your phone
+          </Link>
+        </p>
       </CardBody>
     </Card>
   );

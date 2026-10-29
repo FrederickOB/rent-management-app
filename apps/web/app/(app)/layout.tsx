@@ -8,7 +8,9 @@ import { getCompany, getMe } from '@/lib/server/session';
 export default async function SignedInLayout({ children }: { readonly children: ReactNode }) {
   const me = await getMe();
   if (!me) redirect('/sign-in');
-  if (me.state !== 'ready') redirect(homeFor(me));
+  // Enrolment, a company to choose, or a phone session with nothing here: elsewhere first.
+  const home = homeFor(me);
+  if (home !== '/') redirect(home);
   const company = me.activeCompanyId ? await getCompany() : null;
   return (
     <AppShell me={me} company={company}>

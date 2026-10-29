@@ -14,6 +14,7 @@
     "test:unit": "vitest run --project unit"
   },
   "dependencies": {
+    "@rent/domain": "workspace:*",
     "@aws-sdk/client-s3": "catalog:",
     "@aws-sdk/s3-presigned-post": "catalog:",
     "@aws-sdk/s3-request-presigner": "catalog:",

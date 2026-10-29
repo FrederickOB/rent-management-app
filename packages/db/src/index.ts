@@ -17,6 +17,7 @@ export {
   desc,
   asc,
   inArray,
+  notInArray,
   isNull,
   isNotNull,
 } from 'drizzle-orm';

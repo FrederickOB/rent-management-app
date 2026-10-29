@@ -20,8 +20,14 @@ import {
 } from '@rent/server/core';
 import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
+import {
+  PortfolioModule,
+  PropertyFilesService,
+  RegisterImportService,
+} from '@rent/server/portfolio';
 import { closeRenderer, renderPdfJob } from './render-pdf.job';
 import { workerJobs } from './jobs';
+import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
 
 const config = loadConfig();
 const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
@@ -32,6 +38,7 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     AuditModule,
     DocumentsModule,
     ApprovalsModule,
+    PortfolioModule,
   ],
 })
 class WorkerModule {}
@@ -60,12 +67,24 @@ await storage
 
 const jobs = new JobsService(database, logger, alerts, config.DATABASE_URL);
 await jobs.start();
-const definitions = [...workerJobs(deps), renderPdfJob({ ...deps, storage })];
+const definitions = [
+  ...workerJobs(deps),
+  renderPdfJob({ ...deps, storage }),
+  ...registerJobs({
+    propertyFiles: app.get(PropertyFilesService),
+    imports: app.get(RegisterImportService),
+  }),
+];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
 
 // Event types that have a consumer here; the rest stay in the outbox as the event log.
-const relay = new OutboxRelay(database, jobs, logger, new Set(['documents.render-pdf']));
+const relay = new OutboxRelay(
+  database,
+  jobs,
+  logger,
+  new Set<string>(['documents.render-pdf', ...REGISTER_EVENT_TYPES]),
+);
 await relay.start();
 logger.info({ jobs: definitions.map((d) => d.name) }, 'worker started');
 

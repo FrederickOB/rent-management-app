@@ -12,6 +12,25 @@ export interface NavItem {
 
 const ITEMS: readonly NavItem[] = [
   { href: '/', label: 'Home', description: 'Your company at a glance.', needs: null },
+  // M2: the property register (plan section 4.11).
+  {
+    href: '/portfolio',
+    label: 'Portfolio',
+    description: 'Every property and unit you look after, with their status.',
+    needs: 'register.view',
+  },
+  {
+    href: '/owners',
+    label: 'Owners',
+    description: 'The owners of the properties, and how to reach them.',
+    needs: 'owner.view',
+  },
+  {
+    href: '/portfolio/import',
+    label: 'Import',
+    description: 'Add or update properties and units from a spreadsheet.',
+    needs: 'register.import',
+  },
   {
     href: '/settings/company',
     label: 'Company settings',

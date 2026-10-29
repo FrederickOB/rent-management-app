@@ -69,6 +69,50 @@ async function seedCompany(companyId: string) {
       "insert into audit_anchor (company_id, anchor_date, seq, hash, storage_key, object_sha256) values ($1, current_date, 1, '\\x00', 'k', $2)",
       [companyId, zero],
     );
+    // The register (M2). The unit's status history row comes from its trigger.
+    const { rows: owners } = await app.query<{ id: string }>(
+      "insert into owner (company_id, reference, kind, display_name) values ($1, 'OWN-01', 'individual', 'Owner') returning id",
+      [companyId],
+    );
+    const { rows: portfolios } = await app.query<{ id: string }>(
+      "insert into portfolio (company_id, name, is_default) values ($1, 'Main portfolio', true) returning id",
+      [companyId],
+    );
+    const { rows: properties } = await app.query<{ id: string }>(
+      `insert into property (company_id, portfolio_id, code, area_code, name, property_type, use, region)
+       values ($1, $2, 'ACC-LEG', 'ACC', 'Legon', 'compound_house', 'residential', 'Greater Accra') returning id`,
+      [companyId, portfolios[0]!.id],
+    );
+    const propertyId = properties[0]!.id;
+    await app.query(
+      'insert into property_ownership (company_id, property_id, owner_id, share_bps, effective_from) values ($1, $2, $3, 10000, current_date)',
+      [companyId, propertyId, owners[0]!.id],
+    );
+    const { rows: blocks } = await app.query<{ id: string }>(
+      "insert into block (company_id, property_id, code, is_default) values ($1, $2, 'B1', true) returning id",
+      [companyId, propertyId],
+    );
+    const { rows: units } = await app.query<{ id: string }>(
+      `insert into unit (company_id, property_id, block_id, code, label, unit_type, billing_band)
+       values ($1, $2, $3, 'ACC-LEG-B1-01', '01', 'single_room', 'single_room') returning id`,
+      [companyId, propertyId, blocks[0]!.id],
+    );
+    const { rows: meters } = await app.query<{ id: string }>(
+      "insert into meter (company_id, property_id, utility, supplier, meter_number, meter_type) values ($1, $2, 'electricity', 'ECG', 'P-0001', 'prepaid') returning id",
+      [companyId, propertyId],
+    );
+    await app.query(
+      'insert into unit_meter (company_id, property_id, meter_id, unit_id) values ($1, $2, $3, $4)',
+      [companyId, propertyId, meters[0]!.id, units[0]!.id],
+    );
+    await app.query(
+      "insert into property_file (company_id, property_id, category, upload_intent_id, uploaded_by) values ($1, $2, 'photo', gen_random_uuid(), $3)",
+      [companyId, propertyId, initiator],
+    );
+    await app.query(
+      "insert into register_import (company_id, upload_intent_id, storage_key, created_by) values ($1, gen_random_uuid(), 'k', $2)",
+      [companyId, initiator],
+    );
   });
 }
 

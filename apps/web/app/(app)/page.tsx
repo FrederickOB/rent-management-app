@@ -1,10 +1,15 @@
+import { DISPLAY_STATUS_LABELS, DISPLAY_STATUSES } from '@rent/domain/portfolio';
 import Link from 'next/link';
 import { navFor } from '@/components/nav';
 import { PageHeader } from '@/components/page-header';
+import { STATUS_TONES } from '@/components/status-badge';
 import { Alert } from '@/components/ui/alert';
-import { Card, CardBody } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { companyKindLabel, roleLabel } from '@/lib/format';
-import { getCompany, getMe } from '@/lib/server/session';
+import { allowed } from '@/lib/policy';
+import { totalOf } from '@/lib/register-format';
+import { getCompany, getMe, loadPropertyList, loadUnitCounts } from '@/lib/server/session';
 
 export default async function HomePage() {
   // The layout has already checked the session; these calls are cached for this request.
@@ -12,6 +17,14 @@ export default async function HomePage() {
   if (!me) return null;
   const membership = me.memberships.find((m) => m.companyId === me.activeCompanyId);
   const sections = navFor(me).filter((item) => item.href !== '/');
+  // The start of the DA-01 dashboard (M9): what is in the register, by status (M2 plan 4.11).
+  const [properties, units] = allowed(me, 'register.view')
+    ? await Promise.all([loadPropertyList(), loadUnitCounts()])
+    : [null, null];
+  const register =
+    properties?.ok && units?.ok
+      ? { properties: properties.data.rows.length, counts: units.data.counts }
+      : null;
 
   return (
     <>
@@ -27,6 +40,43 @@ export default async function HomePage() {
           You are not a member of any company yet. Ask an administrator to invite you.
         </Alert>
       )}
+      {register ? (
+        <Card data-testid="register-summary">
+          <CardHeader
+            title="Portfolio at a glance"
+            description="Live from the register; choose a status to see those units."
+          />
+          <CardBody>
+            <dl className="grid grid-cols-2 gap-4 sm:max-w-sm">
+              <div>
+                <dt className="text-sm text-slate-600">Properties</dt>
+                <dd className="text-2xl font-semibold tabular-nums" data-testid="property-count">
+                  {register.properties}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-600">Units</dt>
+                <dd className="text-2xl font-semibold tabular-nums" data-testid="unit-count">
+                  {totalOf(register.counts)}
+                </dd>
+              </div>
+            </dl>
+            <ul className="flex flex-wrap gap-2" aria-label="Units by status">
+              {DISPLAY_STATUSES.map((status) => (
+                <li key={status}>
+                  <Link
+                    href={`/portfolio?status=${status}`}
+                    className="inline-flex min-h-11 items-center gap-2 rounded-md px-1 text-sm underline-offset-2 hover:underline"
+                  >
+                    <Badge tone={STATUS_TONES[status]}>{DISPLAY_STATUS_LABELS[status]}</Badge>
+                    <span className="font-semibold tabular-nums">{register.counts[status]}</span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </CardBody>
+        </Card>
+      ) : null}
       <ul className="grid gap-4 sm:grid-cols-2">
         {sections.map((item) => (
           <li key={item.href}>

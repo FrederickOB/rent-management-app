@@ -12,11 +12,13 @@ import {
   CallbackAlert,
   CompositeAlert,
   EmailAlert,
+  FakeProvidersAddressLookup,
   FakeProvidersSms,
   InMemorySms,
   LocalKms,
   S3Storage,
   SmtpEmail,
+  type AddressLookupPort,
   type AlertPort,
   type EmailPort,
   type KeyManagementPort,
@@ -29,6 +31,7 @@ import { DbKeyStore } from './crypto/db-key-store';
 import { FieldCipher } from './crypto/field-cipher';
 import { createLogger, type AppLogger } from './logging/logger';
 import {
+  ADDRESS_LOOKUP_PORT,
   ALERT_PORT,
   CLOCK,
   CONFIG,
@@ -50,6 +53,8 @@ export interface CoreOptions {
   readonly email?: EmailPort;
   readonly storage?: StoragePort;
   readonly alerts?: AlertPort;
+  /** Null switches lookups off; see addressLookupFor. */
+  readonly addressLookup?: AddressLookupPort | null;
   readonly applicationName?: string;
 }
 
@@ -58,6 +63,16 @@ function smsFor(config: AppConfig): SmsPort {
   if (config.NODE_ENV === 'production')
     throw new Error('No SMS gateway is configured (the real adapter arrives in M6)');
   return new InMemorySms();
+}
+
+/**
+ * GhanaPost GPS lookups (PR-03, OQ-23). There is no licensed source yet, so lookups run only
+ * against the fake provider; elsewhere they are off and addresses are typed by hand.
+ */
+function addressLookupFor(config: AppConfig): AddressLookupPort | null {
+  return config.FAKE_PROVIDERS_URL
+    ? new FakeProvidersAddressLookup(config.FAKE_PROVIDERS_URL)
+    : null;
 }
 
 function storageFor(config: AppConfig): StoragePort {
@@ -112,6 +127,11 @@ export class CoreModule {
         useFactory: () => options.email ?? new SmtpEmail(config.SMTP_URL, config.MAIL_FROM),
       },
       { provide: STORAGE_PORT, useFactory: () => options.storage ?? storageFor(config) },
+      {
+        provide: ADDRESS_LOOKUP_PORT,
+        useFactory: () =>
+          options.addressLookup === undefined ? addressLookupFor(config) : options.addressLookup,
+      },
       { provide: KMS_PORT, useFactory: () => kmsFor(config) },
       {
         provide: FIELD_CIPHER,
@@ -152,6 +172,7 @@ export class CoreModule {
         SMS_PORT,
         EMAIL_PORT,
         STORAGE_PORT,
+        ADDRESS_LOOKUP_PORT,
         KMS_PORT,
         FIELD_CIPHER,
         ALERT_PORT,

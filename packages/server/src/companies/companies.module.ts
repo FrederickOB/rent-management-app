@@ -5,10 +5,11 @@ import { IdentityModule } from '../identity/identity.module';
 import { PolicyModule } from '../policy/policy.module';
 import { CompaniesService } from './companies.service';
 import { MembershipsService } from './memberships.service';
+import { OwnersModule } from './owners.module';
 
 @Module({
-  imports: [AuditModule, DocumentsModule, IdentityModule, PolicyModule],
+  imports: [AuditModule, DocumentsModule, IdentityModule, OwnersModule, PolicyModule],
   providers: [CompaniesService, MembershipsService],
-  exports: [CompaniesService, MembershipsService],
+  exports: [CompaniesService, MembershipsService, OwnersModule],
 })
 export class CompaniesModule {}
