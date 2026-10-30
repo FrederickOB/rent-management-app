@@ -6,3 +6,4 @@ export * from './policy';
 export * from './approvals';
 export * from './rules';
 export * from './settings';
+export * from './portfolio';

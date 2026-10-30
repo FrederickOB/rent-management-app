@@ -187,7 +187,7 @@ pnpm install
 pnpm services:up      # PostgreSQL, SeaweedFS, Mailpit and fake-providers in Docker
 pnpm dev              # services, then api, worker, web, links and the tenant app
 pnpm db:migrate       # SQL migrations and the job-queue schema, as the owner role
-pnpm db:seed          # Accra demo dataset (companies and users in M1); local databases only
+pnpm db:seed          # Accra demo dataset (companies, users and the property register); local databases only
 pnpm test             # unit and integration (real PostgreSQL with RLS)
 pnpm test:unit
 pnpm test:e2e         # Playwright for web, links and the tenant web build; needs the stack running

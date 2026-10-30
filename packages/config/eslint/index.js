@@ -18,6 +18,7 @@ export const MODULE_MAP = {
   policy: ['identity'],
   approvals: ['policy', 'audit', 'identity'],
   companies: ['policy', 'audit', 'documents', 'identity', 'rules'],
+  portfolio: ['companies', 'documents', 'rules', 'audit', 'policy'],
 };
 
 const DB_DRIVERS = [

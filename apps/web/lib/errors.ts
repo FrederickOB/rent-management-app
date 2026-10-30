@@ -58,6 +58,14 @@ const AUTH_MESSAGES: Record<string, string> = {
   PASSWORD_TOO_LONG: 'Use at most 128 characters.',
   SESSION_NOT_FRESH: 'For your security, sign in again to do this.',
   TOTP_ALREADY_ENABLED: 'Two-step sign-in is already set up for your account.',
+  // Phone sign-in for caretakers (AD-06): the phone-number plugin's codes and the API's own.
+  INVALID_PHONE_NUMBER: 'Enter a valid phone number, for example 024 412 3456.',
+  TOO_MANY_CODES:
+    'Too many codes have been sent to this number. Wait a few minutes, then ask for a new one.',
+  INVALID_OTP: 'That code is not right, or it has expired. Check the SMS, or ask for a new code.',
+  OTP_EXPIRED: 'That code has expired. Ask for a new one.',
+  OTP_NOT_FOUND: 'That code has expired, or no code was sent. Ask for a new one.',
+  TOO_MANY_ATTEMPTS: 'Too many wrong codes. Ask for a new code.',
 };
 
 /** Better Auth client errors (`{ error: { status, code, message } }`) as a Problem. */
@@ -67,12 +75,13 @@ export function authProblem(error: unknown): Problem {
   if (!isRecord(error)) return { status: null, code: null, message: GENERIC_MESSAGE };
   const status = statusOf(error);
   const code = typeof error.code === 'string' ? error.code : null;
+  // A known code says more than its status: "too many codes for this number" is also a 429.
+  const known = code ? AUTH_MESSAGES[code] : undefined;
+  if (known) return { status, code, message: known };
   if (status === 429) return { status, code, message: RATE_LIMITED };
   if (status === 401 && !code) {
     return { status, code: 'not_authenticated', message: 'Your session has ended. Sign in again.' };
   }
-  const known = code ? AUTH_MESSAGES[code] : undefined;
-  if (known) return { status, code, message: known };
   const own =
     typeof error.message === 'string' && status !== null && status < 500 ? error.message : null;
   return { status, code, message: own || GENERIC_MESSAGE };

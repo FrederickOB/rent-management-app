@@ -4,12 +4,24 @@ import type { Database, Tx } from './client';
 
 export type ActorKind = 'staff' | 'tenant' | 'platform_admin' | 'system' | 'link';
 
+/**
+ * Scope inside a company (AD-02): the owners whose properties a person sees, and the properties
+ * assigned to them. The transaction then sees only those properties and owners, through a second,
+ * restrictive RLS policy (architecture section 11).
+ */
+export interface ScopeContext {
+  readonly ownerIds: readonly string[];
+  readonly propertyIds: readonly string[];
+}
+
 /** Company context for one transaction (CLAUDE.md section 5, ADR-002). */
 export interface CompanyContext {
   readonly companyId: string;
   readonly personId?: string | null;
   readonly actorKind: ActorKind;
   readonly requestId?: string | null;
+  /** Null or absent: the whole company. */
+  readonly scope?: ScopeContext | null;
 }
 
 export type IsolationLevel = 'read committed' | 'repeatable read' | 'serializable';
@@ -38,14 +50,54 @@ export async function withCompany<T>(
   if (!ctx.companyId) throw new ContextError('A company id is required');
   assertUuid(ctx.companyId, 'companyId');
   assertUuid(ctx.personId, 'personId');
+  const scope = ctx.scope ?? null;
+  if (scope) for (const id of [...scope.ownerIds, ...scope.propertyIds]) assertUuid(id, 'scope id');
   return database.db.transaction(async (tx) => {
     await tx.execute(sql`select
       set_config('app.company_id', ${ctx.companyId}, true),
       set_config('app.person_id', ${ctx.personId ?? ''}, true),
       set_config('app.actor_kind', ${ctx.actorKind}, true),
       set_config('app.request_id', ${ctx.requestId ?? ''}, true)`);
+    if (scope) {
+      // Resolved before the property scope is set, so it reads all of the company's ownership.
+      const owners = `{${scope.ownerIds.join(',')}}`;
+      const properties = `{${scope.propertyIds.join(',')}}`;
+      await tx.execute(sql`select
+        set_config('app.property_scope',
+          app.resolve_property_scope(${owners}::uuid[], ${properties}::uuid[])::text, true),
+        set_config('app.owner_scope', ${owners}, true)`);
+    }
     return fn(tx);
   }, options);
+}
+
+/**
+ * Adds a property this transaction is about to create to a scoped session's property scope, so
+ * the restrictive scope policy lets the session write it and read it back (AD-02). The id must
+ * be generated before the insert. An unscoped session is left as it is: unset means everything.
+ * Callers check first that the actor may create it (for example, for an owner in their scope).
+ */
+export async function addToPropertyScope(tx: Tx, propertyId: string): Promise<void> {
+  assertUuid(propertyId, 'propertyId');
+  await tx.execute(sql`select set_config('app.property_scope',
+      (app.property_scope() || ${propertyId}::uuid)::text, true)
+    where app.property_scope() is not null`);
+}
+
+/** The same for an owner record this transaction is about to create (AD-02). */
+export async function addToOwnerScope(tx: Tx, ownerId: string): Promise<void> {
+  assertUuid(ownerId, 'ownerId');
+  await tx.execute(sql`select set_config('app.owner_scope',
+      (app.owner_scope() || ${ownerId}::uuid)::text, true)
+    where app.owner_scope() is not null`);
+}
+
+/** Whether this transaction runs with an owner and property scope (AD-02). */
+export async function isScoped(tx: Tx): Promise<boolean> {
+  const result = await tx.execute<{ scoped: boolean }>(
+    sql`select app.property_scope() is not null as scoped`,
+  );
+  return result.rows[0]?.scoped === true;
 }
 
 /**

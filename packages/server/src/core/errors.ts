@@ -4,6 +4,8 @@ export class AppError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /** Facts a client can act on, such as a free code to use instead. Never personal data. */
+    readonly details?: Readonly<Record<string, string>>,
   ) {
     super(message);
     this.name = 'AppError';
@@ -15,5 +17,9 @@ export const notAuthenticated = (message = 'Sign in to continue') =>
 export const forbidden = (message = 'You do not have permission to do this') =>
   new AppError(403, 'forbidden', message);
 export const notFound = (what = 'Record') => new AppError(404, 'not_found', `${what} not found`);
-export const conflict = (code: string, message: string) => new AppError(409, code, message);
+export const conflict = (
+  code: string,
+  message: string,
+  details?: Readonly<Record<string, string>>,
+) => new AppError(409, code, message, details);
 export const invalid = (code: string, message: string) => new AppError(400, code, message);

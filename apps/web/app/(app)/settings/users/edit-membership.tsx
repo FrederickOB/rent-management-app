@@ -1,47 +1,94 @@
 'use client';
 
 import { STAFF_ROLES, type MembershipRow } from '@rent/contracts';
+import type { CompanyKind } from '@rent/domain/policy';
 import { useState, type FormEvent } from 'react';
+import { MultiSelect, type MultiSelectOption } from '@/components/multi-select';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { CheckboxField, SelectField, TextAreaField } from '@/components/ui/field';
+import { CheckboxField, SelectField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { roleLabel } from '@/lib/format';
 import { changedFields } from '@/lib/patch';
-import { buildScope, parseIds } from './scope';
+import {
+  buildScope,
+  scopePickersFor,
+  scopeProblems,
+  scopeRefusal,
+  scopeToSave,
+  type PickerNeed,
+} from './scope';
 
 type Role = MembershipRow['role'];
 
 const ROLE_OPTIONS = STAFF_ROLES.map((role) => ({ value: role, label: roleLabel(role) }));
-const ID_HINT = 'Each line must be an ID such as 019a3000-0000-7000-8000-000000000002.';
+
+/** Owners and properties to choose from; null when this session may not list them. */
+export interface ScopeOptions {
+  readonly owners: readonly MultiSelectOption[] | null;
+  readonly properties: readonly MultiSelectOption[] | null;
+}
 
 export interface EditMembershipProps {
   readonly row: MembershipRow;
+  readonly companyKind: CompanyKind;
+  readonly scopeOptions: ScopeOptions;
   readonly onSaved: (message: string) => void;
   readonly onCancel: () => void;
 }
 
+const HINTS: Record<'owners' | 'properties', Record<Exclude<PickerNeed, 'hidden'>, string>> = {
+  owners: {
+    required:
+      'They see the properties of the owners chosen here, and nothing else. Choose at least one.',
+    optional: 'Limit them to these owners’ properties.',
+  },
+  properties: {
+    required: 'They see only the properties chosen here. Choose at least one.',
+    optional: 'Limit them to these properties (added to any owners above).',
+  },
+};
+
 /** Role, access scope and the nominated-approver flag. Every change is audited with before and after (AD-07). */
-export function EditMembership({ row, onSaved, onCancel }: EditMembershipProps) {
+export function EditMembership({
+  row,
+  companyKind,
+  scopeOptions,
+  onSaved,
+  onCancel,
+}: EditMembershipProps) {
   const [role, setRole] = useState<Role>(row.role);
   const [nominatedApprover, setNominatedApprover] = useState(row.nominatedApprover);
-  const [owners, setOwners] = useState((row.scope.owners ?? []).join('\n'));
-  const [properties, setProperties] = useState((row.scope.properties ?? []).join('\n'));
+  const [owners, setOwners] = useState<string[]>([...(row.scope.owners ?? [])]);
+  const [properties, setProperties] = useState<string[]>([...(row.scope.properties ?? [])]);
+  const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<{ owners?: string; properties?: string }>({});
+  // A list the API refused (AD-02): its message shows next to that list until something changes.
+  const [refused, setRefused] = useState<{ list: 'owners' | 'properties'; message: string } | null>(
+    null,
+  );
+
+  // Which lists the chosen role uses comes from the policy module (AD-02), not from this form.
+  const pickers = scopePickersFor(role, companyKind);
+  const problems = scopeProblems(pickers, owners, properties);
+  const optionalOnly = pickers.owners !== 'required' && pickers.properties !== 'required';
+  const listError = (list: 'owners' | 'properties') =>
+    (tried ? problems[list] : undefined) ?? (refused?.list === list ? refused.message : undefined);
+  const changed =
+    <T,>(set: (value: T) => void) =>
+    (value: T) => {
+      set(value);
+      setRefused(null);
+    };
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const ownerIds = parseIds(owners);
-    const propertyIds = parseIds(properties);
-    setFieldErrors({
-      ...(ownerIds ? {} : { owners: ID_HINT }),
-      ...(propertyIds ? {} : { properties: ID_HINT }),
-    });
+    setTried(true);
     setError(null);
-    if (!ownerIds || !propertyIds) return;
+    setRefused(null);
+    if (problems.owners || problems.properties) return;
 
     const patch = changedFields(
       {
@@ -49,7 +96,7 @@ export function EditMembership({ row, onSaved, onCancel }: EditMembershipProps) 
         nominatedApprover: row.nominatedApprover,
         scope: buildScope(row.scope.owners ?? [], row.scope.properties ?? []),
       },
-      { role, nominatedApprover, scope: buildScope(ownerIds, propertyIds) },
+      { role, nominatedApprover, scope: scopeToSave(pickers, owners, properties) },
     );
     if (Object.keys(patch).length === 0) {
       onCancel();
@@ -60,7 +107,17 @@ export function EditMembership({ row, onSaved, onCancel }: EditMembershipProps) 
       await api().memberships.update({ membershipId: row.membershipId, ...patch });
       onSaved(`Saved the changes for ${row.name}.`);
     } catch (failure) {
-      setError(toProblem(failure).message);
+      // The API checks the scope against the role the person will have; place its answer where
+      // it can be acted on.
+      const problem = toProblem(failure);
+      const place = scopeRefusal(problem.code);
+      if ((place === 'owners' || place === 'properties') && pickers[place] !== 'hidden')
+        setRefused({ list: place, message: problem.message });
+      else if (place === 'unknown')
+        setError(
+          `${problem.message.replace(/\.$/, '')}. Untick anything marked “Not in the list”, then save again.`,
+        );
+      else setError(problem.message);
     } finally {
       setPending(false);
     }
@@ -69,6 +126,7 @@ export function EditMembership({ row, onSaved, onCancel }: EditMembershipProps) 
   return (
     <form
       onSubmit={submit}
+      noValidate
       className="space-y-4 rounded-md border border-slate-200 bg-slate-50 p-4"
       aria-label={`Change ${row.name}`}
     >
@@ -80,7 +138,7 @@ export function EditMembership({ row, onSaved, onCancel }: EditMembershipProps) 
         className="max-w-sm"
         onChange={(event) => {
           const next = STAFF_ROLES.find((r) => r === event.target.value);
-          if (next) setRole(next);
+          if (next) changed(setRole)(next);
         }}
       />
       <CheckboxField
@@ -92,24 +150,39 @@ export function EditMembership({ row, onSaved, onCancel }: EditMembershipProps) 
       <fieldset className="space-y-3">
         <legend className="text-sm font-medium text-slate-800">Access</legend>
         <p className="text-sm text-slate-600">
-          Leave both lists empty to give access to everything in this company. To limit access,
-          paste one ID per line.
+          {optionalOnly
+            ? 'Leave both lists empty to give access to everything in this company.'
+            : `As ${roleLabel(role).toLowerCase()}, they see only what is chosen here.`}
         </p>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <TextAreaField
-            label="Owners"
-            rows={3}
-            value={owners}
-            error={fieldErrors.owners}
-            onChange={(event) => setOwners(event.target.value)}
-          />
-          <TextAreaField
-            label="Properties"
-            rows={3}
-            value={properties}
-            error={fieldErrors.properties}
-            onChange={(event) => setProperties(event.target.value)}
-          />
+        <div className="grid gap-4 lg:grid-cols-2">
+          {pickers.owners !== 'hidden' ? (
+            <MultiSelect
+              legend={pickers.owners === 'required' ? 'Owners' : 'Owners (optional)'}
+              hint={HINTS.owners[pickers.owners]}
+              options={scopeOptions.owners ?? []}
+              emptyText={
+                scopeOptions.owners ? 'There are no owners yet.' : 'You cannot list owners here.'
+              }
+              value={owners}
+              error={listError('owners')}
+              onChange={changed(setOwners)}
+            />
+          ) : null}
+          {pickers.properties !== 'hidden' ? (
+            <MultiSelect
+              legend={pickers.properties === 'required' ? 'Properties' : 'Properties (optional)'}
+              hint={HINTS.properties[pickers.properties]}
+              options={scopeOptions.properties ?? []}
+              emptyText={
+                scopeOptions.properties
+                  ? 'There are no properties yet.'
+                  : 'You cannot list properties here.'
+              }
+              value={properties}
+              error={listError('properties')}
+              onChange={changed(setProperties)}
+            />
+          ) : null}
         </div>
       </fieldset>
       <div className="flex flex-wrap gap-2">

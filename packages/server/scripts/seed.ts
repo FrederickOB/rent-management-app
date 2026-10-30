@@ -1,7 +1,8 @@
 /**
- * Accra demo dataset (CLAUDE.md section 14). M1 seeds companies and users only; later
- * milestones add properties, tenancies and money. Every person is fictional and flagged as a
- * test contact, and only fake providers are configured locally, so nothing is ever sent.
+ * Accra demo dataset (CLAUDE.md section 14). M1 seeded companies and users; M2 adds owners,
+ * properties, units, meters and each person's scope. Tenancies and money arrive in later
+ * milestones. Every person is fictional and flagged as a test contact, and only fake providers
+ * are configured locally, so nothing is ever sent.
  *
  *   pnpm db:seed
  */
@@ -10,10 +11,19 @@ import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { eq, schema, sql, withCompany, withSystem, type Database } from '@rent/db';
 import { defaultCompanySettings } from '@rent/domain/settings';
-import type { CompanyKind, MembershipRole } from '@rent/domain/policy';
+import type { Actor, CompanyKind, MembershipRole } from '@rent/domain/policy';
+import type { Availability } from '@rent/domain/portfolio';
 import { symmetricEncrypt } from 'better-auth/crypto';
 import { CONFIG, CoreModule, DATABASE, loadConfig, type AppConfig } from '../src/core';
+import { OwnersService } from '../src/companies/owners.service';
 import { IdentityModule, PersonAccounts } from '../src/identity';
+import {
+  MetersService,
+  PortfolioModule,
+  RegisterReadService,
+  RegisterService,
+  type NewProperty,
+} from '../src/portfolio';
 
 const config = loadConfig();
 const host = new URL(config.DATABASE_URL).hostname;
@@ -104,7 +114,7 @@ const PEOPLE: DemoPerson[] = [
     staff: true,
     memberships: [{ companyId: AGENCY, role: 'adviser' }],
   },
-  // Agency clients; their owner records and property scope arrive in M2. One lives in London.
+  // Agency clients, linked to owner records OWN-02 and OWN-01 (M2). One lives in London.
   {
     name: 'Nana Owner-Accra (demo)',
     email: 'owner.accra@demo.invalid',
@@ -117,7 +127,7 @@ const PEOPLE: DemoPerson[] = [
     staff: true,
     memberships: [{ companyId: AGENCY, role: 'owner' }],
   },
-  // Caretakers sign in by phone; property assignment arrives in M2.
+  // Caretakers sign in by phone; Kojo looks after ACC-LEG and Abena after ACC-OSU (M2).
   {
     name: 'Kojo Caretaker (demo)',
     phone: '+233200000011',
@@ -147,7 +157,13 @@ const PEOPLE: DemoPerson[] = [
   { name: 'Ama Tenant (demo)', phone: '+233200000021', staff: false, memberships: [] },
 ];
 
-@Module({ imports: [CoreModule.forRoot({ config, applicationName: 'rent-seed' }), IdentityModule] })
+@Module({
+  imports: [
+    CoreModule.forRoot({ config, applicationName: 'rent-seed' }),
+    IdentityModule,
+    PortfolioModule,
+  ],
+})
 class SeedModule {}
 
 async function ensureCompanies(database: Database) {
@@ -248,6 +264,331 @@ async function ensurePerson(
   return personId;
 }
 
+/** The staff actor for a seeded person, as the API's guard would build it. */
+async function actorFor(database: Database, companyId: string, email: string): Promise<Actor> {
+  const result = await withSystem(database, {}, (tx) =>
+    tx.execute<{ person_id: string; membership_id: string; role: string; kind: CompanyKind }>(
+      sql`select p.id as person_id, m.membership_id, m.role, m.company_kind as kind
+          from person p, app.memberships_for_person(p.id) m
+          where p.email = ${email} and m.company_id = ${companyId} and m.status = 'active'`,
+    ),
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error(`no active membership for ${email}`);
+  return {
+    kind: 'staff',
+    personId: row.person_id,
+    companyId,
+    companyKind: row.kind,
+    membershipId: row.membership_id,
+    role: row.role as 'owner' | 'agency_admin',
+    nominatedApprover: false,
+    scope: {},
+    authMethod: 'password_totp',
+  };
+}
+
+interface DemoProperty extends NewProperty {
+  readonly status?: {
+    readonly code: string;
+    readonly availability: Availability;
+    readonly reason: string;
+  }[];
+  readonly meters?: {
+    readonly utility: 'electricity' | 'water';
+    readonly supplier: string;
+    readonly meterNumber: string;
+    readonly meterType: 'prepaid' | 'postpaid' | 'shared';
+    readonly units: readonly string[];
+  }[];
+}
+
+// Fake GhanaPost codes (the unused 000 area) and approximate pins for each neighbourhood.
+const AGENCY_PROPERTIES = (ownerA: string, ownerB: string): DemoProperty[] => [
+  {
+    areaCode: 'ACC',
+    propertyPart: 'LEG',
+    name: 'Legon compound house (demo)',
+    propertyType: 'compound_house',
+    use: 'residential',
+    ownerId: ownerA,
+    address: {
+      ghanapostGps: 'GA-000-0001',
+      region: 'Greater Accra',
+      town: 'Legon',
+      latitude: '5.6505',
+      longitude: '-0.1862',
+    },
+    blocks: [
+      { code: 'B1', name: 'Main house', units: [{ unitType: 'chamber_and_hall', count: 6 }] },
+      { code: 'B2', name: 'Back rooms', units: [{ unitType: 'single_room', count: 6 }] },
+    ],
+    status: [
+      {
+        code: 'ACC-LEG-B2-06',
+        availability: 'under_repair',
+        reason: 'Ceiling repair after the rains',
+      },
+    ],
+    meters: [
+      {
+        utility: 'water',
+        supplier: 'Ghana Water',
+        meterNumber: 'W-LEG-001',
+        meterType: 'shared',
+        units: [
+          'ACC-LEG-B1-01',
+          'ACC-LEG-B1-02',
+          'ACC-LEG-B1-03',
+          'ACC-LEG-B1-04',
+          'ACC-LEG-B1-05',
+          'ACC-LEG-B1-06',
+        ],
+      },
+      {
+        utility: 'electricity',
+        supplier: 'ECG',
+        meterNumber: 'P-LEG-0101',
+        meterType: 'prepaid',
+        units: ['ACC-LEG-B1-01'],
+      },
+    ],
+  },
+  {
+    areaCode: 'ACC',
+    propertyPart: 'ELG',
+    name: 'East Legon flats (demo)',
+    propertyType: 'apartment_block',
+    use: 'residential',
+    ownerId: ownerA,
+    address: {
+      ghanapostGps: 'GA-000-0002',
+      region: 'Greater Accra',
+      town: 'East Legon',
+      latitude: '5.6362',
+      longitude: '-0.1591',
+    },
+    units: [
+      { unitType: 'apartment', count: 3, bedrooms: 1, amenities: ['parking', 'borehole'] },
+      {
+        unitType: 'apartment',
+        count: 3,
+        bedrooms: 2,
+        amenities: ['parking', 'borehole', 'air_conditioning'],
+      },
+      {
+        unitType: 'apartment',
+        count: 2,
+        bedrooms: 3,
+        amenities: ['parking', 'borehole', 'air_conditioning', 'generator'],
+      },
+    ],
+    meters: [
+      {
+        utility: 'electricity',
+        supplier: 'ECG',
+        meterNumber: 'P-ELG-0001',
+        meterType: 'prepaid',
+        units: ['ACC-ELG-B1-01'],
+      },
+      {
+        utility: 'electricity',
+        supplier: 'ECG',
+        meterNumber: 'P-ELG-0002',
+        meterType: 'prepaid',
+        units: ['ACC-ELG-B1-02'],
+      },
+    ],
+  },
+  {
+    areaCode: 'ACC',
+    propertyPart: 'OSU',
+    name: 'Osu mixed-use building (demo)',
+    propertyType: 'mixed_use',
+    use: 'mixed',
+    ownerId: ownerB,
+    address: {
+      region: 'Greater Accra',
+      town: 'Osu',
+      street: 'Oxford Street (demo)',
+      latitude: '5.5560',
+      longitude: '-0.1819',
+    },
+    blocks: [
+      { code: 'G', name: 'Ground floor shops', units: [{ unitType: 'shop', count: 4 }] },
+      {
+        code: 'F1',
+        name: 'First floor offices',
+        units: [{ unitType: 'office', count: 4, amenities: ['air_conditioning'] }],
+      },
+    ],
+    status: [
+      { code: 'ACC-OSU-G-04', availability: 'not_lettable', reason: 'Used as the building store' },
+    ],
+    meters: [
+      {
+        utility: 'water',
+        supplier: 'Ghana Water',
+        meterNumber: 'W-OSU-001',
+        meterType: 'shared',
+        units: ['ACC-OSU-G-01', 'ACC-OSU-G-02', 'ACC-OSU-G-03', 'ACC-OSU-G-04'],
+      },
+    ],
+  },
+];
+
+const LANDLORD_PROPERTIES: DemoProperty[] = [
+  {
+    areaCode: 'TEM',
+    propertyPart: 'EST',
+    name: 'Tema estate house (demo)',
+    propertyType: 'gated_estate',
+    use: 'residential',
+    address: {
+      region: 'Greater Accra',
+      town: 'Tema Community 25',
+      latitude: '5.7348',
+      longitude: '0.0322',
+    },
+    units: [
+      {
+        unitType: 'detached_house',
+        count: 1,
+        bedrooms: 4,
+        amenities: ['parking', 'generator', 'borehole'],
+      },
+    ],
+  },
+];
+
+/** Owners, properties, units, statuses and meters (M2), created once through the services. */
+async function ensureRegister(
+  database: Database,
+  services: {
+    owners: OwnersService;
+    register: RegisterService;
+    read: RegisterReadService;
+    meters: MetersService;
+  },
+): Promise<number> {
+  const admin = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
+  const landlord = await actorFor(database, LANDLORD, 'landlord@demo.invalid');
+  const existing = new Set(
+    (await services.owners.list(admin, { includeArchived: true })).map((o) => o.reference),
+  );
+  const demoOwners = [
+    {
+      reference: 'OWN-01',
+      displayName: 'Ama Owner-London (demo)',
+      email: 'owner.london@demo.invalid',
+      residenceCountry: 'GB',
+      timeZone: 'Europe/London',
+    },
+    {
+      reference: 'OWN-02',
+      displayName: 'Nana Owner-Accra (demo)',
+      email: 'owner.accra@demo.invalid',
+      residenceCountry: 'GH',
+      timeZone: 'Africa/Accra',
+    },
+  ];
+  for (const o of demoOwners)
+    if (!existing.has(o.reference))
+      await services.owners.create(admin, { kind: 'individual', ...o });
+  const owners = new Map((await services.owners.list(admin)).map((o) => [o.reference, o.id]));
+  let created = 0;
+  for (const [actor, properties] of [
+    [admin, AGENCY_PROPERTIES(owners.get('OWN-01')!, owners.get('OWN-02')!)],
+    [landlord, LANDLORD_PROPERTIES],
+  ] as const) {
+    const codes = new Set(
+      (await services.read.listProperties(actor, { includeArchived: true })).rows.map(
+        (p) => p.code,
+      ),
+    );
+    for (const p of properties) {
+      if (codes.has(`${p.areaCode}-${p.propertyPart}`)) continue;
+      const propertyId = await services.register.createProperty(actor, p);
+      created += 1;
+      const units = new Map(
+        (await services.read.getProperty(actor, propertyId)).blocks.flatMap((b) =>
+          b.units.map((u) => [u.code, u.id] as const),
+        ),
+      );
+      for (const s of p.status ?? [])
+        await services.register.setAvailability(actor, units.get(s.code)!, {
+          availability: s.availability,
+          reason: s.reason,
+        });
+      for (const m of p.meters ?? [])
+        await services.meters.add(actor, propertyId, {
+          ...m,
+          unitIds: m.units.map((code) => units.get(code)!),
+        });
+    }
+  }
+  // Every demo contact is a test contact (CLAUDE.md section 14).
+  for (const companyId of [AGENCY, LANDLORD])
+    await withCompany(database, { companyId, actorKind: 'system' }, (tx) =>
+      tx
+        .update(schema.owner)
+        .set({ isTestContact: true })
+        .where(eq(schema.owner.isTestContact, false)),
+    );
+  return created;
+}
+
+/** Who sees what inside the agency (AD-02): caretakers by property, client owners by owner. */
+async function ensureScopes(database: Database): Promise<void> {
+  const ids = await withCompany(
+    database,
+    { companyId: AGENCY, actorKind: 'system' },
+    async (tx) => {
+      const owners = await tx
+        .select({ id: schema.owner.id, reference: schema.owner.reference })
+        .from(schema.owner);
+      const properties = await tx
+        .select({ id: schema.property.id, code: schema.property.code })
+        .from(schema.property);
+      return {
+        owner: new Map(owners.map((o) => [o.reference, o.id])),
+        property: new Map(properties.map((p) => [p.code, p.id])),
+      };
+    },
+  );
+  const scopes: {
+    key: { email?: string; phone?: string };
+    scope: { owners?: string[]; properties?: string[] };
+  }[] = [
+    { key: { email: 'owner.london@demo.invalid' }, scope: { owners: [ids.owner.get('OWN-01')!] } },
+    { key: { email: 'owner.accra@demo.invalid' }, scope: { owners: [ids.owner.get('OWN-02')!] } },
+    { key: { email: 'adviser@demo.invalid' }, scope: { owners: [ids.owner.get('OWN-01')!] } },
+    { key: { phone: '+233200000011' }, scope: { properties: [ids.property.get('ACC-LEG')!] } },
+    { key: { phone: '+233200000012' }, scope: { properties: [ids.property.get('ACC-OSU')!] } },
+  ];
+  for (const { key, scope } of scopes) {
+    const [found] = await withSystem(database, {}, (tx) =>
+      tx
+        .select({ id: schema.person.id })
+        .from(schema.person)
+        .where(
+          key.email
+            ? eq(schema.person.email, key.email)
+            : eq(schema.person.phoneNumber, key.phone!),
+        ),
+    );
+    if (!found) continue;
+    await withCompany(database, { companyId: AGENCY, actorKind: 'system' }, (tx) =>
+      tx
+        .update(schema.membership)
+        .set({ scope, updatedAt: new Date() })
+        .where(
+          sql`${schema.membership.personId} = ${found.id} and ${schema.membership.status} = 'active' and ${schema.membership.scope} is distinct from ${JSON.stringify(scope)}::jsonb`,
+        ),
+    );
+  }
+}
+
 /** RFC 4648 base32 without padding, for the otpauth URI people add to an authenticator app. */
 function base32(text: string): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -266,7 +607,17 @@ try {
   const accounts = app.get(PersonAccounts);
   await ensureCompanies(database);
   for (const person of PEOPLE) await ensurePerson(database, accounts, cfg, person);
+  const created = await ensureRegister(database, {
+    owners: app.get(OwnersService),
+    register: app.get(RegisterService),
+    read: app.get(RegisterReadService),
+    meters: app.get(MetersService),
+  });
+  await ensureScopes(database);
   console.log(`Seeded ${COMPANIES.length} companies and ${PEOPLE.length} people.`);
+  console.log(
+    `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST).`,
+  );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(
     `TOTP for every demo staff member: otpauth://totp/Rent%20Platform:demo?secret=${base32(DEMO_TOTP_SECRET)}&issuer=Rent%20Platform`,

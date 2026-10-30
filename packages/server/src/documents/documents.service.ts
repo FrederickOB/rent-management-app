@@ -18,7 +18,7 @@ const DOWNLOAD_SECONDS = 300;
 const UPLOAD_SECONDS = 600;
 
 export interface UploadPurpose {
-  readonly purpose: 'logo';
+  readonly purpose: 'logo' | 'property_photo' | 'property_paper' | 'register_import';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }

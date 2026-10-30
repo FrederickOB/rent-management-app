@@ -11,6 +11,8 @@ export const APPEND_ONLY_TABLES = [
   'approval_decision',
   'processed_job',
   'document',
+  'property_ownership',
+  'unit_status_event',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */

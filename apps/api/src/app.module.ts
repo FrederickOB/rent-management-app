@@ -8,6 +8,7 @@ import { CoreModule, type CoreOptions } from '@rent/server/core';
 import { DocumentsModule } from '@rent/server/documents';
 import { IdentityModule } from '@rent/server/identity';
 import { PolicyModule } from '@rent/server/policy';
+import { PortfolioModule } from '@rent/server/portfolio';
 import { RulesModule } from '@rent/server/rules';
 import { CompanyController } from './company/company.controller';
 import { GovernanceController } from './governance/governance.controller';
@@ -16,6 +17,7 @@ import { ActorGuard, PermissionGuard } from './http/guards';
 import { HealthController } from './health/health.controller';
 import { OpenApiController } from './health/openapi.controller';
 import { MeController } from './me/me.controller';
+import { RegisterController } from './register/register.controller';
 
 @Module({})
 export class AppModule {
@@ -31,6 +33,7 @@ export class AppModule {
         DocumentsModule,
         CompaniesModule,
         ApprovalsModule,
+        PortfolioModule,
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -49,6 +52,7 @@ export class AppModule {
         MeController,
         CompanyController,
         GovernanceController,
+        RegisterController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

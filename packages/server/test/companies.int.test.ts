@@ -1,14 +1,17 @@
-import { InMemoryEmail, InMemorySms } from '@rent/integrations';
+import { randomUUID } from 'node:crypto';
+import { InMemoryAddressLookup, InMemoryEmail, InMemorySms } from '@rent/integrations';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CompaniesService } from '../src/companies/companies.service';
 import { MembershipsService } from '../src/companies/memberships.service';
+import { OwnersService } from '../src/companies/owners.service';
 import { createLogger } from '../src/core/logging/logger';
 import { DocumentsService, LOGO_UPLOAD } from '../src/documents/documents.service';
 import { createAuth } from '../src/identity/auth';
 import { MembershipDirectory } from '../src/identity/memberships';
 import { PersonAccounts } from '../src/identity/person-accounts';
 import { PolicyService } from '../src/policy/policy.service';
+import { RegisterService } from '../src/portfolio/register.service';
 import { RulesService } from '../src/rules/rules.service';
 import { company, member, person, staff, startServerTest, type ServerTestContext } from './support';
 
@@ -256,5 +259,77 @@ describe('AD-03 users and roles', () => {
     expect((await memberships.revoke(admin, invited.membershipId)).status).toBe('revoked');
     const directory = await new MembershipDirectory(ctx.database).forPerson(invited.personId);
     expect(directory).toEqual([]);
+  });
+});
+
+describe('AD-02 required scopes', () => {
+  it('refuses a caretaker without a property and an agency adviser without an owner', async () => {
+    const policy = new PolicyService();
+    const owners = new OwnersService(ctx.database, policy);
+    const register = new RegisterService(
+      ctx.database,
+      policy,
+      owners,
+      ctx.clock,
+      new InMemoryAddressLookup(),
+    );
+    const ownerId = (await owners.create(admin, { kind: 'individual', displayName: 'Scope Owner' }))
+      .id;
+    const propertyId = await register.createProperty(admin, {
+      areaCode: 'acc',
+      propertyPart: 'scp',
+      name: 'Scope house',
+      propertyType: 'compound_house',
+      use: 'residential',
+      ownerId,
+      address: { region: 'Greater Accra', town: 'Legon', ghanapostGps: 'ga 000 0009' },
+      units: [{ unitType: 'single_room', count: 1 }],
+    });
+
+    // An invite starts with no scope, so a new caretaker sees nothing until assigned.
+    const caretaker = await memberships.invite(admin, {
+      name: 'Scoped Caretaker',
+      phone: '020 000 0477',
+      role: 'caretaker',
+    });
+    expect(caretaker.scope).toEqual({});
+    await expect(
+      memberships.update(admin, caretaker.membershipId, { scope: {} }),
+    ).rejects.toMatchObject({ code: 'scope.properties_required' });
+    await expect(
+      memberships.update(admin, caretaker.membershipId, { scope: { properties: [randomUUID()] } }),
+    ).rejects.toMatchObject({ code: 'scope_unknown' });
+    const saved = await memberships.update(admin, caretaker.membershipId, {
+      scope: { owners: [ownerId], properties: [propertyId] },
+    });
+    expect(saved.scope).toEqual({ properties: [propertyId] });
+
+    const adviser = await memberships.invite(admin, {
+      name: 'Scoped Adviser',
+      email: 'scoped.adviser@test.invalid',
+      role: 'adviser',
+    });
+    await expect(
+      memberships.update(admin, adviser.membershipId, { scope: { properties: [propertyId] } }),
+    ).rejects.toMatchObject({ code: 'scope.owners_required' });
+    const advised = await memberships.update(admin, adviser.membershipId, {
+      scope: { owners: [ownerId] },
+    });
+    expect(advised.scope).toEqual({ owners: [ownerId] });
+
+    // A role change is checked against the scope the person already has.
+    const accountant = await memberships.invite(admin, {
+      name: 'Scoped Accountant',
+      email: 'scoped.accountant@test.invalid',
+      role: 'accountant',
+    });
+    await expect(
+      memberships.update(admin, accountant.membershipId, { role: 'adviser' }),
+    ).rejects.toMatchObject({ code: 'scope.owners_required' });
+    const moved = await memberships.update(admin, accountant.membershipId, {
+      role: 'adviser',
+      scope: { owners: [ownerId] },
+    });
+    expect(moved).toMatchObject({ role: 'adviser', scope: { owners: [ownerId] } });
   });
 });

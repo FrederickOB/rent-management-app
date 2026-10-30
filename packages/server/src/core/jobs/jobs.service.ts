@@ -98,8 +98,27 @@ export class JobsService {
             companyId: typeof job.data.companyId === 'string' ? job.data.companyId : null,
           },
         });
+        await this.afterDeadLetter(source, job);
       },
     );
+  }
+
+  /** Lets the job type record its final failure (JobDefinition.onDeadLetter). */
+  private async afterDeadLetter(source: string, job: Job<Record<string, unknown>>): Promise<void> {
+    const definition = this.definitions.get(source);
+    if (!definition?.onDeadLetter) return;
+    const logger = this.logger.child({ job: source, deadLetterJobId: job.id });
+    const payload = definition.schema.safeParse(job.data);
+    if (!payload.success) {
+      logger.error('dead-lettered job payload does not parse; its failure was not recorded');
+      return;
+    }
+    try {
+      await definition.onDeadLetter(payload.data, { logger });
+    } catch (error) {
+      // The alert has gone out already; a person follows up from there.
+      logger.error({ err: error }, 'recording the failure of a dead-lettered job failed');
+    }
   }
 
   /** Enqueues a job, inside `tx` when given, so it commits or rolls back with the caller's work. */

@@ -6,6 +6,7 @@ import {
   GetObjectCommand,
   GetObjectLockConfigurationCommand,
   HeadObjectCommand,
+  ListObjectVersionsCommand,
   PutBucketVersioningCommand,
   PutObjectCommand,
   S3Client,
@@ -96,6 +97,12 @@ export interface DeleteResult {
   readonly versionId: string | null;
 }
 
+/** One stored version of a key, or a delete marker. */
+export interface VersionInfo {
+  readonly versionId: string | null;
+  readonly deleteMarker: boolean;
+}
+
 export interface StoragePort {
   readonly provider: string;
   createUploadUrl(request: UploadUrlRequest): Promise<PresignedUpload>;
@@ -109,6 +116,11 @@ export interface StoragePort {
   get(ref: ObjectRef): Promise<Buffer>;
   /** With a version id, removes that version unless it is retained; without, adds a delete marker. */
   delete(ref: ObjectRef): Promise<DeleteResult>;
+  /**
+   * Every version and delete marker of exactly this key, oldest first where the store says so,
+   * so a file that must not survive (a photo's original, with its location) can be removed whole.
+   */
+  listVersions(ref: { readonly bucket: string; readonly key: string }): Promise<VersionInfo[]>;
   /** Creates the files bucket with versioning and the evidence bucket with Object Lock. Idempotent. */
   ensureBuckets(buckets: BucketNames): Promise<void>;
 }
@@ -411,6 +423,35 @@ export class S3Storage implements StoragePort {
     return { deleteMarker: result.DeleteMarker ?? false, versionId: result.VersionId ?? null };
   }
 
+  async listVersions(ref: {
+    readonly bucket: string;
+    readonly key: string;
+  }): Promise<VersionInfo[]> {
+    const found: VersionInfo[] = [];
+    let keyMarker: string | undefined;
+    let versionIdMarker: string | undefined;
+    for (;;) {
+      const page = await attempt(`list versions ${ref.bucket}/${ref.key}`, () =>
+        this.client.send(
+          new ListObjectVersionsCommand({
+            Bucket: ref.bucket,
+            Prefix: ref.key,
+            KeyMarker: keyMarker,
+            VersionIdMarker: versionIdMarker,
+          }),
+        ),
+      );
+      // A prefix also matches longer keys; only this key's versions count.
+      for (const v of page.Versions ?? [])
+        if (v.Key === ref.key) found.push({ versionId: v.VersionId ?? null, deleteMarker: false });
+      for (const m of page.DeleteMarkers ?? [])
+        if (m.Key === ref.key) found.push({ versionId: m.VersionId ?? null, deleteMarker: true });
+      if (!page.IsTruncated) return found;
+      keyMarker = page.NextKeyMarker;
+      versionIdMarker = page.NextVersionIdMarker;
+    }
+  }
+
   async ensureBuckets(buckets: BucketNames): Promise<void> {
     await this.createBucket(buckets.files, false);
     const versioning = await attempt(`versioning ${buckets.files}`, () =>
@@ -660,6 +701,16 @@ export class InMemoryStorage implements StoragePort {
       versions.filter((v) => v !== version),
     );
     return { deleteMarker: version.body === null, versionId: ref.versionId };
+  }
+
+  async listVersions(ref: {
+    readonly bucket: string;
+    readonly key: string;
+  }): Promise<VersionInfo[]> {
+    return (this.bucket(ref.bucket).objects.get(ref.key) ?? []).map((v) => ({
+      versionId: v.versionId,
+      deleteMarker: v.body === null,
+    }));
   }
 
   async ensureBuckets(buckets: BucketNames): Promise<void> {

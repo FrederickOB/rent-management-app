@@ -8,6 +8,7 @@ import { useMemo, type CSSProperties, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 import { isHexColour, textOn } from '@/lib/colour';
 import { initials } from '@/lib/format';
+import { activeNavHref } from '@/lib/nav-match';
 import { AppProvider } from './app-context';
 import { navFor } from './nav';
 import { SignOutButton } from './sign-out-button';
@@ -44,6 +45,10 @@ export interface AppShellProps {
 export function AppShell({ me, company, children }: AppShellProps) {
   const pathname = usePathname();
   const items = navFor(me);
+  const activeHref = activeNavHref(
+    pathname,
+    items.map((item) => item.href),
+  );
   const membership = me.memberships.find((m) => m.companyId === me.activeCompanyId);
   const companyName = company?.displayName ?? membership?.companyName ?? null;
   const context = useMemo(
@@ -109,8 +114,7 @@ export function AppShell({ me, company, children }: AppShellProps) {
             {/* Wraps on a phone rather than scrolling, so no section hides off screen. */}
             <ul className="flex flex-wrap gap-1 md:flex-col">
               {items.map((item) => {
-                const current =
-                  item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
+                const current = item.href === activeHref;
                 return (
                   <li key={item.href}>
                     <Link

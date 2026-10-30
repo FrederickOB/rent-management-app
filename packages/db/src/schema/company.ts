@@ -29,6 +29,13 @@ export const country = pgTable('country', {
   callingCode: text().notNull(),
   idTypes: text().array().notNull(),
   addressFormat: text().notNull(),
+  /** Administrative regions, for property addresses (PR-03). */
+  regions: text()
+    .array()
+    .notNull()
+    .default(sql`'{}'::text[]`),
+  /** Suggested meter suppliers by utility (PR-05), for example ECG for electricity. */
+  meterSuppliers: jsonb().notNull().default({}),
   createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });
 

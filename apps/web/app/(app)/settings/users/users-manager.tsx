@@ -1,8 +1,9 @@
 'use client';
 
 import type { MembershipRow } from '@rent/contracts';
+import type { CompanyKind } from '@rent/domain/policy';
 import Link from 'next/link';
-import { Fragment, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -10,9 +11,9 @@ import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { formatDate, roleLabel } from '@/lib/format';
-import { EditMembership } from './edit-membership';
+import { EditMembership, type ScopeOptions } from './edit-membership';
 import { InviteForm } from './invite-form';
-import { scopeSummary } from './scope';
+import { scopeSummary, type ScopeNames } from './scope';
 
 const STATUS_LABELS: Record<MembershipRow['status'], string> = {
   invited: 'Invited',
@@ -27,6 +28,9 @@ export interface UsersManagerProps {
   readonly canSearchAudit: boolean;
   readonly selfPersonId: string;
   readonly timeZone: string;
+  readonly companyKind: CompanyKind;
+  /** Owners and properties for the access pickers (AD-02), when this session may list them. */
+  readonly scopeOptions: ScopeOptions;
 }
 
 type Notice = { readonly tone: 'success' | 'error'; readonly text: string } | null;
@@ -38,6 +42,8 @@ export function UsersManager({
   canSearchAudit,
   selfPersonId,
   timeZone,
+  companyKind,
+  scopeOptions,
 }: UsersManagerProps) {
   const [rows, setRows] = useState<readonly MembershipRow[]>(initialRows);
   const [notice, setNotice] = useState<Notice>(null);
@@ -45,6 +51,13 @@ export function UsersManager({
   const [editing, setEditing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const names = useMemo<ScopeNames>(
+    () => ({
+      owners: new Map((scopeOptions.owners ?? []).map((o) => [o.value, o.label])),
+      properties: new Map((scopeOptions.properties ?? []).map((p) => [p.value, p.label])),
+    }),
+    [scopeOptions],
+  );
 
   async function refresh(message: string) {
     setNotice({ tone: 'success', text: message });
@@ -151,7 +164,7 @@ export function UsersManager({
                         ) : null}
                       </Td>
                       <Td>{STATUS_LABELS[row.status]}</Td>
-                      <Td>{scopeSummary(row.scope)}</Td>
+                      <Td>{scopeSummary(row.scope, names)}</Td>
                       <Td className="whitespace-nowrap">{formatDate(row.createdAt, timeZone)}</Td>
                       {showActions ? (
                         <Td>
@@ -237,6 +250,8 @@ export function UsersManager({
                         <td colSpan={columns} className="px-3 pb-4">
                           <EditMembership
                             row={row}
+                            companyKind={companyKind}
+                            scopeOptions={scopeOptions}
                             onSaved={(message) => {
                               setEditing(null);
                               void refresh(message);

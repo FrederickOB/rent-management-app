@@ -1,3 +1,4 @@
+import { isGhanaPostGpsFormat, normaliseGhanaPostGps } from '@rent/domain/portfolio';
 import { ProviderError, requestJson } from '../http';
 import { z } from 'zod';
 import { unexpectedResponse } from '../validation';
@@ -20,24 +21,8 @@ export interface AddressLookupPort {
   lookup(code: string): Promise<GhanaPostAddress | null>;
 }
 
-/**
- * Region letter, district letter, a 3 or 4 digit area and a 4 digit number, for example
- * GA-183-8164. OQ-23 also records a digit in the district place, so that is accepted too until a
- * licensed source settles the format.
- */
-const GHANA_POST_GPS = /^[A-Z][A-Z0-9]-\d{3,4}-\d{4}$/;
-
-/** Upper-cases, trims, and turns spaces or dashes between the groups into single hyphens. */
-export function normaliseGhanaPostGps(code: string): string {
-  return code
-    .trim()
-    .toUpperCase()
-    .replace(/\s*[\s–—-]\s*/g, '-');
-}
-
-export function isGhanaPostGpsFormat(code: string): boolean {
-  return GHANA_POST_GPS.test(normaliseGhanaPostGps(code));
-}
+// The format check lives in packages/domain, so forms, the import and this adapter share it (M2).
+export { isGhanaPostGpsFormat, normaliseGhanaPostGps };
 
 /**
  * Invented addresses for tests and local development, in the unused 000 area. Labelled fake so
@@ -78,7 +63,7 @@ export class InMemoryAddressLookup implements AddressLookupPort {
 
   async lookup(code: string): Promise<GhanaPostAddress | null> {
     const normalised = normaliseGhanaPostGps(code);
-    if (!GHANA_POST_GPS.test(normalised)) return null;
+    if (!isGhanaPostGpsFormat(normalised)) return null;
     const found = Object.hasOwn(this.addresses, normalised)
       ? this.addresses[normalised]
       : undefined;
@@ -101,7 +86,7 @@ export class FakeProvidersAddressLookup implements AddressLookupPort {
 
   async lookup(code: string): Promise<GhanaPostAddress | null> {
     const normalised = normaliseGhanaPostGps(code);
-    if (!GHANA_POST_GPS.test(normalised)) return null;
+    if (!isGhanaPostGpsFormat(normalised)) return null;
     let response: unknown;
     try {
       response = await requestJson<unknown>(

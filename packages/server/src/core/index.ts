@@ -8,3 +8,4 @@ export * from './tokens';
 export * from './outbox';
 export * from './crypto/field-cipher';
 export * from './crypto/db-key-store';
+export * from './db-errors';

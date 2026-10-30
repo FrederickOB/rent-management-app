@@ -1,4 +1,4 @@
-import { twoFactorClient } from 'better-auth/client/plugins';
+import { phoneNumberClient, twoFactorClient } from 'better-auth/client/plugins';
 import { createAuthClient } from 'better-auth/react';
 
 function create() {
@@ -6,7 +6,8 @@ function create() {
   return createAuthClient({
     baseURL: window.location.origin,
     basePath: '/api/auth',
-    plugins: [twoFactorClient()],
+    // Staff sign in with a password and TOTP; caretakers with a code sent to their phone (AD-06).
+    plugins: [twoFactorClient(), phoneNumberClient()],
   });
 }
 

@@ -69,12 +69,13 @@ export async function createMembership(
   });
 }
 
-/** SQLSTATE of a failed query, or null if it succeeded. */
+/** SQLSTATE of a failed query, or null if it succeeded. Drizzle keeps the driver error as `cause`. */
 export async function sqlState(promise: Promise<unknown>): Promise<string | null> {
   try {
     await promise;
     return null;
   } catch (error) {
-    return (error as { code?: string }).code ?? 'unknown';
+    const e = error as { code?: string; cause?: { code?: string } };
+    return e.code ?? e.cause?.code ?? 'unknown';
   }
 }
