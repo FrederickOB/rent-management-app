@@ -21,7 +21,7 @@ import {
   type ApprovalStatus,
   type DecisionKind,
 } from '@rent/domain/approvals';
-import { can, type Actor, type StaffRole } from '@rent/domain/policy';
+import { can, scopeOf, type Actor, type StaffRole } from '@rent/domain/policy';
 import { parseCompanySettings } from '@rent/domain/settings';
 import type { z } from 'zod';
 import type { Clock } from '../core/clock';
@@ -30,7 +30,7 @@ import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { AuditService } from '../audit/audit.service';
 import { StepUpVerifier } from '../identity/step-up';
-import { PolicyService } from '../policy/policy.service';
+import { PolicyService, staffContext } from '../policy/policy.service';
 
 type RequestRow = typeof schema.approvalRequest.$inferSelect;
 
@@ -91,11 +91,26 @@ const asStaff = (actor: Actor | null): Staff => {
   if (!actor || actor.kind !== 'staff') throw forbidden();
   return actor;
 };
-const ctxOf = (actor: Staff) => ({
-  companyId: actor.companyId,
-  personId: actor.personId,
-  actorKind: 'staff' as const,
-});
+/** The person's own context, with their scope: RLS shows a scoped person only their requests. */
+const ctxOf = (actor: Staff) => staffContext(actor);
+
+/** The deciding session's resolved property scope, or null when it sees the whole company. */
+async function scopeProperties(tx: Tx): Promise<string[] | null> {
+  const result = await tx.execute<{ scope: string[] | null }>(
+    sql`select app.property_scope()::text[] as scope`,
+  );
+  return result.rows[0]?.scope ?? null;
+}
+
+/**
+ * Drops the scope for the rest of the transaction, once the request has been found and allowed:
+ * the action then writes for the whole company, as every posting does.
+ */
+async function unscope(tx: Tx): Promise<void> {
+  await tx.execute(
+    sql`select set_config('app.property_scope', '', true), set_config('app.owner_scope', '', true)`,
+  );
+}
 
 @Injectable()
 export class ApprovalsService {
@@ -124,7 +139,13 @@ export class ApprovalsService {
   /** Starts a request. Single-user mode applies when nobody else could approve (OQ-29). */
   async create(
     actor: Actor | null,
-    input: { actionType: string; subjectType: string; subjectId: string; payload: unknown },
+    input: {
+      actionType: string;
+      subjectType: string;
+      subjectId: string;
+      payload: unknown;
+      propertyId?: string | null;
+    },
   ): Promise<ApprovalView> {
     const staff = asStaff(actor);
     const id = await withCompany(this.database, ctxOf(staff), (tx) =>
@@ -140,7 +161,14 @@ export class ApprovalsService {
   async createInTx(
     tx: Tx,
     actor: Actor | null,
-    input: { actionType: string; subjectType: string; subjectId: string; payload: unknown },
+    input: {
+      actionType: string;
+      subjectType: string;
+      subjectId: string;
+      payload: unknown;
+      /** The subject's property (AD-02), or null for a company-level request. */
+      propertyId?: string | null;
+    },
   ): Promise<string> {
     const staff = asStaff(actor);
     const handler = this.handler(input.actionType);
@@ -151,6 +179,7 @@ export class ApprovalsService {
         personId: schema.membership.personId,
         role: schema.membership.role,
         nominatedApprover: schema.membership.nominatedApprover,
+        scope: schema.membership.scope,
       })
       .from(schema.membership)
       .where(
@@ -159,20 +188,36 @@ export class ApprovalsService {
           eq(schema.membership.status, 'active'),
         ),
       );
-    const eligible = others.filter(
-      (m) =>
-        m.personId !== staff.personId &&
-        can(
-          {
-            ...staff,
-            personId: m.personId,
-            role: m.role as StaffRole,
-            nominatedApprover: m.nominatedApprover,
-          },
-          'approval.decide',
-          { initiatorPersonId: staff.personId, eligibleRoles: handler.eligibleRoles },
-        ).allowed,
-    );
+    const eligible = [];
+    for (const m of others) {
+      if (m.personId === staff.personId) continue;
+      const candidate = {
+        ...staff,
+        personId: m.personId,
+        role: m.role as StaffRole,
+        nominatedApprover: m.nominatedApprover,
+        scope: (m.scope ?? {}) as { owners?: string[]; properties?: string[] },
+      };
+      // Who could decide it: in scope for the request's property, as decide() will judge it.
+      const scope = scopeOf(candidate);
+      const covered = scope
+        ? ((
+            await tx.execute<{ scope: string[] | null }>(
+              sql`select app.resolve_property_scope(${`{${scope.ownerIds.join(',')}}`}::uuid[],
+                    ${`{${scope.propertyIds.join(',')}}`}::uuid[])::text[] as scope`,
+            )
+          ).rows[0]?.scope ?? [])
+        : null;
+      if (
+        can(candidate, 'approval.decide', {
+          initiatorPersonId: staff.personId,
+          eligibleRoles: handler.eligibleRoles,
+          propertyId: input.propertyId ?? null,
+          scopeProperties: covered,
+        }).allowed
+      )
+        eligible.push(m);
+    }
     const mode: ApprovalMode = chooseMode(eligible.length);
     const [company] = await tx
       .select({ settings: schema.company.settings })
@@ -187,6 +232,7 @@ export class ApprovalsService {
         actionType: input.actionType,
         subjectType: input.subjectType,
         subjectId: input.subjectId,
+        propertyId: input.propertyId ?? null,
         payload: payload as Record<string, unknown>,
         payloadHash: payloadHash(payload),
         initiatedBy: staff.personId,
@@ -243,7 +289,10 @@ export class ApprovalsService {
       this.policy.assert(staff, action, {
         initiatorPersonId: request.initiatedBy,
         eligibleRoles: handler.eligibleRoles,
+        propertyId: request.propertyId,
+        scopeProperties: await scopeProperties(tx),
       });
+      await unscope(tx);
       if (handler.prepare) await handler.prepare(tx, request);
 
       const [{ approvals } = { approvals: 0 }] = await tx
@@ -377,6 +426,47 @@ export class ApprovalsService {
     return rows.length;
   }
 
+  /**
+   * Requests by id, in the caller's transaction, for modules that show a record's approval state
+   * (M4a review 16: they read approvals through this service, never its table).
+   */
+  async requestsIn(
+    tx: Tx,
+    ids: readonly string[],
+  ): Promise<Map<string, Pick<RequestRow, 'id' | 'status' | 'initiatedBy' | 'propertyId'>>> {
+    if (ids.length === 0) return new Map();
+    const rows = await tx
+      .select({
+        id: schema.approvalRequest.id,
+        status: schema.approvalRequest.status,
+        initiatedBy: schema.approvalRequest.initiatedBy,
+        propertyId: schema.approvalRequest.propertyId,
+      })
+      .from(schema.approvalRequest)
+      .where(inArray(schema.approvalRequest.id, [...new Set(ids)]));
+    return new Map(rows.map((r) => [r.id, r]));
+  }
+
+  /** Requests still waiting for a decision about these subjects, by subject id. */
+  async openFor(
+    tx: Tx,
+    subjectIds: readonly string[],
+    actionType?: string,
+  ): Promise<Map<string, string>> {
+    if (subjectIds.length === 0) return new Map();
+    const rows = await tx
+      .select({ id: schema.approvalRequest.id, subjectId: schema.approvalRequest.subjectId })
+      .from(schema.approvalRequest)
+      .where(
+        and(
+          inArray(schema.approvalRequest.subjectId, [...subjectIds]),
+          inArray(schema.approvalRequest.status, ['pending', 'cooling_off']),
+          actionType ? eq(schema.approvalRequest.actionType, actionType) : undefined,
+        ),
+      );
+    return new Map(rows.map((r) => [r.subjectId, r.id]));
+  }
+
   async list(actor: Actor | null, which: 'open' | 'closed'): Promise<ApprovalView[]> {
     const staff = asStaff(actor);
     this.policy.assert(staff, 'approval.view');
@@ -391,9 +481,10 @@ export class ApprovalsService {
         .where(inArray(schema.approvalRequest.status, statuses))
         .orderBy(desc(schema.approvalRequest.createdAt))
         .limit(200);
+      const scope = await scopeProperties(tx);
       return Promise.all(
         requests.map(async (request) =>
-          this.view(staff, request, await this.decisions(tx, request.id)),
+          this.view(staff, request, await this.decisions(tx, request.id), scope),
         ),
       );
     });
@@ -409,12 +500,22 @@ export class ApprovalsService {
       if (!request) throw notFound('Approval request');
       const isParty = request.initiatedBy === staff.personId;
       if (!isParty) this.policy.assert(staff, 'approval.view');
-      return this.view(staff, request, await this.decisions(tx, requestId));
+      return this.view(
+        staff,
+        request,
+        await this.decisions(tx, requestId),
+        await scopeProperties(tx),
+      );
     });
   }
 
-  private view(staff: Staff, request: RequestRow, decisions: DecisionRow[]): ApprovalView {
-    return { request, decisions, mayDecide: this.mayDecide(staff, request, decisions) };
+  private view(
+    staff: Staff,
+    request: RequestRow,
+    decisions: DecisionRow[],
+    scope: readonly string[] | null,
+  ): ApprovalView {
+    return { request, decisions, mayDecide: this.mayDecide(staff, request, decisions, scope) };
   }
 
   /**
@@ -423,7 +524,12 @@ export class ApprovalsService {
    * its initiator, and in a role the action type accepts). A request whose action type has no
    * handler here can be decided by nobody.
    */
-  private mayDecide(staff: Staff, request: RequestRow, decisions: readonly DecisionRow[]): boolean {
+  private mayDecide(
+    staff: Staff,
+    request: RequestRow,
+    decisions: readonly DecisionRow[],
+    scope: readonly string[] | null,
+  ): boolean {
     const handler = this.handlers.get(request.actionType);
     if (!handler || request.mode !== 'two_person' || request.status !== 'pending') return false;
     if (request.expiresAt.getTime() <= this.clock.now().getTime()) return false;
@@ -431,6 +537,8 @@ export class ApprovalsService {
     return this.policy.can(staff, 'approval.decide', {
       initiatorPersonId: request.initiatedBy,
       eligibleRoles: handler.eligibleRoles,
+      propertyId: request.propertyId,
+      scopeProperties: scope,
     }).allowed;
   }
 

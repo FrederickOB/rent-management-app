@@ -1,14 +1,15 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { sql, withCompany, type Database, type Tx } from '@rent/db';
 import { isTax, lineBalance, linesAfterEnd } from '@rent/domain/billing';
 import { formatBusinessDate } from '@rent/domain/dates';
+import type { AlertPort } from '@rent/integrations';
 import type { Clock } from '../core/clock';
-import { CLOCK, DATABASE } from '../core/tokens';
+import { ALERT_PORT, CLOCK, DATABASE } from '../core/tokens';
 import { companyRecord } from '../companies/companies.service';
 import { PostingService } from '../ledger/posting.service';
 import { leaseIdsIn, renewedLeaseOf, startedRenewalIds } from '../tenancy/billing-facts';
 import { BillingEngine, type LeaseState } from './engine';
-import { isoNow, lockLeases } from './records';
+import { isoNow, leaseGroup, lockCounters, lockLeases } from './records';
 
 /** Lease states the daily invoice run bills (plan 4.4). */
 const BILLED_STATES = ['signed', 'active', 'ending', 'holding_over'] as const;
@@ -26,7 +27,41 @@ export class InvoicingService {
     @Inject(BillingEngine) private readonly engine: BillingEngine,
     @Inject(PostingService) private readonly posting: PostingService,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts?: AlertPort,
   ) {}
+
+  /**
+   * Runs one lease's part of a daily run in its own transaction. A lease that fails raises an
+   * alert (its id and the error's code, nothing personal) and the run carries on; it is tried
+   * again by the next run, and leases that succeeded are never redone (review 7).
+   */
+  private async eachLease(
+    companyId: string,
+    job: string,
+    ids: readonly string[],
+    run: (id: string) => Promise<number>,
+  ): Promise<number> {
+    let done = 0;
+    for (const id of ids)
+      try {
+        done += await run(id);
+      } catch (error) {
+        const code =
+          (error as { code?: unknown }).code &&
+          typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'unexpected';
+        await this.alerts
+          ?.raise({
+            severity: 'critical',
+            code: 'billing.lease_run_failed',
+            message: 'A lease could not be worked in the daily billing run',
+            context: { companyId, job, leaseId: id, error: code },
+          })
+          .catch(() => undefined);
+      }
+    return done;
+  }
 
   private system(companyId: string, requestId?: string) {
     return { companyId, actorKind: 'system' as const, requestId: requestId ?? null };
@@ -51,25 +86,17 @@ export class InvoicingService {
     date: string,
     fn: (tx: Tx, state: LeaseState) => Promise<T>,
     requestId?: string,
+    options: { readonly numbers?: boolean } = {},
   ): Promise<T> {
     return withCompany(this.database, this.system(companyId, requestId), async (tx) => {
       const oldId = await renewedLeaseOf(tx, leaseId);
-      await lockLeases(tx, companyId, oldId ? [leaseId, oldId] : [leaseId]);
+      await lockLeases(tx, companyId, await leaseGroup(tx, leaseId));
+      // Invoices are numbered: the counters come before anything audited (review 3).
+      if (options.numbers) await lockCounters(tx, companyId);
       const state = await this.engine.load(tx, companyId, leaseId);
-      if (oldId) await this.carryOverIfStarted(tx, state, oldId, date);
+      if (oldId) await this.engine.carryOverIfStarted(tx, state, date);
       return fn(tx, state);
     });
-  }
-
-  /** P29 once a renewal has started: the old lease is accrued to date first, then carried. */
-  private async carryOverIfStarted(tx: Tx, renewal: LeaseState, oldId: string, date: string) {
-    const lease = renewal.lease;
-    if (lease.startDate > date) return;
-    if (!['active', 'ending', 'holding_over', 'ended', 'terminated'].includes(lease.status)) return;
-    const old = await this.engine.load(tx, renewal.company.id, oldId);
-    if (old.book.kind !== 'book') return;
-    await this.engine.accrue(tx, old, date);
-    await this.engine.carryOver(tx, old, renewal, lease.startDate);
   }
 
   /** `billing.generate-invoices` for one company (daily 00:10): every cycle due by the date. */
@@ -78,15 +105,16 @@ export class InvoicingService {
     const ids = await withCompany(this.database, this.system(companyId), (tx) =>
       leaseIdsIn(tx, BILLED_STATES),
     );
-    let issued = 0;
-    for (const id of ids)
-      issued += await this.withLease(
+    return this.eachLease(companyId, 'billing.generate-invoices', ids, (id) =>
+      this.withLease(
         companyId,
         id,
         today,
         async (tx, state) => (await this.engine.generate(tx, state, today)).length,
-      );
-    return issued;
+        undefined,
+        { numbers: true },
+      ),
+    );
   }
 
   /**
@@ -107,12 +135,9 @@ export class InvoicingService {
         if (!(await this.posting.findByKey(tx, companyId, `P29:${id}`))) renewals.push(id);
       return [...new Set([...rows.rows.map((r) => r.lease_id), ...renewals])].sort();
     });
-    let accrued = 0;
-    for (const id of ids)
-      accrued += await this.withLease(companyId, id, today, (tx, state) =>
-        this.engine.accrue(tx, state, today),
-      );
-    return accrued;
+    return this.eachLease(companyId, 'billing.accrue-periods', ids, (id) =>
+      this.withLease(companyId, id, today, (tx, state) => this.engine.accrue(tx, state, today)),
+    );
   }
 
   /**
@@ -136,6 +161,7 @@ export class InvoicingService {
         await this.engine.accrue(tx, state, today);
       },
       requestId,
+      { numbers: true },
     );
   }
 

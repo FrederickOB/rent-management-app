@@ -3,8 +3,9 @@ import type { AllocationPosting, LeaseDimensions, PaymentAmount } from '../ledge
 import {
   inAllocationOrder,
   lineBalance,
+  chargedFrom,
   paymentShares,
-  postingClassOf,
+  postingClassAt,
   type AllocationRow,
   type BillingLine,
   type CreditPool,
@@ -21,8 +22,22 @@ export interface AllocationPlan {
   readonly allocations: readonly PlannedAllocation[];
   /** What is left: the payment's credit, held in prepayments (BC-07). */
   readonly surplusMinor: number;
-  /** The same allocations, as the ledger posts them (P03). */
+  /** The same allocations, as the ledger posts them (P03), classified as of the value date. */
   readonly postings: readonly AllocationPosting[];
+  /**
+   * Allocations to periods that had not started on the value date but have accrued since: the
+   * receipt holds them in prepayments as an advance, and each is drawn at once (P02's 2010 part,
+   * dated at the period start), so balances are right as of every date.
+   */
+  readonly lateDraws: readonly LateDraw[];
+}
+
+/** One late draw: Dr 2010 and Cr 1100 on the line, for the payment, at the period start. */
+export interface LateDraw {
+  readonly lineId: string;
+  readonly paymentId: string;
+  readonly amountMinor: number;
+  readonly valueDate: string;
 }
 
 /**
@@ -38,10 +53,19 @@ export function planAllocation(input: {
   readonly lease: LeaseDimensions;
   /** The value date: lines whose period has started by then must be accrued. */
   readonly valueDate: string;
+  /** The lease's last billable day (a move-out): periods after it are not owed and take nothing. */
+  readonly lastDay?: string | null;
 }): AllocationPlan {
   if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor <= 0)
     throw new DomainError('billing.bad_amount', 'A payment must be a positive amount');
-  const waiting = input.lines.find(
+  const lastDay = input.lastDay ?? null;
+  const after = (l: BillingLine) =>
+    lastDay !== null && l.periodStart !== null && !l.accrued && l.periodStart > lastDay;
+  const dropped = new Set(input.lines.filter(after).map((l) => l.id));
+  const lines = input.lines.filter(
+    (l) => !dropped.has(l.id) && !(l.baseLineId !== null && dropped.has(l.baseLineId)),
+  );
+  const waiting = lines.find(
     (l) => !l.accrued && l.periodStart !== null && l.periodStart <= input.valueDate,
   );
   if (waiting)
@@ -49,21 +73,32 @@ export function planAllocation(input: {
   let remaining = input.amountMinor;
   const allocations: PlannedAllocation[] = [];
   const postings: AllocationPosting[] = [];
-  for (const line of inAllocationOrder(input.lines)) {
+  const lateDraws: LateDraw[] = [];
+  for (const line of inAllocationOrder(lines)) {
     if (remaining === 0) break;
     const { outstandingMinor } = lineBalance(line, input.allocations);
     if (outstandingMinor === 0) continue;
     const amount = Math.min(outstandingMinor, remaining);
     remaining -= amount;
     allocations.push({ lineId: line.id, paymentId: input.paymentId, amountMinor: amount });
+    const postingClass = postingClassAt(line, input.valueDate);
     postings.push({
       lease: input.lease,
       invoiceLineId: line.id,
-      postingClass: postingClassOf(line),
+      postingClass,
       amountMinor: amount,
     });
+    // Owed now, but not yet on the day the money arrived: drawn on the day it became owed.
+    const owedFrom = chargedFrom(line);
+    if (postingClass === 'prepayment' && owedFrom !== null)
+      lateDraws.push({
+        lineId: line.id,
+        paymentId: input.paymentId,
+        amountMinor: amount,
+        valueDate: owedFrom,
+      });
   }
-  return { allocations, surplusMinor: remaining, postings };
+  return { allocations, surplusMinor: remaining, postings, lateDraws };
 }
 
 export interface AccrualPlan {
@@ -128,4 +163,34 @@ export function drawFromPools(
         throw new DomainError('billing.pool_overdrawn', `Payment ${p.paymentId} is overdrawn`);
       return p.amountMinor > 0;
     });
+}
+
+/**
+ * P02 for a line's VAT and levy lines (review 10): once the base line has drawn what it needs,
+ * the credit left pays its tax lines too, first in, first out by payment. `pools` is the credit
+ * after the base line's draws; the caller reduces it by these draws.
+ */
+export function planTaxDraws(
+  taxLines: readonly BillingLine[],
+  allocations: readonly AllocationRow[],
+  pools: readonly CreditPool[],
+): { readonly lineId: string; readonly draws: readonly PaymentAmount[] }[] {
+  let left = pools;
+  const out: { lineId: string; draws: PaymentAmount[] }[] = [];
+  for (const tax of taxLines) {
+    let need = lineBalance(tax, allocations).outstandingMinor;
+    const draws: PaymentAmount[] = [];
+    for (const pool of left) {
+      if (need === 0) break;
+      const amount = Math.min(pool.amountMinor, need);
+      if (amount <= 0) continue;
+      draws.push({ paymentId: pool.paymentId, amountMinor: amount });
+      need -= amount;
+    }
+    if (draws.length > 0) {
+      out.push({ lineId: tax.id, draws });
+      left = drawFromPools(left, draws);
+    }
+  }
+  return out;
 }

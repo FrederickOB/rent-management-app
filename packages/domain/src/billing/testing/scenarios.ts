@@ -6,6 +6,7 @@ import { rentSchedule } from '../../tenancy/schedule';
 import {
   cyclesToIssue,
   depositDue,
+  expectedTaxMinor,
   invoiceCycles,
   invoiceLinesFor,
   type InvoiceCycle,
@@ -88,10 +89,18 @@ export const leaseArbitrary: fc.Arbitrary<ScenarioLease> = fc
 
 export type Operation =
   | { readonly kind: 'days'; readonly days: number }
-  | { readonly kind: 'pay'; readonly amountMinor: number; readonly cash: CashAccount }
+  | {
+      readonly kind: 'pay';
+      readonly amountMinor: number;
+      readonly cash: CashAccount;
+      /** Received this many days before it is recorded (an approval or a match comes later). */
+      readonly daysBack: number;
+    }
   | { readonly kind: 'reverse'; readonly pick: number }
   | { readonly kind: 'credit'; readonly pick: number; readonly percent: number }
-  | { readonly kind: 'write_off'; readonly pick: number; readonly percent: number };
+  | { readonly kind: 'write_off'; readonly pick: number; readonly percent: number }
+  /** The tenant moved out `daysBack` days ago (recorded today), once the lease has started. */
+  | { readonly kind: 'move_out'; readonly daysBack: number };
 
 export const operationArbitrary = (withCorrections: boolean): fc.Arbitrary<Operation> => {
   const days = fc.record({
@@ -105,6 +114,10 @@ export const operationArbitrary = (withCorrections: boolean): fc.Arbitrary<Opera
       fc.integer({ min: 200_000, max: 20_000_000 }),
     ),
     cash: fc.constantFrom<CashAccount>('1050', '1060', '1010', '1070'),
+    daysBack: fc.oneof(
+      { arbitrary: fc.constant(0), weight: 2 },
+      { arbitrary: fc.integer({ min: 1, max: 45 }), weight: 1 },
+    ),
   });
   if (!withCorrections)
     return fc.oneof({ arbitrary: days, weight: 3 }, { arbitrary: pay, weight: 3 });
@@ -128,6 +141,13 @@ export const operationArbitrary = (withCorrections: boolean): fc.Arbitrary<Opera
       }),
       weight: 1,
     },
+    {
+      arbitrary: fc.record({
+        kind: fc.constant('move_out' as const),
+        daysBack: fc.integer({ min: 0, max: 60 }),
+      }),
+      weight: 1,
+    },
   );
 };
 
@@ -142,11 +162,15 @@ export class ScenarioRunner {
   private readonly issued = new Set<string>();
   private corrections = 0;
 
+  /** The signing day: no payment is received before it. */
+  readonly signedOn: string;
+
   constructor(
     readonly lease: ScenarioLease,
     readonly leadDays = 14,
   ) {
     const signedOn = toIsoDate(addDays(parseBusinessDate(lease.terms.startDate), -20));
+    this.signedOn = signedOn;
     this.model = new LeaseLedgerModel(signedOn);
     this.model.scheduled = lease.schedule.map((s) => ({
       id: s.id,
@@ -154,6 +178,7 @@ export class ScenarioRunner {
       periodStart: s.periodStart,
       periodEnd: s.periodEnd,
       amountMinor: s.amountMinor,
+      taxMinor: expectedTaxMinor(s, lease.vat),
     }));
     this.cycles = invoiceCycles({
       cycle: lease.terms.cycle,
@@ -190,7 +215,9 @@ export class ScenarioRunner {
 
   /** The daily jobs: invoices due by today, then accrual. */
   tick(): void {
-    for (const cycle of cyclesToIssue(this.cycles, this.model.today, this.issued)) {
+    const last = this.model.lastDay;
+    const cycles = last === null ? this.cycles : this.cycles.filter((c) => c.cycleStart <= last);
+    for (const cycle of cyclesToIssue(cycles, this.model.today, this.issued)) {
       this.model.issue(invoiceLinesFor(cycle, this.lease.vat), cycle.dueDate, cycle.cycleStart);
       this.issued.add(cycle.cycleStart);
     }
@@ -211,7 +238,7 @@ export class ScenarioRunner {
         }
         return;
       case 'pay':
-        m.pay(op.amountMinor, op.cash);
+        m.pay(op.amountMinor, op.cash, receivedOn(m.today, op.daysBack, this.signedOn));
         return;
       case 'reverse': {
         const live = m.payments.filter((p) => !p.reversed);
@@ -232,6 +259,11 @@ export class ScenarioRunner {
         m.creditNote(line.id, amount, `${line.id}-${m.allocations.length}`);
         return;
       }
+      case 'move_out': {
+        const day = moveOutDay(m.today, op.daysBack, this.lease.terms.startDate, m.lastDay);
+        if (day) m.moveOut(day);
+        return;
+      }
       case 'write_off': {
         const owed = m.lines.filter(
           (l) =>
@@ -250,4 +282,21 @@ export class ScenarioRunner {
       }
     }
   }
+}
+
+/** The day a payment was received: `daysBack` before today, never before `earliest`. */
+export function receivedOn(today: string, daysBack: number, earliest: string): string {
+  const day = toIsoDate(addDays(parseBusinessDate(today), -daysBack));
+  return day < earliest ? earliest : day;
+}
+
+/** The day a move-out records: not before the lease started, never twice; null if it cannot be. */
+export function moveOutDay(
+  today: string,
+  daysBack: number,
+  startDate: string,
+  already: string | null,
+): string | null {
+  if (already !== null || today < startDate) return null;
+  return receivedOn(today, daysBack, startDate);
 }

@@ -8,7 +8,7 @@ import {
   parseBusinessDate,
   toIsoDate,
 } from '@rent/domain/dates';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { IdempotencyStore, requestHash } from '../src/core/idempotency';
 import { runSql } from '@rent/db/testing';
 import { startServerTest, type ServerTestContext } from './support';
@@ -28,6 +28,7 @@ import {
   propertyWithUnits,
   staffIn,
   tenancyServices,
+  uploadLeaseFile,
   type TenancyServices,
 } from './support/tenancy';
 
@@ -85,6 +86,19 @@ async function owingLease(name: string, unitId = legUnit(), rent = 100_000) {
 }
 
 const sys = (companyId: string) => ({ companyId, actorKind: 'system' as const });
+
+/** What the invoice screen offers per line of a lease: the most a credit note or write-off takes. */
+async function capsOf(leaseId: string) {
+  const lines = await linesOf(agency.companyId, leaseId);
+  const caps = new Map<string, { creditableMinor: number; writeOffableMinor: number }>();
+  for (const invoiceId of new Set(lines.map((l) => l.invoiceId)))
+    for (const l of (await b.read.invoice(agency.manager, invoiceId)).lines)
+      caps.set(l.id, {
+        creditableMinor: l.creditableMinor,
+        writeOffableMinor: l.writeOffableMinor,
+      });
+  return caps;
+}
 
 async function count(companyId: string, table: string, where = 'true'): Promise<number> {
   const rows = await withCompany(ctx.database, sys(companyId), (tx) =>
@@ -233,6 +247,48 @@ describe('BC-05 cash posts only after a second person approves', () => {
     await expect(b.read.arrears(caretaker, { by: 'tenant' })).rejects.toMatchObject({
       status: 403,
     });
+  });
+
+  it('shows the approver the evidence, and still decides a request stored before it did', async () => {
+    const lease = await owingLease('Older Request');
+    const record = (photoUploadId: string) =>
+      b.money.recordCash(agency.manager, {
+        leaseId: lease.id,
+        method: 'cash',
+        amountMinor: 40_000,
+        receivedOn: today,
+        payerName: 'Older Request',
+        photoUploadId,
+      });
+    // Today's requests carry the photo, which the approver may open before deciding.
+    const current = await record(await uploadMoneyProof(ctx, b, agency.manager, 'cash_photo'));
+    const [currentRecord] = await b.read.cashRecords(agency.manager, {
+      ids: [current.cashRecordId],
+    });
+    const payload = (await s.approvals.get(agency.admin, current.approvalId)).request
+      .payload as Record<string, unknown>;
+    expect(payload).toMatchObject({ evidenceDocumentId: currentRecord!.photoDocumentId });
+    expect(await b.read.paymentFileUrl(agency.admin, String(payload.evidenceDocumentId))).toMatch(
+      /download/,
+    );
+    // A request stored by the code before this field existed: its payload has no evidence.
+    const createInTx = s.approvals.createInTx.bind(s.approvals);
+    const older = vi.spyOn(s.approvals, 'createInTx').mockImplementationOnce((tx, actor, input) => {
+      const { evidenceDocumentId: _dropped, ...rest } = input.payload as Record<string, unknown>;
+      return createInTx(tx, actor, { ...input, payload: rest });
+    });
+    let stored: Awaited<ReturnType<typeof record>>;
+    try {
+      stored = await record(await uploadMoneyProof(ctx, b, agency.manager, 'cash_photo'));
+    } finally {
+      older.mockRestore();
+    }
+    expect(
+      (await s.approvals.get(agency.admin, stored.approvalId)).request.payload,
+    ).not.toHaveProperty('evidenceDocumentId');
+    await s.approvals.decide(agency.admin, stored.approvalId, { decision: 'approve' });
+    const [decided] = await b.read.cashRecords(agency.manager, { ids: [stored.cashRecordId] });
+    expect(decided).toMatchObject({ status: 'approved', paymentId: expect.any(String) });
   });
 });
 
@@ -397,6 +453,11 @@ describe('P27 credit notes', () => {
     });
     const lines = await linesOf(agency.companyId, lease.id);
     const [m0, m1, m2] = lines;
+    // What the screen may offer: each line's full charge can be credited (its unpaid part and its
+    // payments' money); nothing can be written off, since nothing charged is owed.
+    const before = await capsOf(lease.id);
+    for (const line of [m0, m1, m2])
+      expect(before.get(line!.id)).toEqual({ creditableMinor: 100_000, writeOffableMinor: 0 });
     // Month 1 is half paid (oldest first: 100,000 to month 0, 100,000 to month 1, 50,000 to month 2).
     const credit = async (lineId: string, amountMinor: number) => {
       const id = await b.money.requestCreditNote(agency.manager, lineId, {
@@ -425,6 +486,10 @@ describe('P27 credit notes', () => {
     // Charged and paid in full too (month 1 got 100,000): credit 20,000 more.
     await credit(m1!.id, 20_000);
     expect((await moneyCard(ctx, b, agency.companyId, lease.id)).creditMinor).toBe(100_000);
+    const after = await capsOf(lease.id);
+    expect(after.get(m0!.id)!.creditableMinor).toBe(70_000);
+    expect(after.get(m1!.id)!.creditableMinor).toBe(80_000);
+    expect(after.get(m2!.id)!.creditableMinor).toBe(0);
     expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
   });
 
@@ -445,6 +510,10 @@ describe('P24 write-offs', () => {
   it('writes off what is owed with approval, never more, and never on a line not yet charged', async () => {
     const lease = await owingLease('Bad Debt');
     const lines = await linesOf(agency.companyId, lease.id);
+    expect((await capsOf(lease.id)).get(lines[0]!.id)).toEqual({
+      creditableMinor: 100_000,
+      writeOffableMinor: 100_000,
+    });
     const id = await b.money.requestWriteOff(agency.manager, lines[0]!.id, {
       amountMinor: 60_000,
       reason: 'The tenant left the country',
@@ -452,6 +521,10 @@ describe('P24 write-offs', () => {
     await s.approvals.decide(agency.admin, id, { decision: 'approve' });
     expect(await leaseAccount(ctx, agency.companyId, lease.id, '5900')).toBe(60_000);
     expect(await leaseAccount(ctx, agency.companyId, lease.id, '1100')).toBe(140_000);
+    expect((await capsOf(lease.id)).get(lines[0]!.id)).toEqual({
+      creditableMinor: 40_000,
+      writeOffableMinor: 40_000,
+    });
     await expect(
       b.money.requestWriteOff(agency.manager, lines[0]!.id, {
         amountMinor: 40_001,
@@ -468,6 +541,10 @@ describe('P24 write-offs', () => {
       signedOn: today,
     });
     const [future] = await linesOf(agency.companyId, ahead.id);
+    expect((await capsOf(ahead.id)).get(future!.id)).toEqual({
+      creditableMinor: 10_000,
+      writeOffableMinor: 0,
+    });
     await expect(
       b.money.requestWriteOff(agency.manager, future!.id, {
         amountMinor: 1,
@@ -575,6 +652,7 @@ describe('BC-05 and P07 cash on hand', () => {
       receivedOn: today,
     });
     const held = (await b.read.collectorsCash(caretaker)).find((c) => c.ownerId === ownerA)!;
+    expect(held.bankableMinor).toBe(held.heldMinor);
     const slip = await uploadMoneyProof(ctx, b, caretaker, 'banking_slip');
     await expect(
       b.money.recordBanking(caretaker, {
@@ -603,9 +681,22 @@ describe('BC-05 and P07 cash on hand', () => {
     });
     const pending = (await b.read.collectorsCash(caretaker)).find((c) => c.ownerId === ownerA)!;
     expect(pending).toMatchObject({ heldMinor: held.heldMinor, bankingPendingMinor: 100_000 });
+    // Banking waiting still counts as held, so a second banking may ask only for the rest.
+    expect(pending.bankableMinor).toBe(held.heldMinor - 100_000);
+    await expect(
+      b.money.recordBanking(caretaker, {
+        collectorPersonId: caretaker.personId,
+        ownerId: ownerA,
+        bankedInto: 'owner_account',
+        amountMinor: pending.bankableMinor + 1,
+        bankedOn: today,
+        slipUploadId: await uploadMoneyProof(ctx, b, caretaker, 'banking_slip'),
+      }),
+    ).rejects.toMatchObject({ code: 'cash_short' });
     await s.approvals.decide(agency.accountant, banking.approvalId, { decision: 'approve' });
     const after = (await b.read.collectorsCash(caretaker)).find((c) => c.ownerId === ownerA)!;
     expect(after).toMatchObject({ heldMinor: held.heldMinor - 100_000, bankingPendingMinor: 0 });
+    expect(after.bankableMinor).toBe(held.heldMinor - 100_000);
     // Every banked line keeps its property.
     const lines = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
       tx.execute<{ property_id: string | null }>(
@@ -664,6 +755,132 @@ describe('M2 S8 idempotent requests', () => {
   });
 });
 
+describe('M2 S8 a retry with the same upload', () => {
+  const evidenceKey = (purpose: string, uploadId: string) =>
+    `evidence/${agency.companyId}/${purpose}/${uploadId}`;
+  const evidenceCopies = async (purpose: string, uploadId: string) =>
+    (
+      await ctx.storage.listVersions({
+        bucket: ctx.config.S3_BUCKET_EVIDENCE,
+        key: evidenceKey(purpose, uploadId),
+      })
+    ).filter((v) => !v.deleteMarker).length;
+  const documentsOf = (purpose: string, uploadId: string) =>
+    count(agency.companyId, 'document', `storage_key = '${evidenceKey(purpose, uploadId)}'`);
+  const plainCopy = (purpose: string, uploadId: string) =>
+    ctx.storage.head({
+      bucket: ctx.config.S3_BUCKET_FILES,
+      key: `uploads/${agency.companyId}/${purpose}/${uploadId}`,
+    });
+
+  it('records once, with one document, when the same request comes again after its write failed', async () => {
+    const store = new IdempotencyStore(ctx.database, { attempts: 50, ms: 50 });
+    const lease = await owingLease('Retried Cash');
+    const actor = agency.manager;
+    const input = {
+      leaseId: lease.id,
+      method: 'cash' as const,
+      amountMinor: 30_000,
+      receivedOn: today,
+      payerName: 'Retried Cash',
+      photoUploadId: await uploadMoneyProof(ctx, b, actor, 'cash_photo'),
+    };
+    const request = () =>
+      store.run(
+        {
+          companyId: agency.companyId,
+          personId: actor.personId,
+          key: 'retry-after-failure-0001',
+          operation: 'payment.cash_record',
+          hash: requestHash('payment.cash_record', actor.personId, input),
+        },
+        (claim) => b.money.recordCash(actor, input, { claim }),
+      );
+    // The write fails inside its transaction once the photo is staged: a dropped connection, say.
+    const failure = vi
+      .spyOn(s.approvals, 'createInTx')
+      .mockRejectedValueOnce(new Error('connection lost'));
+    try {
+      await expect(request()).rejects.toThrow('connection lost');
+    } finally {
+      failure.mockRestore();
+    }
+    expect(await count(agency.companyId, 'cash_record', `lease_id = '${lease.id}'`)).toBe(0);
+    expect(await documentsOf('cash_photo', input.photoUploadId)).toBe(0);
+    // The same request again records it, with the same photo: one document, one evidence copy.
+    const recorded = await request();
+    expect(await count(agency.companyId, 'cash_record', `lease_id = '${lease.id}'`)).toBe(1);
+    const [record] = await b.read.cashRecords(actor, { ids: [recorded.cashRecordId] });
+    expect(await documentsOf('cash_photo', input.photoUploadId)).toBe(1);
+    expect(
+      await count(
+        agency.companyId,
+        'document',
+        `id = '${record!.photoDocumentId}' and storage_key = '${evidenceKey('cash_photo', input.photoUploadId)}'`,
+      ),
+    ).toBe(1);
+    expect(await evidenceCopies('cash_photo', input.photoUploadId)).toBe(1);
+    // The plain copy goes once the write has committed, and the approver is shown the photo.
+    expect(await plainCopy('cash_photo', input.photoUploadId)).toBeNull();
+    expect((await s.approvals.get(actor, recorded.approvalId)).request.payload).toMatchObject({
+      evidenceDocumentId: record!.photoDocumentId,
+    });
+    // Replayed under its key, it answers the same and records nothing more.
+    expect((await request()).cashRecordId).toBe(recorded.cashRecordId);
+    expect(await documentsOf('cash_photo', input.photoUploadId)).toBe(1);
+  });
+
+  it('takes the same file again after a refusal that came once it was staged', async () => {
+    // A transfer dated tomorrow is refused after its proof was staged; corrected, it records.
+    const lease = await owingLease('Refused Transfer');
+    const proof = await uploadMoneyProof(ctx, b, agency.manager, 'transfer_proof');
+    const transfer = {
+      leaseId: lease.id,
+      receivedInto: 'owner_account' as const,
+      amountMinor: 25_000,
+      senderReference: 'GCB TRF 9001',
+      proofUploadId: proof,
+    };
+    await expect(
+      b.money.recordTransfer(agency.manager, { ...transfer, receivedOn: plusDays(today, 1) }),
+    ).rejects.toMatchObject({ code: 'received_in_future' });
+    const recorded = await b.money.recordTransfer(agency.manager, {
+      ...transfer,
+      receivedOn: today,
+    });
+    expect(await count(agency.companyId, 'direct_receipt', `lease_id = '${lease.id}'`)).toBe(1);
+    expect(await documentsOf('transfer_proof', proof)).toBe(1);
+    expect(await evidenceCopies('transfer_proof', proof)).toBe(1);
+    expect(
+      (await s.approvals.get(agency.manager, recorded.approvalId)).request.payload,
+    ).toMatchObject({ evidenceDocumentId: expect.any(String) });
+    // So does a paper lease (M3), refused for a signing date still to come.
+    const scan = await uploadLeaseFile(ctx, s, agency.manager);
+    const start = plusMonths(today, -1);
+    const paper = {
+      unitId: legUnit(),
+      tenantId: await tenant('Refused Paper'),
+      startDate: start,
+      endDate: endAfter(start, 12),
+      monthlyRentMinor: 50_000,
+      cycle: 'monthly' as const,
+      noticeDays: 30,
+      parties: [{ role: 'tenant' as const, name: 'Refused Paper' }],
+      scanUploadId: scan,
+    };
+    await expect(
+      s.leases.recordPaper(agency.manager, { ...paper, signedOn: plusDays(today, 1) }),
+    ).rejects.toMatchObject({ code: 'signed_on_future' });
+    const signed = await s.leases.recordPaper(agency.manager, { ...paper, signedOn: today });
+    // Billing reacts to the signing, as the worker would, so no event is left for later tests.
+    await b.invoicing.onLeaseSigned(agency.companyId, signed.id);
+    expect(signed.status).toBe('active');
+    expect(await documentsOf('lease_file', scan)).toBe(1);
+    expect(await evidenceCopies('lease_file', scan)).toBe(1);
+    expect(await plainCopy('lease_file', scan)).toBeNull();
+  });
+});
+
 describe('AC-01 replaying an event changes nothing', () => {
   it('posts nothing new when invoice runs, accruals, signing events, approvals and postings are replayed', async () => {
     const lease = await owingLease('Replayed');
@@ -685,9 +902,10 @@ describe('AC-01 replaying an event changes nothing', () => {
     await b.invoicing.accrueAll(agency.companyId, today);
     await b.invoicing.onLeaseSigned(agency.companyId, lease.id);
     await b.invoicing.onLeaseEnded(agency.companyId, lease.id);
+    // The request is closed: a domain refusal the API answers with 422 APPROVAL.CLOSED (review 13).
     await expect(
       s.approvals.decide(agency.accountant, recorded.approvalId, { decision: 'approve' }),
-    ).rejects.toBeDefined();
+    ).rejects.toMatchObject({ name: 'DomainError', code: 'approval.closed' });
     // The approved record posted once: receiving its money again finds the payment.
     await withCompany(ctx.database, sys(agency.companyId), async (tx) => {
       const state = await b.engine.load(tx, agency.companyId, lease.id);
@@ -799,6 +1017,7 @@ describe('NFR-SEC billing isolation and scope', () => {
       receivedOn: today,
     });
     const caretakerCash = await b.read.collectorsCash(caretaker);
+    expect(caretakerCash.length).toBeGreaterThan(0);
     expect(caretakerCash.every((c) => c.collectorPersonId === caretaker.personId)).toBe(true);
     const caretakerRecords = await b.read.cashRecords(caretaker, {});
     expect(caretakerRecords.every((r) => r.collectorPersonId === caretaker.personId)).toBe(true);
@@ -819,6 +1038,29 @@ describe('NFR-SEC billing isolation and scope', () => {
     await expect(b.read.paymentFileUrl(agency.accountant, theirsPhoto)).resolves.toMatch(
       /download/,
     );
+    // Cash the caretaker holds on a property they do not look after: the collector filter alone
+    // would show it; the property scope keeps it out (review 12).
+    const outside = await b.money.recordCash(agency.admin, {
+      leaseId: osuLease.id,
+      method: 'cash',
+      amountMinor: 12_000,
+      receivedOn: today,
+      payerName: 'Outside Scope',
+      collectorPersonId: caretaker.personId,
+      photoUploadId: await uploadMoneyProof(ctx, b, agency.admin, 'cash_photo'),
+    });
+    await s.approvals.decide(agency.manager, outside.approvalId, { decision: 'approve' });
+    expect(
+      (await b.read.collectorsCash(agency.manager)).some(
+        (c) => c.collectorPersonId === caretaker.personId && c.ownerId === ownerB,
+      ),
+    ).toBe(true);
+    const scopedCash = await b.read.collectorsCash(caretaker);
+    expect(scopedCash.length).toBeGreaterThan(0);
+    expect(scopedCash.some((c) => c.ownerId === ownerB)).toBe(false);
+    const scopedRecords = await b.read.cashRecords(caretaker, {});
+    expect(scopedRecords.length).toBeGreaterThan(0);
+    expect(scopedRecords.some((r) => r.id === outside.cashRecordId)).toBe(false);
   });
 });
 
@@ -847,6 +1089,16 @@ describe('BC-07 allocation', () => {
       earnedUnpaidMinor: 150_000,
       creditMinor: 0,
     });
+    const lines = await linesOf(agency.companyId, lease.id);
+    const caps = await capsOf(lease.id);
+    const deposit = lines.find((l) => l.kind === 'deposit')!;
+    const [first, second] = lines
+      .filter((l) => l.kind === 'rent')
+      .sort((x, y) => (x.periodStart! < y.periodStart! ? -1 : 1));
+    // Money held as a deposit leaves only at move-out (M8); a deposit is never written off.
+    expect(caps.get(deposit.id)).toEqual({ creditableMinor: 0, writeOffableMinor: 0 });
+    expect(caps.get(first!.id)).toEqual({ creditableMinor: 100_000, writeOffableMinor: 50_000 });
+    expect(caps.get(second!.id)).toEqual({ creditableMinor: 100_000, writeOffableMinor: 100_000 });
     await approvedCash(ctx, s, b, agency.manager, agency.admin, {
       leaseId: lease.id,
       amountMinor: 200_000,
@@ -871,5 +1123,367 @@ describe('BC-03 payment references', () => {
       'select count(*)::int as n, count(distinct reference)::int as distinct from payment_reference',
     );
     expect(all[0]!.n).toBe(all[0]!.distinct);
+  });
+});
+
+describe('P03 money is classified as of the day it arrived (review 2)', () => {
+  const owedBefore = (lineId: string, date: string) =>
+    journalSum(
+      ctx,
+      agency.companyId,
+      `l.invoice_line_id = $1 and l.account_code = '1100' and e.value_date < $2`,
+      [lineId, date],
+    );
+
+  it('holds cash received before a period started as its advance, then draws it at the start', async () => {
+    // A month started today and has accrued; the cash came in yesterday and is approved today.
+    const lease = await owingLease('Received Yesterday');
+    const current = (await linesOf(agency.companyId, lease.id)).find(
+      (l) => l.periodStart === today,
+    )!;
+    expect(current.accrued).toBe(true);
+    await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: lease.id,
+      amountMinor: 200_000,
+      receivedOn: plusDays(today, -1),
+    });
+    // Yesterday nothing was owed on today's month, and the receivable never went negative.
+    expect(await owedBefore(current.id, today)).toBe(0);
+    expect(await leaseAccount(ctx, agency.companyId, lease.id, '1100')).toBe(0);
+    expect(await leaseAccount(ctx, agency.companyId, lease.id, '2010')).toBe(0);
+    const draws = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
+      tx.execute<{ value_date: string }>(
+        sql`select value_date::text from journal_entry where rule = 'P02'
+            and idempotency_key like ${`P02:${current.id}:%`}`,
+      ),
+    );
+    expect(draws.rows).toEqual([{ value_date: today }]);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+
+  it('matches an unmatched transfer as of the day it arrived', async () => {
+    const lease = await owingLease('Matched As Arrived');
+    const current = (await linesOf(agency.companyId, lease.id)).find(
+      (l) => l.periodStart === today,
+    )!;
+    await approvedTransfer(ctx, s, b, agency.manager, agency.admin, {
+      receivedInto: 'agency_account',
+      amountMinor: 200_000,
+      receivedOn: plusDays(today, -1),
+      senderReference: 'ARRIVED YESTERDAY 01',
+    });
+    const waiting = (await b.read.unmatched(agency.manager)).find(
+      (u) => u.senderReference === 'ARRIVED YESTERDAY 01',
+    )!;
+    await b.money.match(agency.manager, waiting.paymentId, lease.id);
+    const [match] = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
+      tx
+        .select()
+        .from(schema.paymentMatch)
+        .where(sql`${schema.paymentMatch.leaseId} = ${lease.id}`),
+    );
+    expect(match!.valueDate).toBe(plusDays(today, -1));
+    expect(await owedBefore(current.id, today)).toBe(0);
+    expect(await leaseAccount(ctx, agency.companyId, lease.id, '1100')).toBe(0);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+});
+
+describe('P23 matching and reversing the same unmatched money (review 5)', () => {
+  it('lets exactly one of them happen when they run at the same moment', async () => {
+    const lease = await owingLease('Raced Match');
+    await approvedTransfer(ctx, s, b, agency.manager, agency.admin, {
+      receivedInto: 'agency_account',
+      amountMinor: 50_000,
+      receivedOn: today,
+      senderReference: 'RACE TRF 0001',
+    });
+    const waiting = (await b.read.unmatched(agency.manager)).find(
+      (u) => u.senderReference === 'RACE TRF 0001',
+    )!;
+    const requestId = await b.money.requestReversal(agency.accountant, waiting.paymentId, {
+      reason: 'wrong_entry',
+      note: 'Not our money after all',
+      moneyNowIn: 'agency_account',
+    });
+    await Promise.allSettled([
+      b.money.match(agency.manager, waiting.paymentId, lease.id),
+      s.approvals.decide(agency.admin, requestId, { decision: 'approve' }),
+    ]);
+    const matched = await count(
+      agency.companyId,
+      'payment_match',
+      `payment_id = '${waiting.paymentId}'`,
+    );
+    const reversed = await count(
+      agency.companyId,
+      'payment_reversal',
+      `payment_id = '${waiting.paymentId}'`,
+    );
+    expect(matched + reversed).toBe(1);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+
+  it('refuses in the database a line-for-line reversal of matched money', async () => {
+    const lease = await owingLease('Matched Then Reversed');
+    await approvedTransfer(ctx, s, b, agency.manager, agency.admin, {
+      receivedInto: 'agency_account',
+      amountMinor: 30_000,
+      receivedOn: today,
+      senderReference: 'RACE TRF 0002',
+    });
+    const waiting = (await b.read.unmatched(agency.manager)).find(
+      (u) => u.senderReference === 'RACE TRF 0002',
+    )!;
+    await b.money.match(agency.manager, waiting.paymentId, lease.id);
+    const refused = await withCompany(ctx.database, sys(agency.companyId), async (tx) => {
+      const [payment] = await tx
+        .select()
+        .from(schema.payment)
+        .where(sql`${schema.payment.id} = ${waiting.paymentId}`);
+      const [request] = await tx
+        .select({ id: schema.approvalRequest.id })
+        .from(schema.approvalRequest)
+        .limit(1);
+      return tx
+        .insert(schema.paymentReversal)
+        .values({
+          companyId: agency.companyId,
+          paymentId: waiting.paymentId,
+          reason: 'wrong_entry',
+          note: 'A line-for-line reversal',
+          moneyNowIn: 'agency_account',
+          approvalRequestId: request!.id,
+          entryId: payment!.entryId,
+          valueDate: today,
+          accountingDate: today,
+        })
+        .then(
+          () => null,
+          (e: { cause?: { code?: string } }) => e.cause?.code,
+        );
+    });
+    expect(refused).toBe('RA049');
+  });
+});
+
+describe('AC-01 the sub-ledger check reads one snapshot (review 6)', () => {
+  it('raises no alarm for a payment that commits while it runs', async () => {
+    const fresh = await moneyCompany(ctx, s, 'agency', 'Snapshot Agency');
+    const owner = (
+      await s.owners.create(fresh.admin, { kind: 'individual', displayName: 'Snapshot Owner' })
+    ).id;
+    const property = await propertyWithUnits(s, fresh.manager, {
+      areaCode: 'ACC',
+      propertyPart: 'SNP',
+      ownerId: owner,
+      units: [{ unitType: 'single_room', count: 1 }],
+    });
+    const start = plusMonths(today, -1);
+    const lease = await billedLease(ctx, s, b, fresh.manager, {
+      unitId: Object.values(property.units)[0]!,
+      tenantId: (
+        await s.tenants.create(fresh.manager, { kind: 'individual', displayName: 'Snapshot' })
+      ).tenant.id,
+      startDate: start,
+      endDate: endAfter(start, 12),
+      monthlyRentMinor: 100_000,
+      cycle: 'monthly',
+      signedOn: plusDays(start, -1),
+      billingStartDate: start,
+    });
+    // Halfway through the check, another transaction records and commits a payment.
+    const load = b.engine.load.bind(b.engine);
+    let paid = false;
+    const spy = vi.spyOn(b.engine, 'load').mockImplementation(async (tx, companyId, leaseId) => {
+      if (!paid) {
+        paid = true;
+        await b.money.recordProviderPayment(fresh.companyId, {
+          leaseId: lease.id,
+          amountMinor: 150_000,
+          receivedOn: today,
+        });
+      }
+      return load(tx, companyId, leaseId);
+    });
+    try {
+      expect((await b.subledger.check(fresh.companyId, { alert: false })).mismatches).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(paid).toBe(true);
+    expect((await b.subledger.check(fresh.companyId)).mismatches).toEqual([]);
+  });
+});
+
+describe('AD-02 approval requests are scoped by property (review 8)', () => {
+  it('hides a cash request on another property from a scoped manager, who cannot decide it', async () => {
+    const scoped = await staffIn(
+      ctx,
+      agency.companyId,
+      'agency',
+      'property_manager',
+      'Legon Only',
+      {
+        properties: [leg.propertyId],
+      },
+    );
+    const elsewhere = await owingLease('Osu Cash', Object.values(osu.units)[5]!);
+    const recorded = await b.money.recordCash(agency.manager, {
+      leaseId: elsewhere.id,
+      method: 'cash',
+      amountMinor: 20_000,
+      receivedOn: today,
+      payerName: 'Osu Cash',
+      photoUploadId: await uploadMoneyProof(ctx, b, agency.manager, 'cash_photo'),
+    });
+    // Hidden by RLS: not in the list, and not found when asked for.
+    expect((await s.approvals.list(scoped, 'open')).map((v) => v.request.id)).not.toContain(
+      recorded.approvalId,
+    );
+    await expect(s.approvals.get(scoped, recorded.approvalId)).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(
+      s.approvals.decide(scoped, recorded.approvalId, { decision: 'approve' }),
+    ).rejects.toMatchObject({ status: 404 });
+    // The policy refuses it too, whatever the database shows.
+    expect(
+      s.policy.can(scoped, 'approval.decide', {
+        initiatorPersonId: agency.manager.personId,
+        eligibleRoles: ['property_manager'],
+        propertyId: osu.propertyId,
+        scopeProperties: [leg.propertyId],
+      }).allowed,
+    ).toBe(false);
+    // A request on their own property is theirs to decide; an unscoped admin decides the other.
+    const own = await owingLease('Legon Cash');
+    const mine = await b.money.recordCash(agency.manager, {
+      leaseId: own.id,
+      method: 'cash',
+      amountMinor: 20_000,
+      receivedOn: today,
+      payerName: 'Legon Cash',
+      photoUploadId: await uploadMoneyProof(ctx, b, agency.manager, 'cash_photo'),
+    });
+    expect((await s.approvals.get(scoped, mine.approvalId)).mayDecide).toBe(true);
+    await s.approvals.decide(scoped, mine.approvalId, { decision: 'approve' });
+    expect((await s.approvals.get(agency.admin, recorded.approvalId)).mayDecide).toBe(true);
+    await s.approvals.decide(agency.admin, recorded.approvalId, { decision: 'approve' });
+    const [record] = await b.read.cashRecords(agency.manager, { ids: [recorded.cashRecordId] });
+    expect(record!.status).toBe('approved');
+    // The scoped manager opens the photo of the request they could decide.
+    const [ownRecord] = await b.read.cashRecords(agency.manager, { ids: [mine.cashRecordId] });
+    expect(await b.read.paymentFileUrl(scoped, ownRecord!.photoDocumentId!)).toMatch(/download/);
+  });
+});
+
+describe('M2 S8 a committed write always has its answer (review 17)', () => {
+  it('answers a retry from the stored response even when the first answer was lost after commit', async () => {
+    const store = new IdempotencyStore(ctx.database, { attempts: 5, ms: 20 });
+    const lease = await owingLease('Lost Answer');
+    const actor = agency.manager;
+    const input = {
+      leaseId: lease.id,
+      method: 'cash' as const,
+      amountMinor: 15_000,
+      receivedOn: today,
+      payerName: 'Lost Answer',
+      photoUploadId: await uploadMoneyProof(ctx, b, actor, 'cash_photo'),
+    };
+    const request = () =>
+      store.run(
+        {
+          companyId: agency.companyId,
+          personId: actor.personId,
+          key: 'lost-answer-key-0001',
+          operation: 'payment.cash_record',
+          hash: requestHash('payment.cash_record', actor.personId, input),
+        },
+        (claim) => b.money.recordCash(actor, input, { claim }),
+      );
+    // The write commits, then the process dies before it can answer.
+    const lost = vi.spyOn(store, 'complete').mockRejectedValueOnce(new Error('process died'));
+    try {
+      await expect(request()).rejects.toThrow('process died');
+    } finally {
+      lost.mockRestore();
+    }
+    const again = await request();
+    expect(await count(agency.companyId, 'cash_record', `lease_id = '${lease.id}'`)).toBe(1);
+    const [record] = await b.read.cashRecords(actor, { leaseId: lease.id });
+    expect(again.cashRecordId).toBe(record!.id);
+  });
+});
+
+describe('P27 and P24 one open request per line (review 18)', () => {
+  it('refuses a second credit note or write-off request while one waits for a decision', async () => {
+    const lease = await owingLease('One Request');
+    const [first] = await linesOf(agency.companyId, lease.id);
+    await b.money.requestCreditNote(agency.manager, first!.id, {
+      amountMinor: 10_000,
+      reason: 'First request for this line',
+    });
+    await expect(
+      b.money.requestCreditNote(agency.accountant, first!.id, {
+        amountMinor: 5_000,
+        reason: 'Second request for this line',
+      }),
+    ).rejects.toMatchObject({ code: 'approval_open' });
+    await b.money.requestWriteOff(agency.manager, first!.id, {
+      amountMinor: 10_000,
+      reason: 'First write-off request',
+    });
+    await expect(
+      b.money.requestWriteOff(agency.accountant, first!.id, {
+        amountMinor: 10_000,
+        reason: 'Second write-off request',
+      }),
+    ).rejects.toMatchObject({ code: 'approval_open' });
+  });
+});
+
+describe('BC-05 a collector counts banking someone else asked for (second review C)', () => {
+  it('shows a scoped caretaker the banking waiting on their cash, and refuses asking for it twice', async () => {
+    const prop = await propertyWithUnits(s, agency.manager, {
+      areaCode: 'ACC',
+      propertyPart: 'BKC',
+      ownerId: ownerA,
+      units: [{ unitType: 'single_room', count: 1 }],
+    });
+    const keeper = await staffIn(ctx, agency.companyId, 'agency', 'caretaker', 'Banking Keeper', {
+      properties: [prop.propertyId],
+    });
+    const lease = await owingLease('Banked By Another', Object.values(prop.units)[0]!);
+    await approvedCash(ctx, s, b, keeper, agency.admin, {
+      leaseId: lease.id,
+      amountMinor: 100_000,
+      receivedOn: today,
+    });
+    // The accountant asks to bank all of it; the request is company-level.
+    await b.money.recordBanking(agency.accountant, {
+      collectorPersonId: keeper.personId,
+      ownerId: ownerA,
+      bankedInto: 'owner_account',
+      amountMinor: 100_000,
+      bankedOn: today,
+      slipUploadId: await uploadMoneyProof(ctx, b, agency.accountant, 'banking_slip'),
+    });
+    const card = (await b.read.collectorsCash(keeper)).find((c) => c.ownerId === ownerA)!;
+    expect(card).toMatchObject({
+      heldMinor: 100_000,
+      bankingPendingMinor: 100_000,
+      bankableMinor: 0,
+    });
+    await expect(
+      b.money.recordBanking(keeper, {
+        collectorPersonId: keeper.personId,
+        ownerId: ownerA,
+        bankedInto: 'owner_account',
+        amountMinor: 100_000,
+        bankedOn: today,
+        slipUploadId: await uploadMoneyProof(ctx, b, keeper, 'banking_slip'),
+      }),
+    ).rejects.toMatchObject({ code: 'cash_short' });
   });
 });

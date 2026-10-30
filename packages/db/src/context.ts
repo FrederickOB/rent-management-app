@@ -56,7 +56,7 @@ export async function withCompany<T>(
   database: Database,
   ctx: CompanyContext,
   fn: (tx: Tx) => Promise<T>,
-  options: { isolationLevel?: IsolationLevel } = {},
+  options: { isolationLevel?: IsolationLevel; accessMode?: 'read only' | 'read write' } = {},
 ): Promise<T> {
   if (!ctx.companyId) throw new ContextError('A company id is required');
   assertUuid(ctx.companyId, 'companyId');

@@ -16,14 +16,17 @@ export const IDEMPOTENCY_HEADER = 'idempotency-key';
  * gets the first answer back; the same key with another body is refused (422); a retry while the
  * first is still running is told so (409). The claim is taken inside the write's own transaction.
  */
-export async function idempotent<T>(
+export async function idempotent<T, R = T>(
   store: IdempotencyStore,
   ctx: RequestContext,
   operation: string,
   input: unknown,
   write: (claim: IdempotencyClaim | null) => Promise<T>,
+  render?: (written: T) => Promise<R>,
   options: { readonly required: boolean } = { required: true },
-): Promise<T> {
+): Promise<R> {
+  const answer = (written: T) =>
+    render ? render(written) : Promise.resolve(written as unknown as R);
   const key = ctx.headers.get(IDEMPOTENCY_HEADER)?.trim();
   if (!key) {
     if (options.required)
@@ -32,7 +35,7 @@ export async function idempotent<T>(
         'idempotency_key_required',
         'Send an Idempotency-Key header with this request, so a retry is never recorded twice',
       );
-    return write(null);
+    return answer(await write(null));
   }
   if (!IDEMPOTENCY_KEY_PATTERN.test(key))
     throw new AppError(
@@ -51,5 +54,6 @@ export async function idempotent<T>(
       hash: requestHash(operation, actor.personId, input),
     },
     (claim) => write(claim),
+    render,
   );
 }

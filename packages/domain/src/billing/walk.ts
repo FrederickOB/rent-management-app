@@ -28,6 +28,8 @@ export interface WalkLine {
   readonly writtenOffMinor: number;
   /** Charged already (P02 has run): credit no longer applies to it. */
   readonly charged: boolean;
+  /** A VAT or levy line, walked with its base line's period (review 10); never unearned rent. */
+  readonly tax?: boolean;
 }
 
 /** A charge period that has no invoice line yet. */
@@ -37,6 +39,8 @@ export interface ScheduledPeriod {
   readonly periodStart: string;
   readonly periodEnd: string;
   readonly amountMinor: number;
+  /** The VAT and levies it will carry when invoiced (review 10), walked straight after it. */
+  readonly taxMinor?: number;
 }
 
 /** The walk's lines: invoiced recurring lines, then periods still to be invoiced. */
@@ -61,6 +65,30 @@ export function walkLines(input: {
         charged: l.accrued,
       };
     });
+  // VAT and levies on a recurring line are paid with it: credit reaches them as it reaches the
+  // base line, and a month is paid only once they are (review 10).
+  const bases = new Map(input.lines.map((l) => [l.id, l]));
+  const taxes: WalkLine[] = input.lines
+    .filter((l) => l.baseLineId !== null)
+    .flatMap((l) => {
+      const base = bases.get(l.baseLineId as string);
+      if (!base || !isRecurring(base.kind) || !base.periodStart || !base.periodEnd) return [];
+      const b = lineBalance(l, input.allocations);
+      return [
+        {
+          key: l.id,
+          lineId: l.id,
+          chargeType: base.kind as RecurringKind,
+          periodStart: base.periodStart,
+          periodEnd: base.periodEnd,
+          netMinor: b.netMinor,
+          settledMinor: b.settledMinor,
+          writtenOffMinor: b.writtenOffMinor,
+          charged: base.accrued,
+          tax: true,
+        },
+      ];
+    });
   const scheduled: WalkLine[] = input.scheduled.map((s) => ({
     key: s.id,
     lineId: null,
@@ -72,16 +100,30 @@ export function walkLines(input: {
     writtenOffMinor: 0,
     charged: false,
   }));
-  return [...invoiced, ...scheduled].sort((a, b) =>
+  const scheduledTax: WalkLine[] = input.scheduled
+    .filter((sp) => (sp.taxMinor ?? 0) > 0)
+    .map((sp) => ({
+      key: `${sp.id}:tax`,
+      lineId: null,
+      chargeType: sp.chargeType,
+      periodStart: sp.periodStart,
+      periodEnd: sp.periodEnd,
+      netMinor: sp.taxMinor as number,
+      settledMinor: 0,
+      writtenOffMinor: 0,
+      charged: false,
+      tax: true,
+    }));
+  return [...invoiced, ...taxes, ...scheduled, ...scheduledTax].sort((a, b) =>
     a.periodStart !== b.periodStart
       ? a.periodStart < b.periodStart
         ? -1
         : 1
-      : a.chargeType === b.chargeType
-        ? 0
-        : a.chargeType === 'rent'
+      : a.chargeType !== b.chargeType
+        ? a.chargeType === 'rent'
           ? -1
-          : 1,
+          : 1
+        : (a.tax ? 1 : 0) - (b.tax ? 1 : 0),
   );
 }
 
@@ -102,16 +144,28 @@ export interface WalkResult {
   /** AR-03: the rent share of prepayments. */
   readonly unearnedRentMinor: number;
   readonly unearnedServiceChargeMinor: number;
-  /** Credit no line in the walk uses: beyond the term, for now. */
+  /**
+   * Credit no rent or service-charge line in the walk uses: beyond the term, for now, or set aside
+   * for the VAT and levies on lines not charged yet (review 10).
+   */
   readonly creditLeftMinor: number;
 }
 
-export function forwardWalk(lines: readonly WalkLine[], pools: readonly CreditPool[]): WalkResult {
+export function forwardWalk(
+  lines: readonly WalkLine[],
+  pools: readonly CreditPool[],
+  options: {
+    /** The lease's last billable day (a move-out or an end); paid-until never passes it. */
+    readonly lastDay?: string | null;
+  } = {},
+): WalkResult {
   const credit = pools.map((p) => ({ ...p }));
   let poolIndex = 0;
   const walked: WalkedLine[] = [];
   let unearnedRent = 0;
   let unearnedService = 0;
+  // Credit the walk sets aside for VAT and levies: still prepayments, and never unearned rent.
+  let taxCredit = 0;
   for (const line of lines) {
     const outstanding = line.netMinor - line.settledMinor - line.writtenOffMinor;
     const draws: PaymentAmount[] = [];
@@ -125,7 +179,8 @@ export function forwardWalk(lines: readonly WalkLine[], pools: readonly CreditPo
       if (pool.amountMinor === 0) poolIndex += 1;
     }
     const creditMinor = draws.reduce((sum, d) => sum + d.amountMinor, 0);
-    if (!line.charged) {
+    if (line.tax) taxCredit += creditMinor;
+    if (!line.charged && !line.tax) {
       const prepaid = line.settledMinor + creditMinor;
       if (line.chargeType === 'rent') unearnedRent += prepaid;
       else unearnedService += prepaid;
@@ -138,9 +193,15 @@ export function forwardWalk(lines: readonly WalkLine[], pools: readonly CreditPo
     months.set(line.periodStart, [...(months.get(line.periodStart) ?? []), line]);
   let paidUntil: string | null = null;
   let partial: WalkResult['partial'] = null;
+  const lastDay = options.lastDay ?? null;
   for (const [monthStart, monthLines] of months) {
-    if (monthLines.every((l) => l.remainingMinor === 0)) {
-      paidUntil = monthLines.reduce((end, l) => (l.periodEnd > end ? l.periodEnd : end), '');
+    if (lastDay !== null && monthStart > lastDay) break;
+    // A month credited to nothing was cancelled, not paid: it ends the run (review 4).
+    const charged = monthLines.filter((l) => l.netMinor > 0);
+    if (charged.length === 0) break;
+    if (charged.every((l) => l.remainingMinor === 0)) {
+      paidUntil = charged.reduce((end, l) => (l.periodEnd > end ? l.periodEnd : end), '');
+      if (lastDay !== null && paidUntil > lastDay) paidUntil = lastDay;
       continue;
     }
     const amount = monthLines.reduce((sum, l) => sum + l.settledMinor + l.creditMinor, 0);
@@ -153,7 +214,7 @@ export function forwardWalk(lines: readonly WalkLine[], pools: readonly CreditPo
     partial,
     unearnedRentMinor: unearnedRent,
     unearnedServiceChargeMinor: unearnedService,
-    creditLeftMinor: credit.slice(poolIndex).reduce((sum, p) => sum + p.amountMinor, 0),
+    creditLeftMinor: credit.slice(poolIndex).reduce((sum, p) => sum + p.amountMinor, 0) + taxCredit,
   };
 }
 
@@ -164,7 +225,7 @@ function remainingAfterWalk(
   walk: WalkResult,
 ): number {
   const { outstandingMinor } = lineBalance(line, allocations);
-  if (!isRecurring(line.kind)) return outstandingMinor;
+  if (!isRecurring(line.kind) && line.baseLineId === null) return outstandingMinor;
   const walked = walk.lines.find((l) => l.lineId === line.id);
   return walked ? walked.remainingMinor : outstandingMinor;
 }

@@ -225,3 +225,4 @@ Statutes were read from the Parliament repository, GRA, the Data Protection Comm
         6. **TINs on invoices:** M4a prints the owner's and the commercial tenant's TINs masked, as M3 stores them for display; the full numbers stay encrypted.
             - Must a VAT invoice or receipt carry both TINs in full?
             - If so, issuing the invoice would decrypt them as an audited reveal and keep them in the frozen PDF.
+        7. **Tax point of money that came first:** when a payment, or unmatched money later matched, makes invoices issue (decision 4), their VAT is charged at the day the money arrived, not the day they were issued. VAT returns (P33, M5) must report it in that period. Is the arrival date the right tax point for money matched days later?

@@ -1,7 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import { and, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
 import { bankingLines, compactLines, type JournalLineDraft } from '@rent/domain/ledger';
-import { lineBalance, planCreditNote, planWriteOff, postingClassOf } from '@rent/domain/billing';
+import {
+  creditableMinor,
+  planCreditNote,
+  planWriteOff,
+  writeOffableMinor,
+} from '@rent/domain/billing';
 import { DomainError } from '@rent/domain/errors';
 import type { Actor, StaffRole } from '@rent/domain/policy';
 import { v7 as uuidv7 } from 'uuid';
@@ -10,7 +15,7 @@ import { ApprovalsService, type ApprovalView } from '../approvals/approvals.serv
 import { companyRecord, staffActor, type StaffActor } from '../companies/companies.service';
 import { ownerFacts } from '../companies/owners.service';
 import type { Clock } from '../core/clock';
-import { conflict, invalid, notFound } from '../core/errors';
+import { AppError, conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { CLOCK, DATABASE } from '../core/tokens';
 import {
@@ -22,21 +27,28 @@ import {
 } from '../documents/documents.service';
 import { activeMemberIds } from '../identity/memberships';
 import { personContact } from '../identity/person-directory';
+import { ownerBook, sumLines } from '../ledger/ledger.queries';
 import { PostingService } from '../ledger/posting.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { ownerNameThroughProperty } from '../portfolio/ownership';
 import { billingLeaseOf, leaseLabels } from '../tenancy/billing-facts';
 import { BillingEngine, lineLabel, type LeaseState } from './engine';
 import {
+  bankableMinor,
+  cashKey,
   companyBookId,
   formatInvoiceNumber,
   formatReceiptNumber,
   isoNow,
   leaseBookOf,
+  leaseGroup,
   lockCollectorCash,
+  lockCounters,
   lockLeases,
+  lockPayment,
   ownerBookId,
   paymentsByIds,
+  pendingBanking,
   requireBook,
 } from './records';
 
@@ -82,6 +94,8 @@ const cashPayload = z
     chequeBank: z.string().nullable(),
     collectorPersonId: uuid,
     collectorName: name,
+    /** The receipt-book page or cheque photo, for the approver (absent on older requests). */
+    evidenceDocumentId: uuid.optional(),
     posted: z.boolean(),
   })
   .strict();
@@ -98,6 +112,8 @@ const transferPayload = z
     amountMinor: z.number().int().positive(),
     receivedOn: isoDate,
     senderReference: z.string().nullable(),
+    /** The transfer's proof, for the approver (absent on older requests). */
+    evidenceDocumentId: uuid.optional(),
     posted: z.boolean(),
   })
   .strict();
@@ -112,6 +128,8 @@ const bankingPayload = z
     bankedInto: z.enum(['owner_account', 'agency_account']),
     amountMinor: z.number().int().positive(),
     bankedOn: isoDate,
+    /** The banking slip, for the approver (absent on older requests). */
+    evidenceDocumentId: uuid.optional(),
     withinHeld: z.boolean(),
   })
   .strict();
@@ -278,6 +296,7 @@ export class MoneyService {
         actionType: CASH_RECEIPT_ACTION,
         subjectType: 'cash_record',
         subjectId: cashRecordId,
+        propertyId: lease.propertyId,
         payload: {
           cashRecordId,
           leaseId: lease.id,
@@ -291,6 +310,7 @@ export class MoneyService {
           chequeBank: input.method === 'cheque' ? text(input.chequeBank, 80) : null,
           collectorPersonId: collector,
           collectorName: (await personContact(tx, collector))?.name.slice(0, 200) ?? null,
+          evidenceDocumentId: photoDocumentId,
           posted: false,
         },
       });
@@ -313,8 +333,10 @@ export class MoneyService {
         approvalRequestId: id,
         recordedBy: staff.personId,
       });
+      await options.claim?.done(tx, { cashRecordId, approvalId: id });
       return id;
     });
+    await this.documents.discardStagedUpload(staged);
     return { cashRecordId, approvalId };
   }
 
@@ -381,6 +403,7 @@ export class MoneyService {
         actionType: DIRECT_RECEIPT_ACTION,
         subjectType: 'direct_receipt',
         subjectId: directReceiptId,
+        propertyId: lease?.propertyId ?? null,
         payload: {
           directReceiptId,
           leaseId: lease?.id ?? null,
@@ -393,6 +416,7 @@ export class MoneyService {
           amountMinor: input.amountMinor,
           receivedOn: input.receivedOn,
           senderReference: text(input.senderReference, 80),
+          evidenceDocumentId: proofDocumentId,
           posted: false,
         },
       });
@@ -413,8 +437,10 @@ export class MoneyService {
         approvalRequestId: id,
         recordedBy: staff.personId,
       });
+      await options.claim?.done(tx, { directReceiptId, approvalId: id });
       return id;
     });
+    await this.documents.discardStagedUpload(staged);
     return { directReceiptId, approvalId };
   }
 
@@ -446,20 +472,25 @@ export class MoneyService {
     const approvalId = await withCompany(this.database, staffContext(staff), async (tx) => {
       await options.claim?.claim(tx);
       await this.checkReceivedOn(tx, staff.companyId, input.bankedOn);
-      const [book] = await tx
-        .select({ id: schema.book.id })
-        .from(schema.book)
-        .where(eq(schema.book.ownerId, input.ownerId));
-      if (!book) throw notFound('Owner');
+      const bookId = await ownerBook(tx, input.ownerId);
+      if (!bookId) throw notFound('Owner');
+      const book = { id: bookId };
       await lockCollectorCash(tx, staff.companyId, input.collectorPersonId, book.id);
       const held = await this.engine.collectorHeld(tx, input.collectorPersonId, book.id);
-      if (input.amountMinor > held)
-        throw conflict('cash_short', 'That is more than the collector holds for this owner');
+      const waiting = await pendingBanking(tx, staff.companyId, [input.collectorPersonId]);
+      const pending = waiting.get(cashKey(input.collectorPersonId, book.id)) ?? 0;
+      if (input.amountMinor > bankableMinor(held, pending))
+        throw conflict(
+          'cash_short',
+          'That is more than the collector holds for this owner, less banking waiting for approval',
+        );
       const slipDocumentId = await this.documents.recordStagedEvidence(tx, staged, 'banking_slip');
       const id = await this.approvals.createInTx(tx, staff, {
         actionType: BANKING_ACTION,
         subjectType: 'cash_banking',
         subjectId: bankingId,
+        // Cash of several properties can be banked at once: a company-level request.
+        propertyId: null,
         payload: {
           bankingId,
           collectorPersonId: input.collectorPersonId,
@@ -471,6 +502,7 @@ export class MoneyService {
           bankedInto: input.bankedInto,
           amountMinor: input.amountMinor,
           bankedOn: input.bankedOn,
+          evidenceDocumentId: slipDocumentId,
           withinHeld: true,
         },
       });
@@ -488,8 +520,10 @@ export class MoneyService {
         approvalRequestId: id,
         recordedBy: staff.personId,
       });
+      await options.claim?.done(tx, { bankingId, approvalId: id });
       return id;
     });
+    await this.documents.discardStagedUpload(staged);
     return { bankingId, approvalId };
   }
 
@@ -501,15 +535,25 @@ export class MoneyService {
     tx: Tx,
     banking: typeof schema.cashBanking.$inferSelect,
   ): Promise<void> {
-    const held = await tx.execute<{ property_id: string | null; held: number; first: string }>(
-      sql`select l.property_id, sum(l.amount_minor)::bigint as held,
-            min(e.value_date)::text as first
-          from journal_line l join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
-          where l.account_code = '1060' and l.collector_id = ${banking.collectorPersonId}
-            and l.book_id = ${banking.bookId}
-          group by l.property_id having sum(l.amount_minor) > 0
-          order by min(e.value_date), l.property_id`,
+    const byProperty = await sumLines(
+      tx,
+      { accounts: ['1060'], collectorIds: [banking.collectorPersonId], bookIds: [banking.bookId] },
+      ['propertyId'],
     );
+    const held = {
+      rows: byProperty
+        .filter((r) => r.balanceMinor > 0)
+        .sort((a, b) =>
+          (a.firstValueDate ?? '') !== (b.firstValueDate ?? '')
+            ? (a.firstValueDate ?? '') < (b.firstValueDate ?? '')
+              ? -1
+              : 1
+            : (a.propertyId ?? '') < (b.propertyId ?? '')
+              ? -1
+              : 1,
+        )
+        .map((r) => ({ property_id: r.propertyId ?? null, held: r.balanceMinor })),
+    };
     let left = banking.amountMinor;
     const lines: JournalLineDraft[] = [];
     for (const row of held.rows) {
@@ -572,10 +616,13 @@ export class MoneyService {
         .select({ number: schema.receipt.number })
         .from(schema.receipt)
         .where(and(eq(schema.receipt.paymentId, paymentId), eq(schema.receipt.kind, 'receipt')));
-      return this.approvals.createInTx(tx, staff, {
+      const id = await this.approvals.createInTx(tx, staff, {
         actionType: REVERSAL_ACTION,
         subjectType: 'payment',
         subjectId: paymentId,
+        propertyId: payment.leaseId
+          ? (await billingLeaseOf(tx, payment.leaseId)).propertyId
+          : (payment.row.propertyId ?? null),
         payload: {
           paymentId,
           receiptNumber: receipt ? formatReceiptNumber(receipt.number) : null,
@@ -591,6 +638,8 @@ export class MoneyService {
           reversed: false,
         },
       });
+      await options.claim?.done(tx, id);
+      return id;
     });
   }
 
@@ -634,10 +683,11 @@ export class MoneyService {
       // Checked now so the request asks only what can be done; checked again at approval.
       this.checkLineCorrection(state, lineId, input.amountMinor, actionType);
       const record = state.lines.find((l) => l.id === lineId)!;
-      return this.approvals.createInTx(tx, staff, {
+      const id = await this.approvals.createInTx(tx, staff, {
         actionType,
         subjectType: 'invoice_line',
         subjectId: lineId,
+        propertyId: state.lease.propertyId,
         payload: {
           lineId,
           leaseId: line.leaseId,
@@ -651,6 +701,8 @@ export class MoneyService {
           withinLimit: true,
         },
       });
+      await options.claim?.done(tx, id);
+      return id;
     });
   }
 
@@ -681,12 +733,11 @@ export class MoneyService {
   ): boolean {
     const line = state.lines.find((l) => l.id === lineId);
     if (!line) return false;
-    const b = lineBalance(line, state.allocations);
-    if (actionType === WRITE_OFF_ACTION)
-      return postingClassOf(line) === 'receivable' && amountMinor <= b.outstandingMinor;
-    const creditable =
-      line.kind === 'deposit' ? b.outstandingMinor : b.netMinor - b.writtenOffMinor;
-    return line.baseLineId === null && amountMinor <= creditable;
+    const cap =
+      actionType === WRITE_OFF_ACTION
+        ? writeOffableMinor(line, state.allocations)
+        : creditableMinor(line, state.allocations);
+    return amountMinor <= cap;
   }
 
   // Matching (P23) ---------------------------------------------------------------------------------
@@ -710,13 +761,16 @@ export class MoneyService {
     });
     await withCompany(this.database, this.unscoped(staff), async (tx) => {
       await options.claim?.claim(tx);
-      await lockLeases(tx, staff.companyId, [leaseId]);
+      await lockPayment(tx, staff.companyId, paymentId);
+      await lockLeases(tx, staff.companyId, await leaseGroup(tx, leaseId));
+      await lockCounters(tx, staff.companyId);
       const state = await this.engine.load(tx, staff.companyId, leaseId);
       if (!PAYABLE.includes(state.lease.status))
         throw conflict('lease_not_billable', 'Money can be matched only to a signed lease');
       const [payment] = await paymentsByIds(tx, [paymentId]);
       if (!payment) throw notFound('Payment');
       await this.engine.match(tx, state, payment, staff.personId);
+      await options.claim?.done(tx, { paymentId });
     });
   }
 
@@ -741,7 +795,8 @@ export class MoneyService {
     },
   ): Promise<{ paymentId: string; receiptId: string }> {
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
-      await lockLeases(tx, companyId, [input.leaseId]);
+      await lockLeases(tx, companyId, await leaseGroup(tx, input.leaseId));
+      await lockCounters(tx, companyId);
       const state = await this.engine.load(tx, companyId, input.leaseId);
       return this.engine.receive(tx, state, {
         amountMinor: input.amountMinor,
@@ -770,8 +825,12 @@ export class MoneyService {
       actionType: CASH_RECEIPT_ACTION,
       eligibleRoles: APPROVERS,
       schema: cashPayload,
-      prepare: async (tx, request) =>
-        lockLeases(tx, request.companyId, [(request.payload as { leaseId: string }).leaseId]),
+      // Lease, then the counters (receipt; invoices a VAT advance issues), before the decision row.
+      prepare: async (tx, request) => {
+        const leaseId = (request.payload as { leaseId: string }).leaseId;
+        await lockLeases(tx, request.companyId, await leaseGroup(tx, leaseId));
+        await lockCounters(tx, request.companyId);
+      },
       currentPayload: async (tx, request) => {
         const record = await this.cashRecord(tx, request.subjectId);
         return {
@@ -808,7 +867,8 @@ export class MoneyService {
       schema: transferPayload,
       prepare: async (tx, request) => {
         const leaseId = (request.payload as { leaseId: string | null }).leaseId;
-        if (leaseId) await lockLeases(tx, request.companyId, [leaseId]);
+        if (leaseId) await lockLeases(tx, request.companyId, await leaseGroup(tx, leaseId));
+        await lockCounters(tx, request.companyId);
       },
       currentPayload: async (tx, request) => {
         const record = await this.directReceipt(tx, request.subjectId);
@@ -878,13 +938,41 @@ export class MoneyService {
       eligibleRoles: APPROVERS,
       schema: reversalPayload,
       onePerSubject: true,
+      // Every lease the payment touches (re-read once they are locked, until it holds still), the
+      // collector's cash when the money is taken back from them, then the receipt counter.
       prepare: async (tx, request) => {
-        await lockLeases(tx, request.companyId, await this.leasesOfPayment(tx, request.subjectId));
+        await lockPayment(tx, request.companyId, request.subjectId);
+        // All of them at once, in id order; if one more appeared before the locks were held, this
+        // attempt ends and the next takes the full set in order (second review D1).
+        const leases = await this.leasesOfPayment(tx, request.subjectId);
+        await lockLeases(tx, request.companyId, leases);
+        const now = await this.leasesOfPayment(tx, request.subjectId);
+        if (now.some((id) => !leases.includes(id)))
+          throw new AppError(
+            409,
+            'payment_moved',
+            'The payment changed while it was being reversed. Try again.',
+          );
+        const payload = request.payload as z.infer<typeof reversalPayload>;
+        const [payment] = await paymentsByIds(tx, [request.subjectId]);
+        if (payload.moneyNowIn === 'collector' && payment?.row.collectorPersonId)
+          await lockCollectorCash(
+            tx,
+            request.companyId,
+            payment.row.collectorPersonId,
+            payment.row.bookId,
+          );
+        await lockCounters(tx, request.companyId);
       },
       currentPayload: async (tx, request) => {
         const proposed = request.payload as z.infer<typeof reversalPayload>;
         const [payment] = await paymentsByIds(tx, [request.subjectId]);
-        return { ...proposed, reversed: !payment || payment.reversedAccountingDate !== null };
+        // Matched since it was asked for: the request no longer describes it (review 5).
+        return {
+          ...proposed,
+          leaseId: payment?.leaseId ?? proposed.leaseId,
+          reversed: !payment || payment.reversedAccountingDate !== null,
+        };
       },
       execute: async (tx, request, payload) => {
         const [payment] = await paymentsByIds(tx, [payload.paymentId]);
@@ -908,8 +996,14 @@ export class MoneyService {
         actionType,
         eligibleRoles: APPROVERS,
         schema: linePayload,
+        // One open request per line and action: a second would ask the same question (review 18).
+        onePerSubject: true,
         prepare: async (tx, request) =>
-          lockLeases(tx, request.companyId, [(request.payload as { leaseId: string }).leaseId]),
+          lockLeases(
+            tx,
+            request.companyId,
+            await leaseGroup(tx, (request.payload as { leaseId: string }).leaseId),
+          ),
         currentPayload: async (tx, request) => {
           const proposed = request.payload as z.infer<typeof linePayload>;
           const state = await this.engine.load(tx, request.companyId, proposed.leaseId);
@@ -955,11 +1049,19 @@ export class MoneyService {
       .selectDistinct({ leaseId: schema.allocation.leaseId })
       .from(schema.allocation)
       .where(eq(schema.allocation.paymentId, paymentId));
+    // And every lease its credit or deposit was carried to (P29).
+    const carried = await tx
+      .selectDistinct({ leaseId: schema.creditCarryOver.leaseId })
+      .from(schema.creditCarryOver)
+      .where(eq(schema.creditCarryOver.paymentId, paymentId));
     return [
       ...new Set(
-        [payment.leaseId, payment.creditLeaseId, ...lines.map((l) => l.leaseId)].filter(
-          (id): id is string => id !== null,
-        ),
+        [
+          payment.leaseId,
+          payment.creditLeaseId,
+          ...lines.map((l) => l.leaseId),
+          ...carried.map((c) => c.leaseId),
+        ].filter((id): id is string => id !== null),
       ),
     ].sort();
   }
@@ -1005,16 +1107,6 @@ export class MoneyService {
 
   /** Approval requests still open for subjects, for the payment detail's "reversal requested". */
   async openApprovals(tx: Tx, subjectIds: readonly string[]): Promise<Map<string, string>> {
-    if (subjectIds.length === 0) return new Map();
-    const rows = await tx
-      .select({ id: schema.approvalRequest.id, subjectId: schema.approvalRequest.subjectId })
-      .from(schema.approvalRequest)
-      .where(
-        and(
-          inArray(schema.approvalRequest.subjectId, [...subjectIds]),
-          inArray(schema.approvalRequest.status, ['pending', 'cooling_off']),
-        ),
-      );
-    return new Map(rows.map((r) => [r.subjectId, r.id]));
+    return this.approvals.openFor(tx, subjectIds);
   }
 }

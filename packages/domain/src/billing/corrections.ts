@@ -171,6 +171,36 @@ export function planCreditNote(input: {
 }
 
 /**
+ * The most a credit note may take off a line now: exactly what planCreditNote accepts. A tax line
+ * is never credited alone (it follows its base line); a deposit only where it is unpaid; any other
+ * line up to what it charges less what was written off, as far as its unpaid part and its
+ * payments' money reach. Zero when nothing can be credited.
+ */
+export function creditableMinor(line: BillingLine, allocations: readonly AllocationRow[]): number {
+  if (line.baseLineId !== null) return 0;
+  const balance = lineBalance(line, allocations);
+  if (line.kind === 'deposit') return balance.outstandingMinor;
+  let fromPayments = 0;
+  for (const share of paymentShares(line.id, allocations).values()) fromPayments += share;
+  return Math.min(
+    balance.netMinor - balance.writtenOffMinor,
+    balance.outstandingMinor + fromPayments,
+  );
+}
+
+/**
+ * The most a write-off may take off a line now: exactly what planWriteOff accepts, which is what is
+ * still owed on a charged line. Zero for a deposit or a line whose period has not started.
+ */
+export function writeOffableMinor(
+  line: BillingLine,
+  allocations: readonly AllocationRow[],
+): number {
+  if (postingClassOf(line) !== 'receivable') return 0;
+  return lineBalance(line, allocations).outstandingMinor;
+}
+
+/**
  * P24: a write-off of a debt still owed on a charged line (two-person approval). Lines not yet
  * started are credited instead, never written off.
  */
@@ -202,10 +232,22 @@ export function planWriteOff(input: {
 
 /**
  * Lines a lease ending on `lastDay` no longer bills (M4a plan 4.4): recurring lines whose period
- * starts after it. They are cancelled by a system credit note with their tax lines.
+ * starts after it and whose income was never recognised. A system credit note cancels them with
+ * their tax lines and needs no approval (plan deviation 3), because it reverses no income.
  */
 export function linesAfterEnd(lines: readonly BillingLine[], lastDay: string): BillingLine[] {
   return lines.filter(
-    (l) => isRecurring(l.kind) && l.periodStart !== null && l.periodStart > lastDay,
+    (l) => isRecurring(l.kind) && !l.accrued && l.periodStart !== null && l.periodStart > lastDay,
+  );
+}
+
+/**
+ * Lines charged for periods after `lastDay`: accrued before the end was known (a move-out
+ * recorded late). They stay charged; only a credit note a second person approves (P27) cancels
+ * them, so earned income never disappears without two people.
+ */
+export function chargedAfterEnd(lines: readonly BillingLine[], lastDay: string): BillingLine[] {
+  return lines.filter(
+    (l) => isRecurring(l.kind) && l.accrued && l.periodStart !== null && l.periodStart > lastDay,
   );
 }

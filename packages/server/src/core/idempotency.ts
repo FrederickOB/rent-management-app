@@ -16,6 +16,11 @@ import { isUniqueViolation, sqlStateOf } from './db-errors';
 export interface IdempotencyClaim {
   /** Call first thing in the write's transaction. */
   claim(tx: Tx): Promise<void>;
+  /**
+   * Call last thing in the write's transaction with what it wrote (its ids): stored with the
+   * mark, so a committed write always has its answer (M4a review 17).
+   */
+  done(tx: Tx, response: unknown): Promise<void>;
 }
 
 export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
@@ -162,6 +167,17 @@ export class IdempotencyStore {
           .set({ writtenAt: new Date() })
           .where(this.where(input.companyId, input.key));
       },
+      done: async (tx, response) => {
+        await tx
+          .update(schema.idempotentRequest)
+          .set({ response: { body: response ?? null }, completedAt: new Date() })
+          .where(
+            and(
+              this.where(input.companyId, input.key),
+              isNull(schema.idempotentRequest.completedAt),
+            ),
+          );
+      },
     };
   }
 
@@ -193,7 +209,7 @@ export class IdempotencyStore {
    * Runs a write under a key: replays a stored answer, or runs `write` with the claim for its
    * transaction, stores what it answered and returns it.
    */
-  async run<T>(
+  async run<T, R = T>(
     input: {
       readonly companyId: string;
       readonly personId: string;
@@ -202,23 +218,28 @@ export class IdempotencyStore {
       readonly hash: string;
     },
     write: (claim: IdempotencyClaim) => Promise<T>,
-  ): Promise<T> {
+    /** Builds the answer from what was stored (a replay builds it again from the same ids). */
+    render?: (stored: T) => Promise<R>,
+  ): Promise<R> {
+    const answer = (stored: T) =>
+      render ? render(stored) : Promise.resolve(stored as unknown as R);
     const begun = await this.begin<T>(input);
-    if (begun.kind === 'replay') return begun.response;
+    if (begun.kind === 'replay') return answer(begun.response);
     let result: T;
     try {
       result = await write(begun.claim);
     } catch (error) {
       if (error instanceof AlreadyWritten || isUniqueViolation(error, 'idempotent_request_pkey')) {
         const again = await this.begin<T>(input);
-        if (again.kind === 'replay') return again.response;
+        if (again.kind === 'replay') return answer(again.response);
         throw requestInProgress();
       }
       if (!(error instanceof AppError && error.code === 'request_in_progress'))
         await this.release(input.companyId, input.personId, input.key).catch(() => undefined);
       throw error;
     }
+    // A write that stored its answer in its own transaction keeps it; others store it now.
     await this.complete(input.companyId, input.personId, input.key, result);
-    return result;
+    return answer(result);
   }
 }

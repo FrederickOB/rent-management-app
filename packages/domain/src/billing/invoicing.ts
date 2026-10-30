@@ -145,6 +145,15 @@ export function taxLinesOn(
   return lines;
 }
 
+/** The VAT and levies a charge period will carry once invoiced: none for a dwelling (null rates). */
+export function expectedTaxMinor(
+  period: { readonly chargeType: 'rent' | 'service_charge'; readonly amountMinor: number },
+  vat: VatRates | null,
+): number {
+  if (!vat || (period.chargeType === 'service_charge' && !vat.appliesToServiceCharge)) return 0;
+  return taxLinesOn(period.amountMinor, vat).reduce((sum, t) => sum + t.amountMinor, 0);
+}
+
 /**
  * A cycle's invoice lines: each charge period's rent and service charge, with the VAT and levy
  * lines straight after the line they are charged on (decision 4).

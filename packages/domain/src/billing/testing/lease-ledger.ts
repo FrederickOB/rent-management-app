@@ -9,7 +9,9 @@ import {
 } from '../../ledger/journal';
 import {
   accrualLines,
+  creditDrawLines,
   creditNoteLines,
+  lateDrawLines,
   oneOffChargeLines,
   paymentReversalLines,
   receiptLines,
@@ -17,8 +19,8 @@ import {
   writeOffLines,
   type LeaseDimensions,
 } from '../../ledger/posting';
-import { drawFromPools, planAccrual, planAllocation } from '../allocation';
-import { planCreditNote, planPaymentReversal, planWriteOff } from '../corrections';
+import { drawFromPools, planAccrual, planAllocation, planTaxDraws } from '../allocation';
+import { linesAfterEnd, planCreditNote, planPaymentReversal, planWriteOff } from '../corrections';
 import type { InvoiceLineDraft } from '../invoicing';
 import {
   creditPools,
@@ -43,6 +45,8 @@ export interface PostedEntry {
   readonly rule: PostingRule;
   readonly key: string;
   readonly lines: readonly JournalLineDraft[];
+  /** When it happened: a payment's day received, a period's start for P02. */
+  readonly valueDate: string;
 }
 
 export interface ModelPayment extends PaymentRef {
@@ -66,6 +70,8 @@ export class LeaseLedgerModel {
   scheduled: ScheduledPeriod[] = [];
   /** Corrections that may move paid-until backwards (invariant 9). */
   corrections = 0;
+  /** The last day billed once the tenant has moved out; null while the lease runs. */
+  lastDay: string | null = null;
   private sequence = 0;
   private readonly accruedIds = new Set<string>();
 
@@ -73,11 +79,16 @@ export class LeaseLedgerModel {
 
   private bookKind = (): BookKind => 'owner';
 
-  private post(rule: PostingRule, key: string, lines: readonly JournalLineDraft[]): void {
+  private post(
+    rule: PostingRule,
+    key: string,
+    lines: readonly JournalLineDraft[],
+    valueDate: string = this.today,
+  ): void {
     if (lines.length === 0) return;
     if (this.entries.some((e) => e.key === key)) return;
     checkEntry(lines, this.bookKind);
-    this.entries.push({ rule, key, lines });
+    this.entries.push({ rule, key, lines, valueDate });
   }
 
   private addAllocation(row: AllocationRow): void {
@@ -93,8 +104,16 @@ export class LeaseLedgerModel {
     }
   }
 
-  /** Issues an invoice's lines (P01 for one-off lines, P32 for tax lines). */
-  issue(drafts: readonly InvoiceLineDraft[], dueDate: string, invoiceKey: string): BillingLine[] {
+  /**
+   * Issues an invoice's lines (P01 for one-off lines, P32 for tax lines), charged on `taxPoint`:
+   * today, or the value date of the payment that made it issue them (decision 4).
+   */
+  issue(
+    drafts: readonly InvoiceLineDraft[],
+    dueDate: string,
+    invoiceKey: string,
+    taxPoint: string = this.today,
+  ): BillingLine[] {
     const ids: string[] = [];
     const added: BillingLine[] = [];
     for (const draft of drafts) {
@@ -112,6 +131,7 @@ export class LeaseLedgerModel {
         amountMinor: draft.amountMinor,
         accrued: false,
         sequence: this.sequence,
+        chargedOn: isRecurring(draft.kind) || draft.kind === 'deposit' ? null : taxPoint,
       };
       this.lines.push(line);
       added.push(line);
@@ -127,6 +147,7 @@ export class LeaseLedgerModel {
         lease: this.lease,
         lines: oneOff.map((l) => ({ invoiceLineId: l.id, amountMinor: l.amountMinor })),
       }),
+      taxPoint,
     );
     const taxes = added.filter((l) => isTax(l.kind));
     this.post(
@@ -137,6 +158,7 @@ export class LeaseLedgerModel {
         lease: this.lease,
         lines: taxes.map((l) => ({ invoiceLineId: l.id, amountMinor: l.amountMinor })),
       }),
+      taxPoint,
     );
     return added;
   }
@@ -150,7 +172,13 @@ export class LeaseLedgerModel {
     this.refreshAccrued();
     let pools = creditPools(this.livePayments(), this.allocations);
     const due = this.lines
-      .filter((l) => isRecurring(l.kind) && !l.accrued && (l.periodStart as string) <= date)
+      .filter(
+        (l) =>
+          isRecurring(l.kind) &&
+          !l.accrued &&
+          (l.periodStart as string) <= date &&
+          (this.lastDay === null || (l.periodStart as string) <= this.lastDay),
+      )
       .sort((a, b) =>
         (a.periodStart as string) !== (b.periodStart as string)
           ? (a.periodStart as string) < (b.periodStart as string)
@@ -185,20 +213,55 @@ export class LeaseLedgerModel {
             advance: plan.advance,
             draws: plan.draws,
           }),
+          line.periodStart as string,
         );
+      // Its VAT and levies, from the credit left (review 10).
+      for (const tax of planTaxDraws(
+        this.lines.filter((l) => l.baseLineId === line.id),
+        this.allocations,
+        pools,
+      )) {
+        for (const draw of tax.draws)
+          this.addAllocation({
+            lineId: tax.lineId,
+            source: 'payment',
+            paymentId: draw.paymentId,
+            amountMinor: draw.amountMinor,
+          });
+        pools = drawFromPools(pools, tax.draws);
+        this.post(
+          'P02',
+          `P02:${tax.lineId}`,
+          creditDrawLines({
+            bookId: this.book,
+            lease: this.lease,
+            invoiceLineId: tax.lineId,
+            draws: tax.draws,
+          }),
+          line.periodStart as string,
+        );
+      }
       this.accruedIds.add(line.id);
       this.refreshAccrued();
     }
   }
 
-  /** A payment received today: accrue first, then allocate oldest debt first (P03 to P06, P08, P10). */
-  pay(amountMinor: number, cash: CashAccount = '1050'): ModelPayment {
+  /**
+   * A payment recorded today, received on `valueDate` (today or earlier): accrue first, then
+   * allocate oldest debt first, classified as of the day it was received (P03 to P06, P08, P10).
+   * A period that started after that day but has accrued since is paid by a late draw.
+   */
+  pay(
+    amountMinor: number,
+    cash: CashAccount = '1050',
+    valueDate: string = this.today,
+  ): ModelPayment {
     this.accrueTo(this.today);
     const id = `payment-${this.payments.length + 1}`;
     const payment: ModelPayment = {
       id,
       amountMinor,
-      order: `${this.today}#${String(this.payments.length + 1).padStart(6, '0')}`,
+      order: `${valueDate}#${String(this.payments.length + 1).padStart(6, '0')}`,
       cash,
       reversed: false,
     };
@@ -208,7 +271,8 @@ export class LeaseLedgerModel {
       paymentId: id,
       amountMinor,
       lease: this.lease,
-      valueDate: this.today,
+      valueDate,
+      lastDay: this.lastDay,
     });
     this.payments.push(payment);
     for (const a of plan.allocations) this.addAllocation({ ...a, source: 'payment' });
@@ -227,7 +291,21 @@ export class LeaseLedgerModel {
         allocations: plan.postings,
         surplusMinor: plan.surplusMinor,
       }),
+      valueDate,
     );
+    for (const draw of plan.lateDraws)
+      this.post(
+        'P02',
+        `P02:${draw.lineId}:${id}`,
+        lateDrawLines({
+          bookId: this.book,
+          lease: this.lease,
+          invoiceLineId: draw.lineId,
+          paymentId: id,
+          amountMinor: draw.amountMinor,
+        }),
+        draw.valueDate,
+      );
     return payment;
   }
 
@@ -326,7 +404,24 @@ export class LeaseLedgerModel {
     return forwardWalk(
       walkLines({ lines: this.lines, allocations: this.allocations, scheduled: this.scheduled }),
       creditPools(this.livePayments(), this.allocations),
+      { lastDay: this.lastDay },
     );
+  }
+
+  /**
+   * A move-out recorded today, on `lastDay` (today or earlier): nothing after it is billed, and a
+   * system credit note cancels the lines never charged for periods after it (review 1, 14).
+   */
+  moveOut(lastDay: string): void {
+    this.refreshAccrued();
+    this.lastDay = lastDay;
+    this.scheduled = this.scheduled.filter((s) => s.periodStart <= lastDay);
+    this.corrections += 1;
+    for (const line of linesAfterEnd(this.lines, lastDay)) {
+      const b = lineBalance(line, this.allocations);
+      if (b.netMinor - b.writtenOffMinor <= 0) continue;
+      this.creditNote(line.id, b.netMinor - b.writtenOffMinor, `end-${line.id}`);
+    }
   }
 
   /** Allocations from one source, per line. */
@@ -365,6 +460,18 @@ export class LeaseLedgerModel {
     const prepayments = -this.balance('2010', { leaseId: this.lease.leaseId });
     if (prepayments !== prepaidOnLines + credit)
       fail(`2010 is ${prepayments}, expected ${prepaidOnLines} on lines plus ${credit} credit`);
+    // 2b. As of any day before a period starts, nothing is owed on it: no entry dated earlier
+    // touches its receivable (P03 classifies by the day money arrived).
+    for (const line of this.lines) {
+      // Rent from its period start; one-off and tax lines from their charge (P01, P32).
+      const from = isRecurring(line.kind) ? line.periodStart : (line.chargedOn ?? null);
+      if (from === null) continue;
+      const early = balanceOf(
+        this.entries.filter((e) => e.valueDate < from).flatMap((e) => e.lines),
+        { bookId: this.book, accountCode: '1100', invoiceLineId: line.id },
+      );
+      if (early !== 0) fail(`1100 for ${line.id} is ${early} before its period starts`);
+    }
     // 4. 2100 equals deposits received less what left them.
     const deposits = -this.balance('2100', { leaseId: this.lease.leaseId });
     if (deposits !== depositsHeld) fail(`2100 is ${deposits}, expected ${depositsHeld}`);

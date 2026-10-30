@@ -56,3 +56,15 @@ export async function ownerNameThroughProperty(
   );
   return rows.rows[0]?.name ?? null;
 }
+
+/**
+ * The property's owner lock, taken first, before anything audited (second review B): an owner
+ * change or correction and the property's first invoice wait for each other instead of racing.
+ */
+export async function lockPropertyOwner(
+  tx: Tx,
+  companyId: string,
+  propertyId: string,
+): Promise<void> {
+  await tx.execute(sql`select app.lock_property_owner(${companyId}::uuid, ${propertyId}::uuid)`);
+}

@@ -25,7 +25,14 @@ export function billingServices(ctx: ServerTestContext, s: TenancyServices) {
   );
   money.registerApprovals();
   const alerts: Alert[] = [];
-  const read = new BillingReadService(ctx.database, s.policy, engine, s.documents, ctx.clock);
+  const read = new BillingReadService(
+    ctx.database,
+    s.policy,
+    engine,
+    s.documents,
+    ctx.clock,
+    s.approvals,
+  );
   const subledger = new SubledgerCheckService(
     ctx.database,
     engine,

@@ -5,6 +5,7 @@ import { templates, type InvoiceDocumentData, type ReceiptDocumentData } from '@
 import {
   creditPools,
   cyclesForAdvance,
+  expectedTaxMinor,
   cyclesToIssue,
   depositDue,
   draftTotal,
@@ -23,6 +24,7 @@ import {
   planAccrual,
   planAllocation,
   planCreditNote,
+  planTaxDraws,
   planPaymentReversal,
   planWriteOff,
   referenceFrom,
@@ -31,6 +33,7 @@ import {
   type AllocationSource,
   type InvoiceCycle,
   type InvoiceLineDraft,
+  type LateDraw,
   type ScheduledPeriod,
   type ScheduleRow,
   type VatRates,
@@ -42,7 +45,9 @@ import {
   accrualLines,
   carryOverLines,
   compactLines,
+  creditDrawLines,
   creditNoteLines,
+  lateDrawLines,
   oneOffChargeLines,
   paymentReversalLines,
   receiptLines,
@@ -65,9 +70,16 @@ import { enqueueOutbox } from '../core/outbox';
 import { CLOCK } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
 import { personContact } from '../identity/person-directory';
+import { balance } from '../ledger/ledger.queries';
 import { PostingService, type PostedEntry } from '../ledger/posting.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
-import { billingLeaseOf, scheduleRowsOf, type BillingLease } from '../tenancy/billing-facts';
+import {
+  billingLeaseOf,
+  renewedLeaseOf,
+  scheduleRowsOf,
+  startedRenewalOf,
+  type BillingLease,
+} from '../tenancy/billing-facts';
 import {
   allocationRecord,
   dimsOf,
@@ -104,6 +116,8 @@ export interface LeaseState {
   allocations: AllocationRecord[];
   /** Live payments whose credit sits on this lease, first in, first out. */
   payments: PaymentRecord[];
+  /** VAT and levy rates for lines not invoiced yet (CT-04), or null: the walk expects them. */
+  vatRates: VatRates | null;
 }
 
 export interface VatSetting {
@@ -185,7 +199,19 @@ export class BillingEngine {
       paymentIds: payments.map((p) => p.id),
     });
     const book = await leaseBookOf(tx, lease, isoNow(this.clock, company.timeZone));
-    return { company, lease, book, schedule, lines, allocations, payments };
+    const state: LeaseState = {
+      company,
+      lease,
+      book,
+      schedule,
+      lines,
+      allocations,
+      payments,
+      vatRates: null,
+    };
+    state.vatRates =
+      (await this.vatFor(tx, state, isoNow(this.clock, company.timeZone)))?.rates ?? null;
+    return state;
   }
 
   // Invoices (BC-01; plan 4.4) -------------------------------------------------------------------
@@ -265,9 +291,12 @@ export class BillingEngine {
     cycle: InvoiceCycle,
     today: string,
     causedBy?: string | null,
+    /** The tax point when a payment made it issue (decision 4): that payment's value date. */
+    taxPoint?: string,
   ) {
     const vat = await this.vatFor(tx, state, today);
     return this.issue(tx, state, {
+      taxPoint,
       kind: 'cycle',
       drafts: invoiceLinesFor(cycle, vat?.rates ?? null),
       dueDate: cycle.dueDate,
@@ -332,9 +361,12 @@ export class BillingEngine {
       readonly holdingOver: boolean;
       readonly vat: VatSetting | null;
       readonly causedBy?: string | null;
+      /** When its one-off and tax lines are charged (P01, P32); the issue date by default. */
+      readonly taxPoint?: string;
     },
   ) {
     const { company, lease } = state;
+    const taxPoint = input.taxPoint ?? input.issueDate;
     const book = requireBook(state.book);
     if (input.drafts.length === 0) throw new Error('An invoice needs a line');
     const owner = (await ownerFacts(tx, [book.ownerId])).get(book.ownerId);
@@ -448,6 +480,7 @@ export class BillingEngine {
       ruleId: r.ruleId,
       accruedOn: null,
       accruedAccounting: null,
+      chargedOn: isRecurring(r.kind) || r.kind === 'deposit' ? null : taxPoint,
     }));
     state.lines.push(...added);
     const dims = dimsOf(lease);
@@ -456,7 +489,7 @@ export class BillingEngine {
       companyId: company.id,
       rule: 'P01',
       key: `P01:${invoiceId}`,
-      valueDate: input.issueDate,
+      valueDate: taxPoint,
       lines: oneOffChargeLines({
         bookId: book.bookId,
         lease: dims,
@@ -470,7 +503,7 @@ export class BillingEngine {
       companyId: company.id,
       rule: 'P32',
       key: `P32:${invoiceId}`,
-      valueDate: input.issueDate,
+      valueDate: taxPoint,
       lines: vatChargeLines({
         bookId: book.bookId,
         lease: dims,
@@ -524,7 +557,11 @@ export class BillingEngine {
    * the rest is owed. A line credited to nothing is recorded as accrued with nothing posted.
    */
   async accrue(tx: Tx, state: LeaseState, date: string): Promise<number> {
-    const due = linesToAccrue(state.lines, date);
+    // Never a period after the lease's known last day: it is cancelled, not earned (review 1).
+    const last = lastBillableDay(state.lease);
+    const due = linesToAccrue(state.lines, date).filter(
+      (l) => last === null || (l.periodStart as string) <= last,
+    );
     if (due.length === 0) return 0;
     const book = requireBook(state.book);
     const dims = dimsOf(state.lease);
@@ -582,6 +619,46 @@ export class BillingEngine {
         entryId: posted?.entryId ?? null,
       });
       pools = drawFromPools(pools, plan.draws);
+      // Its VAT and levies, from the credit left (review 10).
+      for (const tax of planTaxDraws(
+        state.lines.filter((l) => l.baseLineId === record.id),
+        state.allocations,
+        pools,
+      )) {
+        const drawn = await this.posting.post(tx, {
+          companyId: state.company.id,
+          rule: 'P02',
+          key: `P02:${tax.lineId}`,
+          valueDate,
+          lines: creditDrawLines({
+            bookId: book.bookId,
+            lease: dims,
+            invoiceLineId: tax.lineId,
+            draws: tax.draws,
+          }),
+          record: { type: 'invoice_line', id: tax.lineId },
+        });
+        await this.writeAllocations(
+          tx,
+          state,
+          tax.draws.map((d) => ({
+            lineId: tax.lineId,
+            source: 'payment' as const,
+            paymentId: d.paymentId,
+            amountMinor: d.amountMinor,
+          })),
+          {
+            valueDate,
+            accountingDate:
+              drawn?.accountingDate ??
+              (await this.posting.accountingDate(tx, [book.bookId], valueDate)),
+            recordType: 'accrual',
+            recordId: tax.lineId,
+            entryId: drawn?.entryId ?? null,
+          },
+        );
+        pools = drawFromPools(pools, tax.draws);
+      }
       const index = state.lines.findIndex((l) => l.id === record.id);
       state.lines[index] = {
         ...record,
@@ -634,6 +711,35 @@ export class BillingEngine {
     state.allocations.push(...inserted.map(allocationRecord));
   }
 
+  /**
+   * The late draws of an allocation (P03 by value date): a period that had not started when the
+   * money arrived, but has accrued since, is paid out of the advance at once, dated at its start.
+   */
+  private async postLateDraws(
+    tx: Tx,
+    state: LeaseState,
+    draws: readonly LateDraw[],
+    causedBy: string | null,
+  ): Promise<void> {
+    const book = requireBook(state.book);
+    for (const draw of draws)
+      await this.posting.post(tx, {
+        companyId: state.company.id,
+        rule: 'P02',
+        key: `P02:${draw.lineId}:${draw.paymentId}`,
+        valueDate: draw.valueDate,
+        lines: lateDrawLines({
+          bookId: book.bookId,
+          lease: dimsOf(state.lease),
+          invoiceLineId: draw.lineId,
+          paymentId: draw.paymentId,
+          amountMinor: draw.amountMinor,
+        }),
+        record: { type: 'invoice_line', id: draw.lineId },
+        causedBy,
+      });
+  }
+
   // Money in (BC-07; plan 4.5) --------------------------------------------------------------------
 
   /**
@@ -641,7 +747,14 @@ export class BillingEngine {
    * invoices already issued first issues the invoices it pays for, up to the lease end, so the
    * payment is their tax point.
    */
-  async issueForAdvance(tx: Tx, state: LeaseState, amountMinor: number, today: string) {
+  async issueForAdvance(
+    tx: Tx,
+    state: LeaseState,
+    amountMinor: number,
+    today: string,
+    /** The payment's value date: the tax point of what it makes issue (decision 4). */
+    valueDate: string = today,
+  ) {
     const vat = await this.vatFor(tx, state, today);
     if (!vat) return [];
     const issued = await this.issuedCycleStarts(tx, state.lease.id);
@@ -650,6 +763,11 @@ export class BillingEngine {
       (s, l) => s + lineBalance(l, state.allocations).outstandingMinor,
       0,
     );
+    // The payment pays every open line before any new cycle, so it reaches beyond the issued
+    // invoices only when it is larger than what is open. Credit is applied before the payment
+    // (oldest money first) to the lines not charged yet and to the cycles after them, so the
+    // payment's money reaches `payment − open + credit` into the new cycles (review D2).
+    if (amountMinor <= open) return [];
     const credit = creditPools(state.payments, state.allocations).reduce(
       (s, p) => s + p.amountMinor,
       0,
@@ -661,7 +779,8 @@ export class BillingEngine {
       vat: vat.rates,
     });
     const out = [];
-    for (const cycle of chosen) out.push(await this.issueCycle(tx, state, cycle, today));
+    for (const cycle of chosen)
+      out.push(await this.issueCycle(tx, state, cycle, today, null, valueDate));
     return out;
   }
 
@@ -701,7 +820,8 @@ export class BillingEngine {
     const today = this.today(state);
     if (input.receivedOn > today)
       throw invalid('received_in_future', 'The day the money was received cannot be in the future');
-    await this.issueForAdvance(tx, state, input.amountMinor, today);
+    await this.carryOverIfStarted(tx, state, today);
+    await this.issueForAdvance(tx, state, input.amountMinor, today, input.receivedOn);
     await this.accrue(tx, state, today);
     const paymentId = uuidv7();
     const plan = planAllocation({
@@ -711,6 +831,7 @@ export class BillingEngine {
       amountMinor: input.amountMinor,
       lease: dimsOf(state.lease),
       valueDate: input.receivedOn,
+      lastDay: lastBillableDay(state.lease),
     });
     const cash: CashSide = {
       bookId: book.bookId,
@@ -776,6 +897,8 @@ export class BillingEngine {
         entryId: posted!.entryId,
       },
     );
+    await this.postLateDraws(tx, state, plan.lateDraws, input.causedBy ?? null);
+    if (plan.surplusMinor > 0) await this.carryStranded(tx, state, record!, today);
     const receiptId = await this.issueReceipt(tx, state, {
       payment: record!,
       kind: 'receipt',
@@ -872,7 +995,10 @@ export class BillingEngine {
         'This money was received into another owner’s account; match it to one of their leases',
       );
     const today = this.today(state);
-    await this.issueForAdvance(tx, state, payment.amountMinor, today);
+    // The money arrived when it arrived: allocation is classified, and posted, as of that day.
+    const arrived = payment.row.receivedOn;
+    await this.carryOverIfStarted(tx, state, today);
+    await this.issueForAdvance(tx, state, payment.amountMinor, today, arrived);
     await this.accrue(tx, state, today);
     const plan = planAllocation({
       lines: state.lines,
@@ -880,14 +1006,15 @@ export class BillingEngine {
       paymentId: payment.id,
       amountMinor: payment.amountMinor,
       lease: dimsOf(state.lease),
-      valueDate: today,
+      valueDate: arrived,
+      lastDay: lastBillableDay(state.lease),
     });
     const matchId = uuidv7();
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,
       rule: 'P23',
       key: `P23:${matchId}`,
-      valueDate: today,
+      valueDate: arrived,
       lines: unmatchedMatchLines({
         suspenseBookId: payment.row.bookId,
         bookId: book.bookId,
@@ -910,7 +1037,7 @@ export class BillingEngine {
       unitId: state.lease.unitId,
       bookId: book.bookId,
       entryId: posted!.entryId,
-      valueDate: today,
+      valueDate: arrived,
       accountingDate: posted!.accountingDate,
       matchedBy,
     });
@@ -922,13 +1049,15 @@ export class BillingEngine {
       state,
       plan.allocations.map((a) => ({ ...a, source: 'payment' as const })),
       {
-        valueDate: today,
+        valueDate: arrived,
         accountingDate: posted!.accountingDate,
         recordType: 'match',
         recordId: matchId,
         entryId: posted!.entryId,
       },
     );
+    await this.postLateDraws(tx, state, plan.lateDraws, matchedBy);
+    if (plan.surplusMinor > 0) await this.carryStranded(tx, state, record!, today);
     const receiptId = await this.issueReceipt(tx, state, {
       payment: record!,
       kind: 'receipt',
@@ -977,11 +1106,7 @@ export class BillingEngine {
 
   /** What a collector holds in a book (1060 for that collector), from the journal. */
   async collectorHeld(tx: Tx, collectorId: string, bookId: string): Promise<number> {
-    const result = await tx.execute<{ held: number }>(
-      sql`select coalesce(sum(amount_minor), 0)::bigint as held from journal_line
-          where account_code = '1060' and collector_id = ${collectorId} and book_id = ${bookId}`,
-    );
-    return Number(result.rows[0]?.held ?? 0);
+    return balance(tx, { accounts: ['1060'], collectorIds: [collectorId], bookIds: [bookId] });
   }
 
   /**
@@ -1042,6 +1167,25 @@ export class BillingEngine {
       allocations,
       leaseOf: (lineId) => dimsOf(leaseOfLine.get(lineId)!.lease),
     });
+    // A deposit carried to a renewal is taken back from the lease holding it now (review 9); a
+    // carry-back row keeps each lease's deposit sub-ledger right.
+    const carriedBack: { from: string; to: LeaseState; amountMinor: number }[] = [];
+    const postings = [];
+    for (const posting of plan.postings) {
+      if (posting.postingClass !== 'deposit') {
+        postings.push(posting);
+        continue;
+      }
+      const paidOn = leaseOfLine.get(posting.invoiceLineId)!;
+      const holder = await this.depositHolder(tx, payment.id, paidOn.lease.id);
+      if (holder === paidOn.lease.id) {
+        postings.push(posting);
+        continue;
+      }
+      const lease = await billingLeaseOf(tx, holder);
+      postings.push({ ...posting, lease: dimsOf(lease) });
+      carriedBack.push({ from: holder, to: paidOn, amountMinor: posting.amountMinor });
+    }
     const creditState = states.find((s) => s.lease.id === payment.creditLeaseId) ?? states[0]!;
     const leaseState = states.find((s) => s.lease.id === payment.leaseId) ?? states[0]!;
     // A matched payment's money moved into the lease's book when it was matched.
@@ -1066,7 +1210,7 @@ export class BillingEngine {
         cash,
         bookId: book,
         paymentId: payment.id,
-        allocations: plan.postings,
+        allocations: postings,
         credit:
           plan.creditMinor > 0
             ? { lease: dimsOf(creditState.lease), amountMinor: plan.creditMinor }
@@ -1091,6 +1235,20 @@ export class BillingEngine {
       accountingDate: posted!.accountingDate,
       requestedBy: input.requestedBy,
     });
+    for (const back of carriedBack)
+      await tx.insert(schema.creditCarryOver).values({
+        companyId,
+        propertyId: back.to.lease.propertyId,
+        tenantId: back.to.lease.tenantId,
+        leaseId: back.to.lease.id,
+        fromLeaseId: back.from,
+        kind: 'deposit',
+        paymentId: payment.id,
+        amountMinor: back.amountMinor,
+        entryId: posted!.entryId,
+        valueDate: input.today,
+        accountingDate: posted!.accountingDate,
+      });
     for (const s of states) {
       const mine = plan.rows.filter((r) => leaseOfLine.get(r.lineId) === s);
       await this.writeAllocations(tx, s, mine, {
@@ -1166,15 +1324,12 @@ export class BillingEngine {
       payments,
       amountMinor: input.amountMinor,
     });
-    for (const part of parts)
-      for (const released of part.released) {
-        const payment = payments.find((p) => p.id === released.paymentId);
-        if (payment && payment.creditLeaseId !== state.lease.id)
-          throw conflict(
-            'credit_moved',
-            'Money paid towards this line has moved to the renewal; credit the renewal’s lines instead',
-          );
-      }
+    // Money released for a payment whose credit has moved to a renewal returns to it there, so
+    // no credit is stranded on an ended lease (review 11).
+    const creditLeases = new Map<string, ReturnType<typeof dimsOf>>();
+    for (const payment of payments)
+      if (payment.creditLeaseId && payment.creditLeaseId !== state.lease.id)
+        creditLeases.set(payment.id, dimsOf(await billingLeaseOf(tx, payment.creditLeaseId)));
     const book = requireBook(state.book);
     const dims = dimsOf(state.lease);
     const creditNoteId = uuidv7();
@@ -1186,6 +1341,7 @@ export class BillingEngine {
         chargedTo: part.chargedTo,
         unpaidMinor: part.unpaidMinor,
         released: part.released,
+        creditLeaseOf: (paymentId) => creditLeases.get(paymentId) ?? dims,
       }),
     );
     const posted = await this.posting.post(tx, {
@@ -1228,6 +1384,13 @@ export class BillingEngine {
         entryId: posted?.entryId ?? null,
       },
     );
+    // Credit released here, on a lease whose renewal has started, moves to it (review 11).
+    for (const payment of payments)
+      if (
+        payment.creditLeaseId === state.lease.id &&
+        parts.some((p) => p.released.some((r) => r.paymentId === payment.id))
+      )
+        await this.carryStranded(tx, state, payment, input.valueDate);
     return creditNoteId;
   }
 
@@ -1306,12 +1469,14 @@ export class BillingEngine {
       amountMinor: p.amountMinor,
     }));
     const deposit = await this.depositHeld(tx, from.lease.id);
+    const deposits = await this.depositParts(tx, from, deposit);
     const lines = carryOverLines({
       bookId: book.bookId,
       from: dimsOf(from.lease),
       to: dimsOf(to.lease),
       credits,
       depositMinor: deposit,
+      deposits,
     });
     const posted = await this.posting.post(tx, {
       companyId: to.company.id,
@@ -1328,7 +1493,13 @@ export class BillingEngine {
         paymentId: c.paymentId,
         amountMinor: c.amountMinor,
       })),
-      ...(deposit > 0 ? [{ kind: 'deposit' as const, paymentId: null, amountMinor: deposit }] : []),
+      ...deposits
+        .filter((d) => d.amountMinor > 0)
+        .map((d) => ({
+          kind: 'deposit' as const,
+          paymentId: d.paymentId,
+          amountMinor: d.amountMinor,
+        })),
     ];
     if (rows.length > 0)
       await tx.insert(schema.creditCarryOver).values(
@@ -1362,13 +1533,127 @@ export class BillingEngine {
     return true;
   }
 
+  /**
+   * The deposit a lease holds, by the payment that paid it (review 9): its deposit lines' payment
+   * shares, plus deposits carried in, less deposits carried out. What the parts do not explain
+   * (carried before parts were kept) has no payment. The parts add up to `held`.
+   */
+  async depositParts(
+    tx: Tx,
+    state: LeaseState,
+    held: number,
+  ): Promise<{ paymentId: string | null; amountMinor: number }[]> {
+    const parts = new Map<string, number>();
+    const add = (id: string, amount: number) => parts.set(id, (parts.get(id) ?? 0) + amount);
+    for (const line of state.lines.filter((l) => l.kind === 'deposit'))
+      for (const [paymentId, share] of paymentShares(line.id, state.allocations))
+        add(paymentId, share);
+    const carried = await tx
+      .select()
+      .from(schema.creditCarryOver)
+      .where(
+        and(
+          eq(schema.creditCarryOver.kind, 'deposit'),
+          sql`(${schema.creditCarryOver.leaseId} = ${state.lease.id} or ${schema.creditCarryOver.fromLeaseId} = ${state.lease.id})`,
+        ),
+      );
+    for (const c of carried)
+      if (c.paymentId)
+        add(c.paymentId, c.leaseId === state.lease.id ? c.amountMinor : -c.amountMinor);
+    const out = [...parts]
+      .filter(([, amount]) => amount > 0)
+      .map(([paymentId, amountMinor]) => ({ paymentId: paymentId as string | null, amountMinor }));
+    const explained = out.reduce((sum, p) => sum + p.amountMinor, 0);
+    if (explained > held)
+      throw new Error(`Lease ${state.lease.id} holds less deposit than its payments paid`);
+    if (held > explained) out.push({ paymentId: null, amountMinor: held - explained });
+    return out;
+  }
+
+  /**
+   * Where a payment's deposit, paid on `leaseId`, sits now: the lease it was carried to last
+   * (P29, per payment), or `leaseId` when it never moved.
+   */
+  async depositHolder(tx: Tx, paymentId: string, leaseId: string): Promise<string> {
+    let holder = leaseId;
+    for (let hops = 0; hops < 50; hops += 1) {
+      const [next] = await tx
+        .select({ leaseId: schema.creditCarryOver.leaseId })
+        .from(schema.creditCarryOver)
+        .where(
+          and(
+            eq(schema.creditCarryOver.kind, 'deposit'),
+            eq(schema.creditCarryOver.paymentId, paymentId),
+            eq(schema.creditCarryOver.fromLeaseId, holder),
+          ),
+        );
+      if (!next) return holder;
+      holder = next.leaseId;
+    }
+    throw new Error('A deposit carried round in a circle');
+  }
+
+  /**
+   * P29 once a renewal has started: the old lease is accrued to date first, then carried over.
+   * Every path that takes money for a lease runs it first, as it accrues first (review 10). The
+   * caller holds both leases' locks.
+   */
+  async carryOverIfStarted(tx: Tx, renewal: LeaseState, date: string): Promise<void> {
+    const lease = renewal.lease;
+    const oldId = await renewedLeaseOf(tx, lease.id);
+    if (!oldId || lease.startDate > date) return;
+    if (!['active', 'ending', 'holding_over', 'ended', 'terminated'].includes(lease.status)) return;
+    const old = await this.load(tx, renewal.company.id, oldId);
+    if (old.book.kind !== 'book') return;
+    await this.accrue(tx, old, date);
+    await this.carryOver(tx, old, renewal, lease.startDate);
+  }
+
+  /**
+   * Credit that appears on a lease after its renewal has started (a payment recorded against the
+   * old lease) moves to the renewal at once, under the payment's own key (review 11).
+   */
+  async carryStranded(tx: Tx, from: LeaseState, payment: PaymentRecord, valueDate: string) {
+    const renewalId = await startedRenewalOf(tx, from.lease.id);
+    if (!renewalId) return;
+    const credit = paymentCredit(payment, from.allocations);
+    if (credit <= 0) return;
+    const to = await this.load(tx, from.company.id, renewalId);
+    const book = requireBook(from.book);
+    const posted = await this.posting.post(tx, {
+      companyId: from.company.id,
+      rule: 'P29',
+      key: `P29:${renewalId}:${payment.id}`,
+      valueDate,
+      lines: carryOverLines({
+        bookId: book.bookId,
+        from: dimsOf(from.lease),
+        to: dimsOf(to.lease),
+        credits: [{ paymentId: payment.id, amountMinor: credit }],
+        depositMinor: 0,
+      }),
+      record: { type: 'lease', id: renewalId },
+    });
+    if (!posted) return;
+    await tx.insert(schema.creditCarryOver).values({
+      companyId: from.company.id,
+      propertyId: to.lease.propertyId,
+      tenantId: to.lease.tenantId,
+      leaseId: renewalId,
+      fromLeaseId: from.lease.id,
+      kind: 'credit',
+      paymentId: payment.id,
+      amountMinor: credit,
+      entryId: posted.entryId,
+      valueDate,
+      accountingDate: posted.accountingDate,
+    });
+    from.payments = from.payments.filter((p) => p.id !== payment.id);
+  }
+
   /** The deposit a lease holds now (2100 on the lease), from the journal. */
   async depositHeld(tx: Tx, leaseId: string): Promise<number> {
-    const result = await tx.execute<{ held: number }>(
-      sql`select coalesce(-sum(amount_minor), 0)::bigint as held from journal_line
-          where account_code = '2100' and lease_id = ${leaseId}`,
-    );
-    return Number(result.rows[0]?.held ?? 0);
+    return 0 - (await balance(tx, { accounts: ['2100'], leaseIds: [leaseId] }));
   }
 
   // Receipts (plan 4.10) ---------------------------------------------------------------------------
@@ -1504,6 +1789,7 @@ export class BillingEngine {
         periodStart: s.periodStart,
         periodEnd: s.periodEnd,
         amountMinor: s.amountMinor,
+        taxMinor: expectedTaxMinor(s, state.vatRates),
       }));
   }
 
@@ -1515,6 +1801,7 @@ export class BillingEngine {
         scheduled: this.scheduled(state),
       }),
       creditPools(state.payments, state.allocations),
+      { lastDay: lastBillableDay(state.lease) },
     );
   }
 

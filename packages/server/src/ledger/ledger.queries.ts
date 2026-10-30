@@ -88,3 +88,80 @@ export async function balancesBy(
   }
   return out;
 }
+
+/** An owner's book, or null (made by the database with the owner). */
+export async function ownerBook(tx: Tx, ownerId: string): Promise<string | null> {
+  const result = await tx.execute<{ id: string }>(
+    sql`select id from book where owner_id = ${ownerId}::uuid limit 1`,
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+/** The company's own book (landlords and agencies), or null. */
+export async function companyBook(tx: Tx): Promise<string | null> {
+  const result = await tx.execute<{ id: string }>(
+    sql`select id from book where kind = 'company' limit 1`,
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+/** The owner of each book; the company book has none. */
+export async function bookOwners(
+  tx: Tx,
+  bookIds: readonly string[],
+): Promise<Map<string, string | null>> {
+  if (bookIds.length === 0) return new Map();
+  const result = await tx.execute<{ id: string; owner_id: string | null }>(
+    sql`select id, owner_id from book where id = any(${uuids(bookIds)})`,
+  );
+  return new Map(result.rows.map((r) => [r.id, r.owner_id]));
+}
+
+/** One journal line as the cash views read it: oldest first by value date, then as posted. */
+export interface JournalLineRow {
+  readonly collectorId: string | null;
+  readonly bookId: string;
+  readonly propertyId: string | null;
+  readonly amountMinor: number;
+  readonly valueDate: string;
+}
+
+/** The lines of some accounts, oldest first, filtered as `sumLines` filters. */
+export async function linesOf(tx: Tx, filter: BalanceFilter): Promise<JournalLineRow[]> {
+  const where: SQL[] = [sql`l.account_code = any(${`{${filter.accounts.join(',')}}`}::text[])`];
+  if (filter.bookIds) where.push(sql`l.book_id = any(${uuids(filter.bookIds)})`);
+  if (filter.collectorIds) where.push(sql`l.collector_id = any(${uuids(filter.collectorIds)})`);
+  if (filter.leaseIds) where.push(sql`l.lease_id = any(${uuids(filter.leaseIds)})`);
+  const result = await tx.execute<{
+    collector_id: string | null;
+    book_id: string;
+    property_id: string | null;
+    amount_minor: number;
+    value_date: string;
+  }>(
+    sql`select l.collector_id, l.book_id, l.property_id, l.amount_minor, e.value_date::text
+        from journal_line l join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
+        where ${sql.join(where, sql` and `)}
+        order by e.value_date, e.posted_at, l.line_no`,
+  );
+  return result.rows.map((r) => ({
+    collectorId: r.collector_id,
+    bookId: r.book_id,
+    propertyId: r.property_id,
+    amountMinor: Number(r.amount_minor),
+    valueDate: r.value_date,
+  }));
+}
+
+/** The value date of each posted entry among `keys` (idempotency keys), by key. */
+export async function entryValueDates(
+  tx: Tx,
+  keys: readonly string[],
+): Promise<Map<string, string>> {
+  if (keys.length === 0) return new Map();
+  const result = await tx.execute<{ key: string; value_date: string }>(
+    sql`select idempotency_key as key, value_date::text from journal_entry
+        where idempotency_key = any(${`{${keys.map((k) => `"${k}"`).join(',')}}`}::text[])`,
+  );
+  return new Map(result.rows.map((r) => [r.key, r.value_date]));
+}

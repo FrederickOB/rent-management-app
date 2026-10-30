@@ -167,6 +167,51 @@ export function accrualLines(input: {
   ]);
 }
 
+/**
+ * P02's prepaid part, late (P03): money received before a period started, for a period that has
+ * accrued since it arrived, was held as the line's advance; it now pays the line. Dated at the
+ * period start, so the receivable is never negative and prepayments right as of every date.
+ */
+export function lateDrawLines(input: {
+  readonly bookId: string;
+  readonly lease: LeaseDimensions;
+  readonly invoiceLineId: string;
+  readonly paymentId: string;
+  readonly amountMinor: number;
+}): JournalLineDraft[] {
+  const amount = positive(input.amountMinor, 'The draw');
+  if (amount === 0) return [];
+  const line = { bookId: input.bookId, ...input.lease, invoiceLineId: input.invoiceLineId };
+  return [
+    { ...line, accountCode: '2010', amountMinor: amount, paymentId: input.paymentId },
+    { ...line, accountCode: '1100', amountMinor: -amount },
+  ];
+}
+
+/**
+ * P02's credit for a tax line (review 10): as its base line's period starts, credit pays the VAT
+ * and levies already owed on it, out of prepayments, payment by payment.
+ */
+export function creditDrawLines(input: {
+  readonly bookId: string;
+  readonly lease: LeaseDimensions;
+  readonly invoiceLineId: string;
+  readonly draws: readonly PaymentAmount[];
+}): JournalLineDraft[] {
+  const amount = total(input.draws);
+  if (amount === 0) return [];
+  const line = { bookId: input.bookId, ...input.lease };
+  return compactLines([
+    ...input.draws.map((d) => ({
+      ...line,
+      accountCode: '2010' as const,
+      amountMinor: d.amountMinor,
+      paymentId: d.paymentId,
+    })),
+    { ...line, accountCode: '1100', amountMinor: -amount, invoiceLineId: input.invoiceLineId },
+  ]);
+}
+
 /** P01 for one-off lines: the tenant owes it (1100) and it is income (4200) when issued. */
 export function oneOffChargeLines(input: {
   readonly bookId: string;
@@ -378,12 +423,15 @@ export function creditNoteLines(input: {
   readonly chargedTo: '4000' | '4100' | '4200' | '2210' | null;
   readonly unpaidMinor: number;
   readonly released: readonly PaymentAmount[];
+  /** The lease a payment's credit sits on, when it moved to a renewal (P29; review 11). */
+  readonly creditLeaseOf?: (paymentId: string) => LeaseDimensions;
 }): JournalLineDraft[] {
   const line = { bookId: input.bookId, ...input.lease };
   const releasedTotal = total(input.released);
   const unpaid = positive(input.unpaidMinor, 'The unpaid part');
   const toCredit = input.released.map((r) => ({
     ...line,
+    ...(input.creditLeaseOf ? input.creditLeaseOf(r.paymentId) : {}),
     accountCode: '2010' as const,
     amountMinor: -r.amountMinor,
     paymentId: r.paymentId,
@@ -421,6 +469,14 @@ export function carryOverLines(input: {
   readonly to: LeaseDimensions;
   readonly credits: readonly PaymentAmount[];
   readonly depositMinor: number;
+  /**
+   * The deposit by the payment that paid it, so a later reversal can take it from where it sits;
+   * the parts add up to `depositMinor` (a part with no payment came from before they were kept).
+   */
+  readonly deposits?: readonly {
+    readonly paymentId: string | null;
+    readonly amountMinor: number;
+  }[];
 }): JournalLineDraft[] {
   const lines: JournalLineDraft[] = [];
   for (const credit of input.credits) {
@@ -443,10 +499,26 @@ export function carryOverLines(input: {
     );
   }
   const deposit = positive(input.depositMinor, 'The deposit');
-  if (deposit > 0)
-    lines.push(
-      { bookId: input.bookId, ...input.from, accountCode: '2100', amountMinor: deposit },
-      { bookId: input.bookId, ...input.to, accountCode: '2100', amountMinor: -deposit },
-    );
+  const parts = input.deposits ?? [{ paymentId: null, amountMinor: deposit }];
+  if (total(parts) !== deposit)
+    throw new DomainError('ledger.deposit_parts', 'The deposit parts must add up to the deposit');
+  for (const part of parts)
+    if (part.amountMinor > 0)
+      lines.push(
+        {
+          bookId: input.bookId,
+          ...input.from,
+          accountCode: '2100',
+          amountMinor: part.amountMinor,
+          paymentId: part.paymentId,
+        },
+        {
+          bookId: input.bookId,
+          ...input.to,
+          accountCode: '2100',
+          amountMinor: -part.amountMinor,
+          paymentId: part.paymentId,
+        },
+      );
   return compactLines(lines);
 }

@@ -75,6 +75,10 @@ export const invoiceLineSchema = z.object({
   creditedMinor: minor,
   writtenOffMinor: minor,
   outstandingMinor: minor,
+  /** The most a credit note may take off this line now (P27, the domain's rule); 0 when none. */
+  creditableMinor: minor,
+  /** The most a write-off may take off this line now (P24: accrued and one-off lines); 0 when none. */
+  writeOffableMinor: minor,
   /** Rent and service charge: income since its period started (P02). */
   accrued: z.boolean(),
   rule: ruleUsedSchema.nullable(),
@@ -153,6 +157,23 @@ export const leaseBillingSchema = z.object({
   unearnedRentMinor: minor,
   depositHeldMinor: minor,
   creditMinor: minor,
+  /**
+   * Lines charged for periods after the lease's last day (a move-out recorded late): they stay
+   * owed until a credit note is asked for and a second person approves it (P27).
+   */
+  chargedAfterEnd: z.array(
+    z.object({
+      lineId: uuid,
+      invoiceId: uuid,
+      invoiceNumber: z.string(),
+      label: z.string(),
+      periodStart: isoDate,
+      periodEnd: isoDate,
+      netMinor: minor,
+      outstandingMinor: minor,
+      creditableMinor: minor,
+    }),
+  ),
   currency: z.literal('GHS'),
 });
 export type LeaseBilling = z.infer<typeof leaseBillingSchema>;
@@ -168,6 +189,10 @@ export const paymentRowSchema = z.object({
   unitCode: z.string().nullable(),
   propertyName: z.string().nullable(),
   ownerName: z.string().nullable(),
+  /** Whose book it is in: the owner, or null for money waiting in the company book (P23). */
+  ownerId: uuid.nullable(),
+  /** Where the money went (P03, P06, P28): what a reversal and a match need to know. */
+  receivedInto: z.enum(['provider', 'collector', 'owner_account', 'agency_account']),
   receiptId: uuid.nullable(),
   receiptNumber: z.string().nullable(),
   /** Its credit: what it has not paid towards any line yet. */
@@ -239,6 +264,8 @@ export const collectorCashSchema = z.object({
   heldMinor: minor,
   /** Banking waiting for approval: it still counts as held until approved. */
   bankingPendingMinor: minor,
+  /** What a new banking may ask for now: what is held less banking waiting for approval. */
+  bankableMinor: minor,
   oldestUnbankedOn: isoDate.nullable(),
 });
 

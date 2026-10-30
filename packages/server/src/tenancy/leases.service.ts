@@ -170,6 +170,11 @@ export class LeasesService {
       schema: cancelSignedPayload,
       // One cancellation waits at a time for a lease; a second would only ask the same question.
       onePerSubject: true,
+      // The lease row first, before the decision is audited: the transitions job takes the lease
+      // before the audit chain head too, so the two never wait on each other (review 3).
+      prepare: async (tx, request) => {
+        await leaseRow(tx, (request.payload as CancelSignedPayload).leaseId, { lock: true });
+      },
       currentPayload: async (tx, request) => {
         const proposed = request.payload as CancelSignedPayload;
         const row = await leaseRow(tx, proposed.leaseId);
@@ -538,6 +543,8 @@ export class LeasesService {
       }
       return leaseId;
     });
+    // The scan's plain copy goes only now, so a refused or failed write can be sent again.
+    await this.documents.discardStagedUpload(staged);
     return this.view(staff, id);
   }
 
@@ -662,6 +669,7 @@ export class LeasesService {
         'lease_stamped_copy',
       ),
     }));
+    await this.documents.discardStagedUpload(staged);
     return this.view(staff, leaseId);
   }
 
@@ -702,6 +710,7 @@ export class LeasesService {
           }
         : {}),
     }));
+    if (staged) await this.documents.discardStagedUpload(staged);
     return this.view(staff, leaseId);
   }
 
@@ -780,6 +789,7 @@ export class LeasesService {
       actionType: CANCEL_SIGNED_ACTION,
       subjectType: 'lease',
       subjectId: row.id,
+      propertyId: row.propertyId,
       payload: {
         leaseId: row.id,
         reason: why.slice(0, 500),

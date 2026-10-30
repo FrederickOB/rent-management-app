@@ -41,22 +41,30 @@ export class BillingController {
         serialize(await this.read.leaseBilling(ctx.actor, input.leaseId)),
       ),
       creditNote: implement(contract.invoices.creditNote).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'invoice.credit_note', input, async (claim) => {
-          const { lineId, ...rest } = input;
-          return this.approval(
-            ctx,
-            await this.money.requestCreditNote(ctx.actor, lineId, rest, { claim }),
-          );
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'invoice.credit_note',
+          input,
+          (claim) => {
+            const { lineId, ...rest } = input;
+            return this.money.requestCreditNote(ctx.actor, lineId, rest, { claim });
+          },
+          (approvalId) => this.approval(ctx, approvalId),
+        ),
       ),
       writeOff: implement(contract.invoices.writeOff).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'invoice.write_off', input, async (claim) => {
-          const { lineId, ...rest } = input;
-          return this.approval(
-            ctx,
-            await this.money.requestWriteOff(ctx.actor, lineId, rest, { claim }),
-          );
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'invoice.write_off',
+          input,
+          (claim) => {
+            const { lineId, ...rest } = input;
+            return this.money.requestWriteOff(ctx.actor, lineId, rest, { claim });
+          },
+          (approvalId) => this.approval(ctx, approvalId),
+        ),
       ),
     };
   }
@@ -68,32 +76,44 @@ export class BillingController {
         serialize(await this.money.createUpload(ctx.actor, input)),
       ),
       recordCash: implement(contract.payments.recordCash).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'payment.cash_record', input, async (claim) => {
-          const { cashRecordId, approvalId } = await this.money.recordCash(ctx.actor, input, {
-            claim,
-          });
-          const [cashRecord] = await this.read.cashRecords(ctx.actor, { ids: [cashRecordId] });
-          if (!cashRecord) throw notFound('Cash record');
-          return {
-            cashRecord: serialize(cashRecord),
-            ...(await this.approval(ctx, approvalId)),
-          };
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'payment.cash_record',
+          input,
+          (claim) => this.money.recordCash(ctx.actor, input, { claim }),
+          async ({ cashRecordId, approvalId }) => {
+            const [cashRecord] = await this.read.cashRecords(ctx.actor, { ids: [cashRecordId] });
+            if (!cashRecord) throw notFound('Cash record');
+            return {
+              cashRecord: serialize(cashRecord),
+              ...(await this.approval(ctx, approvalId)),
+            };
+          },
+        ),
       ),
       cashRecords: implement(contract.payments.cashRecords).handler(async ({ input }) =>
         serialize(await this.read.cashRecords(ctx.actor, input)),
       ),
       recordTransfer: implement(contract.payments.recordTransfer).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'payment.direct_receipt', input, async (claim) => {
-          const { approvalId } = await this.money.recordTransfer(ctx.actor, input, { claim });
-          return this.approval(ctx, approvalId);
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'payment.direct_receipt',
+          input,
+          (claim) => this.money.recordTransfer(ctx.actor, input, { claim }),
+          ({ approvalId }) => this.approval(ctx, approvalId),
+        ),
       ),
       recordBanking: implement(contract.payments.recordBanking).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'cash.banking', input, async (claim) => {
-          const { approvalId } = await this.money.recordBanking(ctx.actor, input, { claim });
-          return this.approval(ctx, approvalId);
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'cash.banking',
+          input,
+          (claim) => this.money.recordBanking(ctx.actor, input, { claim }),
+          ({ approvalId }) => this.approval(ctx, approvalId),
+        ),
       ),
       collectorsCash: implement(contract.payments.collectorsCash).handler(async () =>
         serialize(await this.read.collectorsCash(ctx.actor)),
@@ -105,13 +125,17 @@ export class BillingController {
         serialize(await this.read.payment(ctx.actor, input.paymentId)),
       ),
       requestReversal: implement(contract.payments.requestReversal).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'payment.reversal', input, async (claim) => {
-          const { paymentId, ...rest } = input;
-          return this.approval(
-            ctx,
-            await this.money.requestReversal(ctx.actor, paymentId, rest, { claim }),
-          );
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'payment.reversal',
+          input,
+          (claim) => {
+            const { paymentId, ...rest } = input;
+            return this.money.requestReversal(ctx.actor, paymentId, rest, { claim });
+          },
+          (approvalId) => this.approval(ctx, approvalId),
+        ),
       ),
       receipts: implement(contract.payments.receipts).handler(async ({ input }) =>
         serialize(await this.read.receipts(ctx.actor, input)),
@@ -126,10 +150,17 @@ export class BillingController {
         serialize(await this.read.unmatched(ctx.actor)),
       ),
       match: implement(contract.payments.match).handler(({ input }) =>
-        idempotent(this.idempotency, ctx, 'payment.match', input, async (claim) => {
-          await this.money.match(ctx.actor, input.paymentId, input.leaseId, { claim });
-          return serialize(await this.read.payment(ctx.actor, input.paymentId));
-        }),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'payment.match',
+          input,
+          async (claim) => {
+            await this.money.match(ctx.actor, input.paymentId, input.leaseId, { claim });
+            return { paymentId: input.paymentId };
+          },
+          async ({ paymentId }) => serialize(await this.read.payment(ctx.actor, paymentId)),
+        ),
       ),
     };
   }

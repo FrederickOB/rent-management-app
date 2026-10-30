@@ -50,7 +50,7 @@ import { ADDRESS_LOOKUP_PORT, CLOCK, DATABASE } from '../core/tokens';
 import { staffActor } from '../companies/companies.service';
 import { OwnersService } from '../companies/owners.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
-import { propertyHasLedger } from './ownership';
+import { lockPropertyOwner, propertyHasLedger } from './ownership';
 import type { AddressInput, NewBlock, NewProperty, UnitBatch } from './register.types';
 
 type StaffActor = ReturnType<typeof staffActor>;
@@ -485,6 +485,7 @@ export class RegisterService {
     const from = parseBusinessDate(input.effectiveFrom);
     await withRegisterChecks(() =>
       withCompany(this.database, staffContext(staff), async (tx) => {
+        await lockPropertyOwner(tx, staff.companyId, propertyId);
         // Locked, so two changes at once cannot both pass the date check and double the shares.
         const [property] = await tx
           .select({ id: schema.property.id })
@@ -535,6 +536,7 @@ export class RegisterService {
     if (reason.length < 5) throw invalid('reason_required', 'Say why the owner is being corrected');
     await withRegisterChecks(() =>
       withCompany(this.database, staffContext(staff), async (tx) => {
+        await lockPropertyOwner(tx, staff.companyId, propertyId);
         const [property] = await tx
           .select({ id: schema.property.id })
           .from(schema.property)

@@ -81,6 +81,13 @@ export interface ApprovalResource {
   readonly initiatorPersonId: string;
   /** Roles the action type lets approve, declared by its handler. */
   readonly eligibleRoles: readonly StaffRole[];
+  /**
+   * The property the request's subject belongs to; null for a company-level request (AD-02).
+   * Left out, the scope is not judged here.
+   */
+  readonly propertyId?: string | null;
+  /** The properties the deciding session covers (its resolved scope), or null when unscoped. */
+  readonly scopeProperties?: readonly string[] | null;
 }
 
 export interface Decision {
@@ -315,6 +322,15 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
         const isInitiator = resource.initiatorPersonId === actor.personId;
         if (action === 'approval.decide') {
           if (isInitiator) return deny('the initiator can never approve (AD-05)');
+          // A scoped person decides only requests about their properties; a company-level
+          // request is for people who see the whole company (AD-02; M4a review 8).
+          // Checked when the caller says where the request belongs (the approvals engine does).
+          if (
+            resource.propertyId !== undefined &&
+            scopeOf(actor) !== null &&
+            !(resource.propertyId && resource.scopeProperties?.includes(resource.propertyId))
+          )
+            return deny('the request is outside this person’s properties');
           return eligibleToApprove(actor, resource)
             ? allow('eligible approver')
             : deny('not an eligible approver for this action');

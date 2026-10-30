@@ -788,9 +788,11 @@ export const creditCarryOver = pgTable(
     }),
     index('credit_carry_over_from_idx').on(t.companyId, t.fromLeaseId),
     check('credit_carry_over_kind_check', sql`${t.kind} in ('credit', 'deposit')`),
+    // Credit always moves with its payment; a deposit does too from the M4a review on (review 9),
+    // and older deposit rows have none.
     check(
       'credit_carry_over_payment_check',
-      sql`(${t.kind} = 'credit') = (${t.paymentId} is not null)`,
+      sql`${t.kind} = 'deposit' or ${t.paymentId} is not null`,
     ),
     check('credit_carry_over_amount_check', sql`${t.amountMinor} > 0`),
   ],

@@ -9,7 +9,9 @@ import {
   parseBusinessDate,
   toIsoDate,
 } from '@rent/domain/dates';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { CallbackAlert, type Alert } from '@rent/integrations';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { InvoicingService } from '../src/billing/invoicing.service';
 import { asOwner, startServerTest, type ServerTestContext } from './support';
 import {
   approvedCash,
@@ -342,6 +344,8 @@ describe('BC-01 invoices from lease terms', () => {
     expect(detail.notes).toEqual([expect.stringMatching(/^The lease ended on /)]);
     const card = await moneyCard(ctx, b, agency.companyId, lease.id);
     expect(card.creditMinor).toBe(90_000);
+    // Paid until the move-out day, not the end of the cancelled month (review 4, 14).
+    expect(card.paidUntil).toBe(today);
     // Nothing more is invoiced or charged for this lease.
     await generate(plusMonths(today, 2));
     expect(await invoicesOf(lease.id)).toHaveLength(1);
@@ -860,5 +864,494 @@ describe('AC-01 every owner and company has its book', () => {
         ['owner', created.id],
       ].sort(),
     );
+  });
+});
+
+describe('BC-01 a move-out recorded late keeps what was earned (review 1)', () => {
+  it('cancels only periods never charged; charged ones stay owed until two people credit them', async () => {
+    const start = plusMonths(today, -4);
+    const lease = await billedLease(ctx, s, b, agency.manager, {
+      unitId: nextUnit(elg),
+      tenantId: await tenant('Late Move-Out'),
+      startDate: start,
+      endDate: endAfter(start, 12),
+      monthlyRentMinor: 100_000,
+      cycle: 'monthly',
+      signedOn: plusDays(start, -1),
+      billingStartDate: start,
+    });
+    await b.invoicing.generateAll(agency.companyId, today);
+    await b.invoicing.accrueAll(agency.companyId, today);
+    await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: lease.id,
+      amountMinor: 100_000,
+      receivedOn: today,
+    });
+    const before = await moneyCard(ctx, b, agency.companyId, lease.id);
+    const incomeBefore = await leaseAccount(ctx, agency.companyId, lease.id, '4000');
+    expect(before.earnedUnpaidMinor).toBe(400_000);
+    // One person records, today, that the tenant left at the end of the first month.
+    const lastDay = endAfter(start, 1);
+    await s.lifecycle.recordMoveOut(agency.manager, lease.id, { moveOutDate: lastDay });
+    await runLeaseEvents(ctx, b, agency.companyId);
+    await b.invoicing.accrueAll(agency.companyId, today);
+    const after = await moneyCard(ctx, b, agency.companyId, lease.id);
+    // Nothing earned disappeared, and no system credit note touched a charged line.
+    expect(after.earnedUnpaidMinor).toBe(400_000);
+    expect(await leaseAccount(ctx, agency.companyId, lease.id, '4000')).toBe(incomeBefore);
+    const notes = await withCompany(
+      ctx.database,
+      { companyId: agency.companyId, actorKind: 'system' },
+      (tx) =>
+        tx.execute<{ accrued: boolean }>(
+          sql`select exists (select 1 from invoice_line_accrual a where a.invoice_line_id = n.invoice_line_id
+                and a.amount_minor > 0) as accrued
+              from credit_note n where n.lease_id = ${lease.id}`,
+        ),
+    );
+    expect(notes.rows.every((n) => !n.accrued)).toBe(true);
+    // The charged periods after the end are listed for a person to deal with.
+    expect(after.chargedAfterEnd.map((l) => l.periodStart)).toEqual([
+      plusMonths(start, 1),
+      plusMonths(start, 2),
+      plusMonths(start, 3),
+      plusMonths(start, 4),
+    ]);
+    expect(after.chargedAfterEnd.every((l) => l.outstandingMinor === 100_000)).toBe(true);
+    // Paid until the move-out day: the first month was paid, nothing after it.
+    expect(after.paidUntil).toBe(lastDay);
+    // A credit note asked for by one person and approved by another cancels one of them.
+    const first = after.chargedAfterEnd[0]!;
+    const id = await b.money.requestCreditNote(agency.manager, first.lineId, {
+      amountMinor: first.creditableMinor,
+      reason: 'The tenant left at the end of the first month',
+    });
+    await s.approvals.decide(agency.admin, id, { decision: 'approve' });
+    const credited = await moneyCard(ctx, b, agency.companyId, lease.id);
+    expect(credited.earnedUnpaidMinor).toBe(300_000);
+    expect(credited.chargedAfterEnd[0]).toMatchObject({ lineId: first.lineId, netMinor: 0 });
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+});
+
+describe('BC-01 one failing lease never stops the daily runs (review 7)', () => {
+  it('bills every other lease, alerts with the lease and its error code, and catches up later', async () => {
+    const fresh = await moneyCompany(ctx, s, 'agency', 'Daily Run Agency');
+    const owner = (
+      await s.owners.create(fresh.admin, { kind: 'individual', displayName: 'Daily Owner' })
+    ).id;
+    const property = await propertyWithUnits(s, fresh.manager, {
+      areaCode: 'ACC',
+      propertyPart: 'DLY',
+      ownerId: owner,
+      units: [{ unitType: 'single_room', count: 2 }],
+    });
+    const [unitA, unitB] = Object.values(property.units);
+    const start = plusMonths(today, -2);
+    const leaseOn = async (unitId: string, name: string) =>
+      s.leases.recordPaper(fresh.manager, {
+        unitId,
+        tenantId: (await s.tenants.create(fresh.manager, { kind: 'individual', displayName: name }))
+          .tenant.id,
+        startDate: start,
+        endDate: endAfter(start, 12),
+        monthlyRentMinor: 50_000,
+        cycle: 'monthly',
+        noticeDays: 30,
+        parties: [{ role: 'tenant', name }],
+        scanUploadId: await uploadLeaseFile(ctx, s, fresh.manager),
+        signedOn: plusDays(start, -1),
+        billingStartDate: start,
+      });
+    const invoicesOf = (leaseId: string) =>
+      withCompany(ctx.database, { companyId: fresh.companyId, actorKind: 'system' }, (tx) =>
+        tx
+          .select()
+          .from(schema.invoice)
+          .where(sql`${schema.invoice.leaseId} = ${leaseId}`),
+      );
+    const broken = await leaseOn(unitA!, 'Broken Lease');
+    const fine = await leaseOn(unitB!, 'Fine Lease');
+    const alerts: Alert[] = [];
+    const invoicing = new InvoicingService(
+      ctx.database,
+      b.engine,
+      b.posting,
+      ctx.clock,
+      new CallbackAlert((alert) => {
+        alerts.push(alert);
+      }),
+    );
+    // One lease fails as a missing rules row would make it fail.
+    const generate = b.engine.generate.bind(b.engine);
+    const failing = vi.spyOn(b.engine, 'generate').mockImplementation(async (tx, state, date) => {
+      if (state.lease.id === broken.id)
+        throw Object.assign(new Error('No rule'), { code: 'rule_missing' });
+      return generate(tx, state, date);
+    });
+    try {
+      expect(await invoicing.generateAll(fresh.companyId, today)).toBeGreaterThan(0);
+    } finally {
+      failing.mockRestore();
+    }
+    expect(await invoicesOf(fine.id)).not.toHaveLength(0);
+    expect(await invoicesOf(broken.id)).toHaveLength(0);
+    expect(alerts).toEqual([
+      expect.objectContaining({
+        code: 'billing.lease_run_failed',
+        context: expect.objectContaining({ leaseId: broken.id, error: 'rule_missing' }),
+      }),
+    ]);
+    // The next run bills the lease that failed and issues nothing more for the other.
+    const fineInvoices = (await invoicesOf(fine.id)).length;
+    await invoicing.generateAll(fresh.companyId, today);
+    expect(await invoicesOf(broken.id)).not.toHaveLength(0);
+    expect(await invoicesOf(fine.id)).toHaveLength(fineInvoices);
+  });
+});
+
+describe('P29 a reversal after the deposit moved to the renewal (review 9)', () => {
+  it('takes the deposit back from the renewal that holds it; both leases match their sub-ledgers', async () => {
+    const start = plusMonths(today, -11);
+    const end = endAfter(start, 12);
+    const old = await billedLease(ctx, s, b, agency.manager, {
+      unitId: nextUnit(elg),
+      tenantId: await tenant('Bounced Deposit'),
+      startDate: start,
+      endDate: end,
+      monthlyRentMinor: 100_000,
+      depositMinor: 200_000,
+      cycle: 'monthly',
+      signedOn: plusDays(start, -1),
+      billingStartDate: start,
+    });
+    const paid = await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: old.id,
+      amountMinor: 200_000 + 12 * 100_000,
+      receivedOn: today,
+      method: 'cheque',
+    });
+    await generate(plusDays(end, -13));
+    const renewal = await s.leases.offerRenewal(agency.manager, old.id);
+    const scan = await uploadLeaseFile(ctx, s, agency.manager);
+    const staged = await s.documents.stageEvidenceUpload(
+      { companyId: agency.companyId, personId: agency.manager.personId },
+      scan,
+      { purpose: 'lease_file', contentTypes: ['application/pdf'], maxBytes: 20_000_000 },
+    );
+    await withCompany(
+      ctx.database,
+      { companyId: agency.companyId, personId: agency.manager.personId, actorKind: 'staff' },
+      async (tx) => {
+        const documentId = await s.documents.recordStagedEvidence(tx, staged, 'lease_scan');
+        await s.lifecycle.markSigned(tx, {
+          leaseId: renewal.id,
+          signedAt: ctx.clock.now(),
+          source: 'paper',
+          signedDocumentId: documentId,
+        });
+      },
+    );
+    await runLeaseEvents(ctx, b, agency.companyId);
+    const renewalStart = plusDays(end, 1);
+    await on(renewalStart, async () => {
+      await s.lifecycle.runTransitions(agency.companyId, renewalStart);
+      await runLeaseEvents(ctx, b, agency.companyId);
+      await b.invoicing.accrueAll(agency.companyId, renewalStart);
+      expect(-(await leaseAccount(ctx, agency.companyId, renewal.id, '2100'))).toBe(200_000);
+      // The cheque bounces: the whole payment is reversed, deposit included.
+      const [record] = await b.read.cashRecords(agency.manager, { ids: [paid.cashRecordId] });
+      const requestId = await b.money.requestReversal(agency.manager, record!.paymentId!, {
+        reason: 'bounced_cheque',
+        note: 'The cheque came back unpaid',
+        moneyNowIn: 'owner_account',
+      });
+      await s.approvals.decide(agency.admin, requestId, { decision: 'approve' });
+    });
+    expect(await leaseAccount(ctx, agency.companyId, old.id, '2100')).toBe(0);
+    expect(await leaseAccount(ctx, agency.companyId, renewal.id, '2100')).toBe(0);
+    expect((await moneyCard(ctx, b, agency.companyId, renewal.id)).depositHeldMinor).toBe(0);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+});
+
+/** Signs a renewal of `oldId` on paper now; the caller starts it, as the jobs would. */
+async function startRenewal(oldId: string) {
+  const renewal = await s.leases.offerRenewal(agency.manager, oldId);
+  const scan = await uploadLeaseFile(ctx, s, agency.manager);
+  const staged = await s.documents.stageEvidenceUpload(
+    { companyId: agency.companyId, personId: agency.manager.personId },
+    scan,
+    { purpose: 'lease_file', contentTypes: ['application/pdf'], maxBytes: 20_000_000 },
+  );
+  await withCompany(
+    ctx.database,
+    { companyId: agency.companyId, personId: agency.manager.personId, actorKind: 'staff' },
+    async (tx) => {
+      const documentId = await s.documents.recordStagedEvidence(tx, staged, 'lease_scan');
+      await s.lifecycle.markSigned(tx, {
+        leaseId: renewal.id,
+        signedAt: ctx.clock.now(),
+        source: 'paper',
+        signedDocumentId: documentId,
+      });
+    },
+  );
+  await runLeaseEvents(ctx, b, agency.companyId);
+  return renewal;
+}
+
+describe('CT-04 credit pays VAT lines too (review 10)', () => {
+  it('shows no VAT overdue on a renewal while its carried credit lasts', async () => {
+    const start = plusMonths(today, -11);
+    const end = endAfter(start, 12);
+    const shop = await propertyWithUnits(s, agency.manager, {
+      areaCode: 'ACC',
+      propertyPart: 'VRN',
+      ownerId: ownerVat,
+      use: 'commercial',
+      units: [{ unitType: 'shop', count: 1 }],
+    });
+    const old = await billedLease(ctx, s, b, agency.manager, {
+      unitId: Object.values(shop.units)[0]!,
+      tenantId: await tenant('VAT Renewal Ltd', 'company'),
+      startDate: start,
+      endDate: end,
+      monthlyRentMinor: 100_000,
+      cycle: 'monthly',
+      use: 'commercial',
+      signedOn: plusDays(start, -1),
+      billingStartDate: start,
+    });
+    // Twelve months with their VAT and levies (120,000 each), and three more held as credit.
+    await approvedTransfer(ctx, s, b, agency.manager, agency.accountant, {
+      leaseId: old.id,
+      receivedInto: 'agency_account',
+      amountMinor: 15 * 120_000,
+      receivedOn: today,
+    });
+    await generate(plusDays(end, -13));
+    const renewal = await startRenewal(old.id);
+    const renewalStart = plusDays(end, 1);
+    await on(renewalStart, async () => {
+      await s.lifecycle.runTransitions(agency.companyId, renewalStart);
+      await runLeaseEvents(ctx, b, agency.companyId);
+      await b.invoicing.generateAll(agency.companyId, renewalStart);
+      await b.invoicing.accrueAll(agency.companyId, renewalStart);
+    });
+    const next = plusDays(renewalStart, 1);
+    await on(next, async () => {
+      const card = await moneyCard(ctx, b, agency.companyId, renewal.id);
+      expect(card.creditMinor).toBeGreaterThan(0);
+      expect(card.overdueMinor).toBe(0);
+      expect(card.earnedUnpaidMinor).toBe(0);
+    });
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+});
+
+describe('P29 no credit is stranded on an ended lease (review 11)', () => {
+  it('moves credit that appears after the renewal started: a late payment, a credit note', async () => {
+    const start = plusMonths(today, -11);
+    const end = endAfter(start, 12);
+    const old = await billedLease(ctx, s, b, agency.manager, {
+      unitId: nextUnit(elg),
+      tenantId: await tenant('Late Payer'),
+      startDate: start,
+      endDate: end,
+      monthlyRentMinor: 100_000,
+      cycle: 'monthly',
+      signedOn: plusDays(start, -1),
+      billingStartDate: start,
+    });
+    // Eleven months paid; the last month is paid only after the renewal has started.
+    await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: old.id,
+      amountMinor: 11 * 100_000,
+      receivedOn: today,
+    });
+    await generate(plusDays(end, -13));
+    await startRenewal(old.id);
+    const renewalStart = plusDays(end, 1);
+    await on(renewalStart, async () => {
+      await s.lifecycle.runTransitions(agency.companyId, renewalStart);
+      await runLeaseEvents(ctx, b, agency.companyId);
+      await b.invoicing.accrueAll(agency.companyId, renewalStart);
+      // A payment against the old lease: its last month, and 30,000 more.
+      await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+        leaseId: old.id,
+        amountMinor: 130_000,
+        receivedOn: renewalStart,
+      });
+      expect(await leaseAccount(ctx, agency.companyId, old.id, '2010')).toBe(0);
+      expect(await leaseAccount(ctx, agency.companyId, old.id, '1100')).toBe(0);
+      // A credit note on a month of the old lease returns its money to the renewal's credit.
+      const lines = (await invoicesOf(old.id)).flatMap((i) => i.lines);
+      const second = lines.find((l) => l.periodStart === plusMonths(start, 1))!;
+      const id = await b.money.requestCreditNote(agency.manager, second.id, {
+        amountMinor: 20_000,
+        reason: 'Agreed discount, after the renewal began',
+      });
+      await s.approvals.decide(agency.admin, id, { decision: 'approve' });
+      expect(await leaseAccount(ctx, agency.companyId, old.id, '2010')).toBe(0);
+    });
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+});
+
+describe('AR-03 unearned rent', () => {
+  it('is the rent share of prepayments: months not started yet, without service charge', async () => {
+    const lease = await billedLease(ctx, s, b, agency.manager, {
+      unitId: nextUnit(elg),
+      tenantId: await tenant('Unearned Rent'),
+      startDate: today,
+      endDate: endAfter(today, 12),
+      monthlyRentMinor: 100_000,
+      serviceChargeMonthlyMinor: 10_000,
+      cycle: 'quarterly',
+      signedOn: plusDays(today, -1),
+      billingStartDate: today,
+    });
+    // The quarter paid in full: this month is earned today; two months of rent are unearned.
+    await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: lease.id,
+      amountMinor: 3 * 110_000,
+      receivedOn: today,
+    });
+    const card = await moneyCard(ctx, b, agency.companyId, lease.id);
+    expect(card.unearnedRentMinor).toBe(200_000);
+    expect(-(await leaseAccount(ctx, agency.companyId, lease.id, '2010'))).toBe(220_000);
+    expect(card.paidUntil).toBe(endAfter(today, 3));
+  });
+});
+
+describe('PR-07 an invoice is always in its property owner’s book (review 20)', () => {
+  it('refuses in the database an invoice for an owner the property does not have', async () => {
+    const lease = await billedLease(ctx, s, b, agency.manager, {
+      unitId: nextUnit(elg),
+      tenantId: await tenant('Owner Check'),
+      startDate: today,
+      endDate: endAfter(today, 12),
+      monthlyRentMinor: 50_000,
+      cycle: 'monthly',
+      signedOn: plusDays(today, -1),
+      billingStartDate: today,
+    });
+    const refused = await withCompany(
+      ctx.database,
+      { companyId: agency.companyId, actorKind: 'system' },
+      async (tx) => {
+        const [invoice] = await tx
+          .select()
+          .from(schema.invoice)
+          .where(sql`${schema.invoice.leaseId} = ${lease.id}`)
+          .limit(1);
+        const [other] = await tx
+          .select({ id: schema.book.id, ownerId: schema.book.ownerId })
+          .from(schema.book)
+          .where(sql`${schema.book.ownerId} = ${ownerVat}`);
+        const { id: _id, number: _number, ...rest } = invoice!;
+        return tx
+          .insert(schema.invoice)
+          .values({
+            ...rest,
+            number: 999_999,
+            kind: 'one_off',
+            cycleStart: null,
+            ownerId: other!.ownerId!,
+            bookId: other!.id,
+          })
+          .then(
+            () => null,
+            (e: { cause?: { code?: string } }) => e.cause?.code,
+          );
+      },
+    );
+    expect(refused).toBe('RA050');
+  });
+});
+
+describe('CT-04 VAT is never owed before its tax point (second review A)', () => {
+  const taxOwed = (leaseId: string, before?: string) =>
+    journalSum(
+      ctx,
+      agency.companyId,
+      `l.account_code = '1100' and l.invoice_line_id in (select id from invoice_line
+         where lease_id = $1 and kind in ('vat', 'nhil', 'getfund'))${before ? ' and e.value_date < $2' : ''}`,
+      before ? [leaseId, before] : [leaseId],
+    );
+  const vatShop = async (part: string) =>
+    propertyWithUnits(s, agency.manager, {
+      areaCode: 'ACC',
+      propertyPart: part,
+      ownerId: ownerVat,
+      use: 'commercial',
+      units: [{ unitType: 'shop', count: 1 }],
+    });
+
+  it('charges VAT on the invoices a back-dated payment issues at that payment’s date', async () => {
+    const shop = await vatShop('VTA');
+    const start = plusDays(today, 2);
+    const lease = await billedLease(ctx, s, b, agency.manager, {
+      unitId: Object.values(shop.units)[0]!,
+      tenantId: await tenant('Back-dated VAT Ltd', 'company'),
+      startDate: start,
+      endDate: endAfter(start, 12),
+      monthlyRentMinor: 100_000,
+      cycle: 'monthly',
+      use: 'commercial',
+      signedOn: plusDays(today, -10),
+    });
+    const paidOn = plusDays(today, -3);
+    await approvedTransfer(ctx, s, b, agency.manager, agency.accountant, {
+      leaseId: lease.id,
+      receivedInto: 'agency_account',
+      amountMinor: 240_000,
+      receivedOn: paidOn,
+    });
+    expect(await taxOwed(lease.id, today)).toBe(0);
+    expect(await taxOwed(lease.id)).toBe(0);
+    // The payment is the tax point of what it made issue (decision 4).
+    const vatDates = await withCompany(
+      ctx.database,
+      { companyId: agency.companyId, actorKind: 'system' },
+      (tx) =>
+        tx.execute<{ value_date: string }>(
+          sql`select distinct e.value_date::text from journal_entry e
+              join journal_line l on l.entry_id = e.id
+              where e.rule = 'P32' and l.lease_id = ${lease.id}`,
+        ),
+    );
+    expect(vatDates.rows.map((r) => r.value_date)).toContain(paidOn);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
+
+  it('holds money for VAT charged after it arrived, matched or paid, then draws it at the charge', async () => {
+    // Invoiced today, with its VAT charged today; the money arrived three days ago.
+    const shop = await vatShop('VTB');
+    const lease = await billedLease(ctx, s, b, agency.manager, {
+      unitId: Object.values(shop.units)[0]!,
+      tenantId: await tenant('Earlier Money Ltd', 'company'),
+      startDate: today,
+      endDate: endAfter(today, 12),
+      monthlyRentMinor: 100_000,
+      cycle: 'monthly',
+      use: 'commercial',
+      signedOn: plusDays(today, -10),
+      billingStartDate: today,
+    });
+    await approvedTransfer(ctx, s, b, agency.manager, agency.accountant, {
+      receivedInto: 'agency_account',
+      amountMinor: 120_000,
+      receivedOn: plusDays(today, -3),
+      senderReference: 'VAT EARLY 0001',
+    });
+    const waiting = (await b.read.unmatched(agency.manager)).find(
+      (u) => u.senderReference === 'VAT EARLY 0001',
+    )!;
+    await b.money.match(agency.manager, waiting.paymentId, lease.id);
+    expect(await taxOwed(lease.id, today)).toBe(0);
+    expect(await taxOwed(lease.id)).toBe(0);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
   });
 });

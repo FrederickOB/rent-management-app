@@ -200,6 +200,144 @@ describe('M2 S8 idempotent requests over HTTP', () => {
   });
 });
 
+describe('BC-05 approvers see the evidence (M4a review)', () => {
+  it('gives whoever may decide a request its photo, proof or slip, and refuses people outside it', async () => {
+    const leaseId = await paperLease(units[2]!.id, 'Evidence Tenant');
+    // Elsewhere in the company: another property, with a caretaker and a manager kept to it.
+    const ownerB = await admin.call('/owners', {
+      body: { kind: 'individual', displayName: 'Owner B' },
+    });
+    const other = await manager.call('/properties', {
+      body: {
+        areaCode: 'ACC',
+        propertyPart: 'OSU',
+        name: 'Osu',
+        propertyType: 'compound_house',
+        use: 'residential',
+        ownerId: ownerB.json.id,
+        address: { region: 'Greater Accra', town: 'Osu' },
+        units: [{ unitType: 'single_room', count: 1 }],
+      },
+    });
+    expect(other.status, JSON.stringify(other.json)).toBe(200);
+    const keepToOther = (membershipId: string) =>
+      withCompany(api.database, { companyId: agencyId, actorKind: 'system' }, (tx) =>
+        tx
+          .update(schema.membership)
+          .set({ scope: { properties: [String(other.json.id)] } })
+          .where(sql`${schema.membership.id} = ${membershipId}`),
+      );
+    const far = await createPerson(api, { name: 'Far Caretaker', phone: '+233200000402' });
+    await keepToOther(await addMembership(api, agencyId, far.personId, 'caretaker'));
+    const farCaretaker = await phoneSignIn('+233200000402');
+    const scoped = await createPerson(api, {
+      name: 'Osu Manager',
+      email: 'osu.manager@billing.invalid',
+      password: PASSWORD,
+    });
+    await keepToOther(await addMembership(api, agencyId, scoped.personId, 'property_manager'));
+    const farManager = (await enrolStaff(api, 'osu.manager@billing.invalid', PASSWORD)).device;
+    const download = (device: Device, documentId: string) =>
+      device.call(`/payment-files/${documentId}/download`);
+    const outsidersRefused = async (documentId: string) => {
+      // Outside the property, the file does not exist for them (as any record out of scope).
+      for (const outsider of [farCaretaker, farManager])
+        expect((await download(outsider, documentId)).status).toBe(404);
+    };
+    type Awaiting = { approval: { id: string; payload: Record<string, unknown> } };
+    type OnHand = {
+      collectorPersonId: string;
+      ownerId: string;
+      heldMinor: number;
+      bankingPendingMinor: number;
+      bankableMinor: number;
+    };
+    // The caretaker's cash for the Legon owner (the one property they look after).
+    const onHand = async () =>
+      ((await caretaker.call('/collectors/cash')).json as unknown as OnHand[])[0];
+    const heldBefore = (await onHand())?.heldMinor ?? 0;
+
+    // Cash: the caretaker's photo of the receipt-book page is on the request.
+    const cash = await caretaker.call('/cash-records', {
+      body: {
+        leaseId,
+        method: 'cash',
+        amountMinor: 60_000,
+        receivedOn: today,
+        payerName: 'Evidence Tenant',
+        photoUploadId: await upload(caretaker, '/payment-uploads', { purpose: 'cash_photo' }),
+      },
+      headers: { 'idempotency-key': 'evidence-cash-0001' },
+    });
+    expect(cash.status, JSON.stringify(cash.json)).toBe(200);
+    const cashRequest = (cash.json as unknown as Awaiting).approval;
+    const photoId = String(cashRequest.payload.evidenceDocumentId);
+    expect(photoId).toBe(
+      (cash.json as { cashRecord: { photoDocumentId: string } }).cashRecord.photoDocumentId,
+    );
+    const photo = await download(manager, photoId);
+    expect(photo.status).toBe(200);
+    expect(String(photo.json.url)).toMatch(/download/);
+    await outsidersRefused(photoId);
+    expect(
+      (
+        await manager.call(`/approvals/${cashRequest.id}/decisions`, {
+          body: { decision: 'approve' },
+        })
+      ).status,
+    ).toBe(200);
+
+    // Banking: the slip is on the request; what may be banked shrinks while it waits.
+    const held = (await onHand())!;
+    expect(held).toMatchObject({
+      heldMinor: heldBefore + 60_000,
+      bankingPendingMinor: 0,
+      bankableMinor: heldBefore + 60_000,
+    });
+    const banking = await caretaker.call('/cash-bankings', {
+      body: {
+        collectorPersonId: held.collectorPersonId,
+        ownerId: held.ownerId,
+        bankedInto: 'owner_account',
+        amountMinor: 20_000,
+        bankedOn: today,
+        slipUploadId: await upload(caretaker, '/payment-uploads', { purpose: 'banking_slip' }),
+      },
+      headers: { 'idempotency-key': 'evidence-banking-0001' },
+    });
+    expect(banking.status, JSON.stringify(banking.json)).toBe(200);
+    const slipId = String(
+      (banking.json as unknown as Awaiting).approval.payload.evidenceDocumentId,
+    );
+    expect((await download(manager, slipId)).status).toBe(200);
+    await outsidersRefused(slipId);
+    expect(await onHand()).toMatchObject({
+      heldMinor: heldBefore + 60_000,
+      bankingPendingMinor: 20_000,
+      bankableMinor: heldBefore + 40_000,
+    });
+
+    // A transfer: its proof is on the request, for the admin who may decide it.
+    const transfer = await manager.call('/direct-receipts', {
+      body: {
+        leaseId,
+        receivedInto: 'owner_account',
+        amountMinor: 30_000,
+        receivedOn: today,
+        senderReference: 'GCB TRF 0042',
+        proofUploadId: await upload(manager, '/payment-uploads', { purpose: 'transfer_proof' }),
+      },
+      headers: { 'idempotency-key': 'evidence-transfer-0001' },
+    });
+    expect(transfer.status, JSON.stringify(transfer.json)).toBe(200);
+    const proofId = String(
+      (transfer.json as unknown as Awaiting).approval.payload.evidenceDocumentId,
+    );
+    expect((await download(admin, proofId)).status).toBe(200);
+    await outsidersRefused(proofId);
+  });
+});
+
 describe('NFR-SEC billing reads by role (plan 4.17)', () => {
   it('refuses caretakers every billing read except their own cash records and cash on hand', async () => {
     const leaseId = await paperLease(units[1]!.id, 'Scope Tenant');
@@ -224,6 +362,11 @@ describe('NFR-SEC billing reads by role (plan 4.17)', () => {
     const detail = await manager.call(`/invoices/${(rows[0] as unknown as { id: string }).id}`);
     expect(detail.status).toBe(200);
     expect(detail.json).toMatchObject({ lines: expect.any(Array), allocations: expect.any(Array) });
+    for (const line of detail.json.lines as unknown as Record<string, unknown>[])
+      expect(line).toMatchObject({
+        creditableMinor: expect.any(Number),
+        writeOffableMinor: expect.any(Number),
+      });
     const arrears = await manager.call(`/arrears?by=property&asOf=${today}`);
     expect(arrears.status).toBe(200);
     // A reversal is asked for with billing.manage, and needs the key too.

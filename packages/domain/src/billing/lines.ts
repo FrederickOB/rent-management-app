@@ -52,6 +52,11 @@ export interface BillingLine {
   readonly accrued: boolean;
   /** Creation order on the lease: the last tie-breaker. */
   readonly sequence: number;
+  /**
+   * One-off and tax lines: the day they were charged (P01, P32: the invoice's tax point). Money
+   * that arrived before it waits in prepayments and is drawn on that day (review A).
+   */
+  readonly chargedOn?: string | null;
 }
 
 /** Where an allocation comes from (CLAUDE.md section 4). Corrections are negative rows. */
@@ -164,6 +169,27 @@ export function postingClassOf(line: BillingLine): PostingClass {
   if (line.kind === 'deposit') return 'deposit';
   if (isRecurring(line.kind) && !line.accrued) return 'prepayment';
   return 'receivable';
+}
+
+/**
+ * The account an allocation to this line lands in as of `valueDate`, the day the money arrived
+ * (architecture section 5, P03): deposits held (2100); owed (1100) for a period started by then, a
+ * one-off or a tax line; prepaid (2010) for a period that had not started then, even if it has
+ * accrued since (the late draw moves it, dated at the period start).
+ */
+export function postingClassAt(line: BillingLine, valueDate: string): PostingClass {
+  if (line.kind === 'deposit') return 'deposit';
+  const chargedFrom = isRecurring(line.kind) ? line.periodStart : (line.chargedOn ?? null);
+  if (isRecurring(line.kind) && chargedFrom === null) return 'prepayment';
+  if (chargedFrom !== null && chargedFrom > valueDate) return 'prepayment';
+  return 'receivable';
+}
+
+/** The day a line became owed (1100): its period start once accrued, or its charge date. */
+export function chargedFrom(line: BillingLine): string | null {
+  if (line.kind === 'deposit') return null;
+  if (isRecurring(line.kind)) return line.accrued ? line.periodStart : null;
+  return line.chargedOn ?? null;
 }
 
 /** The account a line was charged to, or null if it has not been charged (P01, P02, P32). */

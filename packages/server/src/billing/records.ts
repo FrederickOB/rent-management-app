@@ -10,6 +10,7 @@ import type { LeaseDimensions } from '@rent/domain/ledger';
 import { businessDateOf, instantFrom, toIsoDate } from '@rent/domain/dates';
 import type { Clock } from '../core/clock';
 import { conflict } from '../core/errors';
+import { companyBook, entryValueDates, ownerBook } from '../ledger/ledger.queries';
 import { ownersOn } from '../portfolio/ownership';
 import type { BillingLease } from '../tenancy/billing-facts';
 
@@ -107,6 +108,19 @@ export async function loadLines(tx: Tx, leaseIds: readonly string[]): Promise<Li
     )
     .where(inArray(schema.invoiceLine.leaseId, [...leaseIds]))
     .orderBy(asc(schema.invoice.number), asc(schema.invoiceLine.position));
+  // One-off and tax lines are owed from their charge (P01, P32), dated at its tax point.
+  const charged = rows.filter((r) => r.line.kind === 'one_off' || r.line.baseLineId !== null);
+  const charges = await entryValueDates(tx, [
+    ...new Set(
+      charged.map((r) => `${r.line.kind === 'one_off' ? 'P01' : 'P32'}:${r.line.invoiceId}`),
+    ),
+  ]);
+  const chargedOnOf = (r: (typeof rows)[number]) =>
+    r.line.kind === 'one_off'
+      ? (charges.get(`P01:${r.line.invoiceId}`) ?? r.issueDate)
+      : r.line.baseLineId !== null
+        ? (charges.get(`P32:${r.line.invoiceId}`) ?? r.issueDate)
+        : null;
   return rows.map((r, index) => ({
     id: r.line.id,
     kind: r.line.kind as LineKind,
@@ -118,6 +132,7 @@ export async function loadLines(tx: Tx, leaseIds: readonly string[]): Promise<Li
     amountMinor: r.line.amountMinor,
     accrued: r.accruedOn !== null,
     sequence: index + 1,
+    chargedOn: chargedOnOf(r),
     invoiceId: r.line.invoiceId,
     invoiceNumber: r.number,
     invoiceKind: r.invoiceKind as LineRecord['invoiceKind'],
@@ -269,12 +284,9 @@ export async function leaseBookOf(
   if (owners.length > 1 || owners[0]!.shareBps !== 10_000)
     return { kind: 'not_billed', reason: 'joint_owners' };
   const ownerId = owners[0]!.ownerId;
-  const [book] = await tx
-    .select({ id: schema.book.id })
-    .from(schema.book)
-    .where(eq(schema.book.ownerId, ownerId));
-  if (!book) return { kind: 'not_billed', reason: 'no_owner' };
-  return { kind: 'book', bookId: book.id, ownerId };
+  const bookId = await ownerBook(tx, ownerId);
+  if (!bookId) return { kind: 'not_billed', reason: 'no_owner' };
+  return { kind: 'book', bookId, ownerId };
 }
 
 export function requireBook(book: LeaseBook): { bookId: string; ownerId: string } {
@@ -289,22 +301,16 @@ export function requireBook(book: LeaseBook): { bookId: string; ownerId: string 
 
 /** The company book: unmatched money in the agency's account waits here (P23). */
 export async function companyBookId(tx: Tx): Promise<string> {
-  const [book] = await tx
-    .select({ id: schema.book.id })
-    .from(schema.book)
-    .where(eq(schema.book.kind, 'company'));
+  const book = await companyBook(tx);
   if (!book) throw new Error('The company has no company book');
-  return book.id;
+  return book;
 }
 
 /** An owner's book. */
 export async function ownerBookId(tx: Tx, ownerId: string): Promise<string> {
-  const [book] = await tx
-    .select({ id: schema.book.id })
-    .from(schema.book)
-    .where(eq(schema.book.ownerId, ownerId));
+  const book = await ownerBook(tx, ownerId);
   if (!book) throw new Error(`Owner ${ownerId} has no book`);
-  return book.id;
+  return book;
 }
 
 /** Takes the per-lease billing lock for each lease, in one order, before reading their money. */
@@ -313,8 +319,21 @@ export async function lockLeases(
   companyId: string,
   leaseIds: readonly string[],
 ): Promise<void> {
-  for (const id of [...new Set(leaseIds)].sort())
+  const ids = [...new Set(leaseIds)].sort();
+  for (const id of ids)
     await tx.execute(sql`select app.lock_lease_billing(${companyId}::uuid, ${id}::uuid)`);
+  // Then their properties' owner locks: an invoice may be issued, and a same-day owner correction
+  // takes the same lock. The single order is lease(s), property owner, collector cash, counters,
+  // audit chain head (second review B); the invoice trigger takes it again, re-entrantly.
+  if (ids.length === 0) return;
+  const properties = await tx.execute<{ property_id: string }>(
+    sql`select distinct property_id from lease where id = any(${`{${ids.join(',')}}`}::uuid[])
+        order by property_id`,
+  );
+  for (const row of properties.rows)
+    await tx.execute(
+      sql`select app.lock_property_owner(${companyId}::uuid, ${row.property_id}::uuid)`,
+    );
 }
 
 export async function lockCollectorCash(
@@ -329,6 +348,74 @@ export async function lockCollectorCash(
 }
 
 /**
+ * Takes the company's number counters (receipts and invoices) for the rest of the transaction,
+ * before anything audited is written, so every path locks in one order: the lease(s), the
+ * collector's cash, the counters, then the audit chain head (review 3).
+ */
+export async function lockCounters(tx: Tx, companyId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`counters:${companyId}`}, 17))`,
+  );
+}
+
+/**
+ * One transaction at a time works on a payment that is not matched yet: matching it and reversing
+ * it take this lock first, before any lease (review 5).
+ */
+export async function lockPayment(tx: Tx, companyId: string, paymentId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`payment:${companyId}:${paymentId}`}, 19))`,
+  );
+}
+
+/**
+ * A lease with the lease it renews and its started renewal: money on one can move to another
+ * (P29), so they are locked together, in one order (review 10, 11).
+ */
+export async function leaseGroup(tx: Tx, leaseId: string): Promise<string[]> {
+  const rows = await tx.execute<{ id: string }>(
+    sql`select ${leaseId}::uuid as id
+        union select renews_lease_id from lease where id = ${leaseId} and renews_lease_id is not null
+        union select id from lease where renews_lease_id = ${leaseId}
+          and status in ('active', 'ending', 'holding_over', 'ended', 'terminated')`,
+  );
+  return rows.rows.map((r) => r.id).sort();
+}
+
+/** A collector's cash in one owner's book: the key of cash on hand and of banking waiting. */
+export const cashKey = (collectorId: string, bookId: string): string => `${collectorId}|${bookId}`;
+
+/**
+ * Banking waiting for approval (P07), per collector and book (`cashKey`). It still counts as held
+ * until it is approved, so a new banking may ask only for the rest (`bankableMinor`). Read through
+ * a narrow database function, so a scoped collector counts banking someone else asked for on their
+ * cash without seeing that request (second review C).
+ */
+export async function pendingBanking(
+  tx: Tx,
+  companyId: string,
+  collectorIds: readonly string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (const collectorId of new Set(collectorIds)) {
+    const rows = await tx.execute<{ book_id: string; amount_minor: number }>(
+      sql`select book_id, amount_minor from app.pending_banking(${companyId}::uuid, ${collectorId}::uuid)`,
+    );
+    for (const r of rows.rows) out.set(cashKey(collectorId, r.book_id), Number(r.amount_minor));
+  }
+  return out;
+}
+
+/**
+ * What a new banking may ask for (BC-05, P07): what the collector holds in the book, less banking
+ * already waiting for approval, so two requests can never ask for the same cash. The request
+ * checks it and the cash-on-hand screen shows it; approval checks again against what is held.
+ */
+export function bankableMinor(heldMinor: number, pendingMinor: number): number {
+  return Math.max(0, heldMinor - pendingMinor);
+}
+
+/**
  * The next number of a per-company sequence (plan 4.10), from its counter row, locked until the
  * transaction ends: a failed transaction rolls the number back with it, so there are no gaps.
  */
@@ -337,6 +424,7 @@ export async function nextNumber(
   companyId: string,
   name: 'receipt' | 'invoice',
 ): Promise<number> {
+  await lockCounters(tx, companyId);
   const result = await tx.execute<{ value: number }>(
     sql`insert into company_counter (company_id, name, value) values (${companyId}, ${name}, 1)
         on conflict (company_id, name) do update set value = company_counter.value + 1

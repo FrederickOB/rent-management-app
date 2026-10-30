@@ -8,7 +8,14 @@ import { loadAllocations, paymentsByIds } from './records';
 
 export interface SubledgerMismatch {
   readonly check:
-    'receivable' | 'prepayment' | 'deposit' | 'payment' | 'cash' | 'suspense' | 'entry';
+    | 'receivable'
+    | 'prepayment'
+    | 'deposit'
+    | 'deposit_unfunded'
+    | 'payment'
+    | 'cash'
+    | 'suspense'
+    | 'entry';
   readonly subject: string;
   readonly expectedMinor: number;
   readonly actualMinor: number;
@@ -46,8 +53,13 @@ export class SubledgerCheckService {
     companyId: string,
     options: { readonly alert?: boolean } = {},
   ): Promise<SubledgerResult> {
-    const result = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
-      this.run(tx, companyId),
+    // One snapshot for the whole check, read only: a payment that commits midway is either all
+    // in it or not at all, so it never raises a false alarm (review 6).
+    const result = await withCompany(
+      this.database,
+      { companyId, actorKind: 'system' },
+      (tx) => this.run(tx, companyId),
+      { isolationLevel: 'repeatable read', accessMode: 'read only' },
     );
     if (result.mismatches.length > 0 && options.alert !== false)
       await this.alerts.raise({
@@ -130,6 +142,29 @@ export class SubledgerCheckService {
         actualMinor: -(deposits.get(leaseId) ?? 0),
       });
     }
+
+    // No lease, and no payment's part of it, holds a negative deposit: a deposit taken from the
+    // wrong lease is caught here rather than netted away (review 9).
+    const unfunded = await tx.execute<{
+      lease_id: string;
+      payment_id: string | null;
+      total: number;
+    }>(
+      sql`select lease_id, payment_id, sum(amount_minor)::bigint as total from journal_line
+          where account_code = '2100' and lease_id is not null and payment_id is not null
+          group by lease_id, payment_id having sum(amount_minor) > 0
+          union all
+          select lease_id, null, sum(amount_minor)::bigint from journal_line
+          where account_code = '2100' and lease_id is not null
+          group by lease_id having sum(amount_minor) > 0`,
+    );
+    for (const r of unfunded.rows)
+      add({
+        check: 'deposit_unfunded',
+        subject: `${r.lease_id}:${r.payment_id ?? 'all'}`,
+        expectedMinor: 0,
+        actualMinor: -Number(r.total),
+      });
 
     // Invariant 7 per payment, and the unmatched suspense (2090).
     const paymentIds = (await tx.execute<{ id: string }>(sql`select id from payment`)).rows.map(

@@ -16,6 +16,8 @@ import {
 import {
   AGE_BUCKETS,
   agedLines,
+  chargedAfterEnd,
+  creditableMinor,
   creditPools,
   forwardWalk,
   invoiceStatusOf,
@@ -23,6 +25,7 @@ import {
   lineBalance,
   moneySummary,
   walkLines,
+  writeOffableMinor,
   type AgeBucket,
   type InvoiceStatus,
 } from '@rent/domain/billing';
@@ -35,15 +38,20 @@ import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { leaseLabels } from '../tenancy/billing-facts';
-import { BillingEngine, dedupe, lineLabel, type LeaseState } from './engine';
+import { BillingEngine, dedupe, lastBillableDay, lineLabel, type LeaseState } from './engine';
 import { MONEY_APPROVERS } from './money.service';
+import { ApprovalsService } from '../approvals/approvals.service';
+import { bookOwners, linesOf } from '../ledger/ledger.queries';
 import {
+  bankableMinor,
+  cashKey,
   formatInvoiceNumber,
   formatReceiptNumber,
   isoNow,
   loadAllocations,
   loadLines,
   paymentsByIds,
+  pendingBanking,
   type AllocationRecord,
   type LineRecord,
   type PaymentRecord,
@@ -70,6 +78,10 @@ export interface InvoiceLineView {
   readonly creditedMinor: number;
   readonly writtenOffMinor: number;
   readonly outstandingMinor: number;
+  /** The most a credit note may take off the line now (P27, the domain's own check). */
+  readonly creditableMinor: number;
+  /** The most a write-off may take off the line now (P24, the domain's own check). */
+  readonly writeOffableMinor: number;
   readonly accrued: boolean;
   readonly rule: RuleUsed | null;
 }
@@ -139,8 +151,32 @@ export interface LeaseBillingView {
   readonly unearnedRentMinor: number;
   readonly depositHeldMinor: number;
   readonly creditMinor: number;
+  /**
+   * Lines charged for periods after the lease's last day (a move-out recorded late). They stay
+   * owed until a person asks for a credit note and a second person approves it (P27).
+   */
+  readonly chargedAfterEnd: readonly ChargedAfterEndView[];
   readonly currency: 'GHS';
 }
+
+export interface ChargedAfterEndView {
+  readonly lineId: string;
+  readonly invoiceId: string;
+  readonly invoiceNumber: string;
+  readonly label: string;
+  readonly periodStart: string;
+  readonly periodEnd: string;
+  readonly netMinor: number;
+  readonly outstandingMinor: number;
+  readonly creditableMinor: number;
+}
+
+const RECEIVED_INTO: Record<string, PaymentRowView['receivedInto']> = {
+  '1050': 'provider',
+  '1060': 'collector',
+  '1010': 'owner_account',
+  '1070': 'agency_account',
+};
 
 export interface PaymentRowView {
   readonly id: string;
@@ -153,6 +189,10 @@ export interface PaymentRowView {
   readonly unitCode: string | null;
   readonly propertyName: string | null;
   readonly ownerName: string | null;
+  /** Whose book it is in: the owner, or null for money waiting in the company book. */
+  readonly ownerId: string | null;
+  /** Where the money went: with a provider, a collector, the owner's account or the agency's. */
+  readonly receivedInto: 'provider' | 'collector' | 'owner_account' | 'agency_account';
   readonly receiptId: string | null;
   readonly receiptNumber: string | null;
   readonly creditMinor: number;
@@ -215,6 +255,8 @@ export interface CollectorCashView {
   readonly ownerName: string;
   readonly heldMinor: number;
   readonly bankingPendingMinor: number;
+  /** What a new banking may ask for: held less banking waiting (the request's own check). */
+  readonly bankableMinor: number;
   readonly oldestUnbankedOn: string | null;
 }
 
@@ -284,6 +326,7 @@ export class BillingReadService {
     @Inject(BillingEngine) private readonly engine: BillingEngine,
     @Inject(DocumentsService) private readonly documents: DocumentsService,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(ApprovalsService) private readonly approvals: ApprovalsService,
   ) {}
 
   private async today(tx: Tx, companyId: string): Promise<string> {
@@ -468,6 +511,8 @@ export class BillingReadService {
       creditedMinor: l.amountMinor - b.netMinor,
       writtenOffMinor: b.writtenOffMinor,
       outstandingMinor: b.outstandingMinor,
+      creditableMinor: creditableMinor(l, allocations),
+      writeOffableMinor: writeOffableMinor(l, allocations),
       accrued: l.accrued,
       rule,
     };
@@ -587,8 +632,29 @@ export class BillingReadService {
       unearnedRentMinor: summary.unearnedRentMinor,
       depositHeldMinor: await this.engine.depositHeld(tx, leaseId),
       creditMinor: summary.creditMinor,
+      chargedAfterEnd: this.chargedAfterEndOf(state),
       currency: 'GHS',
     };
+  }
+
+  private chargedAfterEndOf(state: LeaseState): ChargedAfterEndView[] {
+    const last = lastBillableDay(state.lease);
+    if (!last) return [];
+    return chargedAfterEnd(state.lines, last).map((l) => {
+      const record = l as LineRecord;
+      const b = lineBalance(record, state.allocations);
+      return {
+        lineId: record.id,
+        invoiceId: record.invoiceId,
+        invoiceNumber: formatInvoiceNumber(record.invoiceNumber),
+        label: lineLabel(record),
+        periodStart: record.periodStart!,
+        periodEnd: record.periodEnd!,
+        netMinor: b.netMinor,
+        outstandingMinor: b.outstandingMinor,
+        creditableMinor: creditableMinor(record, state.allocations),
+      };
+    });
   }
 
   // Payments and receipts ---------------------------------------------------------------------------
@@ -716,6 +782,8 @@ export class BillingReadService {
         unitCode: label?.unitCode ?? null,
         propertyName: label?.propertyName ?? null,
         ownerName: ownerId ? (owners.get(ownerId)?.displayName ?? null) : null,
+        ownerId: ownerId ?? null,
+        receivedInto: RECEIVED_INTO[p.row.cashAccount] ?? 'owner_account',
         receiptId: receipt?.id ?? null,
         receiptNumber: receipt ? formatReceiptNumber(receipt.number) : null,
         creditMinor: status === 'confirmed' ? this.engine.creditOf(p, allocations) : 0,
@@ -771,16 +839,10 @@ export class BillingReadService {
                   : ('owner_account' as const),
               ]
             : [];
-      const [open] = await tx
-        .select({ id: schema.approvalRequest.id })
-        .from(schema.approvalRequest)
-        .where(
-          and(
-            eq(schema.approvalRequest.actionType, 'payment.reversal'),
-            eq(schema.approvalRequest.subjectId, paymentId),
-            inArray(schema.approvalRequest.status, ['pending', 'cooling_off']),
-          ),
-        );
+      const openId = (await this.approvals.openFor(tx, [paymentId], 'payment.reversal')).get(
+        paymentId,
+      );
+      const open = openId ? { id: openId } : undefined;
       return {
         ...row!,
         allocations: await this.allocationViews(tx, allocations, lines),
@@ -904,16 +966,21 @@ export class BillingReadService {
         const own = row.collector === staff.personId || row.recorded_by === staff.personId;
         if (own && this.policy.can(staff, 'cash.view_own').allowed) return true;
         if (!row.approval_id) continue;
-        const [request] = await tx
-          .select()
-          .from(schema.approvalRequest)
-          .where(eq(schema.approvalRequest.id, row.approval_id));
+        const request = (await this.approvals.requestsIn(tx, [row.approval_id])).get(
+          row.approval_id,
+        );
         if (
           request &&
           ['pending', 'cooling_off'].includes(request.status) &&
           this.policy.can(staff, 'approval.decide', {
             initiatorPersonId: request.initiatedBy,
             eligibleRoles: MONEY_APPROVERS,
+            propertyId: request.propertyId,
+            scopeProperties: (
+              await tx.execute<{ scope: string[] | null }>(
+                sql`select app.property_scope()::text[] as scope`,
+              )
+            ).rows[0]?.scope,
           }).allowed
         )
           return true;
@@ -951,19 +1018,20 @@ export class BillingReadService {
           ? undefined
           : sql`(${c.collectorPersonId} = ${staff.personId} or ${c.recordedBy} = ${staff.personId})`,
       ].filter((x) => x !== undefined);
-      const rows = await tx
-        .select({ record: c, status: schema.approvalRequest.status })
+      const records = await tx
+        .select()
         .from(c)
-        .leftJoin(
-          schema.approvalRequest,
-          and(
-            eq(schema.approvalRequest.companyId, c.companyId),
-            eq(schema.approvalRequest.id, c.approvalRequestId),
-          ),
-        )
         .where(conditions.length ? and(...conditions) : undefined)
         .orderBy(desc(c.createdAt))
         .limit(500);
+      const requests = await this.approvals.requestsIn(
+        tx,
+        records.map((r) => r.approvalRequestId),
+      );
+      const rows = records.map((record) => ({
+        record,
+        status: requests.get(record.approvalRequestId)?.status ?? null,
+      }));
       const labels = await leaseLabels(
         tx,
         rows.map((r) => r.record.leaseId),
@@ -1022,30 +1090,26 @@ export class BillingReadService {
     const all = this.policy.can(staff, 'billing.view').allowed;
     if (!all) this.policy.assert(staff, 'cash.view_own');
     return withCompany(this.database, staffContext(staff), async (tx) => {
-      const lines = await tx.execute<{
-        collector_id: string;
-        book_id: string;
-        property_id: string | null;
-        amount_minor: number;
-        value_date: string;
-      }>(
-        sql`select l.collector_id, l.book_id, l.property_id, l.amount_minor, e.value_date::text
-            from journal_line l join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
-            where l.account_code = '1060' ${all ? sql`` : sql`and l.collector_id = ${staff.personId}`}
-            order by e.value_date, e.posted_at, l.line_no`,
-      );
+      const journal = await linesOf(tx, {
+        accounts: ['1060'],
+        ...(all ? {} : { collectorIds: [staff.personId] }),
+      });
+      const lines = {
+        rows: journal.map((l) => ({
+          collector_id: l.collectorId as string,
+          book_id: l.bookId,
+          property_id: l.propertyId,
+          amount_minor: l.amountMinor,
+          value_date: l.valueDate,
+        })),
+      };
       const groups = new Map<string, typeof lines.rows>();
       for (const line of lines.rows) {
         const key = `${line.collector_id}|${line.book_id}`;
         groups.set(key, [...(groups.get(key) ?? []), line]);
       }
-      const books = groups.size
-        ? await tx
-            .select({ id: schema.book.id, ownerId: schema.book.ownerId })
-            .from(schema.book)
-            .where(inArray(schema.book.id, [...new Set(lines.rows.map((l) => l.book_id))]))
-        : [];
-      const ownerOfBook = new Map(books.map((b) => [b.id, b.ownerId]));
+      const ownerOfBook = await bookOwners(tx, [...new Set(lines.rows.map((l) => l.book_id))]);
+      const books = [...ownerOfBook].map(([id, ownerId]) => ({ id, ownerId }));
       const owners = await ownerFacts(
         tx,
         books.flatMap((b) => (b.ownerId ? [b.ownerId] : [])),
@@ -1054,22 +1118,11 @@ export class BillingReadService {
         tx,
         lines.rows.map((l) => l.collector_id),
       );
-      const pending = await tx
-        .select({
-          collector: schema.cashBanking.collectorPersonId,
-          bookId: schema.cashBanking.bookId,
-          amount: sql<number>`sum(${schema.cashBanking.amountMinor})::bigint`,
-        })
-        .from(schema.cashBanking)
-        .innerJoin(
-          schema.approvalRequest,
-          and(
-            eq(schema.approvalRequest.companyId, schema.cashBanking.companyId),
-            eq(schema.approvalRequest.id, schema.cashBanking.approvalRequestId),
-          ),
-        )
-        .where(inArray(schema.approvalRequest.status, ['pending', 'cooling_off']))
-        .groupBy(schema.cashBanking.collectorPersonId, schema.cashBanking.bookId);
+      const pending = await pendingBanking(
+        tx,
+        staff.companyId,
+        lines.rows.map((l) => l.collector_id),
+      );
       const out: CollectorCashView[] = [];
       for (const [key, group] of groups) {
         const [collectorId, bookId] = key.split('|') as [string, string];
@@ -1104,9 +1157,8 @@ export class BillingReadService {
           ownerId,
           ownerName: ownerName ?? '',
           heldMinor: held,
-          bankingPendingMinor: Number(
-            pending.find((p) => p.collector === collectorId && p.bookId === bookId)?.amount ?? 0,
-          ),
+          bankingPendingMinor: pending.get(cashKey(collectorId, bookId)) ?? 0,
+          bankableMinor: bankableMinor(held, pending.get(cashKey(collectorId, bookId)) ?? 0),
           oldestUnbankedOn: oldest,
         });
       }

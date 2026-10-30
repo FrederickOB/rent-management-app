@@ -4,6 +4,7 @@ import {
   cyclesForAdvance,
   cyclesToIssue,
   depositDue,
+  expectedTaxMinor,
   invoiceCycles,
   invoiceLinesFor,
   isTax,
@@ -13,7 +14,13 @@ import {
   type InvoiceCycle,
   type VatRates,
 } from '@rent/domain/billing';
-import { LeaseLedgerModel, operationArbitrary, type Operation } from '@rent/domain/billing/testing';
+import {
+  LeaseLedgerModel,
+  moveOutDay,
+  operationArbitrary,
+  receivedOn,
+  type Operation,
+} from '@rent/domain/billing/testing';
 import {
   addDays,
   addMonths,
@@ -46,7 +53,7 @@ import { propertyWithUnits, tenancyServices, type TenancyServices } from './supp
  * The database's own sub-ledger check passes at the end. Run counts are modest because CI runs the
  * integration suites together; M4A_PROPERTY_RUNS raises them locally.
  */
-const RUNS = Number(process.env.M4A_PROPERTY_RUNS ?? 4);
+const RUNS = Number(process.env.M4A_PROPERTY_RUNS ?? 24);
 const VAT: VatRates = { vatBps: 1500, nhilBps: 250, getfundBps: 250, appliesToServiceCharge: true };
 const ACCOUNTS: readonly AccountCode[] = [
   '1100',
@@ -194,7 +201,10 @@ async function runOne(
     amountMinor: p.amountMinor,
     source: 'schedule' as const,
   }));
-  model.scheduled = schedule.map(({ sequence: _s, source: _src, ...p }) => p);
+  model.scheduled = schedule.map(({ sequence: _s, source: _src, ...p }) => ({
+    ...p,
+    taxMinor: expectedTaxMinor(p, lease.vat ? VAT : null),
+  }));
   const cycles: InvoiceCycle[] = invoiceCycles({
     cycle: terms.cycle,
     initialAdvanceMonths: terms.initialAdvanceMonths,
@@ -227,12 +237,14 @@ async function runOne(
       terms.startDate,
       'deposit',
     );
-  const issue = (cycle: InvoiceCycle) => {
-    model.issue(invoiceLinesFor(cycle, vat), cycle.dueDate, cycle.cycleStart);
+  const issue = (cycle: InvoiceCycle, taxPoint?: string) => {
+    model.issue(invoiceLinesFor(cycle, vat), cycle.dueDate, cycle.cycleStart, taxPoint);
     issued.add(cycle.cycleStart);
   };
   const tick = () => {
-    for (const cycle of cyclesToIssue(cycles, model.today, issued)) issue(cycle);
+    const last = model.lastDay;
+    const due = last === null ? cycles : cycles.filter((c) => c.cycleStart <= last);
+    for (const cycle of cyclesToIssue(due, model.today, issued)) issue(cycle);
     model.accrueTo(model.today);
   };
   tick();
@@ -242,7 +254,15 @@ async function runOne(
     model,
     paymentIds: [],
     async apply(op) {
-      await apply(this, op, { cycles, issued, issue, tick, vat });
+      await apply(this, op, {
+        cycles,
+        issued,
+        issue,
+        tick,
+        vat,
+        startDate: terms.startDate,
+        endDate: terms.endDate,
+      });
     },
   };
   await check(run);
@@ -277,9 +297,11 @@ async function apply(
   m: {
     cycles: InvoiceCycle[];
     issued: Set<string>;
-    issue: (c: InvoiceCycle) => void;
+    issue: (c: InvoiceCycle, taxPoint?: string) => void;
     tick: () => void;
     vat: VatRates | null;
+    startDate: string;
+    endDate: string;
   },
 ): Promise<void> {
   const { model, agency } = run;
@@ -298,7 +320,10 @@ async function apply(
       return;
     }
     case 'pay': {
-      // Decision 4, as the services apply it: a payment beyond the issued invoices issues them.
+      // Received up to 45 days before it is recorded, never before signing (review 2).
+      const valueDate = receivedOn(model.today, op.daysBack, today);
+      // Decision 4, as the services apply it: a payment beyond what is open issues the invoices
+      // it pays for, charged on its own value date (review A, D2).
       if (m.vat) {
         const live = model.payments.filter((p) => !p.reversed);
         const open = model.lines.reduce(
@@ -309,16 +334,21 @@ async function apply(
           (sum, p) => sum + p.amountMinor,
           0,
         );
-        for (const cycle of cyclesForAdvance({
-          pending: m.cycles.filter((c) => !m.issued.has(c.cycleStart)),
-          openMinor: open - credit,
-          paymentMinor: op.amountMinor,
-          vat: m.vat,
-        }))
-          m.issue(cycle);
+        if (op.amountMinor > open)
+          for (const cycle of cyclesForAdvance({
+            pending: m.cycles.filter(
+              (c) =>
+                !m.issued.has(c.cycleStart) &&
+                (model.lastDay === null || c.cycleStart <= model.lastDay),
+            ),
+            openMinor: open - credit,
+            paymentMinor: op.amountMinor,
+            vat: m.vat,
+          }))
+            m.issue(cycle, valueDate);
       }
-      model.pay(op.amountMinor, op.cash);
-      run.paymentIds.push(await payInDatabase(run, op.amountMinor, op.cash));
+      model.pay(op.amountMinor, op.cash, valueDate);
+      run.paymentIds.push(await payInDatabase(run, op.amountMinor, op.cash, valueDate));
       return;
     }
     case 'reverse': {
@@ -356,6 +386,18 @@ async function apply(
       await s.approvals.decide(agency.admin, requestId, { decision: 'approve' });
       return;
     }
+    case 'move_out': {
+      // The tenant left up to 60 days ago, recorded today (review 14).
+      // Within the term only: the model does not hold a lease over past its end (M3 does).
+      if (model.today > m.endDate) return;
+      const day = moveOutDay(model.today, op.daysBack, m.startDate, model.lastDay);
+      if (!day) return;
+      await s.lifecycle.runTransitions(companyId, model.today);
+      await s.lifecycle.recordMoveOut(agency.manager, run.leaseId, { moveOutDate: day });
+      await b.invoicing.onLeaseEnded(companyId, run.leaseId);
+      model.moveOut(day);
+      return;
+    }
     case 'write_off': {
       const owed = model.lines.filter(
         (l) =>
@@ -381,8 +423,13 @@ async function apply(
   }
 }
 
-async function payInDatabase(run: Run, amountMinor: number, cash: CashAccount): Promise<string> {
-  const { agency, model } = run;
+async function payInDatabase(
+  run: Run,
+  amountMinor: number,
+  cash: CashAccount,
+  valueDate: string,
+): Promise<string> {
+  const { agency } = run;
   const companyId = agency.companyId;
   switch (cash) {
     case '1050':
@@ -390,14 +437,14 @@ async function payInDatabase(run: Run, amountMinor: number, cash: CashAccount): 
         await b.money.recordProviderPayment(companyId, {
           leaseId: run.leaseId,
           amountMinor,
-          receivedOn: model.today,
+          receivedOn: valueDate,
         })
       ).paymentId;
     case '1060': {
       const recorded = await approvedCash(ctx, s, b, agency.manager, agency.admin, {
         leaseId: run.leaseId,
         amountMinor,
-        receivedOn: model.today,
+        receivedOn: valueDate,
       });
       return sourcePayment(companyId, recorded.cashRecordId);
     }
@@ -406,7 +453,7 @@ async function payInDatabase(run: Run, amountMinor: number, cash: CashAccount): 
         leaseId: run.leaseId,
         receivedInto: cash === '1010' ? 'owner_account' : 'agency_account',
         amountMinor,
-        receivedOn: model.today,
+        receivedOn: valueDate,
       });
       return sourcePayment(companyId, recorded.directReceiptId);
     }
