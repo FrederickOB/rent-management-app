@@ -4,6 +4,12 @@ import { arrearsContract, invoicesContract, paymentsContract } from './billing';
 import { companyContract } from './company';
 import { linksContract } from './links';
 import { meContract } from './me';
+import {
+  payLinksContract,
+  paymentsQueueContract,
+  settlementContract,
+  tenantMoneyContract,
+} from './payments';
 import { membershipsContract } from './memberships';
 import {
   ownersContract,
@@ -26,6 +32,7 @@ export * from './billing';
 export * from './company';
 export * from './links';
 export * from './me';
+export * from './payments';
 export * from './memberships';
 export * from './register';
 export * from './rules';
@@ -52,6 +59,10 @@ export const contract = {
   invoices: invoicesContract,
   payments: paymentsContract,
   arrears: arrearsContract,
+  payLinks: payLinksContract,
+  settlement: settlementContract,
+  paymentsQueue: paymentsQueueContract,
+  tenantMoney: tenantMoneyContract,
 };
 
 export type Contract = typeof contract;
