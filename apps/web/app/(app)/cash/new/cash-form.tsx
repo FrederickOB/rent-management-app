@@ -3,26 +3,27 @@
 import Link from 'next/link';
 import { useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
+import { CancelLink } from '@/components/cancel-link';
 import { FileField } from '@/components/file-field';
 import { LeasePicker } from '@/components/lease-picker';
-import { secondaryLink, textLink } from '@/components/link-styles';
+import { secondaryLink } from '@/components/link-styles';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextAreaField, TextField } from '@/components/ui/field';
 import { keyedApi } from '@/lib/api';
 import { todayIn } from '@/lib/business-dates';
-import {
-  isKeyReused,
-  moneyProblem,
-  outcomeOf,
-  sendOnce,
-  useIdempotencyKeeper,
-} from '@/lib/idempotency';
+import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
+import { useHoldWhileSending } from '@/lib/in-flight';
 import type { PickedLease } from '@/lib/lease-pick';
 import { waitingNote } from '@/lib/money-requests';
 import { cashForm, emptyCash, type CashDraft } from '@/lib/payment-form';
-import { CASH_PHOTO_UPLOAD, uploadOnce } from '@/lib/payment-upload';
+import {
+  CASH_PHOTO_UPLOAD,
+  fileAgainMessage,
+  needsFileAgain,
+  uploadOnce,
+} from '@/lib/payment-upload';
 import { formatMinor } from '@/lib/tenancy-format';
 import { fileProblem, StorageUploadError } from '@/lib/upload';
 
@@ -42,7 +43,10 @@ export function CashForm({
   seeLease,
 }: {
   readonly initialLease: PickedLease | null;
-  /** Other people who may hold the money; empty when this person may not list them. */
+  /**
+   * Other people who may hold the money: offered only to someone who may record another person's
+   * cash (cash.bank_others) and list the company's people. Empty otherwise: they record as themselves.
+   */
   readonly collectors: readonly { readonly id: string; readonly name: string }[];
   readonly seeLease: boolean;
 }) {
@@ -68,6 +72,8 @@ export function CashForm({
   const errors = tried ? parsed.errors : {};
   const cheque = draft.method === 'cheque';
   const set = (patch: Partial<CashDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  const working = status !== null;
+  useHoldWhileSending(working);
 
   function pickLease(next: PickedLease | null) {
     setLease(next);
@@ -109,8 +115,15 @@ export function CashForm({
         setProblem(failure.message);
         return;
       }
-      // A refused attempt recorded nothing: the photo goes again with the corrected details.
-      if (outcomeOf(failure) === 'refused') uploads.forget(file);
+      // The upload itself was refused (expired or missing): the photo must be chosen again. For
+      // anything else the same upload is sent again, which the API accepts.
+      if (needsFileAgain(failure)) {
+        uploads.forget(file);
+        if (photo.current) photo.current.value = '';
+        setPhotoError(fileAgainMessage('photo'));
+        setProblem(fileAgainMessage('photo'));
+        return;
+      }
       setProblem(moneyProblem(failure));
       setReused(isKeyReused(failure));
     }
@@ -122,6 +135,7 @@ export function CashForm({
     setDone(null);
     setTried(false);
     setProblem(null);
+    setPhotoError(null);
     setLease(null);
     setDraft(emptyCash(today));
     if (photo.current) photo.current.value = '';
@@ -149,7 +163,6 @@ export function CashForm({
       </Card>
     );
 
-  const working = status !== null;
   return (
     <form onSubmit={submit} noValidate aria-label="Record cash or cheque" className="space-y-6">
       {problem ? <Alert tone="error">{problem}</Alert> : null}
@@ -253,7 +266,6 @@ export function CashForm({
               ref={photo}
               label={cheque ? 'Photo of the cheque' : 'Photo of the receipt-book page'}
               rule={CASH_PHOTO_UPLOAD}
-              capture="environment"
               disabled={working}
               error={photoError}
               note={
@@ -274,7 +286,7 @@ export function CashForm({
       ) : null}
       {reused ? (
         <Button variant="secondary" onClick={another}>
-          Start a new record
+          Start again
         </Button>
       ) : null}
       {tried && !working && !problem && (!parsed.input || photoError) ? (
@@ -284,9 +296,7 @@ export function CashForm({
         <Button type="submit" pending={working}>
           {cheque ? 'Record the cheque' : 'Record the cash'}
         </Button>
-        <Link href="/cash" className={textLink}>
-          Cancel
-        </Link>
+        <CancelLink href="/cash" disabled={working} />
       </div>
     </form>
   );

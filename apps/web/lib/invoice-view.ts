@@ -1,5 +1,6 @@
 import type { InvoiceDetail, InvoiceLineView, InvoiceRow } from '@rent/contracts';
-import { isRecurring, TAX_KINDS } from '@rent/domain/billing';
+import { TAX_KINDS } from '@rent/domain/billing';
+import { lineKindLabel, periodLabel, rateLabel } from './billing-format';
 
 // The invoice screens (BC-01, CT-04; M4a plan 4.19). The API derives every balance and status;
 // these helpers only arrange them, and offer corrections the domain rules allow, which the API
@@ -34,32 +35,38 @@ export function groupLines(lines: readonly InvoiceLineView[]): LineGroup[] {
     }));
 }
 
-export interface LineCorrections {
-  /** The most a credit note can take off the line (P27); 0 when none can be asked for. */
-  readonly creditableMinor: number;
-  /** The most that can be written off (P24); 0 when nothing can be. */
-  readonly writableOffMinor: number;
+/**
+ * A line's name for a heading or a button: `Rent, 15 Nov 2026 to 14 Dec 2026`, and for a tax line
+ * `VAT at 15% on Rent, 15 Nov 2026 to 14 Dec 2026`, so each per-line control says which line it is.
+ */
+export function lineName(line: InvoiceLineView, base: InvoiceLineView | null = null): string {
+  if (line.baseLineId !== null) {
+    const tax = `${lineKindLabel(line.kind)}${line.rateBps !== null ? ` at ${rateLabel(line.rateBps)}` : ''}`;
+    return base ? `${tax} on ${lineName(base)}` : tax;
+  }
+  const period = periodLabel(line.periodStart, line.periodEnd);
+  const label = line.label || lineKindLabel(line.kind);
+  return period && !label.includes(period) ? `${label}, ${period}` : label;
 }
 
+export type CorrectionKind = 'credit_note' | 'write_off';
+
 /**
- * What can be asked for on a line, by the domain's rules (packages/domain/billing corrections):
- * - a credit note on any line but a VAT or levy line, which follows the line it is charged on; a
- *   deposit only where it is unpaid, since money held as a deposit leaves only at move-out (M8);
- * - a write-off of what is still owed on a charged line: a started rent or service-charge period,
- *   a one-off charge, or a tax line. A deposit is never income, so it is never written off.
+ * The most a correction may take off a line now, as the API works it out from the domain's rules
+ * (P27 credit notes, P24 write-offs): never a figure the browser computes. Zero offers nothing.
  */
-export function lineCorrections(line: InvoiceLineView): LineCorrections {
-  const creditable =
-    line.baseLineId !== null
-      ? 0
-      : line.kind === 'deposit'
-        ? line.outstandingMinor
-        : line.netMinor - line.writtenOffMinor;
-  const charged = line.kind !== 'deposit' && (!isRecurring(line.kind) || line.accrued);
-  return {
-    creditableMinor: Math.max(0, creditable),
-    writableOffMinor: charged ? Math.max(0, line.outstandingMinor) : 0,
-  };
+export function correctionMax(
+  line: Pick<InvoiceLineView, 'creditableMinor' | 'writeOffableMinor'>,
+  kind: CorrectionKind,
+): number {
+  return kind === 'credit_note' ? line.creditableMinor : line.writeOffableMinor;
+}
+
+/** The corrections to offer on a line: those the API allows an amount for. */
+export function correctionsOffered(
+  line: Pick<InvoiceLineView, 'creditableMinor' | 'writeOffableMinor'>,
+): CorrectionKind[] {
+  return (['credit_note', 'write_off'] as const).filter((kind) => correctionMax(line, kind) > 0);
 }
 
 /** The legal rules behind an invoice's amounts that nobody has verified yet (CLAUDE.md section 7). */

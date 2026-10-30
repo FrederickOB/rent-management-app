@@ -25,6 +25,7 @@ const billing = (overrides: Partial<LeaseBilling> = {}): LeaseBilling => ({
   unearnedRentMinor: 3_300_000,
   depositHeldMinor: 500_000,
   creditMinor: 1_250,
+  chargedAfterEnd: [],
   currency: 'GHS',
   ...overrides,
 });

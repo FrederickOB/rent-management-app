@@ -1,6 +1,7 @@
 import { paymentsContract } from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
 import { api } from './api';
+import { errorCode, statusOf } from './errors';
 import { fileTypesLabel, sendToStorage, type UploadRule } from './upload';
 
 // Files for money records (BC-05, P07, P28): a photo of the receipt-book page or the cheque, a
@@ -49,6 +50,27 @@ export async function uploadPaymentFile(
   return slot.uploadId;
 }
 
+/** Refusals that mean the file itself must be chosen again (plan 4.8; the documents service). */
+const FILE_AGAIN: ReadonlySet<string> = new Set([
+  'UPLOAD_EXPIRED',
+  'UPLOAD_MISSING',
+  'UPLOAD_REJECTED',
+]);
+
+/**
+ * The API refused the upload, not the money: it expired, never reached storage, or was not the
+ * file declared. A retry with the same upload id is safe otherwise, so only these send the person
+ * back to choose the file again.
+ */
+export function needsFileAgain(error: unknown): boolean {
+  return statusOf(error) === 400 && FILE_AGAIN.has(errorCode(error));
+}
+
+/** What to say when the file must be chosen again: `photo`, `proof`, `slip`. */
+export function fileAgainMessage(what: string): string {
+  return `The ${what} did not reach us, or its upload expired before it was used. Choose the ${what} again, then send it.`;
+}
+
 export interface UploadOnce {
   /** The upload id for this file: uploaded the first time, the same id after that. */
   readonly idFor: (file: File, purpose: PaymentUploadPurpose) => Promise<string>;
@@ -57,8 +79,10 @@ export interface UploadOnce {
 }
 
 /**
- * One upload per chosen file. A retry after a dropped connection sends the same upload id, so the
- * money write is the same request with the same Idempotency-Key and is never recorded twice.
+ * One upload per chosen file. A retry, after a dropped connection or a refusal of the details,
+ * sends the same upload id (the API stages a file once per upload), so the money write stays the
+ * same request and a slow connection is spared sending the photo again. Only a refusal of the
+ * upload itself (`needsFileAgain`) forgets it.
  */
 export function uploadOnce(
   upload: (file: File, purpose: PaymentUploadPurpose) => Promise<string> = uploadPaymentFile,

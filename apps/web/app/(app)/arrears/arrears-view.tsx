@@ -125,7 +125,11 @@ export function ArrearsView({
             <tbody className="divide-y divide-slate-100">
               {data.rows.map((row) => (
                 <tr key={row.key} data-testid="arrears-row">
-                  <Td>
+                  {/* The row's name heads it, so each amount is read with whose it is. */}
+                  <th
+                    scope="row"
+                    className="px-3 py-3 text-left align-top font-normal text-slate-800"
+                  >
                     {linkRecord(data.by) ? (
                       <Link
                         href={recordHref(data.by, row.key)}
@@ -145,7 +149,7 @@ export function ArrearsView({
                       </Link>
                       {row.leaseIds.length > 1 ? ` · ${row.leaseIds.length} leases` : ''}
                     </p>
-                  </Td>
+                  </th>
                   {BUCKET_COLUMNS.map((bucket) => (
                     <Td
                       key={bucket}

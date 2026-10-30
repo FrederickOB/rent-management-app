@@ -19,6 +19,22 @@ export function statusOf(error: unknown): number | null {
 }
 
 /**
+ * The API's error code in capitals, or an empty string: a guard sends it in the body, a contract
+ * handler as the typed client's error code (`CASH_SHORT`, `UPLOAD_EXPIRED`…).
+ */
+export function errorCode(error: unknown): string {
+  const body =
+    isRecord(error) && isRecord(error.data) && isRecord(error.data.body) ? error.data.body : null;
+  const code =
+    typeof body?.code === 'string'
+      ? body.code
+      : isRecord(error) && typeof error.code === 'string'
+        ? error.code
+        : '';
+  return code.toUpperCase();
+}
+
+/**
  * Normalises errors from the typed API client. Guard refusals arrive as `{ code, message }`
  * bodies (kept by the client under `data.body`); handler errors carry their own message.
  */

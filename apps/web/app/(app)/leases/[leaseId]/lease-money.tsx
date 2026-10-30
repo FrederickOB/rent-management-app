@@ -59,9 +59,11 @@ function RecordLinks({
 
 interface MoneyData {
   readonly billing: LeaseBilling;
-  /** Cash and cheques recorded for the lease and still waiting for a second person. */
-  readonly waitingMinor: number;
-  readonly waitingCount: number;
+  /**
+   * Cash and cheques recorded for the lease and still waiting for a second person, or null when
+   * that could not be checked (the figures are shown, with a warning that some may be missing).
+   */
+  readonly waiting: { readonly minor: number; readonly count: number } | null;
 }
 
 /**
@@ -84,13 +86,15 @@ export function LeaseMoney({
       // Cash posts only once approved (BC-05); until then it is not in the figures, so say so.
       api()
         .payments.cashRecords({ leaseId, status: 'awaiting_approval' })
-        .catch(() => []),
+        .then(
+          (rows) => ({
+            minor: rows.reduce((sum, r) => sum + r.amountMinor, 0),
+            count: rows.length,
+          }),
+          () => null,
+        ),
     ]);
-    return {
-      billing,
-      waitingMinor: waiting.reduce((sum, r) => sum + r.amountMinor, 0),
-      waitingCount: waiting.length,
-    };
+    return { billing, waiting };
   }, [leaseId]);
   const { state, reload } = useLoad(load);
 
@@ -125,9 +129,14 @@ function MoneySummary({ data, unitCode }: { readonly data: MoneyData; readonly u
           {NOT_BILLED_LABELS[billing.notBilledReason]}
         </Alert>
       ) : null}
-      {data.waitingCount > 0 ? (
+      {data.waiting === null ? (
+        <Alert tone="warning">
+          We could not check for cash or cheques waiting for confirmation. Any that are waiting are
+          not in these figures until a second person approves them.
+        </Alert>
+      ) : data.waiting.count > 0 ? (
         <Alert tone="info">
-          {formatMinor(data.waitingMinor)} in cash or cheques is recorded and waiting for
+          {formatMinor(data.waiting.minor)} in cash or cheques is recorded and waiting for
           confirmation. It is not in these figures until a second person approves it.
         </Alert>
       ) : null}
@@ -168,7 +177,60 @@ function MoneySummary({ data, unitCode }: { readonly data: MoneyData; readonly u
           </div>
         ))}
       </dl>
+      {billing.chargedAfterEnd.length > 0 ? (
+        <ChargedAfterEnd lines={billing.chargedAfterEnd} />
+      ) : null}
     </>
+  );
+}
+
+/**
+ * Periods charged before a late move-out was recorded (P27): they stay owed, and only a credit
+ * note that a second person approves takes them off, so the card lists them with their invoices.
+ */
+function ChargedAfterEnd({ lines }: { readonly lines: LeaseBilling['chargedAfterEnd'] }) {
+  return (
+    <div className="space-y-2" data-testid="money-charged-after-end">
+      <Alert tone="warning" title="Charged after the lease ended">
+        These periods were charged before the move-out was recorded, so they are still owed. If the
+        tenant should not pay them, ask for a credit note on the invoice. A second person must
+        approve it.
+      </Alert>
+      <Table caption="Charges for periods after the lease ended">
+        <thead>
+          <tr>
+            <Th>Invoice</Th>
+            <Th>For</Th>
+            <Th className="text-right">Charged</Th>
+            <Th className="text-right">Still to pay</Th>
+            <Th className="text-right">Can be credited</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {lines.map((line) => (
+            <tr key={line.lineId} data-testid="charged-after-end">
+              <Td>
+                <Link
+                  href={`/invoices/${line.invoiceId}`}
+                  className="font-mono font-medium underline underline-offset-2"
+                >
+                  {line.invoiceNumber}
+                </Link>
+              </Td>
+              <Td>
+                {line.label}
+                <p className="text-xs whitespace-nowrap text-slate-600">
+                  {periodLabel(line.periodStart, line.periodEnd)}
+                </p>
+              </Td>
+              <Td className="text-right tabular-nums">{formatMinor(line.netMinor)}</Td>
+              <Td className="text-right tabular-nums">{formatMinor(line.outstandingMinor)}</Td>
+              <Td className="text-right tabular-nums">{formatMinor(line.creditableMinor)}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </div>
   );
 }
 

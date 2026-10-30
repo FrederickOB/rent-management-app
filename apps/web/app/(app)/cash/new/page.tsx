@@ -32,8 +32,9 @@ export default async function RecordCashPage({
     typeof query.leaseId === 'string' && UUID.test(query.leaseId) ? query.leaseId : null;
   const [lease, people] = await Promise.all([
     leaseId ? loadLease(leaseId) : null,
-    // Someone who may list the company's people can say who holds the money now.
-    allowed(me, 'membership.view') ? loadMemberships() : null,
+    // Naming someone else as holding the money needs cash.bank_others (the API refuses it
+    // otherwise), and the list of people needs membership.view.
+    allowed(me, 'cash.bank_others') && allowed(me, 'membership.view') ? loadMemberships() : null,
   ]);
   const collectors = people?.ok
     ? people.data

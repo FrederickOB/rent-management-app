@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { useApp } from '@/components/app-context';
 import { PaymentStatusBadge } from '@/components/billing-badges';
+import { EvidenceButton } from '@/components/evidence-button';
 import { secondaryLink, textLink } from '@/components/link-styles';
 import { Empty } from '@/components/load-state';
 import { PageHeader } from '@/components/page-header';
@@ -17,9 +18,11 @@ import { Table, Td, Th } from '@/components/ui/table';
 import { api, keyedApi } from '@/lib/api';
 import {
   ALLOCATION_SOURCE_LABELS,
+  evidenceOfMethod,
   MONEY_LOCATION_LABELS,
   PAYMENT_METHOD_LABELS,
   RECEIPT_KIND_LABELS,
+  RECEIVED_INTO_LABELS,
   REVERSAL_REASON_LABELS,
   type MoneyLocation,
   type ReversalReason,
@@ -29,11 +32,14 @@ import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import {
+  isKeyReused,
   moneyProblem,
   sendOnce,
   useIdempotencyKeeper,
   type IdempotencyKeeper,
 } from '@/lib/idempotency';
+import { useHoldWhileSending } from '@/lib/in-flight';
+import { ownerAccountOf } from '@/lib/lease-pick';
 import { waitingNote } from '@/lib/money-requests';
 import { CORRECTION_REASON_MIN, reversalForm, type ReversalDraft } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
@@ -71,6 +77,8 @@ export function PaymentDetailView({
   // One key for the reversal request while the page is open, even if its form is closed and
   // opened again after an attempt nobody heard back from.
   const reversalKeeper = useIdempotencyKeeper();
+  // Money in an owner's own account can be matched only to that owner's leases (P23).
+  const unmatchedOwner = ownerAccountOf(payment);
 
   async function refresh() {
     try {
@@ -140,6 +148,14 @@ export function PaymentDetailView({
               {PAYMENT_METHOD_LABELS[payment.method]}
               {cheque ? <p className="text-slate-700">Cheque {cheque}</p> : null}
             </Fact>
+            <Fact label="Received into">{RECEIVED_INTO_LABELS[payment.receivedInto]}</Fact>
+            <Fact label="Owner">
+              {payment.ownerName ?? (
+                <span className="text-slate-700">
+                  None yet: it waits in the company’s book until it is matched
+                </span>
+              )}
+            </Fact>
             {payment.payerName ? <Fact label="Paid by">{payment.payerName}</Fact> : null}
             {payment.collectorName ? (
               <Fact label="Collected by">{payment.collectorName}</Fact>
@@ -162,7 +178,14 @@ export function PaymentDetailView({
               </Fact>
             ) : null}
             {payment.proofDocumentId ? (
-              <Fact label="Proof">A proof file is kept with this payment.</Fact>
+              <Fact
+                label={evidenceOfMethod(payment.method) === 'transfer_proof' ? 'Proof' : 'Photo'}
+              >
+                <EvidenceButton
+                  documentId={payment.proofDocumentId}
+                  kind={evidenceOfMethod(payment.method)}
+                />
+              </Fact>
             ) : null}
             {payment.note ? <Fact label="Note">{payment.note}</Fact> : null}
             <Fact label="Recorded">{formatTime(payment.createdAt, timeZone)}</Fact>
@@ -269,6 +292,7 @@ export function PaymentDetailView({
           <CardBody>
             <MatchForm
               paymentId={payment.id}
+              owner={unmatchedOwner}
               onMatched={(next, lease) => {
                 setPayment(next);
                 setNotice(
@@ -356,13 +380,27 @@ function ReversalForm({
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // An earlier attempt reached the API with other details: offer a fresh start, never a retry.
+  const [reused, setReused] = useState(false);
   const parsed = reversalForm(draft, payment.id, options);
   const errors = tried ? parsed.errors : {};
+  useHoldWhileSending(pending);
+
+  function startAgain() {
+    keeper.reset();
+    setDraft(
+      options.length === 1 ? { ...EMPTY_REVERSAL, moneyNowIn: options[0]! } : EMPTY_REVERSAL,
+    );
+    setTried(false);
+    setError(null);
+    setReused(false);
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setTried(true);
     setError(null);
+    setReused(false);
     const input = parsed.input;
     if (!input) return;
     setPending(true);
@@ -373,6 +411,7 @@ function ReversalForm({
       await onDone(`Asked to reverse this payment. ${waitingNote(approval, timeZone)}`);
     } catch (failure) {
       setError(moneyProblem(failure));
+      setReused(isKeyReused(failure));
       setPending(false);
     }
   }
@@ -435,7 +474,12 @@ function ReversalForm({
         <Button type="submit" variant="danger" pending={pending}>
           Ask for the reversal
         </Button>
-        <Button variant="ghost" onClick={onCancel}>
+        {reused ? (
+          <Button variant="secondary" onClick={startAgain}>
+            Start again
+          </Button>
+        ) : null}
+        <Button variant="ghost" disabled={pending} onClick={onCancel}>
           Cancel
         </Button>
       </div>

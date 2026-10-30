@@ -96,12 +96,51 @@ describe('M2 S8 and plan 4.15 one Idempotency-Key per money submission', () => {
     expect(outcomeOf(refusal(429, 'TOO_MANY_REQUESTS'))).toBe('refused');
   });
 
+  it('treats a 409 that names its reason as a refusal, so the next attempt gets a new key', async () => {
+    for (const code of [
+      'CASH_SHORT',
+      'LEASE_NOT_BILLABLE',
+      'APPROVAL_OPEN',
+      'PAYMENT_MATCHED',
+      'PAYMENT_OTHER_OWNER',
+      'PAYMENT_REVERSED',
+      'CHANGED_MEANWHILE',
+    ])
+      expect(outcomeOf(refusal(409, code)), code).toBe('refused');
+    // The API's filter sends the code in the body, in lower case.
+    const body = Object.assign(new Error('refused'), {
+      status: 409,
+      data: { body: { code: 'cash_short' } },
+    });
+    expect(outcomeOf(body)).toBe('refused');
+    const keeper = idempotencyKeeper(counter());
+    await expect(
+      sendOnce(keeper, async () => {
+        throw refusal(409, 'CASH_SHORT');
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(keeper.key()).toBe('key-2');
+  });
+
+  it('keeps the key after a 409 that names no reason, or one still in progress', async () => {
+    expect(outcomeOf({ status: 409 })).toBe('unknown');
+    expect(outcomeOf(refusal(409, ''))).toBe('unknown');
+    expect(outcomeOf(refusal(409, 'REQUEST_IN_PROGRESS'))).toBe('unknown');
+    const keeper = idempotencyKeeper(counter());
+    await expect(
+      sendOnce(keeper, async () => {
+        throw refusal(409, 'REQUEST_IN_PROGRESS');
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(keeper.key()).toBe('key-1');
+  });
+
   it('says plainly when sending again is safe, and when it was already recorded', () => {
     expect(moneyProblem(new TypeError('Failed to fetch'))).toBe(
       'We could not reach the server. Check your connection and try again. Sending it again is safe: it will not be recorded twice.',
     );
     expect(moneyProblem(refusal(422, 'IDEMPOTENCY_KEY_REUSED'))).toBe(
-      'This was recorded already, with the details first sent, so it was not recorded again. Check the list before recording anything more.',
+      'An earlier attempt from this form may already have been recorded, so this one was not. Check the list before recording it again.',
     );
     expect(moneyProblem(refusal(409, 'REQUEST_IN_PROGRESS'))).toContain(
       'it will not be recorded twice',

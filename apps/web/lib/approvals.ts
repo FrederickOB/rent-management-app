@@ -1,10 +1,12 @@
 import type { ApiClient } from '@rent/contracts/client';
 import { isOpen, type ApprovalStatus } from '@rent/domain/approvals';
 import {
+  evidenceOfMethod,
   MONEY_LOCATION_LABELS,
   PAYMENT_METHOD_LABELS,
   RECEIVING_ACCOUNT_LABELS,
   REVERSAL_REASON_LABELS,
+  type EvidenceKind,
 } from './billing-format';
 import { formatBusinessDate } from './business-dates';
 import { humanise } from './format';
@@ -167,6 +169,51 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   add('Where the money is now', pick(MONEY_LOCATION_LABELS, data.moneyNowIn));
   add('Note', str('note'));
   return facts;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The file each money request is approved on, by its action. */
+const EVIDENCE_OF: Record<string, (data: Record<string, unknown>) => EvidenceKind> = {
+  'payment.cash_receipt': (data) => evidenceOfMethod(data.method === 'cheque' ? 'cheque' : 'cash'),
+  'payment.direct_receipt': () => 'transfer_proof',
+  'cash.banking': () => 'banking_slip',
+};
+
+/**
+ * The photo, proof or slip an approver checks before deciding (BC-05, P07, P28): the payload's
+ * `evidenceDocumentId`. A request made before payloads carried it has none, and shows no link.
+ */
+export function approvalEvidence(
+  actionType: string,
+  payload: unknown,
+): { readonly documentId: string; readonly kind: EvidenceKind } | null {
+  const data = asRecord(payload);
+  const kindOf = EVIDENCE_OF[actionType];
+  const documentId = data?.evidenceDocumentId;
+  if (!data || !kindOf || typeof documentId !== 'string' || !UUID.test(documentId)) return null;
+  return { documentId, kind: kindOf(data) };
+}
+
+/**
+ * The lease line of a money request from its own payload (`unitCode`, `tenantName`), so the
+ * screen fetches a lease only when the payload does not name it.
+ */
+export function payloadSubject(row: Pick<ApprovalRow, 'subjectType' | 'payload'>): {
+  readonly title: string;
+  readonly detail: string | null;
+  readonly leaseId: string | null;
+} | null {
+  if (row.subjectType === 'lease') return null;
+  const data = asRecord(row.payload);
+  const unitCode = data?.unitCode;
+  if (typeof unitCode !== 'string' || !unitCode.trim()) return null;
+  const tenantName = data?.tenantName;
+  return {
+    title: `Lease for ${unitCode.trim()}`,
+    detail: typeof tenantName === 'string' && tenantName.trim() ? tenantName.trim() : null,
+    leaseId: payloadLeaseId(row),
+  };
 }
 
 /** The lease a request is about, when its payload names one and it is not the subject itself. */

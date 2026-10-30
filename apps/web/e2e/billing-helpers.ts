@@ -1,11 +1,22 @@
-import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from '@playwright/test';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { ready } from './helpers';
 import { newSmsCode, smsIds } from './register-helpers';
 
 /**
- * Helpers for the M4a billing specs. They read the demo dataset `pnpm db:seed` loads (plan 4.21):
- * the agency's Legon compound house (ACC-LEG), looked after by Kojo the caretaker, the East Legon
- * flats (ACC-ELG), and their tenancies with money recorded through the real services.
+ * Helpers for the M4a billing specs. They read the demo dataset `pnpm db:seed` loads, as plan
+ * M4a section 5 lists it for a fresh database: the agency's Legon compound house (ACC-LEG),
+ * looked after by Kojo the caretaker, the East Legon flats (ACC-ELG), and their tenancies with
+ * money recorded through the real services.
  */
 
 export interface PhonePerson {
@@ -13,12 +24,13 @@ export interface PhonePerson {
   readonly name: string;
   /** How a person types the number on the form, the way it is written in Ghana. */
   readonly typed: string;
+  /** A short name for the saved session's file, never the phone number. */
+  readonly label: string;
 }
 
 /**
  * Signs in by phone through the real screens (AD-06): one code per call, read from the fake SMS
- * provider and never printed. The API sends at most 3 codes per phone in 15 minutes, so a spec
- * signs in once and keeps the page.
+ * provider and never printed. The API sends at most 3 codes per phone in 15 minutes.
  */
 export async function phoneSignIn(page: Page, person: PhonePerson): Promise<void> {
   await page.goto('/sign-in/phone');
@@ -33,6 +45,32 @@ export async function phoneSignIn(page: Page, person: PhonePerson): Promise<void
   await expect(page.getByTestId('shell-person')).toHaveText(person.name);
 }
 
+/**
+ * A browser context signed in by phone, at most once per person per test run: the session is
+ * saved in the run's output folder (emptied when a run starts) and reused by a CI retry, so a
+ * retried spec does not spend another of the person's 3 codes in 15 minutes.
+ */
+export async function phoneSession(
+  browser: Browser,
+  baseURL: string | undefined,
+  person: PhonePerson,
+): Promise<BrowserContext> {
+  const saved = join(test.info().project.outputDir, `.session-${person.label}.json`);
+  if (existsSync(saved)) {
+    const context = await browser.newContext({ baseURL, storageState: saved });
+    const me = await context.request.get('/api/v1/me');
+    if (me.status() === 200 && ((await me.json()) as { name: string }).name === person.name)
+      return context;
+    await context.close();
+  }
+  const context = await browser.newContext({ baseURL });
+  const page = await context.newPage();
+  await phoneSignIn(page, person);
+  await context.storageState({ path: saved });
+  await page.close();
+  return context;
+}
+
 async function ok<T>(response: Awaited<ReturnType<APIRequestContext['get']>>, what: string) {
   expect(response.status(), `${what}: ${await response.text()}`).toBe(200);
   return (await response.json()) as T;
@@ -44,21 +82,22 @@ export interface CollectorCashRow {
   readonly ownerName: string;
   readonly heldMinor: number;
   readonly bankingPendingMinor: number;
+  readonly bankableMinor: number;
 }
 
-/** What a collector holds for an owner, in pesewas, as the API reports it to this session. */
-export async function heldFor(
+/** A collector's cash for an owner, in pesewas, as the API reports it to this session. */
+export async function cashFor(
   page: Page,
   collectorName: string,
   ownerName: string,
-): Promise<number> {
+): Promise<CollectorCashRow> {
   const rows = await ok<CollectorCashRow[]>(
     await page.request.get('/api/v1/collectors/cash'),
     'list cash on hand',
   );
-  return (
-    rows.find((r) => r.collectorName === collectorName && r.ownerName === ownerName)?.heldMinor ?? 0
-  );
+  const row = rows.find((r) => r.collectorName === collectorName && r.ownerName === ownerName);
+  if (!row) throw new Error(`${collectorName} holds nothing for ${ownerName}: run pnpm db:seed`);
+  return row;
 }
 
 /** A lease's id by its unit code, as the signed-in person sees it. */
@@ -83,18 +122,6 @@ export async function pickLease(scope: Locator, unitCode: string): Promise<void>
   await expect(option).toHaveCount(1);
   const value = await option.getAttribute('value');
   await select.selectOption(value!);
-}
-
-/** A distinctive amount for one run, so its approvals are told apart from leftovers: GH₵50.xx. */
-export function runAmount(): {
-  readonly typed: string;
-  readonly minor: number;
-  readonly shown: string;
-} {
-  const pesewas = 1 + Math.trunc(Math.random() * 98);
-  const minor = 5_000 + pesewas;
-  const typed = `50.${String(pesewas).padStart(2, '0')}`;
-  return { typed, minor, shown: `GH₵${typed}` };
 }
 
 /** Polls a short-lived document link until the PDF is rendered (a worker job), then fetches it. */

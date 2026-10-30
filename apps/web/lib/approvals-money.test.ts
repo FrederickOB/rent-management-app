@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { approvalActionLabel, approvalFacts, payloadLeaseId, subjectHref } from './approvals';
+import {
+  approvalActionLabel,
+  approvalEvidence,
+  approvalFacts,
+  payloadLeaseId,
+  payloadSubject,
+  subjectHref,
+} from './approvals';
+import { EVIDENCE_LABELS } from './billing-format';
 
 const LEASE = '019a3000-0000-7000-8000-0000000000e2';
 const PAYMENT = '019a3000-0000-7000-8000-0000000000e3';
@@ -127,6 +135,60 @@ describe('BC-05, P07, P21, P24, P27 and P28 money requests read plainly on the a
     expect(payloadLeaseId({ subjectType: 'lease', payload: { leaseId: LEASE } })).toBeNull();
     expect(
       payloadLeaseId({ subjectType: 'cash_record', payload: { leaseId: 'not-an-id' } }),
+    ).toBeNull();
+  });
+});
+
+describe('BC-05, P07 and P28 the approver sees the photo, proof or slip', () => {
+  const DOC = '019a3000-0000-7000-8000-0000000000f7';
+
+  it('links the file each money request was made with, from the payload', () => {
+    expect(
+      approvalEvidence('payment.cash_receipt', { method: 'cash', evidenceDocumentId: DOC }),
+    ).toEqual({ documentId: DOC, kind: 'receipt_photo' });
+    expect(
+      approvalEvidence('payment.cash_receipt', { method: 'cheque', evidenceDocumentId: DOC }),
+    ).toEqual({ documentId: DOC, kind: 'cheque_photo' });
+    expect(approvalEvidence('payment.direct_receipt', { evidenceDocumentId: DOC })).toEqual({
+      documentId: DOC,
+      kind: 'transfer_proof',
+    });
+    expect(approvalEvidence('cash.banking', { evidenceDocumentId: DOC })).toEqual({
+      documentId: DOC,
+      kind: 'banking_slip',
+    });
+    expect(EVIDENCE_LABELS.receipt_photo).toBe('Open the receipt-book photo');
+  });
+
+  it('shows no link for a request made before payloads carried the file, or for other requests', () => {
+    expect(approvalEvidence('payment.cash_receipt', { method: 'cash' })).toBeNull();
+    expect(approvalEvidence('cash.banking', { evidenceDocumentId: 'not-an-id' })).toBeNull();
+    expect(approvalEvidence('payment.reversal', { evidenceDocumentId: DOC })).toBeNull();
+    expect(approvalEvidence('lease.cancel_signed', null)).toBeNull();
+  });
+});
+
+describe('BC-05 a money request names its lease from its own payload', () => {
+  it('uses the payload’s unit and tenant, and asks for the lease only when they are missing', () => {
+    expect(
+      payloadSubject({
+        subjectType: 'cash_record',
+        payload: { leaseId: LEASE, unitCode: 'ACC-LEG-B1-01', tenantName: 'Kwame Monthly (demo)' },
+      }),
+    ).toEqual({
+      title: 'Lease for ACC-LEG-B1-01',
+      detail: 'Kwame Monthly (demo)',
+      leaseId: LEASE,
+    });
+    // Without a unit in the payload the screen looks the lease up, once per lease.
+    expect(payloadSubject({ subjectType: 'cash_record', payload: { leaseId: LEASE } })).toBeNull();
+    // A transfer with no lease names none.
+    expect(
+      payloadSubject({ subjectType: 'direct_receipt', payload: { unitCode: null, leaseId: null } }),
+    ).toBeNull();
+    // A lease's own request is named from the lease.
+    expect(
+      payloadSubject({ subjectType: 'lease', payload: { unitCode: 'ACC-LEG-B1-01' } }),
     ).toBeNull();
   });
 });

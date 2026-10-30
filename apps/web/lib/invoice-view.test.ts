@@ -1,8 +1,10 @@
 import type { InvoiceLineView } from '@rent/contracts';
 import { describe, expect, it } from 'vitest';
 import {
+  correctionMax,
+  correctionsOffered,
   groupLines,
-  lineCorrections,
+  lineName,
   otherInvoiceWarnings,
   unverifiedRuleKeys,
   vatWarning,
@@ -36,6 +38,8 @@ function line(overrides: Partial<InvoiceLineView> = {}): InvoiceLineView {
     creditedMinor: 0,
     writtenOffMinor: 0,
     outstandingMinor: 300_000,
+    creditableMinor: 300_000,
+    writeOffableMinor: 300_000,
     accrued: true,
     rule: null,
     ...overrides,
@@ -90,39 +94,38 @@ describe('CT-04 VAT and levy lines sit under the line they are charged on', () =
 });
 
 describe('P27 and P24 credit notes and write-offs offered per line', () => {
-  it('offers a credit note up to what the line charges, less any write-off', () => {
-    const paid = line({ settledMinor: 300_000, outstandingMinor: 0 });
-    expect(lineCorrections(paid)).toEqual({ creditableMinor: 300_000, writableOffMinor: 0 });
-    const part = line({ writtenOffMinor: 100_000, outstandingMinor: 200_000 });
-    expect(lineCorrections(part)).toEqual({ creditableMinor: 200_000, writableOffMinor: 200_000 });
+  it('offers each correction up to the amount the API allows, never the browser’s own figure', () => {
+    // A paid rent line the API says can be credited in full, and not written off.
+    const paid = line({ settledMinor: 300_000, outstandingMinor: 0, writeOffableMinor: 0 });
+    expect(correctionsOffered(paid)).toEqual(['credit_note']);
+    expect(correctionMax(paid, 'credit_note')).toBe(300_000);
+    // The API's figure wins even where the line's other amounts would suggest more.
+    const capped = line({ creditableMinor: 120_000, writeOffableMinor: 45_000 });
+    expect(correctionMax(capped, 'credit_note')).toBe(120_000);
+    expect(correctionMax(capped, 'write_off')).toBe(45_000);
   });
 
-  it('offers no credit note on a VAT or levy line: it follows the line it is charged on', () => {
-    const vat = line({ kind: 'vat', baseLineId: id(), rateBps: 1500, amountMinor: 45_000 });
-    expect(lineCorrections({ ...vat, netMinor: 45_000, outstandingMinor: 45_000 })).toEqual({
-      creditableMinor: 0,
-      writableOffMinor: 45_000,
-    });
+  it('offers nothing the API allows no amount for', () => {
+    // A VAT line follows its base line, and a paid deposit leaves only at move-out (M8).
+    const vat = line({ kind: 'vat', baseLineId: id(), rateBps: 1500, creditableMinor: 0 });
+    expect(correctionsOffered({ ...vat, writeOffableMinor: 0 })).toEqual([]);
+    expect(correctionsOffered({ ...vat, writeOffableMinor: 45_000 })).toEqual(['write_off']);
   });
+});
 
-  it('credits only the unpaid part of a deposit, and never writes a deposit off', () => {
+describe('CT-04 and P27 each line is named where it is acted on', () => {
+  it('names a line with its period, and a tax line with its rate and its base line', () => {
+    const rent = line({ label: 'Rent' });
+    expect(lineName(rent)).toBe('Rent, 15 Nov 2026 to 14 Dec 2026');
+    const vat = line({ kind: 'vat', label: 'VAT', baseLineId: rent.id, rateBps: 1500 });
+    expect(lineName(vat, rent)).toBe('VAT at 15% on Rent, 15 Nov 2026 to 14 Dec 2026');
+    expect(lineName(vat)).toBe('VAT at 15%');
     const deposit = line({
       kind: 'deposit',
+      label: 'Security deposit',
       periodStart: null,
       periodEnd: null,
-      amountMinor: 500_000,
-      netMinor: 500_000,
-      settledMinor: 200_000,
-      outstandingMinor: 300_000,
-      accrued: false,
     });
-    expect(lineCorrections(deposit)).toEqual({ creditableMinor: 300_000, writableOffMinor: 0 });
-  });
-
-  it('writes off only a charge already owed: a rent period that has not started is credited instead', () => {
-    const future = line({ accrued: false });
-    expect(lineCorrections(future)).toEqual({ creditableMinor: 300_000, writableOffMinor: 0 });
-    const oneOff = line({ kind: 'one_off', periodStart: null, periodEnd: null, accrued: false });
-    expect(lineCorrections(oneOff).writableOffMinor).toBe(300_000);
+    expect(lineName(deposit)).toBe('Security deposit');
   });
 });

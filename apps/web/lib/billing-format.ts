@@ -73,6 +73,13 @@ export const RECEIVING_ACCOUNT_LABELS: Record<ReceivingAccount, string> = {
   agency_account: 'The agency’s account',
 };
 
+/** Where a payment's money went when it arrived (P03, P06, P28). */
+export const RECEIVED_INTO_LABELS: Record<MoneyLocation, string> = {
+  provider: 'The payment provider',
+  collector: 'The person who collected it',
+  ...RECEIVING_ACCOUNT_LABELS,
+};
+
 export const REVERSAL_REASON_LABELS: Record<ReversalReason, string> = {
   bounced_cheque: 'The cheque bounced',
   wrong_entry: 'It was recorded by mistake',
@@ -100,6 +107,25 @@ export const RECEIPT_KIND_LABELS: Record<'receipt' | 'credit_receipt', string> =
   receipt: 'Receipt',
   credit_receipt: 'Credit receipt',
 };
+
+/** The file behind a money record (BC-05, P07, P28), which a person opens to check it. */
+export type EvidenceKind = 'receipt_photo' | 'cheque_photo' | 'transfer_proof' | 'banking_slip';
+
+export const EVIDENCE_LABELS: Record<EvidenceKind, string> = {
+  receipt_photo: 'Open the receipt-book photo',
+  cheque_photo: 'Open the cheque photo',
+  transfer_proof: 'Open the transfer proof',
+  banking_slip: 'Open the banking slip',
+};
+
+/** The file a payment of this method was recorded with: a photo for cash or a cheque, else a proof. */
+export function evidenceOfMethod(method: PaymentMethod): EvidenceKind {
+  const photos: Partial<Record<PaymentMethod, EvidenceKind>> = {
+    cash: 'receipt_photo',
+    cheque: 'cheque_photo',
+  };
+  return photos[method] ?? 'transfer_proof';
+}
 
 /** A rate in basis points as a percentage, without floating point: 1500 is `15%`, 250 `2.5%`. */
 export function rateLabel(bps: number): string {

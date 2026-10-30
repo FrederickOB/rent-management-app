@@ -4,9 +4,10 @@ import { RECEIVING_ACCOUNTS } from '@rent/contracts';
 import Link from 'next/link';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
+import { CancelLink } from '@/components/cancel-link';
 import { FileField } from '@/components/file-field';
 import { LeasePicker } from '@/components/lease-picker';
-import { secondaryLink, textLink } from '@/components/link-styles';
+import { secondaryLink } from '@/components/link-styles';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -14,13 +15,8 @@ import { SelectField, TextAreaField, TextField } from '@/components/ui/field';
 import { api, keyedApi } from '@/lib/api';
 import { RECEIVING_ACCOUNT_LABELS, type ReceivingAccount } from '@/lib/billing-format';
 import { todayIn } from '@/lib/business-dates';
-import {
-  isKeyReused,
-  moneyProblem,
-  outcomeOf,
-  sendOnce,
-  useIdempotencyKeeper,
-} from '@/lib/idempotency';
+import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
+import { useHoldWhileSending } from '@/lib/in-flight';
 import type { PickedLease } from '@/lib/lease-pick';
 import { waitingNote } from '@/lib/money-requests';
 import {
@@ -29,7 +25,12 @@ import {
   transferForm,
   type TransferDraft,
 } from '@/lib/payment-form';
-import { PAYMENT_PROOF_UPLOAD, uploadOnce } from '@/lib/payment-upload';
+import {
+  fileAgainMessage,
+  needsFileAgain,
+  PAYMENT_PROOF_UPLOAD,
+  uploadOnce,
+} from '@/lib/payment-upload';
 import { formatMinor } from '@/lib/tenancy-format';
 import { fileProblem, StorageUploadError } from '@/lib/upload';
 
@@ -93,6 +94,8 @@ export function TransferForm({
   const errors = tried ? parsed.errors : {};
   const check = referenceCheck(draft.senderReference, leaseReference);
   const set = (patch: Partial<TransferDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  const working = status !== null;
+  useHoldWhileSending(working);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -126,8 +129,15 @@ export function TransferForm({
         setProblem(failure.message);
         return;
       }
-      // A refused attempt recorded nothing: its proof is sent again with the corrected details.
-      if (outcomeOf(failure) === 'refused') uploads.forget(file);
+      // The upload itself was refused (expired or missing): the proof must be chosen again. For
+      // anything else the same upload is sent again, which the API accepts.
+      if (needsFileAgain(failure)) {
+        uploads.forget(file);
+        if (proof.current) proof.current.value = '';
+        setProofError(fileAgainMessage('proof'));
+        setProblem(fileAgainMessage('proof'));
+        return;
+      }
       setProblem(moneyProblem(failure));
       setReused(isKeyReused(failure));
     }
@@ -139,6 +149,7 @@ export function TransferForm({
     setDone(null);
     setTried(false);
     setProblem(null);
+    setProofError(null);
     setLease(null);
     setDraft(emptyTransfer(today, { agency }));
     if (proof.current) proof.current.value = '';
@@ -167,7 +178,6 @@ export function TransferForm({
       </Card>
     );
 
-  const working = status !== null;
   const needsOwner = !lease && draft.receivedInto === 'owner_account';
   return (
     <form onSubmit={submit} noValidate aria-label="Record a transfer" className="space-y-6">
@@ -299,7 +309,7 @@ export function TransferForm({
       ) : null}
       {reused ? (
         <Button variant="secondary" onClick={another}>
-          Start a new record
+          Start again
         </Button>
       ) : null}
       {tried && !working && !problem && (!parsed.input || proofError) ? (
@@ -309,9 +319,7 @@ export function TransferForm({
         <Button type="submit" pending={working}>
           Record the transfer
         </Button>
-        <Link href={lease ? `/leases/${lease.id}` : '/payments'} className={textLink}>
-          Cancel
-        </Link>
+        <CancelLink href={lease ? `/leases/${lease.id}` : '/payments'} disabled={working} />
       </div>
     </form>
   );

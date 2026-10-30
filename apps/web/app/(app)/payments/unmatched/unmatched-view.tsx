@@ -15,6 +15,7 @@ import { useKeepers } from '@/lib/idempotency';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
 import { MatchForm } from '../match-form';
+import { ownerAccountOf } from '@/lib/lease-pick';
 
 /** The minimal unmatched list (P23; plan 4.9), with "Match to a lease". */
 export function UnmatchedView({ canMatch }: { readonly canMatch: boolean }) {
@@ -90,6 +91,7 @@ export function UnmatchedView({ canMatch }: { readonly canMatch: boolean }) {
                 {canMatch && open === row.paymentId ? (
                   <MatchForm
                     paymentId={row.paymentId}
+                    owner={ownerAccountOf(row)}
                     keeper={keepers(row.paymentId)}
                     onMatched={(_payment, lease) => {
                       setOpen(null);

@@ -14,7 +14,6 @@ export function FileField({
   disabled,
   error,
   note,
-  capture,
 }: {
   readonly ref: Ref<HTMLInputElement>;
   readonly label: string;
@@ -23,8 +22,6 @@ export function FileField({
   readonly error?: string | null;
   /** What the file must or must not contain, read with the field. */
   readonly note?: ReactNode;
-  /** Opens the phone's camera straight away (`environment`: the back camera), for a photo. */
-  readonly capture?: 'environment' | 'user';
 }) {
   const id = useId();
   const noteId = note ? `${id}-note` : undefined;
@@ -39,7 +36,6 @@ export function FileField({
         id={id}
         type="file"
         accept={acceptFor(rule)}
-        capture={capture}
         disabled={disabled}
         aria-describedby={[noteId, `${id}-hint`, errorId].filter(Boolean).join(' ')}
         aria-invalid={error ? true : undefined}

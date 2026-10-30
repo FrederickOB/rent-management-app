@@ -5,41 +5,52 @@ import { formatBusinessDate } from '../lib/business-dates';
 import { nav, PEOPLE, ready, signIn } from './helpers';
 import { expectNoSidewaysScroll } from './register-helpers';
 
-/** The seed's tenancies in arrears (plan 4.21): billing started months back, then nothing paid. */
+/**
+ * The seed's tenancies in arrears (plan M4a section 5): billed from their start, partly paid,
+ * then nothing. On the day the seed runs, Kofi's oldest unpaid line is 45 days past due and Esi's
+ * 95 days. The seed dates everything from that day, so the spec finds it from Kofi's oldest due
+ * date and checks the documented figures as of then.
+ */
 const FORTY_FIVE = 'Kofi Arrears-45 (demo)';
 const NINETY_FIVE = 'Esi Arrears-95 (demo)';
 
 const BUCKETS = ['0_30', '31_60', '61_90', '90_plus'] as const;
 type Bucket = (typeof BUCKETS)[number];
+type Buckets = Partial<Record<Bucket, number>>;
 
 interface ArrearsRow {
-  readonly key: string;
   readonly label: string;
-  readonly buckets: Partial<Record<Bucket, number>>;
-  readonly totalMinor: number;
+  readonly buckets: Buckets;
   readonly oldestDueDate: string;
 }
 
 const cedis = (minor: number) => format(money(minor));
 const daysAfter = (iso: string, days: number) => toIsoDate(addDays(parseBusinessDate(iso), days));
 
-async function arrears(page: Page, asOf: string | null): Promise<{ rows: ArrearsRow[] }> {
+async function arrearsRows(page: Page, asOf: string | null): Promise<ArrearsRow[]> {
   const response = await page.request.get(
     `/api/v1/arrears?by=tenant${asOf ? `&asOf=${asOf}` : ''}`,
   );
   expect(response.status(), await response.text()).toBe(200);
-  return (await response.json()) as { rows: ArrearsRow[] };
+  return ((await response.json()) as { rows: ArrearsRow[] }).rows;
 }
 
-/** The row's amount in each bucket, as the screen shows it. */
-async function expectBuckets(page: Page, label: string, row: ArrearsRow) {
-  const shown = page.getByTestId('arrears-row').filter({ hasText: label });
-  await expect(shown).toHaveCount(1);
+/** Shows the arrears as of a date, and waits for the screen to say so. */
+async function asOf(page: Page, date: string) {
+  await page.getByLabel('As of').fill(date);
+  await expect(page.getByTestId('arrears')).toContainText(`As of ${formatBusinessDate(date)}`);
+}
+
+/** The row's amount in each bucket and its total, as the screen shows them. */
+async function expectRow(page: Page, label: string, buckets: Buckets) {
+  const row = page.getByTestId('arrears-row').filter({ hasText: label });
+  await expect(row).toHaveCount(1);
   for (const bucket of BUCKETS) {
-    const amount = row.buckets[bucket] ?? 0;
-    await expect(shown.getByTestId(`bucket-${bucket}`)).toHaveText(amount ? cedis(amount) : '—');
+    const amount = buckets[bucket] ?? 0;
+    await expect(row.getByTestId(`bucket-${bucket}`)).toHaveText(amount ? cedis(amount) : '—');
   }
-  await expect(shown.getByTestId('arrears-total')).toHaveText(cedis(row.totalMinor));
+  const total = BUCKETS.reduce((sum, b) => sum + (buckets[b] ?? 0), 0);
+  await expect(row.getByTestId('arrears-total')).toHaveText(cedis(total));
 }
 
 test.describe('BC-08 arrears screen', () => {
@@ -47,20 +58,14 @@ test.describe('BC-08 arrears screen', () => {
     page,
   }) => {
     await signIn(page, PEOPLE.managerOne.email);
-    // The seed ages its tenancies from the day it was loaded; each check is pinned to the day the
-    // tenant's oldest unpaid line is that many days past due, so the e2e database may be older.
-    const now = await arrears(page, null);
-    const kofiNow = now.rows.find((r) => r.label === FORTY_FIVE);
-    const esiNow = now.rows.find((r) => r.label === NINETY_FIVE);
-    expect(kofiNow, `${FORTY_FIVE} is in arrears`).toBeTruthy();
-    expect(esiNow, `${NINETY_FIVE} is in arrears`).toBeTruthy();
-
-    // 45 days after Kofi's oldest due date, that line is in 31–60 and nothing is older.
-    const day45 = daysAfter(kofiNow!.oldestDueDate, 45);
-    const at45 = (await arrears(page, day45)).rows.find((r) => r.label === FORTY_FIVE)!;
-    expect(at45.buckets['31_60'] ?? 0).toBeGreaterThan(0);
-    expect(at45.buckets['61_90'] ?? 0).toBe(0);
-    expect(at45.buckets['90_plus'] ?? 0).toBe(0);
+    // The seed's day: 45 days after Kofi's oldest due date, and 95 after Esi's.
+    const today = await arrearsRows(page, null);
+    const kofi = today.find((r) => r.label === FORTY_FIVE);
+    const esi = today.find((r) => r.label === NINETY_FIVE);
+    expect(kofi, `${FORTY_FIVE} is in arrears`).toBeTruthy();
+    expect(esi, `${NINETY_FIVE} is in arrears`).toBeTruthy();
+    const seedDay = daysAfter(kofi!.oldestDueDate, 45);
+    expect(daysAfter(esi!.oldestDueDate, 95), 'both are aged from the seed day').toBe(seedDay);
 
     await nav(page).getByRole('link', { name: 'Arrears' }).click();
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Arrears');
@@ -69,26 +74,35 @@ test.describe('BC-08 arrears screen', () => {
       'aria-pressed',
       'true',
     );
-    await page.getByLabel('As of').fill(day45);
-    await expect(page.getByTestId('arrears')).toContainText(`As of ${formatBusinessDate(day45)}`);
-    await expectBuckets(page, FORTY_FIVE, at45);
 
-    // 95 days after Esi's oldest due date, that line is over 90 days.
-    const day95 = daysAfter(esiNow!.oldestDueDate, 95);
-    const at95 = (await arrears(page, day95)).rows.find((r) => r.label === NINETY_FIVE)!;
-    expect(at95.buckets['90_plus'] ?? 0).toBeGreaterThan(0);
-    await page.getByLabel('As of').fill(day95);
-    await expectBuckets(page, NINETY_FIVE, at95);
+    // As of the seed day, the figures the plan documents.
+    await asOf(page, seedDay);
+    await expectRow(page, FORTY_FIVE, { '0_30': 40_000, '31_60': 30_000 });
+    await expectRow(page, NINETY_FIVE, {
+      '0_30': 40_000,
+      '31_60': 40_000,
+      '61_90': 40_000,
+      '90_plus': 25_000,
+    });
 
     // The totals row adds up every row on screen, bucket by bucket.
-    const all = await arrears(page, day95);
+    const all = await arrearsRows(page, seedDay);
     const totals = page.getByTestId('arrears-totals');
     for (const bucket of BUCKETS) {
-      const sum = all.rows.reduce((s, r) => s + (r.buckets[bucket] ?? 0), 0);
+      const sum = all.reduce((s, r) => s + (r.buckets[bucket] ?? 0), 0);
       await expect(totals.getByTestId(`bucket-${bucket}`)).toHaveText(cedis(sum));
     }
 
-    // Grouped by property and by owner, both tenants' Legon compound house and its owner appear.
+    // The date changes the answer. 20 days after Kofi's oldest due date, that line is young:
+    // nothing of his is 31–60 days old, and his next month was not due yet.
+    await asOf(page, daysAfter(kofi!.oldestDueDate, 20));
+    await expectRow(page, FORTY_FIVE, { '0_30': 30_000 });
+    // The day before it fell due, he owed nothing overdue: the months before were paid.
+    await asOf(page, daysAfter(kofi!.oldestDueDate, -1));
+    await expect(page.getByTestId('arrears-row').filter({ hasText: FORTY_FIVE })).toHaveCount(0);
+
+    // Grouped by property and by owner, the Legon compound house and its owner appear.
+    await asOf(page, seedDay);
     await page.getByRole('button', { name: 'By property' }).click();
     await expect(
       page.getByTestId('arrears-row').filter({ hasText: 'Legon compound house (demo)' }),

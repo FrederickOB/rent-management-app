@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useCallback, useState } from 'react';
 import { useApp } from '@/components/app-context';
 import { CashRecordStatusBadge } from '@/components/billing-badges';
+import { EvidenceButton } from '@/components/evidence-button';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -13,12 +14,12 @@ import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import {
   CASH_RECORD_STATUS_LABELS,
+  evidenceOfMethod,
   PAYMENT_METHOD_LABELS,
   type CashRecordStatus,
 } from '@/lib/billing-format';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { formatTime } from '@/lib/format';
-import { bankable } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
 
@@ -81,6 +82,7 @@ function Holdings({ can }: { readonly can: CashPermissions }) {
                 <Th>Owner</Th>
                 <Th className="text-right">Held</Th>
                 <Th className="text-right">Banking waiting for approval</Th>
+                <Th className="text-right">Can bank now</Th>
                 <Th>Held since</Th>
                 {can.bank ? <Th>Banking</Th> : null}
               </tr>
@@ -88,7 +90,8 @@ function Holdings({ can }: { readonly can: CashPermissions }) {
             <tbody className="divide-y divide-slate-100">
               {rows.map((row) => {
                 const mine = row.collectorPersonId === me.personId;
-                const canBank = can.bank && (mine || can.bankOthers) && bankable(row) > 0;
+                // What a new banking may ask for comes from the API (held less banking waiting).
+                const canBank = can.bank && (mine || can.bankOthers) && row.bankableMinor > 0;
                 return (
                   <tr key={`${row.collectorPersonId}:${row.ownerId}`} data-testid="cash-holding">
                     <Td>{mine ? `${row.collectorName} (you)` : row.collectorName}</Td>
@@ -96,8 +99,11 @@ function Holdings({ can }: { readonly can: CashPermissions }) {
                     <Td className="text-right font-semibold tabular-nums" data-testid="cash-held">
                       {formatMinor(row.heldMinor)}
                     </Td>
-                    <Td className="text-right tabular-nums">
+                    <Td className="text-right tabular-nums" data-testid="cash-pending">
                       {formatMinor(row.bankingPendingMinor)}
+                    </Td>
+                    <Td className="text-right tabular-nums" data-testid="cash-bankable">
+                      {formatMinor(row.bankableMinor)}
                     </Td>
                     <Td className="whitespace-nowrap">
                       {row.oldestUnbankedOn ? formatBusinessDate(row.oldestUnbankedOn) : '—'}
@@ -125,7 +131,7 @@ function Holdings({ can }: { readonly can: CashPermissions }) {
                     Total
                   </Th>
                   <Td className="text-right font-semibold tabular-nums">{formatMinor(total)}</Td>
-                  <Td colSpan={can.bank ? 3 : 2} />
+                  <Td colSpan={can.bank ? 4 : 3} />
                 </tr>
               </tfoot>
             ) : null}
@@ -183,6 +189,7 @@ function CashRecords({ can }: { readonly can: CashPermissions }) {
                 <Th>Paid by</Th>
                 <Th>Held by</Th>
                 <Th>Status</Th>
+                <Th>Photo</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -219,6 +226,16 @@ function CashRecords({ can }: { readonly can: CashPermissions }) {
                         </Link>
                       </p>
                     ) : null}
+                  </Td>
+                  <Td>
+                    {row.photoDocumentId ? (
+                      <EvidenceButton
+                        documentId={row.photoDocumentId}
+                        kind={evidenceOfMethod(row.method)}
+                      />
+                    ) : (
+                      '—'
+                    )}
                   </Td>
                 </tr>
               ))}

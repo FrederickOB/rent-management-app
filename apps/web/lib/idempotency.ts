@@ -1,6 +1,6 @@
 import { createApiClient, type ApiClient } from '@rent/contracts/client';
 import { useState } from 'react';
-import { isRecord, statusOf, toProblem } from './errors';
+import { errorCode, statusOf, toProblem } from './errors';
 
 // Idempotent money writes (M2 S8; M4a plan 4.15). Every money write sends an Idempotency-Key
 // header. The key belongs to one submission of a form: it is made when the form is first sent and
@@ -34,25 +34,32 @@ export function newIdempotencyKey(
  */
 export type AttemptOutcome = 'recorded' | 'refused' | 'unknown';
 
-/** The error code the API sent, from a guard's body or a handler's error. */
-const codeOf = (error: unknown): string => {
-  const body =
-    isRecord(error) && isRecord(error.data) && isRecord(error.data.body) ? error.data.body : null;
-  if (typeof body?.code === 'string') return body.code;
-  return isRecord(error) && typeof error.code === 'string' ? error.code : '';
-};
-
-/** The API refuses a key it has seen with other details (plan 4.15): the first one was recorded. */
+/**
+ * The API refuses a key it has seen with other details (plan 4.15): an earlier attempt from the
+ * same form reached it, and may have been recorded.
+ */
 export function isKeyReused(error: unknown): boolean {
-  return statusOf(error) === 422 && /idempotency/i.test(codeOf(error));
+  return statusOf(error) === 422 && errorCode(error) === 'IDEMPOTENCY_KEY_REUSED';
 }
+
+/** A request with this key is still running, or its answer was lost (409). */
+const isInProgress = (error: unknown): boolean =>
+  statusOf(error) === 409 && errorCode(error) === 'REQUEST_IN_PROGRESS';
+
+/** A 409 that names no reason: oRPC's own `CONFLICT`, or no code at all. */
+const UNNAMED_CONFLICTS: ReadonlySet<string> = new Set(['', 'CONFLICT']);
 
 export function outcomeOf(error: unknown): Exclude<AttemptOutcome, 'recorded'> {
   const status = statusOf(error);
   // No answer (the connection dropped or timed out) or a server failure: it may have been saved.
   if (status === null || status >= 500 || status === 408) return 'unknown';
-  // 409: a request with this key may still be running; a reused key: the first one was saved.
-  if (status === 409 || isKeyReused(error)) return 'unknown';
+  // A 409 is unknown only while the key's request may still be running, or when it names no
+  // reason. One that names its reason (CASH_SHORT, APPROVAL_OPEN, PAYMENT_MATCHED…) is the API
+  // refusing the write: nothing was recorded.
+  if (status === 409)
+    return isInProgress(error) || UNNAMED_CONFLICTS.has(errorCode(error)) ? 'unknown' : 'refused';
+  // A reused key: an earlier attempt reached the API, so this form's key is kept.
+  if (isKeyReused(error)) return 'unknown';
   return 'refused';
 }
 
@@ -99,9 +106,10 @@ export async function sendOnce<T>(
  * safe. The API's words for a reused or busy key are about keys; these are about the money.
  */
 export function moneyProblem(error: unknown): string {
+  // The key may belong to an attempt still running, or to one that failed: nothing is certain.
   if (isKeyReused(error))
-    return 'This was recorded already, with the details first sent, so it was not recorded again. Check the list before recording anything more.';
-  if (statusOf(error) === 409 && /in_progress/i.test(codeOf(error)))
+    return 'An earlier attempt from this form may already have been recorded, so this one was not. Check the list before recording it again.';
+  if (isInProgress(error))
     return 'It is still being recorded, or its answer was lost on the way. Wait a moment, then send it again: it will not be recorded twice.';
   const { message } = toProblem(error);
   return outcomeOf(error) === 'unknown'

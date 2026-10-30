@@ -1,26 +1,24 @@
 import { expect, test, type Page } from '@playwright/test';
+import { addDays, addMonths, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { format, money } from '@rent/domain/money';
 import { formatBusinessDate } from '../lib/business-dates';
 import { leaseIdByUnit } from './billing-helpers';
 import { PEOPLE, signIn } from './helpers';
+import { today } from './tenancy-helpers';
 
-/** The seed's two-year residential advance (plan 4.21): paid for the whole term up front. */
+/**
+ * The seed's figures (plan M4a section 5), pinned rather than read back from the screen's own
+ * source. Kojo Partial pays by a cheque on the seed day; Yaw Two-Year paid GH₵36,000 for a
+ * 24-month lease at GH₵1,500 a month.
+ */
 const TWO_YEAR = 'ACC-ELG-B1-04';
-/** The seed's part-paid monthly lease. */
 const PART_PAID = 'ACC-LEG-B2-03';
+const YAW_RENT_MINOR = 150_000;
+const YAW_MONTHS = 24;
+const KOJO_TOWARDS_MINOR = 20_000;
 
 const cedis = (minor: number) => format(money(minor));
-
-interface LeaseTerms {
-  readonly terms: { readonly endDate: string; readonly monthlyRentMinor: number };
-}
-
-interface Billing {
-  readonly paidUntil: string | null;
-  readonly partial: { readonly monthStart: string; readonly amountMinor: number } | null;
-  readonly unearnedRentMinor: number;
-  readonly notBilledReason: string | null;
-}
+const dayBefore = (iso: string) => toIsoDate(addDays(parseBusinessDate(iso), -1));
 
 async function read<T>(page: Page, path: string): Promise<T> {
   const response = await page.request.get(path);
@@ -32,48 +30,46 @@ test.describe('AR-02 the lease page shows paid-until and unearned rent', () => {
   test('for the seed’s two-year advance and a part-paid lease', async ({ page }) => {
     await signIn(page, PEOPLE.managerOne.email);
 
-    // The two-year advance: every month of the term is paid, so it is paid until the lease's last
-    // day, and the rent for the months not started yet is unearned, shown in cedis.
-    const advanceId = await leaseIdByUnit(page, TWO_YEAR);
-    const advance = await read<LeaseTerms>(page, `/api/v1/leases/${advanceId}`);
-    const advanceMoney = await read<Billing>(page, `/api/v1/leases/${advanceId}/billing`);
-    expect(advanceMoney.notBilledReason).toBeNull();
-    expect(advanceMoney.paidUntil).toBe(advance.terms.endDate);
-    expect(advanceMoney.partial).toBeNull();
-    // Whole months of rent are unearned: some are, and never more than the term.
-    const rent = advance.terms.monthlyRentMinor;
-    expect(advanceMoney.unearnedRentMinor % rent).toBe(0);
-    expect(advanceMoney.unearnedRentMinor).toBeGreaterThan(0);
-    expect(advanceMoney.unearnedRentMinor).toBeLessThanOrEqual(24 * rent);
-
-    await page.goto(`/leases/${advanceId}`);
-    const card = page.getByTestId('lease-money');
-    await expect(card.getByTestId('money-paid-until')).toContainText(
-      formatBusinessDate(advance.terms.endDate),
-    );
-    await expect(card.getByTestId('money-partial')).toHaveCount(0);
-    await expect(card.getByTestId('money-unearned-rent')).toContainText(
-      cedis(advanceMoney.unearnedRentMinor),
-    );
-    await expect(card.getByTestId('money-reference')).toContainText(/[0-9A-Z]{7}/);
-
-    // The part-paid lease: what is paid towards the next month shows as partial cover, in the
-    // words of prd-issues 17.
+    // Kojo Partial: paid until the day before the seed day, plus GH₵200.00 towards the month
+    // starting on it. The seed day is the day of his cheque.
     const partId = await leaseIdByUnit(page, PART_PAID);
-    const part = await read<Billing>(page, `/api/v1/leases/${partId}/billing`);
-    expect(part.partial, 'the part-paid lease has partial cover').not.toBeNull();
-    const partial = part.partial!;
+    const payments = await read<{ method: string; receivedOn: string }[]>(
+      page,
+      `/api/v1/payments?leaseId=${partId}`,
+    );
+    const cheque = payments.find((p) => p.method === 'cheque');
+    expect(cheque, 'the seed’s cheque from Kojo Partial').toBeTruthy();
+    const seedDay = cheque!.receivedOn;
     await page.goto(`/leases/${partId}`);
     const partCard = page.getByTestId('lease-money');
-    const towards = `${cedis(partial.amountMinor)} towards the month starting ${formatBusinessDate(partial.monthStart)}`;
-    await expect(partCard.getByTestId('money-partial')).toHaveText(
-      part.paidUntil ? `plus ${towards}` : towards,
-    );
     await expect(partCard.getByTestId('money-paid-until')).toContainText(
-      part.paidUntil ? formatBusinessDate(part.paidUntil) : 'Not a whole month yet',
+      formatBusinessDate(dayBefore(seedDay)),
     );
-    await expect(partCard.getByTestId('money-unearned-rent')).toContainText(
-      cedis(part.unearnedRentMinor),
+    await expect(partCard.getByTestId('money-partial')).toHaveText(
+      `plus ${cedis(KOJO_TOWARDS_MINOR)} towards the month starting ${formatBusinessDate(seedDay)}`,
     );
+
+    // Yaw Two-Year: the whole term is paid, so he is paid until its last day, and the rent for
+    // every month not yet started is unearned: GH₵1,500 for each.
+    const advanceId = await leaseIdByUnit(page, TWO_YEAR);
+    const advance = await read<{ terms: { startDate: string; endDate: string } }>(
+      page,
+      `/api/v1/leases/${advanceId}`,
+    );
+    const start = parseBusinessDate(advance.terms.startDate);
+    const lastDay = toIsoDate(addDays(addMonths(start, YAW_MONTHS), -1));
+    expect(advance.terms.endDate, 'the seed’s 24-month term').toBe(lastDay);
+    const now = today();
+    let notStarted = 0;
+    for (let month = 0; month < YAW_MONTHS; month += 1)
+      if (toIsoDate(addMonths(start, month)) > now) notStarted += 1;
+    await page.goto(`/leases/${advanceId}`);
+    const card = page.getByTestId('lease-money');
+    await expect(card.getByTestId('money-paid-until')).toContainText(formatBusinessDate(lastDay));
+    await expect(card.getByTestId('money-partial')).toHaveCount(0);
+    await expect(card.getByTestId('money-unearned-rent')).toContainText(
+      cedis(YAW_RENT_MINOR * notStarted),
+    );
+    await expect(card.getByTestId('money-reference')).toContainText(/[0-9A-Z]{7}/);
   });
 });

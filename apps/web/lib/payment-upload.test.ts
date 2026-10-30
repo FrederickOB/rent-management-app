@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { CASH_PHOTO_UPLOAD, PAYMENT_PROOF_UPLOAD, uploadOnce } from './payment-upload';
+import {
+  CASH_PHOTO_UPLOAD,
+  fileAgainMessage,
+  needsFileAgain,
+  PAYMENT_PROOF_UPLOAD,
+  uploadOnce,
+} from './payment-upload';
 import { acceptFor, fileProblem, fileTypesLabel, sizeLabel } from './upload';
 
 const photo = (name = 'receipt-book.jpg') => new File(['jpeg'], name, { type: 'image/jpeg' });
@@ -52,5 +58,37 @@ describe('BC-05, P07 and P28 money files go straight to storage', () => {
     const page = photo();
     await expect(once.idFor(page, 'banking_slip')).rejects.toThrow('Failed to fetch');
     expect(await once.idFor(page, 'banking_slip')).toBe('upload-ok');
+  });
+});
+
+describe('BC-05, P07 and P28 a refused upload asks for the file again', () => {
+  const refusal = (status: number, code: string) =>
+    Object.assign(new Error('refused'), { status, code });
+
+  it('asks again when the upload expired, never arrived or was not the file declared', () => {
+    expect(needsFileAgain(refusal(400, 'UPLOAD_EXPIRED'))).toBe(true);
+    expect(needsFileAgain(refusal(400, 'UPLOAD_MISSING'))).toBe(true);
+    expect(needsFileAgain(refusal(400, 'UPLOAD_REJECTED'))).toBe(true);
+    // As a guard's body carries it, in lower case.
+    expect(
+      needsFileAgain(
+        Object.assign(new Error('refused'), {
+          status: 400,
+          data: { body: { code: 'upload_expired' } },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the upload for any other answer: the same upload id is safe to send again', () => {
+    expect(needsFileAgain(refusal(409, 'CASH_SHORT'))).toBe(false);
+    expect(needsFileAgain(refusal(400, 'PAYER_NAME'))).toBe(false);
+    expect(needsFileAgain(new TypeError('Failed to fetch'))).toBe(false);
+  });
+
+  it('says plainly what to do', () => {
+    expect(fileAgainMessage('photo')).toBe(
+      'The photo did not reach us, or its upload expired before it was used. Choose the photo again, then send it.',
+    );
   });
 });

@@ -2,7 +2,7 @@
 
 import type { InvoiceDetail, InvoiceLineView } from '@rent/contracts';
 import Link from 'next/link';
-import { Fragment, useState, type FormEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useApp } from '@/components/app-context';
 import { InvoiceStatusBadge } from '@/components/billing-badges';
 import { textLink } from '@/components/link-styles';
@@ -25,11 +25,20 @@ import {
 import { openFetchedLink } from '@/lib/browser-files';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
-import { moneyProblem, sendOnce, useKeepers } from '@/lib/idempotency';
+import { isKeyReused, moneyProblem, sendOnce, useKeepers } from '@/lib/idempotency';
+import { useHoldWhileSending } from '@/lib/in-flight';
 import { amountInput } from '@/lib/lease-form';
-import { groupLines, lineCorrections, otherInvoiceWarnings, vatWarning } from '@/lib/invoice-view';
+import {
+  correctionMax,
+  correctionsOffered,
+  groupLines,
+  lineName,
+  otherInvoiceWarnings,
+  vatWarning,
+  type CorrectionKind,
+} from '@/lib/invoice-view';
 import { waitingNote } from '@/lib/money-requests';
-import { correctionForm, CORRECTION_REASON_MIN, type CorrectionKind } from '@/lib/payment-form';
+import { correctionForm, CORRECTION_REASON_MIN } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
 
 export interface InvoicePermissions {
@@ -80,7 +89,11 @@ export function InvoiceDetailView({
   const invoice = initial;
   const [notice, setNotice] = useState<string | null>(null);
   const [pdfProblem, setPdfProblem] = useState<string | null>(null);
-  const [open, setOpen] = useState<{ kind: CorrectionKind; line: InvoiceLineView } | null>(null);
+  const [open, setOpen] = useState<{
+    kind: CorrectionKind;
+    line: InvoiceLineView;
+    base: InvoiceLineView | null;
+  } | null>(null);
   const keepers = useKeepers();
   const warning = vatWarning(invoice);
   const others = otherInvoiceWarnings(invoice.warnings, warning);
@@ -232,17 +245,17 @@ export function InvoiceDetailView({
                 <Fragment key={line.id}>
                   <LineRow
                     line={line}
-                    tax={false}
+                    base={null}
                     can={can.correct}
-                    onAsk={(kind) => setOpen({ kind, line })}
+                    onAsk={(kind) => setOpen({ kind, line, base: null })}
                   />
                   {taxes.map((tax) => (
                     <LineRow
                       key={tax.id}
                       line={tax}
-                      tax
+                      base={line}
                       can={can.correct}
-                      onAsk={(kind) => setOpen({ kind, line: tax })}
+                      onAsk={(kind) => setOpen({ kind, line: tax, base: line })}
                     />
                   ))}
                 </Fragment>
@@ -254,6 +267,7 @@ export function InvoiceDetailView({
               key={`${open.kind}:${open.line.id}`}
               kind={open.kind}
               line={open.line}
+              name={lineName(open.line, open.base)}
               keeperName={`${open.kind}:${open.line.id}`}
               keepers={keepers}
               onDone={(text) => {
@@ -324,18 +338,22 @@ export function InvoiceDetailView({
 
 function LineRow({
   line,
-  tax,
+  base,
   can,
   onAsk,
 }: {
   readonly line: InvoiceLineView;
-  readonly tax: boolean;
+  /** The line a VAT or levy line is charged on; null for any other line. */
+  readonly base: InvoiceLineView | null;
   readonly can: boolean;
   readonly onAsk: (kind: CorrectionKind) => void;
 }) {
-  const moves = lineCorrections(line);
+  const tax = base !== null;
+  const offered = correctionsOffered(line);
   const period = periodLabel(line.periodStart, line.periodEnd);
   const unverified = line.rule !== null && line.rule.verificationStatus !== 'verified';
+  // Each button names its line for people using a screen reader (WCAG 2.4.6).
+  const name = lineName(line, base);
   return (
     <tr
       data-testid={tax ? 'invoice-tax-line' : 'invoice-line'}
@@ -373,14 +391,14 @@ function LineRow({
       {can ? (
         <Td>
           <div className="flex flex-wrap gap-1">
-            {moves.creditableMinor > 0 ? (
+            {offered.includes('credit_note') ? (
               <Button size="sm" variant="secondary" onClick={() => onAsk('credit_note')}>
-                Ask for a credit note
+                Ask for a credit note<span className="sr-only"> on {name}</span>
               </Button>
             ) : null}
-            {moves.writableOffMinor > 0 ? (
+            {offered.includes('write_off') ? (
               <Button size="sm" variant="secondary" onClick={() => onAsk('write_off')}>
-                Ask to write off
+                Ask to write off<span className="sr-only"> {name}</span>
               </Button>
             ) : null}
           </div>
@@ -398,6 +416,7 @@ function LineRow({
 function CorrectionForm({
   kind,
   line,
+  name,
   keeperName,
   keepers,
   onDone,
@@ -405,28 +424,39 @@ function CorrectionForm({
 }: {
   readonly kind: CorrectionKind;
   readonly line: InvoiceLineView;
+  /** The line as people read it (`lineName`). */
+  readonly name: string;
   readonly keeperName: string;
   readonly keepers: ReturnType<typeof useKeepers>;
   readonly onDone: (text: string) => void;
   readonly onCancel: () => void;
 }) {
   const { timeZone } = useApp();
-  const moves = lineCorrections(line);
-  const max = kind === 'credit_note' ? moves.creditableMinor : moves.writableOffMinor;
+  // The API's own figure for what this correction may take off (P27, P24).
+  const max = correctionMax(line, kind);
   const [amount, setAmount] = useState(amountInput(max));
   const [reason, setReason] = useState('');
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // An earlier attempt reached the API with other details: offer a fresh start, never a retry.
+  const [reused, setReused] = useState(false);
+  const form = useRef<HTMLFormElement>(null);
   const words = KIND_WORDS[kind];
   const parsed = correctionForm(kind, { amount, reason }, max);
   const errors = tried ? parsed.errors : {};
-  const name = line.baseLineId ? taxName(line) : line.label || lineKindLabel(line.kind);
+  useHoldWhileSending(pending);
+
+  // Opening the form takes the focus to it, so keyboard and screen-reader users land in it.
+  useEffect(() => {
+    form.current?.querySelector<HTMLElement>('input, textarea')?.focus();
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setTried(true);
     setError(null);
+    setReused(false);
     if (!parsed.input) return;
     const input = { lineId: line.id, ...parsed.input };
     setPending(true);
@@ -441,12 +471,23 @@ function CorrectionForm({
       );
     } catch (failure) {
       setError(moneyProblem(failure));
+      setReused(isKeyReused(failure));
       setPending(false);
     }
   }
 
+  function startAgain() {
+    keepers(keeperName).reset();
+    setAmount(amountInput(max));
+    setReason('');
+    setTried(false);
+    setError(null);
+    setReused(false);
+  }
+
   return (
     <form
+      ref={form}
       onSubmit={submit}
       noValidate
       aria-label={words.title}
@@ -484,7 +525,12 @@ function CorrectionForm({
         <Button type="submit" pending={pending}>
           {words.submit}
         </Button>
-        <Button variant="ghost" onClick={onCancel}>
+        {reused ? (
+          <Button variant="secondary" onClick={startAgain}>
+            Start again
+          </Button>
+        ) : null}
+        <Button variant="ghost" disabled={pending} onClick={onCancel}>
           Cancel
         </Button>
       </div>

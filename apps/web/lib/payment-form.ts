@@ -3,6 +3,7 @@ import { normaliseReference } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { parseAmount } from '@rent/domain/money';
 import type { MoneyLocation, ReceivingAccount, ReversalReason } from './billing-format';
+import type { CorrectionKind } from './invoice-view';
 import { formatMinor } from './tenancy-format';
 
 // The money forms (BC-05, P07, P21, P23, P24, P27, P28; M4a plan 4.19). Amounts are typed in
@@ -219,23 +220,17 @@ export const holdingKey = (row: Pick<CollectorCash, 'collectorPersonId' | 'owner
   `${row.collectorPersonId}:${row.ownerId}`;
 
 /**
- * What can still be banked from a holding: banking already waiting for approval still counts as
- * held until it is approved, so it is taken off first. Never more than the collector holds.
- */
-export function bankable(row: Pick<CollectorCash, 'heldMinor' | 'bankingPendingMinor'>): number {
-  return Math.max(0, row.heldMinor - row.bankingPendingMinor);
-}
-
-/**
  * The holdings this person may bank: their own (cash.bank), or anyone's with cash.bank_others,
- * where something is left to bank. The API checks both again.
+ * where the API says something is left to bank (`bankableMinor`: what is held less banking
+ * waiting for approval). The API checks both again.
  */
 export function bankableHoldings(
   rows: readonly CollectorCash[],
   options: { readonly personId: string; readonly others: boolean },
 ): CollectorCash[] {
   return rows.filter(
-    (row) => (options.others || row.collectorPersonId === options.personId) && bankable(row) > 0,
+    (row) =>
+      (options.others || row.collectorPersonId === options.personId) && row.bankableMinor > 0,
   );
 }
 
@@ -260,7 +255,7 @@ export function bankingForm(
   const holding = holdings.find((row) => holdingKey(row) === draft.holding) ?? null;
   if (!holding) errors.holding = 'Choose whose cash is banked';
   if (!draft.bankedInto) errors.bankedInto = 'Choose where the cash went';
-  const most = holding ? bankable(holding) : MAX_AMOUNT_MINOR;
+  const most = holding ? holding.bankableMinor : MAX_AMOUNT_MINOR;
   const amount = amountMinorOf(
     draft.amount,
     holding
@@ -323,7 +318,7 @@ export function reversalForm(
   };
 }
 
-export type CorrectionKind = 'credit_note' | 'write_off';
+export type { CorrectionKind };
 export type CorrectionField = 'amount' | 'reason';
 
 /** A credit note or a write-off on one line, never more than the line allows. */

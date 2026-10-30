@@ -2,7 +2,6 @@ import { referenceFrom } from '@rent/domain/billing';
 import { describe, expect, it } from 'vitest';
 import {
   amountMinorOf,
-  bankable,
   bankableHoldings,
   bankingForm,
   cashForm,
@@ -31,6 +30,7 @@ const holding = (overrides: Partial<CollectorCash> = {}): CollectorCash => ({
   ownerName: 'Ama Owner-London (demo)',
   heldMinor: 120_000,
   bankingPendingMinor: 0,
+  bankableMinor: 120_000,
   oldestUnbankedOn: '2026-10-28',
   ...overrides,
 });
@@ -185,10 +185,7 @@ describe('P28 and P23 transfer form', () => {
 
 describe('P07 banking form never banks more than is held', () => {
   it('banks at most what the collector holds and has not already sent for banking', () => {
-    expect(bankable(holding())).toBe(120_000);
-    expect(bankable(holding({ bankingPendingMinor: 50_000 }))).toBe(70_000);
-    expect(bankable(holding({ bankingPendingMinor: 200_000 }))).toBe(0);
-    const rows = [holding({ bankingPendingMinor: 50_000 })];
+    const rows = [holding({ bankingPendingMinor: 50_000, bankableMinor: 70_000 })];
     const draft = {
       holding: holdingKey(rows[0]!),
       bankedInto: 'owner_account' as const,
@@ -213,11 +210,34 @@ describe('P07 banking form never banks more than is held', () => {
     });
   });
 
+  it('caps the banking at what the API says can be banked, not at the browser’s own sum', () => {
+    // The API knows what the held total does not show (a reversal that took cash back, say).
+    const rows = [holding({ heldMinor: 120_000, bankingPendingMinor: 0, bankableMinor: 30_000 })];
+    const draft = {
+      holding: holdingKey(rows[0]!),
+      bankedInto: 'owner_account' as const,
+      amount: '300.01',
+      bankedOn: TODAY,
+      note: '',
+    };
+    expect(bankingForm(draft, rows, TODAY).errors.amount).toContain('GH₵300.00');
+    expect(bankingForm({ ...draft, amount: '300' }, rows, TODAY).input?.amountMinor).toBe(30_000);
+    // Nothing to bank, by the API's figure: the holding is not offered.
+    expect(
+      bankableHoldings([holding({ bankableMinor: 0 })], { personId: KOJO, others: true }),
+    ).toEqual([]);
+  });
+
   it('offers a person their own cash, or anyone’s with the right to bank others’ cash', () => {
     const rows = [
       holding(),
       holding({ collectorPersonId: ABENA, collectorName: 'Abena Caretaker (demo)' }),
-      holding({ ownerId: OWNER_B, heldMinor: 10_000, bankingPendingMinor: 10_000 }),
+      holding({
+        ownerId: OWNER_B,
+        heldMinor: 10_000,
+        bankingPendingMinor: 10_000,
+        bankableMinor: 0,
+      }),
     ];
     expect(bankableHoldings(rows, { personId: KOJO, others: false })).toEqual([rows[0]]);
     expect(bankableHoldings(rows, { personId: KOJO, others: true })).toEqual([rows[0], rows[1]]);

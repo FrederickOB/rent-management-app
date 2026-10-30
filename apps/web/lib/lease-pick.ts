@@ -56,3 +56,29 @@ export function leasePickLabel(lease: PickedLease): string {
     .filter(Boolean)
     .join(' · ');
 }
+
+/** Leases in order, each once (an owner's leases arrive property by property). */
+export function uniqueLeases(leases: readonly PickedLease[]): PickedLease[] {
+  const seen = new Set<string>();
+  return leases.filter((lease) => (seen.has(lease.id) ? false : (seen.add(lease.id), true)));
+}
+
+/**
+ * The owner whose own account holds unmatched money (P23), so matching offers only their leases;
+ * null when it sits in the agency's account, which may pay any lease the agency manages.
+ */
+export function ownerAccountOf(receipt: {
+  readonly receivedInto: 'provider' | 'collector' | 'owner_account' | 'agency_account';
+  readonly ownerId: string | null;
+  readonly ownerName: string | null;
+}): { readonly ownerId: string; readonly ownerName: string | null } | null {
+  const owned: Record<typeof receipt.receivedInto, boolean> = {
+    provider: false,
+    collector: false,
+    owner_account: true,
+    agency_account: false,
+  };
+  return owned[receipt.receivedInto] && receipt.ownerId
+    ? { ownerId: receipt.ownerId, ownerName: receipt.ownerName }
+    : null;
+}

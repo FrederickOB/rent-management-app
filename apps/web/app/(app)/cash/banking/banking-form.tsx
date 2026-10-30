@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
+import { CancelLink } from '@/components/cancel-link';
 import { FileField } from '@/components/file-field';
 import { secondaryLink, textLink } from '@/components/link-styles';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
@@ -13,24 +14,23 @@ import { SelectField, TextAreaField, TextField } from '@/components/ui/field';
 import { api, keyedApi } from '@/lib/api';
 import type { ReceivingAccount } from '@/lib/billing-format';
 import { todayIn } from '@/lib/business-dates';
-import {
-  isKeyReused,
-  moneyProblem,
-  outcomeOf,
-  sendOnce,
-  useIdempotencyKeeper,
-} from '@/lib/idempotency';
+import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
+import { useHoldWhileSending } from '@/lib/in-flight';
 import { amountInput } from '@/lib/lease-form';
 import { waitingNote } from '@/lib/money-requests';
 import {
-  bankable,
   bankableHoldings,
   bankingForm,
   holdingKey,
   type BankingDraft,
   type CollectorCash,
 } from '@/lib/payment-form';
-import { PAYMENT_PROOF_UPLOAD, uploadOnce } from '@/lib/payment-upload';
+import {
+  fileAgainMessage,
+  needsFileAgain,
+  PAYMENT_PROOF_UPLOAD,
+  uploadOnce,
+} from '@/lib/payment-upload';
 import { formatMinor } from '@/lib/tenancy-format';
 import { fileProblem, StorageUploadError } from '@/lib/upload';
 import { useLoad } from '@/lib/use-load';
@@ -53,6 +53,8 @@ export function BankingForm({
   const { me } = useApp();
   const load = useCallback(() => api().payments.collectorsCash(), []);
   const { state, reload } = useLoad(load);
+  // "Start again" begins a new round: fresh fields, a new Idempotency-Key, the holdings reloaded.
+  const [round, setRound] = useState(0);
   if (state.status === 'loading') return <Loading what="the cash held" />;
   if (state.status === 'error')
     return <LoadFailed message={state.problem.message} onRetry={reload} />;
@@ -75,17 +77,31 @@ export function BankingForm({
     holdings.find(
       (h) => h.collectorPersonId === initial.collectorPersonId && h.ownerId === initial.ownerId,
     ) ?? (holdings.length === 1 ? holdings[0]! : null);
-  return <BankingFields holdings={holdings} chosen={chosen} agency={agency} />;
+  return (
+    <BankingFields
+      key={round}
+      holdings={holdings}
+      chosen={chosen}
+      agency={agency}
+      onStartAgain={() => {
+        setRound((r) => r + 1);
+        reload();
+      }}
+    />
+  );
 }
 
 function BankingFields({
   holdings,
   chosen,
   agency,
+  onStartAgain,
 }: {
   readonly holdings: readonly CollectorCash[];
   readonly chosen: CollectorCash | null;
   readonly agency: boolean;
+  /** A new round of the form: cleared details and slip, a new key, the holdings reloaded. */
+  readonly onStartAgain: () => void;
 }) {
   const { timeZone } = useApp();
   const today = todayIn(timeZone);
@@ -95,14 +111,14 @@ function BankingFields({
   const [draft, setDraft] = useState<BankingDraft>(() => ({
     holding: chosen ? holdingKey(chosen) : '',
     bankedInto: agency ? '' : 'owner_account',
-    amount: chosen ? amountInput(bankable(chosen)) : '',
+    amount: chosen ? amountInput(chosen.bankableMinor) : '',
     bankedOn: today,
     note: '',
   }));
   const [tried, setTried] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  // The first attempt was recorded with other details: offer a fresh form, never a silent retry.
+  // An earlier attempt reached the API with other details: offer a fresh form, never a retry.
   const [reused, setReused] = useState(false);
   const [slipError, setSlipError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -110,6 +126,8 @@ function BankingFields({
   const parsed = bankingForm(draft, holdings, today);
   const errors = tried ? parsed.errors : {};
   const set = (patch: Partial<BankingDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  const working = status !== null;
+  useHoldWhileSending(working);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -140,16 +158,18 @@ function BankingFields({
         setProblem(failure.message);
         return;
       }
-      if (outcomeOf(failure) === 'refused') uploads.forget(file);
+      // The upload itself was refused (expired or missing): the slip must be chosen again. For
+      // anything else the same upload is sent again, which the API accepts.
+      if (needsFileAgain(failure)) {
+        uploads.forget(file);
+        if (slip.current) slip.current.value = '';
+        setSlipError(fileAgainMessage('slip'));
+        setProblem(fileAgainMessage('slip'));
+        return;
+      }
       setProblem(moneyProblem(failure));
       setReused(isKeyReused(failure));
     }
-  }
-
-  function startAgain() {
-    keeper.reset();
-    setReused(false);
-    setProblem(null);
   }
 
   if (done)
@@ -166,7 +186,6 @@ function BankingFields({
       </Card>
     );
 
-  const working = status !== null;
   return (
     <form onSubmit={submit} noValidate aria-label="Record banking" className="space-y-6">
       {problem ? <Alert tone="error">{problem}</Alert> : null}
@@ -182,13 +201,16 @@ function BankingFields({
               ...(holdings.length > 1 ? [{ value: '', label: 'Choose whose cash it is' }] : []),
               ...holdings.map((h) => ({
                 value: holdingKey(h),
-                label: `${h.collectorName}, for ${h.ownerName}: ${formatMinor(bankable(h))} to bank`,
+                label: `${h.collectorName}, for ${h.ownerName}: ${formatMinor(h.bankableMinor)} to bank`,
               })),
             ]}
             onChange={(event) => {
               // A new choice of whose cash starts the amount at all of it.
               const next = holdings.find((h) => holdingKey(h) === event.target.value);
-              set({ holding: event.target.value, amount: next ? amountInput(bankable(next)) : '' });
+              set({
+                holding: event.target.value,
+                amount: next ? amountInput(next.bankableMinor) : '',
+              });
             }}
           />
           {agency ? (
@@ -218,7 +240,7 @@ function BankingFields({
             label="Amount (GH₵)"
             inputMode="decimal"
             autoComplete="off"
-            hint={holding ? `At most ${formatMinor(bankable(holding))}.` : undefined}
+            hint={holding ? `At most ${formatMinor(holding.bankableMinor)}.` : undefined}
             value={draft.amount}
             error={errors.amount}
             onChange={(event) => set({ amount: event.target.value })}
@@ -260,8 +282,8 @@ function BankingFields({
         </Alert>
       ) : null}
       {reused ? (
-        <Button variant="secondary" onClick={startAgain}>
-          Start a new record
+        <Button variant="secondary" onClick={onStartAgain}>
+          Start again
         </Button>
       ) : null}
       {tried && !working && !problem && (!parsed.input || slipError) ? (
@@ -271,9 +293,7 @@ function BankingFields({
         <Button type="submit" pending={working}>
           Record the banking
         </Button>
-        <Link href="/cash" className={textLink}>
-          Cancel
-        </Link>
+        <CancelLink href="/cash" disabled={working} />
       </div>
     </form>
   );

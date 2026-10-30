@@ -134,10 +134,9 @@ export function PaperLeaseForm({
         parties: partiesInput(parties, { paper: true }),
         scanUploadId,
         signedOn,
-        // Sent only when staff chose another period start than the default (decision 1).
-        ...(billing && chosenStart !== billing.defaultStart
-          ? { billingStartDate: chosenStart }
-          : {}),
+        // Always the start the form shows (decision 1), so the lease bills from what staff saw,
+        // whatever day the API records it.
+        ...(chosenStart ? { billingStartDate: chosenStart } : {}),
       });
       router.push(`/leases/${lease.id}?saved=paper`);
     } catch (failure) {
