@@ -5,6 +5,7 @@ import type { Database } from '@rent/db';
 import type { AlertPort, StoragePort } from '@rent/integrations';
 import { ApprovalsModule, ApprovalsService } from '@rent/server/approvals';
 import { AuditModule, AuditService } from '@rent/server/audit';
+import { BillingModule, InvoicingService, SubledgerCheckService } from '@rent/server/billing';
 import {
   ALERT_PORT,
   CLOCK,
@@ -21,6 +22,7 @@ import {
 import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
+import { LedgerModule } from '@rent/server/ledger';
 import { MessagingModule, MessagingService } from '@rent/server/messaging';
 import {
   PortfolioModule,
@@ -33,6 +35,7 @@ import {
   TenancyModule,
   TenancyRemindersService,
 } from '@rent/server/tenancy';
+import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
@@ -52,6 +55,8 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     EsignModule,
     TenancyModule,
     MessagingModule,
+    LedgerModule,
+    BillingModule,
   ],
 })
 class WorkerModule {}
@@ -100,6 +105,11 @@ const definitions = [
     lifecycle: app.get(LeaseLifecycleService),
     render: renderOnPool,
   }),
+  ...billingJobs({
+    ...deps,
+    invoicing: app.get(InvoicingService),
+    subledger: app.get(SubledgerCheckService),
+  }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -114,6 +124,7 @@ const relay = new OutboxRelay(
     ...REGISTER_EVENT_TYPES,
     ...TENANCY_EVENT_TYPES,
     ...ESIGN_EVENT_TYPES,
+    ...BILLING_EVENT_TYPES,
   ]),
 );
 await relay.start();

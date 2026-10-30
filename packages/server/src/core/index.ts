@@ -11,3 +11,4 @@ export * from './crypto/field-cipher';
 export * from './crypto/db-key-store';
 export * from './db-errors';
 export * from './rate-limit';
+export * from './idempotency';

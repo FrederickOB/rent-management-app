@@ -20,6 +20,27 @@ export const APPEND_ONLY_TABLES = [
   'signing_event',
   'message',
   'message_event',
+  // M4a: books, the journal and period locks, and every billing record.
+  'book',
+  'journal_entry',
+  'journal_line',
+  'period_lock',
+  'payment_reference',
+  'invoice',
+  'invoice_line',
+  'invoice_line_accrual',
+  'payment',
+  'payment_match',
+  'payment_reversal',
+  'receipt',
+  'cash_record',
+  'direct_receipt',
+  'cash_banking',
+  'credit_carry_over',
+  'credit_note',
+  'write_off',
+  'allocation',
+  'property_ownership_correction',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */
@@ -32,4 +53,6 @@ export const GLOBAL_TABLES = [
   'verification',
   'two_factor',
   'rate_limit',
+  // M4a: the chart of accounts.
+  'ledger_account',
 ] as const;

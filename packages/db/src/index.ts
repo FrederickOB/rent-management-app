@@ -20,4 +20,5 @@ export {
   notInArray,
   isNull,
   isNotNull,
+  type SQL,
 } from 'drizzle-orm';

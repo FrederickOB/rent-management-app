@@ -390,6 +390,12 @@ export const lease = pgTable(
     formalWetSignedDocumentId: uuid(),
     formalRegisteredOn: day(),
     formalRegistrationNumber: text(),
+    /**
+     * Where billing starts (M4a decision 1): the start of an e-signed lease; for a paper lease,
+     * the first rent period that starts on or after the day it was recorded, unless staff chose
+     * another period start. Set once, as the lease is signed.
+     */
+    billingStartDate: day(),
     createdBy: uuid().references(() => person.id),
     createdAt: tsNow(),
     updatedAt: tsNow(),

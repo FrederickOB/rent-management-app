@@ -497,6 +497,15 @@ export const paymentsContract = {
     })
     .input(z.object({ receiptId: uuid }))
     .output(download),
+  paymentFile: oc
+    .route({
+      method: 'GET',
+      path: '/payment-files/{documentId}/download',
+      summary:
+        'A short-lived link to a cash or cheque photo, a transfer proof or a banking slip: for people who see billing, the approvers of its open request, and a caretaker for their own records (BC-05)',
+    })
+    .input(z.object({ documentId: uuid }))
+    .output(download),
   unmatched: oc
     .route({
       method: 'GET',

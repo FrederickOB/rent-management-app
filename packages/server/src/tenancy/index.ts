@@ -1,4 +1,5 @@
 export * from './tenancy.module';
+export * from './billing-facts';
 export * from './tenancy.types';
 export * from './tenants.service';
 export * from './id-checks.service';

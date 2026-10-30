@@ -25,7 +25,10 @@ BEGIN
 END
 $$;
 
-GRANT ledger_writer TO rent_app;
+-- rent_app may become ledger_writer (SET ROLE) but does not inherit its privileges, so outside
+-- the posting service it cannot write the journal (ADR-003; M4a). Re-running this updates the
+-- options of an existing grant.
+GRANT ledger_writer TO rent_app WITH INHERIT FALSE, SET TRUE;
 -- Lets migrations hand function ownership to rent_system.
 GRANT rent_system TO rent_owner;
 

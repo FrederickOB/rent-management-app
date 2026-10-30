@@ -1,0 +1,1537 @@
+import { randomInt } from 'node:crypto';
+import { Inject, Injectable } from '@nestjs/common';
+import { and, eq, schema, sql, type Tx } from '@rent/db';
+import { templates, type InvoiceDocumentData, type ReceiptDocumentData } from '@rent/documents';
+import {
+  creditPools,
+  cyclesForAdvance,
+  cyclesToIssue,
+  depositDue,
+  draftTotal,
+  drawFromPools,
+  forwardWalk,
+  inAccrualOrder,
+  invoiceCycles,
+  invoiceLinesFor,
+  isRecurring,
+  isTax,
+  LINE_KIND_LABELS,
+  lineBalance,
+  linesToAccrue,
+  paymentCredit,
+  paymentShares,
+  planAccrual,
+  planAllocation,
+  planCreditNote,
+  planPaymentReversal,
+  planWriteOff,
+  referenceFrom,
+  REFERENCE_PAYLOAD_LENGTH,
+  walkLines,
+  type AllocationSource,
+  type InvoiceCycle,
+  type InvoiceLineDraft,
+  type ScheduledPeriod,
+  type ScheduleRow,
+  type VatRates,
+  type WalkResult,
+} from '@rent/domain/billing';
+import { parseBusinessDate } from '@rent/domain/dates';
+import { DomainError } from '@rent/domain/errors';
+import {
+  accrualLines,
+  carryOverLines,
+  compactLines,
+  creditNoteLines,
+  oneOffChargeLines,
+  paymentReversalLines,
+  receiptLines,
+  unmatchedArrivalLines,
+  unmatchedMatchLines,
+  vatChargeLines,
+  writeOffLines,
+  type CashAccount,
+  type CashSide,
+  type JournalLineDraft,
+  type PostingRule,
+} from '@rent/domain/ledger';
+import { billingSettingsOf, parseCompanySettings } from '@rent/domain/settings';
+import { v7 as uuidv7 } from 'uuid';
+import { companyRecord, type CompanyRecord } from '../companies/companies.service';
+import { ownerFacts } from '../companies/owners.service';
+import type { Clock } from '../core/clock';
+import { conflict, invalid } from '../core/errors';
+import { enqueueOutbox } from '../core/outbox';
+import { CLOCK } from '../core/tokens';
+import { DocumentsService } from '../documents/documents.service';
+import { personContact } from '../identity/person-directory';
+import { PostingService, type PostedEntry } from '../ledger/posting.service';
+import { RulesService, type ResolvedRule } from '../rules/rules.service';
+import { billingLeaseOf, scheduleRowsOf, type BillingLease } from '../tenancy/billing-facts';
+import {
+  allocationRecord,
+  dimsOf,
+  formatInvoiceNumber,
+  formatReceiptNumber,
+  isoNow,
+  leaseBookOf,
+  loadAllocations,
+  loadLines,
+  lockCollectorCash,
+  nextNumber,
+  paymentOrder,
+  paymentsByIds,
+  poolPayments,
+  requireBook,
+  type AllocationRecord,
+  type LeaseBook,
+  type LineRecord,
+  type PaymentRecord,
+} from './records';
+
+export const INVOICE_TEMPLATE = { key: 'billing.invoice', version: 1 } as const;
+export const RECEIPT_TEMPLATE = { key: 'billing.receipt', version: 1 } as const;
+/** Emitted when a payment is posted; M4b's payments module sends the receipt from it (BC-06). */
+export const PAYMENT_POSTED_EVENT = 'payment.posted';
+
+/** A lease's money, loaded in one transaction under its billing lock. Mutated as it is written. */
+export interface LeaseState {
+  readonly company: CompanyRecord;
+  readonly lease: BillingLease;
+  readonly book: LeaseBook;
+  readonly schedule: readonly ScheduleRow[];
+  lines: LineRecord[];
+  allocations: AllocationRecord[];
+  /** Live payments whose credit sits on this lease, first in, first out. */
+  payments: PaymentRecord[];
+}
+
+export interface VatSetting {
+  readonly rates: VatRates;
+  readonly rateRule: ResolvedRule;
+  readonly serviceRule: ResolvedRule;
+}
+
+/** Money coming in for a lease (P03, P06, P28): where it sits and where it came from. */
+export interface MoneyIn {
+  readonly amountMinor: number;
+  readonly receivedOn: string;
+  readonly method: 'cash' | 'cheque' | 'bank_transfer' | 'momo' | 'card' | 'test';
+  readonly rule: Extract<PostingRule, 'P03' | 'P06' | 'P28'>;
+  readonly cashAccount: CashAccount;
+  readonly collectorPersonId?: string | null;
+  readonly provider?: string | null;
+  readonly sourceType: 'cash_record' | 'direct_receipt' | 'provider_test';
+  readonly sourceId: string;
+  readonly payerName?: string | null;
+  readonly senderReference?: string | null;
+  readonly chequeNumber?: string | null;
+  readonly chequeBank?: string | null;
+  readonly note?: string | null;
+  readonly proofDocumentId?: string | null;
+  readonly recordedBy?: string | null;
+  readonly causedBy?: string | null;
+}
+
+const METHOD_LABELS: Record<MoneyIn['method'], string> = {
+  cash: 'Cash',
+  cheque: 'Cheque',
+  bank_transfer: 'Bank transfer',
+  momo: 'Mobile money',
+  card: 'Card',
+  test: 'Test payment',
+};
+
+export const lineLabel = (line: Pick<LineRecord, 'kind'>) => LINE_KIND_LABELS[line.kind];
+
+/** The last day a lease is billed for: its move-out or end, else open (held over month by month). */
+export function lastBillableDay(lease: BillingLease): string | null {
+  return lease.moveOutDate ?? lease.endedOn ?? null;
+}
+
+/**
+ * The billing engine (M4a plan 4.4 to 4.11): each operation runs the domain's planning and posting
+ * functions in the order of the reference model (packages/domain/src/billing/testing/
+ * lease-ledger.ts) and writes the result in the caller's transaction, which holds the lease's
+ * billing lock. Invoice lines, accruals, allocations, payments and receipts are written here and
+ * nowhere else; journal rows go through the posting service.
+ */
+@Injectable()
+export class BillingEngine {
+  constructor(
+    @Inject(PostingService) private readonly posting: PostingService,
+    @Inject(DocumentsService) private readonly documents: DocumentsService,
+    @Inject(RulesService) private readonly rules: RulesService,
+    @Inject(CLOCK) private readonly clock: Clock,
+  ) {}
+
+  today(state: { readonly company: CompanyRecord }): string {
+    return isoNow(this.clock, state.company.timeZone);
+  }
+
+  // Loading -------------------------------------------------------------------------------------
+
+  async load(tx: Tx, companyId: string, leaseId: string): Promise<LeaseState> {
+    const company = await companyRecord(tx, companyId);
+    if (!company) throw new Error('Company not found');
+    const lease = await billingLeaseOf(tx, leaseId);
+    const [lines, payments, schedule] = [
+      await loadLines(tx, [leaseId]),
+      await poolPayments(tx, leaseId),
+      await scheduleRowsOf(tx, leaseId),
+    ];
+    const allocations = await loadAllocations(tx, {
+      leaseIds: [leaseId],
+      paymentIds: payments.map((p) => p.id),
+    });
+    const book = await leaseBookOf(tx, lease, isoNow(this.clock, company.timeZone));
+    return { company, lease, book, schedule, lines, allocations, payments };
+  }
+
+  // Invoices (BC-01; plan 4.4) -------------------------------------------------------------------
+
+  /** The lease's invoice cycles from its billing start, with the company's lead days. */
+  cycles(state: LeaseState): InvoiceCycle[] {
+    const lease = state.lease;
+    if (!lease.billingStartDate) return [];
+    return invoiceCycles({
+      cycle: lease.cycle,
+      initialAdvanceMonths: lease.initialAdvanceMonths,
+      schedule: state.schedule,
+      billingStartDate: lease.billingStartDate,
+      lastBillableDay: lastBillableDay(lease),
+      leadDays: billingSettingsOf(parseCompanySettings(state.company.settings)).invoiceLeadDays,
+    });
+  }
+
+  issuedCycleStarts(tx: Tx, leaseId: string): Promise<Set<string>> {
+    return tx
+      .select({ cycleStart: schema.invoice.cycleStart })
+      .from(schema.invoice)
+      .where(and(eq(schema.invoice.leaseId, leaseId), eq(schema.invoice.kind, 'cycle')))
+      .then((rows) => new Set(rows.flatMap((r) => (r.cycleStart ? [r.cycleStart] : []))));
+  }
+
+  /**
+   * VAT and levies for a commercial lease whose owner is VAT-registered (CT-04, P32), with the
+   * rules in force on the date; null for every other lease (dwellings are exempt).
+   */
+  async vatFor(tx: Tx, state: LeaseState, date: string): Promise<VatSetting | null> {
+    if (state.lease.use !== 'commercial' || state.book.kind !== 'book') return null;
+    const owner = (await ownerFacts(tx, [state.book.ownerId])).get(state.book.ownerId);
+    if (!owner?.vatRegistered) return null;
+    const asOf = parseBusinessDate(date);
+    const rateRule = await this.rules.resolveIn(
+      tx,
+      state.company.countryCode,
+      'vat.commercial_rent',
+      asOf,
+    );
+    const serviceRule = await this.rules.resolveIn(
+      tx,
+      state.company.countryCode,
+      'vat.applies_to_service_charge',
+      asOf,
+    );
+    const value = rateRule.value as { vatBps: number; nhilBps: number; getfundBps: number };
+    return {
+      rates: {
+        vatBps: value.vatBps,
+        nhilBps: value.nhilBps,
+        getfundBps: value.getfundBps,
+        appliesToServiceCharge: serviceRule.value === true,
+      },
+      rateRule,
+      serviceRule,
+    };
+  }
+
+  /** Issues the cycles due by `today` that have no invoice yet. A rerun issues nothing new. */
+  async generate(tx: Tx, state: LeaseState, today: string, causedBy?: string | null) {
+    if (state.book.kind !== 'book') return [];
+    const due = cyclesToIssue(
+      this.cycles(state),
+      today,
+      await this.issuedCycleStarts(tx, state.lease.id),
+    );
+    const issued = [];
+    for (const cycle of due) issued.push(await this.issueCycle(tx, state, cycle, today, causedBy));
+    return issued;
+  }
+
+  async issueCycle(
+    tx: Tx,
+    state: LeaseState,
+    cycle: InvoiceCycle,
+    today: string,
+    causedBy?: string | null,
+  ) {
+    const vat = await this.vatFor(tx, state, today);
+    return this.issue(tx, state, {
+      kind: 'cycle',
+      drafts: invoiceLinesFor(cycle, vat?.rates ?? null),
+      dueDate: cycle.dueDate,
+      issueDate: today,
+      periodFrom: cycle.periodFrom,
+      periodTo: cycle.periodTo,
+      cycleStart: cycle.cycleStart,
+      holdingOver: cycle.holdingOver,
+      vat,
+      causedBy,
+    });
+  }
+
+  /**
+   * The deposit invoice at signing (decision 2), due on the start date, for what the carried
+   * deposit of a renewal does not cover; none for a paper lease billed from a later date.
+   */
+  async issueDeposit(tx: Tx, state: LeaseState, carriedDepositMinor: number, today: string) {
+    const amount = depositDue({
+      depositMinor: state.lease.depositMinor,
+      startDate: state.lease.startDate,
+      billingStartDate: state.lease.billingStartDate ?? state.lease.startDate,
+      carriedDepositMinor,
+    });
+    if (amount <= 0 || state.book.kind !== 'book') return null;
+    if (state.lines.some((l) => l.invoiceKind === 'deposit')) return null;
+    return this.issue(tx, state, {
+      kind: 'deposit',
+      drafts: [
+        {
+          kind: 'deposit',
+          chargePeriodId: null,
+          periodStart: null,
+          periodEnd: null,
+          amountMinor: amount,
+          rateBps: null,
+          baseIndex: null,
+        },
+      ],
+      dueDate: state.lease.startDate,
+      issueDate: today,
+      periodFrom: null,
+      periodTo: null,
+      cycleStart: null,
+      holdingOver: false,
+      vat: null,
+    });
+  }
+
+  /** Issues an invoice: its lines, P01 for one-off lines and P32 for VAT lines, and its PDF. */
+  private async issue(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly kind: 'cycle' | 'deposit' | 'one_off';
+      readonly drafts: readonly InvoiceLineDraft[];
+      readonly dueDate: string;
+      readonly issueDate: string;
+      readonly periodFrom: string | null;
+      readonly periodTo: string | null;
+      readonly cycleStart: string | null;
+      readonly holdingOver: boolean;
+      readonly vat: VatSetting | null;
+      readonly causedBy?: string | null;
+    },
+  ) {
+    const { company, lease } = state;
+    const book = requireBook(state.book);
+    if (input.drafts.length === 0) throw new Error('An invoice needs a line');
+    const owner = (await ownerFacts(tx, [book.ownerId])).get(book.ownerId);
+    if (!owner) throw new Error('The owner of this lease is not visible');
+    const reference = await this.ensureReference(tx, lease);
+    const number = await nextNumber(tx, company.id, 'invoice');
+    const invoiceId = uuidv7();
+    const ids = input.drafts.map(() => uuidv7());
+    const rows = input.drafts.map((d, i) => ({
+      id: ids[i]!,
+      companyId: company.id,
+      invoiceId,
+      propertyId: lease.propertyId,
+      tenantId: lease.tenantId,
+      leaseId: lease.id,
+      position: i + 1,
+      kind: d.kind,
+      baseLineId: d.baseIndex === null ? null : ids[d.baseIndex]!,
+      chargePeriodId: d.chargePeriodId,
+      periodStart: d.periodStart,
+      periodEnd: d.periodEnd,
+      dueDate: input.dueDate,
+      amountMinor: d.amountMinor,
+      rateBps: d.rateBps,
+      ruleId: isTax(d.kind) ? (input.vat?.rateRule.ruleId ?? null) : null,
+    }));
+    const vatTotal = rows.filter((r) => isTax(r.kind)).reduce((s, r) => s + r.amountMinor, 0);
+    const data: InvoiceDocumentData = {
+      number: formatInvoiceNumber(number),
+      kind: input.kind,
+      issueDate: input.issueDate,
+      dueDate: input.dueDate,
+      periodFrom: input.periodFrom,
+      periodTo: input.periodTo,
+      paymentReference: reference,
+      billedTo: { name: lease.tenantName, tin: lease.tenantTinMasked },
+      billedFrom: { name: owner.name, tin: owner.tinMasked },
+      unit: { code: lease.unitCode, propertyName: lease.propertyName },
+      lines: rows.map((r) => ({
+        label: LINE_KIND_LABELS[r.kind],
+        periodStart: r.periodStart,
+        periodEnd: r.periodEnd,
+        rateBps: r.rateBps,
+        amountMinor: r.amountMinor,
+        isTax: isTax(r.kind),
+      })),
+      totalMinor: draftTotal(input.drafts),
+      vatTotalMinor: input.vat && vatTotal > 0 ? vatTotal : null,
+      notes: [],
+    };
+    templates.get(INVOICE_TEMPLATE.key, INVOICE_TEMPLATE.version).schema.parse(data);
+    const renderRequestId = await this.documents.requestRender(tx, {
+      companyId: company.id,
+      templateKey: INVOICE_TEMPLATE.key,
+      templateVersion: INVOICE_TEMPLATE.version,
+      data,
+      requestedBy: input.causedBy ?? null,
+    });
+    await tx.insert(schema.invoice).values({
+      id: invoiceId,
+      companyId: company.id,
+      number,
+      kind: input.kind,
+      propertyId: lease.propertyId,
+      tenantId: lease.tenantId,
+      leaseId: lease.id,
+      unitId: lease.unitId,
+      ownerId: book.ownerId,
+      bookId: book.bookId,
+      issueDate: input.issueDate,
+      dueDate: input.dueDate,
+      periodFrom: input.periodFrom,
+      periodTo: input.periodTo,
+      cycleStart: input.cycleStart,
+      holdingOver: input.holdingOver,
+      paymentReference: reference,
+      unitCode: lease.unitCode,
+      propertyName: lease.propertyName,
+      billedToName: lease.tenantName,
+      billedToTin: lease.tenantTinMasked,
+      billedFromName: owner.name,
+      billedFromTin: owner.tinMasked,
+      vatRuleId: input.vat && vatTotal > 0 ? input.vat.rateRule.ruleId : null,
+      vatServiceRuleId: input.vat && vatTotal > 0 ? input.vat.serviceRule.ruleId : null,
+      renderRequestId,
+      createdBy: input.causedBy ?? null,
+    });
+    await tx.insert(schema.invoiceLine).values(rows);
+    const base = state.lines.length;
+    const added: LineRecord[] = rows.map((r, i) => ({
+      id: r.id,
+      kind: r.kind,
+      baseLineId: r.baseLineId,
+      rateBps: r.rateBps,
+      dueDate: r.dueDate,
+      periodStart: r.periodStart,
+      periodEnd: r.periodEnd,
+      amountMinor: r.amountMinor,
+      accrued: false,
+      sequence: base + i + 1,
+      invoiceId,
+      invoiceNumber: number,
+      invoiceKind: input.kind,
+      issueDate: input.issueDate,
+      leaseId: lease.id,
+      propertyId: lease.propertyId,
+      tenantId: lease.tenantId,
+      ownerId: book.ownerId,
+      bookId: book.bookId,
+      chargePeriodId: r.chargePeriodId,
+      ruleId: r.ruleId,
+      accruedOn: null,
+      accruedAccounting: null,
+    }));
+    state.lines.push(...added);
+    const dims = dimsOf(lease);
+    const oneOff = added.filter((l) => l.kind === 'one_off');
+    await this.posting.post(tx, {
+      companyId: company.id,
+      rule: 'P01',
+      key: `P01:${invoiceId}`,
+      valueDate: input.issueDate,
+      lines: oneOffChargeLines({
+        bookId: book.bookId,
+        lease: dims,
+        lines: oneOff.map((l) => ({ invoiceLineId: l.id, amountMinor: l.amountMinor })),
+      }),
+      record: { type: 'invoice', id: invoiceId },
+      causedBy: input.causedBy ?? null,
+    });
+    const taxes = added.filter((l) => isTax(l.kind));
+    await this.posting.post(tx, {
+      companyId: company.id,
+      rule: 'P32',
+      key: `P32:${invoiceId}`,
+      valueDate: input.issueDate,
+      lines: vatChargeLines({
+        bookId: book.bookId,
+        lease: dims,
+        lines: taxes.map((l) => ({ invoiceLineId: l.id, amountMinor: l.amountMinor })),
+      }),
+      record: { type: 'invoice', id: invoiceId },
+      causedBy: input.causedBy ?? null,
+    });
+    return { invoiceId, number, lines: added };
+  }
+
+  /**
+   * The lease's payment reference (BC-03; decision 8): drawn with server randomness the first
+   * time it is needed (at signing), unique across the platform, never changed.
+   */
+  async ensureReference(
+    tx: Tx,
+    lease: Pick<BillingLease, 'id' | 'companyId' | 'propertyId' | 'tenantId'>,
+  ): Promise<string> {
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const [existing] = await tx
+        .select({ reference: schema.paymentReference.reference })
+        .from(schema.paymentReference)
+        .where(eq(schema.paymentReference.leaseId, lease.id));
+      if (existing) return existing.reference;
+      const reference = referenceFrom(
+        Array.from({ length: REFERENCE_PAYLOAD_LENGTH }, () => randomInt(0, 32)),
+      );
+      if (!reference) continue;
+      const inserted = await tx
+        .insert(schema.paymentReference)
+        .values({
+          companyId: lease.companyId,
+          propertyId: lease.propertyId,
+          tenantId: lease.tenantId,
+          leaseId: lease.id,
+          reference,
+        })
+        .onConflictDoNothing()
+        .returning({ reference: schema.paymentReference.reference });
+      if (inserted[0]) return inserted[0].reference;
+    }
+    throw new Error('Could not draw a free payment reference');
+  }
+
+  // Accrual (AR-01; plan 4.6) ---------------------------------------------------------------------
+
+  /**
+   * P02 for every started line not yet accrued, in accrual order: each draws its own advance
+   * allocations, then the lease's credit first in, first out (each draw is a new allocation), and
+   * the rest is owed. A line credited to nothing is recorded as accrued with nothing posted.
+   */
+  async accrue(tx: Tx, state: LeaseState, date: string): Promise<number> {
+    const due = linesToAccrue(state.lines, date);
+    if (due.length === 0) return 0;
+    const book = requireBook(state.book);
+    const dims = dimsOf(state.lease);
+    let pools = creditPools(state.payments, state.allocations);
+    for (const line of due) {
+      const record = line as LineRecord;
+      const plan = planAccrual(record, state.allocations, pools);
+      const valueDate = record.periodStart!;
+      let posted: PostedEntry | null = null;
+      if (plan.amountMinor > 0)
+        posted = await this.posting.post(tx, {
+          companyId: state.company.id,
+          rule: 'P02',
+          key: `P02:${record.id}`,
+          valueDate,
+          lines: accrualLines({
+            bookId: book.bookId,
+            lease: dims,
+            invoiceLineId: record.id,
+            chargeType: record.kind as 'rent' | 'service_charge',
+            amountMinor: plan.amountMinor,
+            advance: plan.advance,
+            draws: plan.draws,
+          }),
+          record: { type: 'invoice_line', id: record.id },
+        });
+      const accountingDate =
+        posted?.accountingDate ?? (await this.posting.accountingDate(tx, [book.bookId], valueDate));
+      await this.writeAllocations(
+        tx,
+        state,
+        plan.draws.map((d) => ({
+          lineId: record.id,
+          source: 'payment' as const,
+          paymentId: d.paymentId,
+          amountMinor: d.amountMinor,
+        })),
+        {
+          valueDate,
+          accountingDate,
+          recordType: 'accrual',
+          recordId: record.id,
+          entryId: posted?.entryId ?? null,
+        },
+      );
+      await tx.insert(schema.invoiceLineAccrual).values({
+        companyId: state.company.id,
+        propertyId: state.lease.propertyId,
+        tenantId: state.lease.tenantId,
+        leaseId: state.lease.id,
+        invoiceLineId: record.id,
+        amountMinor: plan.amountMinor,
+        valueDate,
+        accountingDate,
+        entryId: posted?.entryId ?? null,
+      });
+      pools = drawFromPools(pools, plan.draws);
+      const index = state.lines.findIndex((l) => l.id === record.id);
+      state.lines[index] = {
+        ...record,
+        accrued: true,
+        accruedOn: valueDate,
+        accruedAccounting: accountingDate,
+      };
+    }
+    return due.length;
+  }
+
+  private async writeAllocations(
+    tx: Tx,
+    state: LeaseState,
+    rows: readonly {
+      readonly lineId: string;
+      readonly source: AllocationSource;
+      readonly paymentId: string | null;
+      readonly amountMinor: number;
+    }[],
+    meta: {
+      readonly valueDate: string;
+      readonly accountingDate: string;
+      readonly recordType:
+        'payment' | 'match' | 'accrual' | 'reversal' | 'credit_note' | 'write_off';
+      readonly recordId: string;
+      readonly entryId: string | null;
+    },
+    leaseOf: (lineId: string) => Pick<BillingLease, 'id' | 'propertyId' | 'tenantId'> = () =>
+      state.lease,
+  ): Promise<void> {
+    const values = rows
+      .filter((r) => r.amountMinor !== 0)
+      .map((r) => {
+        const lease = leaseOf(r.lineId);
+        return {
+          companyId: state.company.id,
+          propertyId: lease.propertyId,
+          tenantId: lease.tenantId,
+          leaseId: lease.id,
+          invoiceLineId: r.lineId,
+          source: r.source,
+          paymentId: r.paymentId,
+          amountMinor: r.amountMinor,
+          ...meta,
+        };
+      });
+    if (values.length === 0) return;
+    const inserted = await tx.insert(schema.allocation).values(values).returning();
+    state.allocations.push(...inserted.map(allocationRecord));
+  }
+
+  // Money in (BC-07; plan 4.5) --------------------------------------------------------------------
+
+  /**
+   * Decision 4: for a VAT-registered owner's commercial lease, a payment that reaches beyond the
+   * invoices already issued first issues the invoices it pays for, up to the lease end, so the
+   * payment is their tax point.
+   */
+  async issueForAdvance(tx: Tx, state: LeaseState, amountMinor: number, today: string) {
+    const vat = await this.vatFor(tx, state, today);
+    if (!vat) return [];
+    const issued = await this.issuedCycleStarts(tx, state.lease.id);
+    const pending = this.cycles(state).filter((c) => !issued.has(c.cycleStart));
+    const open = state.lines.reduce(
+      (s, l) => s + lineBalance(l, state.allocations).outstandingMinor,
+      0,
+    );
+    const credit = creditPools(state.payments, state.allocations).reduce(
+      (s, p) => s + p.amountMinor,
+      0,
+    );
+    const chosen = cyclesForAdvance({
+      pending,
+      openMinor: open - credit,
+      paymentMinor: amountMinor,
+      vat: vat.rates,
+    });
+    const out = [];
+    for (const cycle of chosen) out.push(await this.issueCycle(tx, state, cycle, today));
+    return out;
+  }
+
+  /**
+   * The one way money is taken for a lease (plan 4.5): the lease is accrued first, the payment is
+   * allocated oldest debt first, posted with its cash side, and its receipt numbered and queued,
+   * all in the caller's transaction. A payment is made once per source record.
+   */
+  async receive(
+    tx: Tx,
+    state: LeaseState,
+    input: MoneyIn,
+  ): Promise<{ paymentId: string; receiptId: string }> {
+    const [existing] = await tx
+      .select({ id: schema.payment.id })
+      .from(schema.payment)
+      .where(
+        and(
+          eq(schema.payment.sourceType, input.sourceType),
+          eq(schema.payment.sourceId, input.sourceId),
+        ),
+      );
+    if (existing) {
+      const [receipt] = await tx
+        .select({ id: schema.receipt.id })
+        .from(schema.receipt)
+        .where(and(eq(schema.receipt.paymentId, existing.id), eq(schema.receipt.kind, 'receipt')));
+      return { paymentId: existing.id, receiptId: receipt!.id };
+    }
+    if (
+      !['signed', 'active', 'ending', 'holding_over', 'ended', 'terminated'].includes(
+        state.lease.status,
+      )
+    )
+      throw conflict('lease_not_billable', 'Money can be recorded only for a signed lease');
+    const book = requireBook(state.book);
+    const today = this.today(state);
+    if (input.receivedOn > today)
+      throw invalid('received_in_future', 'The day the money was received cannot be in the future');
+    await this.issueForAdvance(tx, state, input.amountMinor, today);
+    await this.accrue(tx, state, today);
+    const paymentId = uuidv7();
+    const plan = planAllocation({
+      lines: state.lines,
+      allocations: state.allocations,
+      paymentId,
+      amountMinor: input.amountMinor,
+      lease: dimsOf(state.lease),
+      valueDate: input.receivedOn,
+    });
+    const cash: CashSide = {
+      bookId: book.bookId,
+      account: input.cashAccount,
+      collectorId: input.collectorPersonId ?? null,
+      provider: input.provider ?? null,
+    };
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: input.rule,
+      key: `${input.rule}:${paymentId}`,
+      valueDate: input.receivedOn,
+      lines: receiptLines({
+        cash,
+        bookId: book.bookId,
+        paymentId,
+        lease: dimsOf(state.lease),
+        allocations: plan.postings,
+        surplusMinor: plan.surplusMinor,
+      }),
+      record: { type: 'payment', id: paymentId },
+      causedBy: input.causedBy ?? null,
+    });
+    await tx.insert(schema.payment).values({
+      id: paymentId,
+      companyId: state.company.id,
+      method: input.method,
+      amountMinor: input.amountMinor,
+      receivedOn: input.receivedOn,
+      accountingDate: posted!.accountingDate,
+      propertyId: state.lease.propertyId,
+      unitId: state.lease.unitId,
+      tenantId: state.lease.tenantId,
+      leaseId: state.lease.id,
+      ownerId: book.ownerId,
+      bookId: book.bookId,
+      cashAccount: input.cashAccount,
+      collectorPersonId: input.collectorPersonId ?? null,
+      provider: input.provider ?? null,
+      payerName: input.payerName ?? null,
+      senderReference: input.senderReference ?? null,
+      chequeNumber: input.chequeNumber ?? null,
+      chequeBank: input.chequeBank ?? null,
+      note: input.note ?? null,
+      proofDocumentId: input.proofDocumentId ?? null,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      entryId: posted!.entryId,
+      recordedBy: input.recordedBy ?? null,
+    });
+    const [record] = await paymentsByIds(tx, [paymentId]);
+    state.payments.push(record!);
+    state.payments.sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
+    await this.writeAllocations(
+      tx,
+      state,
+      plan.allocations.map((a) => ({ ...a, source: 'payment' as const })),
+      {
+        valueDate: input.receivedOn,
+        accountingDate: posted!.accountingDate,
+        recordType: 'payment',
+        recordId: paymentId,
+        entryId: posted!.entryId,
+      },
+    );
+    const receiptId = await this.issueReceipt(tx, state, {
+      payment: record!,
+      kind: 'receipt',
+      allocations: plan.allocations.map((a) => ({ lineId: a.lineId, amountMinor: a.amountMinor })),
+      creditMinor: plan.surplusMinor,
+      reverses: null,
+    });
+    await enqueueOutbox(tx, {
+      companyId: state.company.id,
+      type: PAYMENT_POSTED_EVENT,
+      payload: { paymentId, receiptId, leaseId: state.lease.id },
+      idempotencyKey: `${PAYMENT_POSTED_EVENT}:${paymentId}`,
+    });
+    return { paymentId, receiptId };
+  }
+
+  /**
+   * P23 on arrival: money whose lease nobody knows yet waits in suspense (2090) in the book of
+   * whoever received it: the owner's book for the owner's account, the company book for the
+   * agency's. No receipt until it is matched.
+   */
+  async receiveUnmatched(
+    tx: Tx,
+    input: Omit<MoneyIn, 'rule'> & {
+      readonly companyId: string;
+      readonly bookId: string;
+      readonly ownerId: string | null;
+    },
+  ): Promise<string> {
+    const [existing] = await tx
+      .select({ id: schema.payment.id })
+      .from(schema.payment)
+      .where(
+        and(
+          eq(schema.payment.sourceType, input.sourceType),
+          eq(schema.payment.sourceId, input.sourceId),
+        ),
+      );
+    if (existing) return existing.id;
+    const paymentId = uuidv7();
+    const posted = await this.posting.post(tx, {
+      companyId: input.companyId,
+      rule: 'P23',
+      key: `P23:${paymentId}`,
+      valueDate: input.receivedOn,
+      lines: unmatchedArrivalLines({
+        cash: { bookId: input.bookId, account: input.cashAccount },
+        paymentId,
+        amountMinor: input.amountMinor,
+      }),
+      record: { type: 'payment', id: paymentId },
+      causedBy: input.causedBy ?? null,
+    });
+    await tx.insert(schema.payment).values({
+      id: paymentId,
+      companyId: input.companyId,
+      method: input.method,
+      amountMinor: input.amountMinor,
+      receivedOn: input.receivedOn,
+      accountingDate: posted!.accountingDate,
+      ownerId: input.ownerId,
+      bookId: input.bookId,
+      cashAccount: input.cashAccount,
+      senderReference: input.senderReference ?? null,
+      note: input.note ?? null,
+      proofDocumentId: input.proofDocumentId ?? null,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      entryId: posted!.entryId,
+      recordedBy: input.recordedBy ?? null,
+    });
+    return paymentId;
+  }
+
+  /**
+   * P23 on matching: a person matches unmatched money to a lease. The suspense clears and the
+   * money is allocated as P03; from the company book into an owner's book, the asset holding it
+   * moves between the books so each balances. Its receipt is issued now.
+   */
+  async match(
+    tx: Tx,
+    state: LeaseState,
+    payment: PaymentRecord,
+    matchedBy: string | null,
+  ): Promise<{ matchId: string; receiptId: string }> {
+    if (payment.leaseId)
+      throw conflict('payment_matched', 'This payment is already matched to a lease');
+    if (payment.reversedAccountingDate)
+      throw conflict('payment_reversed', 'This payment was reversed');
+    const book = requireBook(state.book);
+    if (payment.row.ownerId && payment.row.bookId !== book.bookId)
+      throw conflict(
+        'payment_other_owner',
+        'This money was received into another owner’s account; match it to one of their leases',
+      );
+    const today = this.today(state);
+    await this.issueForAdvance(tx, state, payment.amountMinor, today);
+    await this.accrue(tx, state, today);
+    const plan = planAllocation({
+      lines: state.lines,
+      allocations: state.allocations,
+      paymentId: payment.id,
+      amountMinor: payment.amountMinor,
+      lease: dimsOf(state.lease),
+      valueDate: today,
+    });
+    const matchId = uuidv7();
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P23',
+      key: `P23:${matchId}`,
+      valueDate: today,
+      lines: unmatchedMatchLines({
+        suspenseBookId: payment.row.bookId,
+        bookId: book.bookId,
+        holding: { bookId: book.bookId, account: payment.row.cashAccount as CashAccount },
+        paymentId: payment.id,
+        lease: dimsOf(state.lease),
+        allocations: plan.postings,
+        surplusMinor: plan.surplusMinor,
+      }),
+      record: { type: 'payment_match', id: matchId },
+      causedBy: matchedBy,
+    });
+    await tx.insert(schema.paymentMatch).values({
+      id: matchId,
+      companyId: state.company.id,
+      paymentId: payment.id,
+      propertyId: state.lease.propertyId,
+      tenantId: state.lease.tenantId,
+      leaseId: state.lease.id,
+      unitId: state.lease.unitId,
+      bookId: book.bookId,
+      entryId: posted!.entryId,
+      valueDate: today,
+      accountingDate: posted!.accountingDate,
+      matchedBy,
+    });
+    const [record] = await paymentsByIds(tx, [payment.id]);
+    state.payments.push(record!);
+    state.payments.sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
+    await this.writeAllocations(
+      tx,
+      state,
+      plan.allocations.map((a) => ({ ...a, source: 'payment' as const })),
+      {
+        valueDate: today,
+        accountingDate: posted!.accountingDate,
+        recordType: 'match',
+        recordId: matchId,
+        entryId: posted!.entryId,
+      },
+    );
+    const receiptId = await this.issueReceipt(tx, state, {
+      payment: record!,
+      kind: 'receipt',
+      allocations: plan.allocations.map((a) => ({ lineId: a.lineId, amountMinor: a.amountMinor })),
+      creditMinor: plan.surplusMinor,
+      reverses: null,
+    });
+    await enqueueOutbox(tx, {
+      companyId: state.company.id,
+      type: PAYMENT_POSTED_EVENT,
+      payload: { paymentId: payment.id, receiptId, leaseId: state.lease.id },
+      idempotencyKey: `${PAYMENT_POSTED_EVENT}:${payment.id}`,
+    });
+    return { matchId, receiptId };
+  }
+
+  // Corrections (plan 4.9) ------------------------------------------------------------------------
+
+  /** Where a payment's money can be taken back from now (P21b): the reversal's options. */
+  async reversalOptions(
+    tx: Tx,
+    payment: PaymentRecord,
+    companyKind: string,
+  ): Promise<('collector' | 'owner_account' | 'agency_account' | 'provider')[]> {
+    switch (payment.row.cashAccount) {
+      case '1050':
+        return ['provider'];
+      case '1010':
+        return ['owner_account'];
+      case '1070':
+        return ['agency_account'];
+      default: {
+        const options: ('collector' | 'owner_account' | 'agency_account')[] = [];
+        const held = await this.collectorHeld(
+          tx,
+          payment.row.collectorPersonId!,
+          payment.row.bookId,
+        );
+        if (held >= payment.amountMinor) options.push('collector');
+        options.push('owner_account');
+        if (companyKind === 'agency') options.push('agency_account');
+        return options;
+      }
+    }
+  }
+
+  /** What a collector holds in a book (1060 for that collector), from the journal. */
+  async collectorHeld(tx: Tx, collectorId: string, bookId: string): Promise<number> {
+    const result = await tx.execute<{ held: number }>(
+      sql`select coalesce(sum(amount_minor), 0)::bigint as held from journal_line
+          where account_code = '1060' and collector_id = ${collectorId} and book_id = ${bookId}`,
+    );
+    return Number(result.rows[0]?.held ?? 0);
+  }
+
+  /**
+   * P21(b): reverses a payment from what it pays for now, never from its first entry. Its
+   * allocations come off every line, its credit leaves prepayments, and the money is taken back
+   * from where it sits now. A credit receipt is issued. An unmatched payment is reversed line for
+   * line (P21a), since nothing has used it.
+   */
+  async reverse(
+    tx: Tx,
+    states: readonly LeaseState[],
+    payment: PaymentRecord,
+    input: {
+      readonly reason: string;
+      readonly note: string;
+      readonly moneyNowIn: 'collector' | 'owner_account' | 'agency_account' | 'provider';
+      readonly approvalRequestId: string;
+      readonly requestedBy: string | null;
+      readonly today: string;
+    },
+  ): Promise<{ reversalId: string; receiptId: string | null }> {
+    if (payment.reversedAccountingDate)
+      throw conflict('payment_reversed', 'This payment was already reversed');
+    const reversalId = uuidv7();
+    const companyId = payment.row.companyId;
+    if (!payment.leaseId) {
+      const posted = await this.posting.reverse(tx, {
+        companyId,
+        entryId: payment.row.entryId,
+        key: `P21:${payment.id}`,
+        valueDate: input.today,
+        record: { type: 'payment_reversal', id: reversalId },
+        causedBy: input.requestedBy,
+      });
+      await tx.insert(schema.paymentReversal).values({
+        id: reversalId,
+        companyId,
+        paymentId: payment.id,
+        reason: input.reason,
+        note: input.note,
+        moneyNowIn: input.moneyNowIn,
+        approvalRequestId: input.approvalRequestId,
+        entryId: posted!.entryId,
+        valueDate: input.today,
+        accountingDate: posted!.accountingDate,
+        requestedBy: input.requestedBy,
+      });
+      return { reversalId, receiptId: null };
+    }
+    const lines = states.flatMap((s) => s.lines);
+    const allocations = dedupe(states.flatMap((s) => s.allocations));
+    const leaseOfLine = new Map(
+      lines.map((l) => [l.id, states.find((s) => s.lease.id === l.leaseId)!]),
+    );
+    const plan = planPaymentReversal({
+      payment,
+      lines,
+      allocations,
+      leaseOf: (lineId) => dimsOf(leaseOfLine.get(lineId)!.lease),
+    });
+    const creditState = states.find((s) => s.lease.id === payment.creditLeaseId) ?? states[0]!;
+    const leaseState = states.find((s) => s.lease.id === payment.leaseId) ?? states[0]!;
+    // A matched payment's money moved into the lease's book when it was matched.
+    const book = requireBook(leaseState.book).bookId;
+    const cash = this.cashSideFor(payment, input.moneyNowIn, book);
+    if (input.moneyNowIn === 'collector') {
+      await lockCollectorCash(tx, companyId, payment.row.collectorPersonId!, book);
+      if (
+        (await this.collectorHeld(tx, payment.row.collectorPersonId!, book)) < payment.amountMinor
+      )
+        throw conflict(
+          'collector_cash_short',
+          'The collector no longer holds this much cash; say where the money is now',
+        );
+    }
+    const posted = await this.posting.post(tx, {
+      companyId,
+      rule: 'P21',
+      key: `P21:${payment.id}`,
+      valueDate: input.today,
+      lines: paymentReversalLines({
+        cash,
+        bookId: book,
+        paymentId: payment.id,
+        allocations: plan.postings,
+        credit:
+          plan.creditMinor > 0
+            ? { lease: dimsOf(creditState.lease), amountMinor: plan.creditMinor }
+            : null,
+      }),
+      record: { type: 'payment_reversal', id: reversalId },
+      causedBy: input.requestedBy,
+    });
+    await tx.insert(schema.paymentReversal).values({
+      id: reversalId,
+      companyId,
+      paymentId: payment.id,
+      propertyId: leaseState.lease.propertyId,
+      tenantId: leaseState.lease.tenantId,
+      leaseId: leaseState.lease.id,
+      reason: input.reason,
+      note: input.note,
+      moneyNowIn: input.moneyNowIn,
+      approvalRequestId: input.approvalRequestId,
+      entryId: posted!.entryId,
+      valueDate: input.today,
+      accountingDate: posted!.accountingDate,
+      requestedBy: input.requestedBy,
+    });
+    for (const s of states) {
+      const mine = plan.rows.filter((r) => leaseOfLine.get(r.lineId) === s);
+      await this.writeAllocations(tx, s, mine, {
+        valueDate: input.today,
+        accountingDate: posted!.accountingDate,
+        recordType: 'reversal',
+        recordId: reversalId,
+        entryId: posted!.entryId,
+      });
+      s.payments = s.payments.filter((p) => p.id !== payment.id);
+    }
+    const receiptId = await this.issueReceipt(tx, leaseState, {
+      payment,
+      kind: 'credit_receipt',
+      allocations: plan.rows.map((r) => ({ lineId: r.lineId, amountMinor: -r.amountMinor })),
+      creditMinor: plan.creditMinor,
+      reverses: { reversalId, reason: input.note },
+      linesFrom: lines,
+    });
+    return { reversalId, receiptId };
+  }
+
+  private cashSideFor(
+    payment: PaymentRecord,
+    location: 'collector' | 'owner_account' | 'agency_account' | 'provider',
+    bookId: string,
+  ): CashSide {
+    switch (location) {
+      case 'collector':
+        if (!payment.row.collectorPersonId)
+          throw invalid('money_location', 'This payment was not received in cash');
+        return { bookId, account: '1060', collectorId: payment.row.collectorPersonId };
+      case 'owner_account':
+        return { bookId, account: '1010' };
+      case 'agency_account':
+        return { bookId, account: '1070' };
+      case 'provider':
+        return { bookId, account: '1050', provider: payment.row.provider ?? 'test' };
+    }
+  }
+
+  /**
+   * P27: a credit note on a line, its VAT and levy lines following it (approval required, or a
+   * system credit note for the periods after a lease ends). The unpaid part stops being owed;
+   * payments' money released returns to their credit, latest payment first.
+   */
+  async credit(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly lineId: string;
+      readonly amountMinor: number;
+      readonly reason: string;
+      readonly kind: 'approved' | 'system';
+      readonly approvalRequestId: string | null;
+      readonly createdBy: string | null;
+      readonly valueDate: string;
+    },
+  ): Promise<string> {
+    const line = state.lines.find((l) => l.id === input.lineId);
+    if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
+    const taxLines = state.lines.filter((l) => l.baseLineId === line.id);
+    const sharing = new Set(
+      [line, ...taxLines].flatMap((l) => [...paymentShares(l.id, state.allocations).keys()]),
+    );
+    const payments = (await paymentsByIds(tx, [...sharing])).filter(
+      (p) => !p.reversedAccountingDate,
+    );
+    const parts = planCreditNote({
+      line,
+      taxLines,
+      allocations: state.allocations,
+      payments,
+      amountMinor: input.amountMinor,
+    });
+    for (const part of parts)
+      for (const released of part.released) {
+        const payment = payments.find((p) => p.id === released.paymentId);
+        if (payment && payment.creditLeaseId !== state.lease.id)
+          throw conflict(
+            'credit_moved',
+            'Money paid towards this line has moved to the renewal; credit the renewal’s lines instead',
+          );
+      }
+    const book = requireBook(state.book);
+    const dims = dimsOf(state.lease);
+    const creditNoteId = uuidv7();
+    const lines: JournalLineDraft[] = parts.flatMap((part) =>
+      creditNoteLines({
+        bookId: book.bookId,
+        lease: dims,
+        invoiceLineId: part.line.id,
+        chargedTo: part.chargedTo,
+        unpaidMinor: part.unpaidMinor,
+        released: part.released,
+      }),
+    );
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P27',
+      key: `P27:${creditNoteId}`,
+      valueDate: input.valueDate,
+      lines,
+      record: { type: 'credit_note', id: creditNoteId },
+      causedBy: input.createdBy,
+    });
+    const accountingDate =
+      posted?.accountingDate ??
+      (await this.posting.accountingDate(tx, [book.bookId], input.valueDate));
+    await tx.insert(schema.creditNote).values({
+      id: creditNoteId,
+      companyId: state.company.id,
+      propertyId: state.lease.propertyId,
+      tenantId: state.lease.tenantId,
+      leaseId: state.lease.id,
+      invoiceLineId: line.id,
+      amountMinor: input.amountMinor,
+      reason: input.reason,
+      kind: input.kind,
+      approvalRequestId: input.approvalRequestId,
+      entryId: posted?.entryId ?? null,
+      valueDate: input.valueDate,
+      accountingDate,
+      createdBy: input.createdBy,
+    });
+    await this.writeAllocations(
+      tx,
+      state,
+      parts.flatMap((p) => p.rows),
+      {
+        valueDate: input.valueDate,
+        accountingDate,
+        recordType: 'credit_note',
+        recordId: creditNoteId,
+        entryId: posted?.entryId ?? null,
+      },
+    );
+    return creditNoteId;
+  }
+
+  /** P24: writes off a debt still owed on a charged line (two-person approval). */
+  async writeOff(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly lineId: string;
+      readonly amountMinor: number;
+      readonly reason: string;
+      readonly approvalRequestId: string;
+      readonly createdBy: string | null;
+      readonly valueDate: string;
+    },
+  ): Promise<string> {
+    const line = state.lines.find((l) => l.id === input.lineId);
+    if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
+    const row = planWriteOff({
+      line,
+      allocations: state.allocations,
+      amountMinor: input.amountMinor,
+    });
+    const book = requireBook(state.book);
+    const writeOffId = uuidv7();
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P24',
+      key: `P24:${writeOffId}`,
+      valueDate: input.valueDate,
+      lines: writeOffLines({
+        bookId: book.bookId,
+        lease: dimsOf(state.lease),
+        invoiceLineId: line.id,
+        amountMinor: input.amountMinor,
+      }),
+      record: { type: 'write_off', id: writeOffId },
+      causedBy: input.createdBy,
+    });
+    await tx.insert(schema.writeOff).values({
+      id: writeOffId,
+      companyId: state.company.id,
+      propertyId: state.lease.propertyId,
+      tenantId: state.lease.tenantId,
+      leaseId: state.lease.id,
+      invoiceLineId: line.id,
+      amountMinor: input.amountMinor,
+      reason: input.reason,
+      approvalRequestId: input.approvalRequestId,
+      entryId: posted!.entryId,
+      valueDate: input.valueDate,
+      accountingDate: posted!.accountingDate,
+      createdBy: input.createdBy,
+    });
+    await this.writeAllocations(tx, state, [row], {
+      valueDate: input.valueDate,
+      accountingDate: posted!.accountingDate,
+      recordType: 'write_off',
+      recordId: writeOffId,
+      entryId: posted!.entryId,
+    });
+    return writeOffId;
+  }
+
+  /**
+   * P29: when a renewal starts, the old lease's credit, payment by payment (so first in, first out
+   * is kept), and its deposit move to the new lease within the owner's book. Debts stay on the old
+   * lease's invoices. Once per renewal.
+   */
+  async carryOver(tx: Tx, from: LeaseState, to: LeaseState, valueDate: string): Promise<boolean> {
+    const key = `P29:${to.lease.id}`;
+    if (await this.posting.findByKey(tx, to.company.id, key)) return false;
+    const book = requireBook(from.book);
+    const credits = creditPools(from.payments, from.allocations).map((p) => ({
+      paymentId: p.paymentId,
+      amountMinor: p.amountMinor,
+    }));
+    const deposit = await this.depositHeld(tx, from.lease.id);
+    const lines = carryOverLines({
+      bookId: book.bookId,
+      from: dimsOf(from.lease),
+      to: dimsOf(to.lease),
+      credits,
+      depositMinor: deposit,
+    });
+    const posted = await this.posting.post(tx, {
+      companyId: to.company.id,
+      rule: 'P29',
+      key,
+      valueDate,
+      lines,
+      record: { type: 'lease', id: to.lease.id },
+    });
+    if (!posted) return false;
+    const rows = [
+      ...credits.map((c) => ({
+        kind: 'credit' as const,
+        paymentId: c.paymentId,
+        amountMinor: c.amountMinor,
+      })),
+      ...(deposit > 0 ? [{ kind: 'deposit' as const, paymentId: null, amountMinor: deposit }] : []),
+    ];
+    if (rows.length > 0)
+      await tx.insert(schema.creditCarryOver).values(
+        rows.map((r) => ({
+          companyId: to.company.id,
+          propertyId: to.lease.propertyId,
+          tenantId: to.lease.tenantId,
+          leaseId: to.lease.id,
+          fromLeaseId: from.lease.id,
+          kind: r.kind,
+          paymentId: r.paymentId,
+          amountMinor: r.amountMinor,
+          entryId: posted.entryId,
+          valueDate,
+          accountingDate: posted.accountingDate,
+        })),
+      );
+    const moved = from.payments.filter((p) => credits.some((c) => c.paymentId === p.id));
+    from.payments = from.payments.filter((p) => !moved.includes(p));
+    const reloaded = await paymentsByIds(
+      tx,
+      moved.map((p) => p.id),
+    );
+    to.payments = [...to.payments, ...reloaded].sort((a, b) =>
+      a.order < b.order ? -1 : a.order > b.order ? 1 : 0,
+    );
+    to.allocations = dedupe([
+      ...to.allocations,
+      ...(await loadAllocations(tx, { leaseIds: [], paymentIds: reloaded.map((p) => p.id) })),
+    ]);
+    return true;
+  }
+
+  /** The deposit a lease holds now (2100 on the lease), from the journal. */
+  async depositHeld(tx: Tx, leaseId: string): Promise<number> {
+    const result = await tx.execute<{ held: number }>(
+      sql`select coalesce(-sum(amount_minor), 0)::bigint as held from journal_line
+          where account_code = '2100' and lease_id = ${leaseId}`,
+    );
+    return Number(result.rows[0]?.held ?? 0);
+  }
+
+  // Receipts (plan 4.10) ---------------------------------------------------------------------------
+
+  /** Numbers a receipt in the posting transaction and queues its PDF. */
+  private async issueReceipt(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly payment: PaymentRecord;
+      readonly kind: 'receipt' | 'credit_receipt';
+      readonly allocations: readonly { readonly lineId: string; readonly amountMinor: number }[];
+      readonly creditMinor: number;
+      readonly reverses: { readonly reversalId: string; readonly reason: string } | null;
+      readonly linesFrom?: readonly LineRecord[];
+    },
+  ): Promise<string> {
+    const { company, lease } = state;
+    const book = requireBook(state.book);
+    const owner = (await ownerFacts(tx, [book.ownerId])).get(book.ownerId);
+    const number = await nextNumber(tx, company.id, 'receipt');
+    const receiptId = uuidv7();
+    const issuedAt = this.clock.now();
+    const linesById = new Map((input.linesFrom ?? state.lines).map((l) => [l.id, l]));
+    const walk = this.walk(state);
+    const payment = input.payment.row;
+    const collector = payment.collectorPersonId
+      ? await personContact(tx, payment.collectorPersonId)
+      : null;
+    let reverses: ReceiptDocumentData['reverses'] = null;
+    if (input.reverses) {
+      const [original] = await tx
+        .select({ number: schema.receipt.number })
+        .from(schema.receipt)
+        .where(and(eq(schema.receipt.paymentId, payment.id), eq(schema.receipt.kind, 'receipt')));
+      reverses = original
+        ? {
+            number: formatReceiptNumber(original.number),
+            reason: input.reverses.reason.slice(0, 300),
+          }
+        : null;
+    }
+    const reference = await this.ensureReference(tx, lease);
+    const allocations = input.allocations.filter((a) => a.amountMinor !== 0);
+    const data: ReceiptDocumentData = {
+      number: formatReceiptNumber(number),
+      kind: input.kind,
+      issuedAt: issuedAt.toISOString(),
+      timeZone: company.timeZone,
+      receivedOn: payment.receivedOn,
+      method:
+        payment.method === 'cheque' && payment.chequeNumber
+          ? `Cheque ${payment.chequeNumber}${payment.chequeBank ? ` (${payment.chequeBank})` : ''}`.slice(
+              0,
+              120,
+            )
+          : METHOD_LABELS[payment.method as MoneyIn['method']],
+      receivedFrom: (payment.payerName ?? lease.tenantName).slice(0, 200),
+      tenant: { name: lease.tenantName.slice(0, 200), tin: lease.tenantTinMasked },
+      billedFrom: {
+        name: (owner?.name ?? company.displayName).slice(0, 200),
+        tin: owner?.tinMasked ?? null,
+      },
+      unit: { code: lease.unitCode, propertyName: lease.propertyName.slice(0, 200) },
+      paymentReference: reference,
+      amountMinor: payment.amountMinor,
+      allocations: allocations.map((a) => {
+        const line = linesById.get(a.lineId)!;
+        return {
+          label: lineLabel(line),
+          invoiceNumber: formatInvoiceNumber(line.invoiceNumber),
+          amountMinor: a.amountMinor,
+        };
+      }),
+      creditMinor: input.creditMinor,
+      vatMinor: allocations.some((a) => isTax(linesById.get(a.lineId)!.kind))
+        ? allocations
+            .filter((a) => isTax(linesById.get(a.lineId)!.kind))
+            .reduce((s, a) => s + a.amountMinor, 0)
+        : null,
+      paidUntil: walk.paidUntil,
+      partial: walk.partial,
+      receivedBy:
+        (payment.method === 'cash' || payment.method === 'cheque') && collector
+          ? collector.name.slice(0, 200)
+          : null,
+      reverses,
+    };
+    templates.get(RECEIPT_TEMPLATE.key, RECEIPT_TEMPLATE.version).schema.parse(data);
+    const renderRequestId = await this.documents.requestRender(tx, {
+      companyId: company.id,
+      templateKey: RECEIPT_TEMPLATE.key,
+      templateVersion: RECEIPT_TEMPLATE.version,
+      data,
+    });
+    await tx.insert(schema.receipt).values({
+      id: receiptId,
+      companyId: company.id,
+      number,
+      kind: input.kind,
+      paymentId: payment.id,
+      reversalId: input.reverses?.reversalId ?? null,
+      propertyId: lease.propertyId,
+      tenantId: lease.tenantId,
+      leaseId: lease.id,
+      amountMinor: payment.amountMinor,
+      issuedAt,
+      renderRequestId,
+    });
+    return receiptId;
+  }
+
+  // The forward walk (AR-02, AR-03; plan 4.7) -------------------------------------------------------
+
+  /** The charge periods the lease will bill that have no invoice line yet. */
+  scheduled(state: LeaseState): ScheduledPeriod[] {
+    const lease = state.lease;
+    if (!lease.billingStartDate) return [];
+    const invoiced = new Set(
+      state.lines.flatMap((l) => (l.chargePeriodId ? [l.chargePeriodId] : [])),
+    );
+    const last = lastBillableDay(lease);
+    return state.schedule
+      .filter(
+        (s) =>
+          !invoiced.has(s.id) &&
+          s.periodStart >= lease.billingStartDate! &&
+          (last === null || s.periodStart <= last),
+      )
+      .map((s) => ({
+        id: s.id,
+        chargeType: s.chargeType,
+        periodStart: s.periodStart,
+        periodEnd: s.periodEnd,
+        amountMinor: s.amountMinor,
+      }));
+  }
+
+  walk(state: LeaseState): WalkResult {
+    return forwardWalk(
+      walkLines({
+        lines: state.lines,
+        allocations: state.allocations,
+        scheduled: this.scheduled(state),
+      }),
+      creditPools(state.payments, state.allocations),
+    );
+  }
+
+  /** A payment's credit: what it has not paid towards any line (BC-07, invariant 7). */
+  creditOf(payment: PaymentRecord, allocations: readonly AllocationRecord[]): number {
+    return paymentCredit(payment, allocations);
+  }
+}
+
+/** Allocation rows without repeats (a payment's rows can be loaded with its lease's). */
+export function dedupe(rows: readonly AllocationRecord[]): AllocationRecord[] {
+  const seen = new Set<string>();
+  return rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+}
+
+/** The recurring lines of a lease in accrual order, for views. */
+export const recurringInOrder = (lines: readonly LineRecord[]) =>
+  inAccrualOrder(lines.filter((l) => isRecurring(l.kind)));
+
+export { paymentOrder, DomainError, compactLines };

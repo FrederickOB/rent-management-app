@@ -207,6 +207,11 @@ export interface PaperLeaseInput extends LeaseDraftInput {
   readonly scanUploadId: string;
   /** When the last party signed, a business date. */
   readonly signedOn: string;
+  /**
+   * The first rent period to bill (M4a decision 1); by default the first that starts on or after
+   * the day the lease is recorded. Checked to be the start of one of the lease's periods.
+   */
+  readonly billingStartDate?: string | null;
 }
 
 export interface PartyView {

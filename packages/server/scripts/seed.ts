@@ -1,7 +1,7 @@
 /**
  * Accra demo dataset (CLAUDE.md section 14). M1 seeded companies and users; M2 adds owners,
  * properties, units, meters and each person's scope; M3 adds tenants and their leases, recorded
- * as signed on paper (decision 7), and one lease out for e-signing. Money arrives in M4a. Every
+ * as signed on paper (decision 7), and one lease out for e-signing; M4a adds their money. Every
  * person is fictional and flagged as a test contact, and only fake providers are configured
  * locally, so nothing is ever sent.
  *
@@ -48,6 +48,15 @@ import {
   TenantsService,
   type TenantInput,
 } from '../src/tenancy';
+import { ApprovalsService } from '../src/approvals';
+import {
+  BillingModule,
+  BillingReadService,
+  InvoicingService,
+  MoneyService,
+  SubledgerCheckService,
+} from '../src/billing';
+import { LedgerModule } from '../src/ledger';
 
 const config = loadConfig();
 const host = new URL(config.DATABASE_URL).hostname;
@@ -187,6 +196,8 @@ const PEOPLE: DemoPerson[] = [
     IdentityModule,
     PortfolioModule,
     TenancyModule,
+    LedgerModule,
+    BillingModule,
   ],
 })
 class SeedModule {}
@@ -290,16 +301,23 @@ async function ensurePerson(
 }
 
 /** The staff actor for a seeded person, as the API's guard would build it. */
-async function actorFor(database: Database, companyId: string, email: string): Promise<Actor> {
+async function actorFor(database: Database, companyId: string, signIn: string): Promise<Actor> {
   const result = await withSystem(database, {}, (tx) =>
-    tx.execute<{ person_id: string; membership_id: string; role: string; kind: CompanyKind }>(
-      sql`select p.id as person_id, m.membership_id, m.role, m.company_kind as kind
+    tx.execute<{
+      person_id: string;
+      membership_id: string;
+      role: string;
+      kind: CompanyKind;
+      nominated_approver: boolean;
+      scope: { owners?: string[]; properties?: string[] } | null;
+    }>(
+      sql`select p.id as person_id, m.membership_id, m.role, m.company_kind as kind, m.nominated_approver, m.scope
           from person p, app.memberships_for_person(p.id) m
-          where p.email = ${email} and m.company_id = ${companyId} and m.status = 'active'`,
+          where (p.email = ${signIn} or p.phone_number = ${signIn}) and m.company_id = ${companyId} and m.status = 'active'`,
     ),
   );
   const row = result.rows[0];
-  if (!row) throw new Error(`no active membership for ${email}`);
+  if (!row) throw new Error(`no active membership for ${signIn}`);
   return {
     kind: 'staff',
     personId: row.person_id,
@@ -307,9 +325,10 @@ async function actorFor(database: Database, companyId: string, email: string): P
     companyKind: row.kind,
     membershipId: row.membership_id,
     role: row.role as 'owner' | 'agency_admin',
-    nominatedApprover: false,
-    scope: {},
-    authMethod: 'password_totp',
+    nominatedApprover: row.nominated_approver,
+    scope: row.scope ?? {},
+    // Caretakers are found by phone, as they sign in (CLAUDE.md section 10); staff by email.
+    authMethod: signIn.startsWith('+') ? 'phone_otp' : 'password_totp',
   };
 }
 
@@ -515,6 +534,8 @@ async function ensureRegister(
       email: 'owner.accra@demo.invalid',
       residenceCountry: 'GH',
       timeZone: 'Africa/Accra',
+      // The Osu building's owner charges VAT on commercial rent (CT-04, M4a).
+      vatRegistered: true,
     },
   ];
   for (const o of demoOwners)
@@ -622,6 +643,13 @@ interface DemoTenancy {
   readonly unitCode: string;
   /** Months before today that the lease started (anchored on today's day of the month). */
   readonly startedMonthsAgo: number;
+  /**
+   * Anchors the lease on another day: it starts `startedMonthsAgo` months before this many days
+   * ago, so a line falls due exactly that many days ago (the 45- and 95-day arrears, M4a 4.21).
+   */
+  readonly anchorDaysAgo?: number;
+  /** Bills from the lease start (M4a decision 1); otherwise from the first period from today. */
+  readonly billFromStart?: boolean;
   readonly months: number;
   /** Ends this many days from today instead of after `months`. */
   readonly endsInDays?: number;
@@ -655,6 +683,7 @@ const TENANCIES: DemoTenancy[] = [
     monthlyRentMinor: 80_000,
     cycle: 'monthly',
     depositMinor: 160_000,
+    billFromStart: true,
   },
   {
     companyId: AGENCY,
@@ -672,6 +701,7 @@ const TENANCIES: DemoTenancy[] = [
     months: 12,
     monthlyRentMinor: 70_000,
     cycle: 'annual',
+    billFromStart: true,
   },
   {
     companyId: AGENCY,
@@ -687,10 +717,11 @@ const TENANCIES: DemoTenancy[] = [
     unitCode: 'ACC-ELG-B1-04',
     startedMonthsAgo: 1,
     months: 24,
-    monthlyRentMinor: 250_000,
+    monthlyRentMinor: 150_000,
     cycle: 'annual',
     initialAdvanceMonths: 24,
-    depositMinor: 500_000,
+    depositMinor: 300_000,
+    billFromStart: true,
   },
   {
     companyId: AGENCY,
@@ -721,6 +752,7 @@ const TENANCIES: DemoTenancy[] = [
     cycle: 'quarterly',
     depositMinor: 900_000,
     serviceChargeMonthlyMinor: 30_000,
+    billFromStart: true,
   },
   {
     companyId: AGENCY,
@@ -743,7 +775,7 @@ const TENANCIES: DemoTenancy[] = [
   {
     companyId: AGENCY,
     actorEmail: 'manager.two@demo.invalid',
-    what: 'a tenancy that will be 45 days in arrears (payments arrive in M4a)',
+    what: 'a tenancy 45 days in arrears: billed from its start, partly paid, then nothing',
     tenant: {
       kind: 'individual',
       displayName: 'Kofi Arrears-45 (demo)',
@@ -751,7 +783,9 @@ const TENANCIES: DemoTenancy[] = [
       consent: smsConsent,
     },
     unitCode: 'ACC-LEG-B2-01',
-    startedMonthsAgo: 5,
+    startedMonthsAgo: 3,
+    anchorDaysAgo: 45,
+    billFromStart: true,
     months: 12,
     monthlyRentMinor: 40_000,
     cycle: 'monthly',
@@ -759,7 +793,7 @@ const TENANCIES: DemoTenancy[] = [
   {
     companyId: AGENCY,
     actorEmail: 'manager.two@demo.invalid',
-    what: 'a tenancy that will be 95 days in arrears',
+    what: 'a tenancy 95 days in arrears: billed from its start, partly paid, then nothing',
     tenant: {
       kind: 'individual',
       displayName: 'Esi Arrears-95 (demo)',
@@ -767,7 +801,9 @@ const TENANCIES: DemoTenancy[] = [
       consent: smsConsent,
     },
     unitCode: 'ACC-LEG-B2-02',
-    startedMonthsAgo: 6,
+    startedMonthsAgo: 2,
+    anchorDaysAgo: 95,
+    billFromStart: true,
     months: 12,
     monthlyRentMinor: 40_000,
     cycle: 'monthly',
@@ -775,7 +811,7 @@ const TENANCIES: DemoTenancy[] = [
   {
     companyId: AGENCY,
     actorEmail: 'manager.two@demo.invalid',
-    what: 'a tenancy that will be partly paid',
+    what: 'a tenancy partly paid this month',
     tenant: {
       kind: 'individual',
       displayName: 'Kojo Partial (demo)',
@@ -787,11 +823,12 @@ const TENANCIES: DemoTenancy[] = [
     months: 12,
     monthlyRentMinor: 45_000,
     cycle: 'monthly',
+    billFromStart: true,
   },
   {
     companyId: AGENCY,
     actorEmail: 'manager.one@demo.invalid',
-    what: 'a tenancy that will hold an overpayment as credit',
+    what: 'a tenancy holding an overpayment as credit',
     tenant: {
       kind: 'individual',
       displayName: 'Adwoa Credit (demo)',
@@ -804,6 +841,7 @@ const TENANCIES: DemoTenancy[] = [
     monthlyRentMinor: 180_000,
     cycle: 'monthly',
     depositMinor: 360_000,
+    billFromStart: true,
   },
   // One person who rents from both the agency and the self-managing landlord (TL-01), on the demo
   // tenant phone, so both tenancies show in the tenant app.
@@ -824,6 +862,7 @@ const TENANCIES: DemoTenancy[] = [
     monthlyRentMinor: 220_000,
     cycle: 'monthly',
     depositMinor: 440_000,
+    billFromStart: true,
   },
   {
     companyId: LANDLORD,
@@ -842,6 +881,7 @@ const TENANCIES: DemoTenancy[] = [
     monthlyRentMinor: 450_000,
     cycle: 'six_monthly',
     depositMinor: 900_000,
+    billFromStart: true,
   },
 ];
 
@@ -892,7 +932,8 @@ async function ensureTenancies(
     const tenantId =
       found.tenantId ??
       (await services.tenants.create(actor, t.tenant, { isTestContact: true })).tenant.id;
-    const start = toIsoDate(addMonths(parseBusinessDate(today), -t.startedMonthsAgo));
+    const anchor = toIsoDate(addDays(parseBusinessDate(today), -(t.anchorDaysAgo ?? 0)));
+    const start = toIsoDate(addMonths(parseBusinessDate(anchor), -t.startedMonthsAgo));
     const end = t.endsInDays
       ? toIsoDate(addDays(parseBusinessDate(today), t.endsInDays))
       : toIsoDate(addDays(addMonths(parseBusinessDate(start), t.months), -1));
@@ -926,6 +967,7 @@ async function ensureTenancies(
       parties: [{ ...signer, paperSignedOn: signedOn }],
       scanUploadId: upload.uploadId,
       signedOn,
+      billingStartDate: t.billFromStart ? start : null,
     });
     created += 1;
   }
@@ -1022,6 +1064,373 @@ async function ensureSigningLease(
   return true;
 }
 
+// Money (M4a plan 4.21): through the real services, approved by a second person, so the ledger,
+// receipts and balances are what production would hold. Amounts are pesewas.
+type MoneyStep =
+  | {
+      readonly kind: 'cash';
+      /** Who received the money: a person seeded above, by email or phone. */
+      readonly collector: string;
+      readonly approver: string;
+      readonly amountMinor: number;
+      /** Days after the lease start, or 'today'. */
+      readonly receivedOn: number | 'today';
+      readonly method?: 'cash' | 'cheque';
+    }
+  | {
+      readonly kind: 'transfer';
+      readonly recorder: string;
+      readonly approver: string;
+      readonly into: 'owner_account' | 'agency_account';
+      /** A fixed amount, or the deposit and every invoice issued so far. */
+      readonly amountMinor: number | 'all_invoiced';
+      readonly receivedOn: number | 'today';
+    };
+
+interface DemoMoney {
+  readonly companyId: string;
+  readonly unitCode: string;
+  readonly steps: readonly MoneyStep[];
+}
+
+const KOJO = '+233200000011';
+const MONEY: DemoMoney[] = [
+  {
+    // Paid up in cash: the first two months to a manager, the last two to the caretaker Kojo.
+    companyId: AGENCY,
+    unitCode: 'ACC-LEG-B1-01',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.one@demo.invalid',
+        approver: 'manager.two@demo.invalid',
+        amountMinor: 240_000,
+        receivedOn: 0,
+      },
+      {
+        kind: 'cash',
+        collector: 'manager.one@demo.invalid',
+        approver: 'manager.two@demo.invalid',
+        amountMinor: 80_000,
+        receivedOn: 31,
+      },
+      {
+        kind: 'cash',
+        collector: KOJO,
+        approver: 'manager.one@demo.invalid',
+        amountMinor: 80_000,
+        receivedOn: 61,
+      },
+      {
+        kind: 'cash',
+        collector: KOJO,
+        approver: 'manager.one@demo.invalid',
+        amountMinor: 80_000,
+        receivedOn: 'today',
+      },
+    ],
+  },
+  {
+    // A one-year advance: twelve months in one cash payment at the start.
+    companyId: AGENCY,
+    unitCode: 'ACC-LEG-B1-02',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.one@demo.invalid',
+        approver: 'agency.admin@demo.invalid',
+        amountMinor: 840_000,
+        receivedOn: 0,
+      },
+    ],
+  },
+  {
+    // The two-year advance (worked example A): the deposit in cash, then GH₵36,000 by transfer.
+    companyId: AGENCY,
+    unitCode: 'ACC-ELG-B1-04',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.one@demo.invalid',
+        approver: 'accountant@demo.invalid',
+        amountMinor: 300_000,
+        receivedOn: 0,
+      },
+      {
+        kind: 'transfer',
+        recorder: 'manager.one@demo.invalid',
+        approver: 'accountant@demo.invalid',
+        into: 'owner_account',
+        amountMinor: 3_600_000,
+        receivedOn: 0,
+      },
+    ],
+  },
+  {
+    // The commercial company tenant: its deposit and both quarters with VAT, into the agency's account.
+    companyId: AGENCY,
+    unitCode: 'ACC-OSU-G-01',
+    steps: [
+      {
+        kind: 'transfer',
+        recorder: 'accountant@demo.invalid',
+        approver: 'agency.admin@demo.invalid',
+        into: 'agency_account',
+        amountMinor: 'all_invoiced',
+        receivedOn: 'today',
+      },
+    ],
+  },
+  {
+    // 45 days in arrears: three months and part of the fourth, then nothing.
+    companyId: AGENCY,
+    unitCode: 'ACC-LEG-B2-01',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.two@demo.invalid',
+        approver: 'manager.one@demo.invalid',
+        amountMinor: 130_000,
+        receivedOn: 70,
+      },
+    ],
+  },
+  {
+    // 95 days in arrears: two months and part of the third, then nothing.
+    companyId: AGENCY,
+    unitCode: 'ACC-LEG-B2-02',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.two@demo.invalid',
+        approver: 'manager.one@demo.invalid',
+        amountMinor: 95_000,
+        receivedOn: 40,
+      },
+    ],
+  },
+  {
+    // A part payment: two months and GH₵200 towards this one.
+    companyId: AGENCY,
+    unitCode: 'ACC-LEG-B2-03',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.two@demo.invalid',
+        approver: 'accountant@demo.invalid',
+        amountMinor: 110_000,
+        receivedOn: 'today',
+        method: 'cheque',
+      },
+    ],
+  },
+  {
+    // An overpayment: the deposit, three months and GH₵500 more, held as credit.
+    companyId: AGENCY,
+    unitCode: 'ACC-ELG-B1-02',
+    steps: [
+      {
+        kind: 'transfer',
+        recorder: 'manager.one@demo.invalid',
+        approver: 'accountant@demo.invalid',
+        into: 'owner_account',
+        amountMinor: 360_000 + 3 * 180_000 + 50_000,
+        receivedOn: 'today',
+      },
+    ],
+  },
+  {
+    // The demo tenant's flat: the deposit and every month so far.
+    companyId: AGENCY,
+    unitCode: 'ACC-ELG-B1-05',
+    steps: [
+      {
+        kind: 'transfer',
+        recorder: 'manager.one@demo.invalid',
+        approver: 'agency.admin@demo.invalid',
+        into: 'owner_account',
+        amountMinor: 440_000 + 3 * 220_000,
+        receivedOn: 'today',
+      },
+    ],
+  },
+  {
+    // The demo tenant's house: the deposit and the first six months in cash, approved by the
+    // landlord's nominated approver; the next six months are due today.
+    companyId: LANDLORD,
+    unitCode: 'TEM-EST-B1-01',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'landlord@demo.invalid',
+        approver: 'approver@demo.invalid',
+        amountMinor: 900_000 + 6 * 450_000,
+        receivedOn: 0,
+      },
+    ],
+  },
+];
+
+/** A photo, proof or slip where the browser's presigned upload would put it. */
+async function moneyUpload(
+  services: { money: MoneyService; storage: StoragePort; cfg: AppConfig },
+  actor: Actor,
+  purpose: 'cash_photo' | 'transfer_proof' | 'banking_slip',
+): Promise<string> {
+  const upload = await services.money.createUpload(actor, {
+    purpose,
+    contentType: 'application/pdf',
+    sizeBytes: PAPER_SCAN.length,
+  });
+  await services.storage.put({
+    bucket: services.cfg.S3_BUCKET_FILES,
+    key: upload.fields.key!,
+    body: PAPER_SCAN,
+    contentType: 'application/pdf',
+  });
+  return upload.uploadId;
+}
+
+/**
+ * The demo money (M4a plan 4.21), once: billing's reaction to each signed lease (the worker would
+ * run it too; both are idempotent), then each lease's payments, the caretaker's banking and one
+ * transfer nobody has matched. A lease that already has money is left alone.
+ */
+async function ensureMoney(
+  database: Database,
+  services: {
+    money: MoneyService;
+    invoicing: InvoicingService;
+    approvals: ApprovalsService;
+    read: BillingReadService;
+    subledger: SubledgerCheckService;
+    storage: StoragePort;
+    cfg: AppConfig;
+  },
+): Promise<{ payments: number; problems: number }> {
+  const today = toIsoDate(businessDateOf(instantFrom(new Date()), 'Africa/Accra'));
+  const leaseOf = async (companyId: string, unitCode: string) =>
+    withCompany(database, { companyId, actorKind: 'system' }, async (tx) => {
+      const rows = await tx.execute<{ id: string; start_date: string; paid: boolean }>(
+        sql`select l.id, l.start_date::text, exists (select 1 from cash_record c where c.lease_id = l.id)
+              or exists (select 1 from direct_receipt d where d.lease_id = l.id) as paid
+            from lease l join unit u on u.id = l.unit_id
+            where u.code = ${unitCode} and l.status in ('signed', 'active', 'ending', 'holding_over')
+            order by l.start_date desc limit 1`,
+      );
+      return rows.rows[0] ?? null;
+    });
+  for (const companyId of [AGENCY, LANDLORD]) {
+    const signed = await withCompany(database, { companyId, actorKind: 'system' }, (tx) =>
+      tx.execute<{ id: string }>(
+        sql`select id from lease where status in ('signed', 'active', 'ending', 'holding_over') order by start_date`,
+      ),
+    );
+    for (const { id } of signed.rows) await services.invoicing.onLeaseSigned(companyId, id);
+  }
+  let payments = 0;
+  for (const demo of MONEY) {
+    const lease = await leaseOf(demo.companyId, demo.unitCode);
+    if (!lease || lease.paid) continue;
+    for (const step of demo.steps) {
+      const receivedOn =
+        step.receivedOn === 'today'
+          ? today
+          : toIsoDate(addDays(parseBusinessDate(lease.start_date), step.receivedOn));
+      const on = receivedOn > today ? today : receivedOn;
+      const approver = await actorFor(database, demo.companyId, step.approver);
+      if (step.kind === 'cash') {
+        const collector = await actorFor(database, demo.companyId, step.collector);
+        const recorded = await services.money.recordCash(collector, {
+          leaseId: lease.id,
+          method: step.method ?? 'cash',
+          amountMinor: step.amountMinor,
+          receivedOn: on,
+          payerName: 'The tenant (demo)',
+          chequeNumber: step.method === 'cheque' ? '004512' : null,
+          chequeBank: step.method === 'cheque' ? 'GCB Bank (demo)' : null,
+          photoUploadId: await moneyUpload(services, collector, 'cash_photo'),
+        });
+        await services.approvals.decide(approver, recorded.approvalId, { decision: 'approve' });
+      } else {
+        const recorder = await actorFor(database, demo.companyId, step.recorder);
+        let amount = step.amountMinor;
+        if (amount === 'all_invoiced') {
+          const card = await services.read.leaseBilling(recorder, lease.id);
+          const invoices = await services.read.invoices(recorder, { leaseId: lease.id });
+          amount = invoices.reduce((sum, i) => sum + i.outstandingMinor, 0) - card.creditMinor;
+        }
+        const recorded = await services.money.recordTransfer(recorder, {
+          leaseId: lease.id,
+          receivedInto: step.into,
+          amountMinor: amount,
+          receivedOn: on,
+          senderReference: `DEMO ${demo.unitCode}`,
+          proofUploadId: await moneyUpload(services, recorder, 'transfer_proof'),
+        });
+        await services.approvals.decide(approver, recorded.approvalId, { decision: 'approve' });
+      }
+      payments += 1;
+    }
+  }
+  // The caretaker Kojo banks one of the two cash payments he holds; the other stays in hand.
+  const kojo = await actorFor(database, AGENCY, KOJO);
+  const banked = await withCompany(database, { companyId: AGENCY, actorKind: 'system' }, (tx) =>
+    tx.execute<{ n: number }>(
+      sql`select count(*)::int as n from cash_banking where collector_person_id = ${kojo.kind === 'staff' ? kojo.personId : null}`,
+    ),
+  );
+  if (kojo.kind === 'staff' && banked.rows[0]!.n === 0) {
+    const ownerId = (
+      await withCompany(database, { companyId: AGENCY, actorKind: 'system' }, (tx) =>
+        tx
+          .select({ id: schema.owner.id })
+          .from(schema.owner)
+          .where(eq(schema.owner.reference, 'OWN-01')),
+      )
+    )[0]?.id;
+    const holding = (await services.read.collectorsCash(kojo)).find((c) => c.ownerId === ownerId);
+    if (ownerId && holding && holding.heldMinor >= 80_000) {
+      const banking = await services.money.recordBanking(kojo, {
+        collectorPersonId: kojo.personId,
+        ownerId,
+        bankedInto: 'owner_account',
+        amountMinor: 80_000,
+        bankedOn: today,
+        slipUploadId: await moneyUpload(services, kojo, 'banking_slip'),
+      });
+      const approver = await actorFor(database, AGENCY, 'manager.one@demo.invalid');
+      await services.approvals.decide(approver, banking.approvalId, { decision: 'approve' });
+    }
+  }
+  // One transfer into the agency's account that nobody has matched to a lease yet (P23).
+  const unmatched = await withCompany(database, { companyId: AGENCY, actorKind: 'system' }, (tx) =>
+    tx.execute<{ n: number }>(
+      sql`select count(*)::int as n from direct_receipt where sender_reference = 'UNKNOWN TRF 0001 (demo)'`,
+    ),
+  );
+  if (unmatched.rows[0]!.n === 0) {
+    const accountant = await actorFor(database, AGENCY, 'accountant@demo.invalid');
+    const recorded = await services.money.recordTransfer(accountant, {
+      receivedInto: 'agency_account',
+      amountMinor: 50_000,
+      receivedOn: today,
+      senderReference: 'UNKNOWN TRF 0001 (demo)',
+      note: 'Arrived without a reference',
+      proofUploadId: await moneyUpload(services, accountant, 'transfer_proof'),
+    });
+    const admin = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
+    await services.approvals.decide(admin, recorded.approvalId, { decision: 'approve' });
+  }
+  let problems = 0;
+  for (const companyId of [AGENCY, LANDLORD]) {
+    await services.invoicing.generateAll(companyId, today);
+    await services.invoicing.accrueAll(companyId, today);
+    problems += (await services.subledger.check(companyId)).mismatches.length;
+  }
+  return { payments, problems };
+}
+
 /** RFC 4648 base32 without padding, for the otpauth URI people add to an authenticator app. */
 function base32(text: string): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -1060,6 +1469,15 @@ try {
     leases: app.get(LeasesService),
     signing: app.get(LeaseSigningService),
   });
+  const money = await ensureMoney(database, {
+    money: app.get(MoneyService),
+    invoicing: app.get(InvoicingService),
+    approvals: app.get(ApprovalsService),
+    read: app.get(BillingReadService),
+    subledger: app.get(SubledgerCheckService),
+    storage,
+    cfg,
+  });
   console.log(`Seeded ${COMPANIES.length} companies and ${PEOPLE.length} people.`);
   console.log(
     `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST).`,
@@ -1071,6 +1489,9 @@ try {
     signing
       ? `E-signing: ${SIGNING_UNIT} issued for signature; the worker sends the links (tenant +233 20 000 0040).`
       : `E-signing: ${SIGNING_UNIT} already has its lease.`,
+  );
+  console.log(
+    `Money: ${money.payments} new payments; the sub-ledger check found ${money.problems} mismatches.`,
   );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, schema, withCompany, withSystem, type Database } from '@rent/db';
+import { and, eq, schema, withCompany, withSystem, type Database, type Tx } from '@rent/db';
 import { parseBusinessDate, toIsoDate, type BusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import {
@@ -76,6 +76,21 @@ export class RulesService {
         .from(schema.rule)
         .where(and(eq(schema.rule.country, country), eq(schema.rule.key, key))),
     );
+    const chosen = resolveAsOf(rows.map(toRuleRow), asOf);
+    if (!chosen)
+      throw new DomainError('rule.missing', `No rule ${key} for ${country} on ${toIsoDate(asOf)}`);
+    return toResolved(rows.find((r) => r.id === chosen.id)!);
+  }
+
+  /**
+   * The same, read in the caller's transaction (the rule table is global): for calculations that
+   * record the rule they used in the same transaction, such as VAT on an invoice (M4a).
+   */
+  async resolveIn(tx: Tx, country: string, key: string, asOf: BusinessDate): Promise<ResolvedRule> {
+    const rows = await tx
+      .select()
+      .from(schema.rule)
+      .where(and(eq(schema.rule.country, country), eq(schema.rule.key, key)));
     const chosen = resolveAsOf(rows.map(toRuleRow), asOf);
     if (!chosen)
       throw new DomainError('rule.missing', `No rule ${key} for ${country} on ${toIsoDate(asOf)}`);

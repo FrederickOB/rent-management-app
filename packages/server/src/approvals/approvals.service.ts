@@ -45,6 +45,12 @@ export interface ApprovalActionHandler<P = unknown> {
   readonly schema: z.ZodType<P>;
   /** At most one open request per subject: another is refused while one waits for a decision. */
   readonly onePerSubject?: boolean;
+  /**
+   * Runs before a decision is recorded, in the deciding transaction: handlers that will write money
+   * take their locks here, before anything in the transaction is audited, so every path locks in
+   * the same order (M4a plan 8).
+   */
+  prepare?(tx: Tx, request: RequestRow): Promise<void>;
   /** The fields that matter, re-read from the subject at decision time to detect changes. */
   currentPayload(tx: Tx, request: RequestRow): Promise<P>;
   /** Runs in the same transaction as the final approval; if it throws, nothing is recorded. */
@@ -121,73 +127,86 @@ export class ApprovalsService {
     input: { actionType: string; subjectType: string; subjectId: string; payload: unknown },
   ): Promise<ApprovalView> {
     const staff = asStaff(actor);
+    const id = await withCompany(this.database, ctxOf(staff), (tx) =>
+      this.createInTx(tx, staff, input),
+    );
+    return this.get(staff, id);
+  }
+
+  /**
+   * Starts a request in the caller's transaction, so the record it asks about and the request
+   * commit together (M4a: a cash record and its approval). Returns the request's id.
+   */
+  async createInTx(
+    tx: Tx,
+    actor: Actor | null,
+    input: { actionType: string; subjectType: string; subjectId: string; payload: unknown },
+  ): Promise<string> {
+    const staff = asStaff(actor);
     const handler = this.handler(input.actionType);
     const payload = handler.schema.parse(input.payload);
-    const id = await withCompany(this.database, ctxOf(staff), async (tx) => {
-      if (handler.onePerSubject) await this.refuseSecondOpen(tx, staff, input);
-      const others = await tx
-        .select({
-          personId: schema.membership.personId,
-          role: schema.membership.role,
-          nominatedApprover: schema.membership.nominatedApprover,
-        })
-        .from(schema.membership)
-        .where(
-          and(
-            eq(schema.membership.companyId, staff.companyId),
-            eq(schema.membership.status, 'active'),
-          ),
-        );
-      const eligible = others.filter(
-        (m) =>
-          m.personId !== staff.personId &&
-          can(
-            {
-              ...staff,
-              personId: m.personId,
-              role: m.role as StaffRole,
-              nominatedApprover: m.nominatedApprover,
-            },
-            'approval.decide',
-            { initiatorPersonId: staff.personId, eligibleRoles: handler.eligibleRoles },
-          ).allowed,
+    if (handler.onePerSubject) await this.refuseSecondOpen(tx, staff, input);
+    const others = await tx
+      .select({
+        personId: schema.membership.personId,
+        role: schema.membership.role,
+        nominatedApprover: schema.membership.nominatedApprover,
+      })
+      .from(schema.membership)
+      .where(
+        and(
+          eq(schema.membership.companyId, staff.companyId),
+          eq(schema.membership.status, 'active'),
+        ),
       );
-      const mode: ApprovalMode = chooseMode(eligible.length);
-      const [company] = await tx
-        .select({ settings: schema.company.settings })
-        .from(schema.company)
-        .where(eq(schema.company.id, staff.companyId));
-      const settings = parseCompanySettings(company?.settings);
-      const now = this.clock.now();
-      const [row] = await tx
-        .insert(schema.approvalRequest)
-        .values({
-          companyId: staff.companyId,
-          actionType: input.actionType,
-          subjectType: input.subjectType,
-          subjectId: input.subjectId,
-          payload: payload as Record<string, unknown>,
-          payloadHash: payloadHash(payload),
-          initiatedBy: staff.personId,
-          initiatorMembershipId: staff.membershipId,
-          mode,
-          status: initialStatus(mode),
-          coolingOffUntil:
-            mode === 'single_user'
-              ? new Date(now.getTime() + settings.approvalCoolingOffHours * 3_600_000)
-              : null,
-          expiresAt: new Date(now.getTime() + settings.approvalExpiryDays * 86_400_000),
-        })
-        .returning({ id: schema.approvalRequest.id });
-      await enqueueOutbox(tx, {
+    const eligible = others.filter(
+      (m) =>
+        m.personId !== staff.personId &&
+        can(
+          {
+            ...staff,
+            personId: m.personId,
+            role: m.role as StaffRole,
+            nominatedApprover: m.nominatedApprover,
+          },
+          'approval.decide',
+          { initiatorPersonId: staff.personId, eligibleRoles: handler.eligibleRoles },
+        ).allowed,
+    );
+    const mode: ApprovalMode = chooseMode(eligible.length);
+    const [company] = await tx
+      .select({ settings: schema.company.settings })
+      .from(schema.company)
+      .where(eq(schema.company.id, staff.companyId));
+    const settings = parseCompanySettings(company?.settings);
+    const now = this.clock.now();
+    const [row] = await tx
+      .insert(schema.approvalRequest)
+      .values({
         companyId: staff.companyId,
-        type: 'approval.requested',
-        payload: { requestId: row!.id, actionType: input.actionType, mode },
-        idempotencyKey: `approval.requested:${row!.id}`,
-      });
-      return row!.id;
+        actionType: input.actionType,
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        payload: payload as Record<string, unknown>,
+        payloadHash: payloadHash(payload),
+        initiatedBy: staff.personId,
+        initiatorMembershipId: staff.membershipId,
+        mode,
+        status: initialStatus(mode),
+        coolingOffUntil:
+          mode === 'single_user'
+            ? new Date(now.getTime() + settings.approvalCoolingOffHours * 3_600_000)
+            : null,
+        expiresAt: new Date(now.getTime() + settings.approvalExpiryDays * 86_400_000),
+      })
+      .returning({ id: schema.approvalRequest.id });
+    await enqueueOutbox(tx, {
+      companyId: staff.companyId,
+      type: 'approval.requested',
+      payload: { requestId: row!.id, actionType: input.actionType, mode },
+      idempotencyKey: `approval.requested:${row!.id}`,
     });
-    return this.get(staff, id);
+    return row!.id;
   }
 
   /**
@@ -225,6 +244,7 @@ export class ApprovalsService {
         initiatorPersonId: request.initiatedBy,
         eligibleRoles: handler.eligibleRoles,
       });
+      if (handler.prepare) await handler.prepare(tx, request);
 
       const [{ approvals } = { approvals: 0 }] = await tx
         .select({ approvals: sql<number>`count(*)::int` })

@@ -222,3 +222,6 @@ Statutes were read from the Parliament repository, GRA, the Data Protection Comm
         3. **Advances:** a payment made before its invoices exist issues them at once, so the payment is the tax point (M4a decision 4).
         4. **Corrections:** a credit note on a line reduces the VAT and levies charged on it; a write-off leaves the VAT already charged payable. Is bad-debt relief available?
         5. **Invoices:** numbered per company (`INV-000123`). Must they also go through GRA's E-VAT system?
+        6. **TINs on invoices:** M4a prints the owner's and the commercial tenant's TINs masked, as M3 stores them for display; the full numbers stay encrypted.
+            - Must a VAT invoice or receipt carry both TINs in full?
+            - If so, issuing the invoice would decrypt them as an audited reveal and keep them in the frozen PDF.

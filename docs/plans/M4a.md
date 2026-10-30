@@ -390,6 +390,155 @@ The seed extends the M3 paper leases with money that exercises every flow, all t
     6. **References** are drawn again whenever 0 and Z would be neighbours, the one swap Luhn mod 32 cannot detect.
     7. **For you to look at in the report:** within one invoice the approved order pays every rent line before any service charge. A part payment on an annual invoice with service charge therefore covers rent for every month but service charge for none, and paid-until shows no whole month. Allocating month by month would fix that, but changes the approved order.
 
+**2026-10-30, the backend: steps 2 to 5 and 7 (in the working tree for review, not committed).** The web screens (step 6) are being built separately.
+
+- **Database (step 2):** three migrations; `docs/architecture.md` sections 3.4 and 11 list the tables and policies.
+    - **`0012_ledger_billing`,** generated from the Drizzle schema:
+        - the ledger and billing tables;
+        - `lease.billing_start_date`;
+        - `property_ownership_correction` (M2 S5).
+    - **`0013_ledger_billing_security`,** written by hand:
+        - **The chart of accounts:** the 28 accounts, read-only.
+        - **Books:** triggers make one with each owner and with each landlord or agency company. Existing ones were backfilled.
+        - **Billing start:** backfilled by decision 1: an e-signed lease bills from its start; a paper lease from the first period starting on or after the day it was recorded. From then on it is set once, at signing (`RA046`).
+        - **Row Level Security:** forced, with property, owner and tenant scope.
+        - **Append-only:** 20 tables.
+        - **The journal's checks:**
+            - only `ledger_writer` writes (`RA040`);
+            - each entry has two lines or more (`RA041`) and is zero in each book at commit (`RA042`);
+            - each account stays in its kind of book (`RA043`);
+            - nothing posts into a locked month (`RA044`);
+            - lines are written only in their entry's transaction (`RA048`).
+        - **Owners and books:**
+            - an owner change is refused once the property has an invoice, a payment or a journal line (`RA045`);
+            - a lease's invoices stay in one book (`RA047`).
+        - **Locks:** advisory locks per lease and per collector and book.
+        - **Audit:** row-audit triggers on 18 business tables.
+    - **`0014_rules_m4a`:** `vat.applies_to_service_charge` = true, `unverified`, effective from the same date as `vat.commercial_rent` (decision 4; OQ-20).
+    - **`bootstrap.sql`:** `GRANT ledger_writer TO rent_app WITH INHERIT FALSE, SET TRUE`. The application role holds no journal privilege until it switches role. It is applied to the local cluster too.
+    - **Checked:** the migrations were run on two copies of the dev database. The backfill was right, and every audit chain still verified.
+- **Ledger (step 3):**
+    - **`PostingService`** is the only code that inserts journal rows:
+        - it runs the domain's entry checks;
+        - it switches to `ledger_writer` for the insert, then back;
+        - it writes one `ledger.entry_posted` audit event per entry.
+    - **Replays:** the idempotency key is unique per company, so posting it again returns the existing entry and writes nothing.
+    - **It also provides:** accounting dates under locks (the first open day across the entry's books), correction reversals (P21a), month locks and balance queries.
+    - **The lint rule** `rent/ledger-writes` fails any other code that writes the journal. Its test is `AC-01 only the posting service writes the journal`.
+- **Billing (step 4).** `BillingEngine` runs the domain's planning and posting functions against the database, step for step as the `LeaseLedgerModel` reference does.
+    - **BC-01 and P32:**
+        - **What is issued:** cycles from the M3 schedule, 14 days ahead by the company setting, keyed on lease and cycle start. The deposit invoice comes at signing, due on the start date, for a lease billed from its start. Held-over months are invoiced as they start.
+        - **When a lease ends early or is cancelled:** nothing after the end is billed. System credit notes cancel the lines already issued.
+        - **Not billed:** a property with two owners on the day (`notBilledReason: joint_owners`).
+        - **VAT:** VAT, NHIL and GETFund lines follow each rent and service-charge line on a VAT-registered owner's commercial lease. Each rate is read in the transaction and its rule id kept on the invoice and the line. A payment beyond the issued invoices issues the invoices it pays for (decision 4).
+        - **P01 one-off lines** post when issued, but nothing raises a one-off charge yet: plan 4.18 has no endpoint for one. The domain tests cover the rule.
+    - **AR-01 to AR-03 (P02, P09):**
+        - **Accrual:** each started line accrues once (`P02:<line id>`). It draws first on its own advance, then on credit, oldest payment first. The value date is the period start; the accounting date moves to the first open day if that month is locked.
+        - **Payments accrue first:** a payment accrues the lease's started lines before it allocates.
+        - **Derived on every read, never stored:** paid-until, partial cover, unearned rent, what is due and overdue, earned and unpaid, deposit held and credit.
+    - **BC-07 and BC-11 (P03 to P05, P08, P10):**
+        - **Allocation:** oldest debt first, with every allocation's source.
+        - **Credit:** what is left stays on the payment.
+        - **Deposits:** money for a deposit line goes to 2100 per lease, never to income.
+        - **The test harness** (`MoneyService.recordProviderPayment`) posts P03 to 1050, standing in for a payment provider.
+    - **BC-05, P06, P07 and P28:**
+        - **Cash and cheques** are recorded with a photo, then wait for approval (`payment.cash_receipt`). Approval writes the payment, its allocations, the P06 entry and the receipt in one transaction; a rejection writes nothing.
+        - **Transfers** need proof and approval (`payment.direct_receipt`). They go into the owner's account (1010) or, for an agency, the agency's (1070).
+        - **Banking** needs the slip and approval (`cash.banking`). It never exceeds what the collector holds, checked under the collector's lock both when asked and when approved. It is split by property, oldest cash first.
+    - **Corrections:**
+        - **P21b reversals** (`payment.reversal`, `billing.manage`) are built from current allocations. They credit the cash side where the money is now and issue a credit receipt.
+        - **P27 credit notes and P24 write-offs** (`invoice.credit_note`, `invoice.write_off`, `billing.manage`) are checked against the domain before the request opens, and again on approval.
+    - **P23 unmatched transfers:** held in suspense (2090) in the receiver's book, and matched by `billing.manage`. Money in an owner's account matches only that owner's leases. Money in the agency's account moves into the owner's book.
+    - **P29:** when a renewal starts, each payment's credit and the deposit move to the new lease, which keeps first-in, first-out order. A started renewal is carried over before any other billing on it, and by the daily accrual if the event was missed.
+    - **BC-08:** lines due before the as-of date, whatever day they were invoiced, less allocations accounted up to it. Rows by tenant, property or owner.
+    - **BC-03:** one reference per lease at signing, unique across the platform.
+    - **Numbers (the numbering half of BC-06):**
+        - receipts `RC-000001` and invoices `INV-000001`, per company;
+        - taken in the posting transaction from `company_counter` with `INSERT … ON CONFLICT DO UPDATE … RETURNING`;
+        - the row lock orders concurrent takers, and a rollback gives the number back.
+    - **PDFs:** every invoice and receipt requests its PDF in the same transaction (the outbox); the worker renders it. A `payment.posted` event is written for M4b's receipt sender.
+    - **The sub-ledger check (4.16):** each entry balances per book; invariants 2, 3, 4 and 7; 2090 against unmatched receipts; 1060 per collector and book. A mismatch raises `billing.subledger_mismatch`.
+    - **Owners (decisions 5 and 6, M2 S5):** `POST /properties/{propertyId}/ownership/correction` corrects the owner on the same day, before any ledger entry. Changes after the first entry are refused.
+- **Concurrency:**
+    - **Locks:** one advisory lock per lease (`app.lock_lease_billing`) serialises everything that bills, accrues, allocates or corrects a lease; renewals lock both leases, in id order. Cash takes one per collector and book (`app.lock_collector_cash`).
+    - **Order:** both locks are taken before any audited write, so the order is always lease, then collector, then the audit chain head.
+    - **Approvals:** M1's engine gains a `prepare` step, which takes these locks before the decision row is written.
+- **Idempotent requests (M2 S8):**
+    - **Where:** one place in the API (`apps/api/src/http/idempotency.ts`) over `IdempotencyStore` (`packages/server/src/core/idempotency.ts`).
+    - **Required on** the seven money writes. Without the header the API answers 400 `idempotency_key_required`.
+    - **What is stored:** the key per company and person, with a SHA-256 hash of the operation, the person and the body.
+    - **How it runs:** a reservation; a claim inside the write's own transaction; the response saved on success; the reservation released on failure.
+    - **Answers:** a replay returns the stored response. The key with another body gets 422 `idempotency_key_reused`. A second request while the first runs gets 409 `request_in_progress`.
+    - **Uploads:** a photo or proof is staged outside the write, so a retry never stores it twice.
+- **API (step 5):**
+    - **`BillingController`** serves the whole billing contract (4.18), with `billingStartDate` on paper leases (the default, an earlier period start or a later one).
+    - **Two contract changes, both additive:**
+        - `paymentsContract.paymentFile`: `GET /payment-files/{documentId}/download` returns `{ url }`;
+        - `registerContract.correctOwner`.
+- **Worker:** the invoice, accrual and sub-ledger runs at 00:10, 00:20 and 03:00, each fanning out one job per company; and the lease events `lease.signed`, `lease.activated`, `lease.ended` and `lease.cancelled` (architecture section 10).
+- **Seed (step 7):**
+    - **How it records money:** through the real services: cash and cheques approved by a second person, transfers, Kojo's banking, and one unmatched transfer.
+    - **Each run** ends with the sub-ledger check: `Money: 14 new payments; the sub-ledger check found 0 mismatches.` A second run adds nothing.
+    - **Balances on a fresh database seeded on 2026-10-30.** Dates move with the day of seeding: billing starts and arrears are set relative to it.
+
+        | Unit | Tenant and story | Billed from | Paid until | Owed | Unearned | Deposit | Credit |
+        | --- | --- | --- | --- | --- | --- | --- | --- |
+        | ACC-LEG-B1-01 | Kwame Monthly: monthly, paid up in cash | 2026-07-30 | 2026-11-29 | nothing | — | GH₵1,600.00 | — |
+        | ACC-LEG-B1-02 | Efua Annual: a year in advance, in cash | 2026-08-30 | 2027-08-29 (the end) | nothing | GH₵6,300.00 | — | — |
+        | ACC-ELG-B1-04 | Yaw Two-Year: GH₵36,000 by transfer, deposit in cash | 2026-09-30 | 2028-09-29 (the end) | nothing | GH₵33,000.00, falling GH₵1,500 a month | GH₵3,000.00 | — |
+        | ACC-OSU-G-01 | Osu Pharmacy Ltd: commercial, owner Nana Owner-Accra VAT-registered, quarterly invoices with VAT lines, by transfer | 2026-06-30 | 2026-12-29 | nothing | GH₵3,000.00 | GH₵9,000.00 | — |
+        | ACC-LEG-B2-01 | Kofi Arrears-45 | 2026-06-15 | 2026-09-14, plus GH₵100.00 towards 2026-09-15 | GH₵700.00 overdue: GH₵400.00 at 0–30 days, GH₵300.00 at 31–60; oldest due 2026-09-15 | — | — | — |
+        | ACC-LEG-B2-02 | Esi Arrears-95 | 2026-05-27 | 2026-07-26, plus GH₵150.00 towards 2026-07-27 | GH₵1,450.00 overdue: GH₵400.00 each at 0–30, 31–60 and 61–90, GH₵250.00 at 90+; oldest due 2026-07-27 | — | — | — |
+        | ACC-LEG-B2-03 | Kojo Partial: part payment by cheque | 2026-08-30 | 2026-10-29, plus GH₵200.00 towards 2026-10-30 | GH₵250.00 due today | — | — | — |
+        | ACC-ELG-B1-02 | Adwoa Credit: overpaid | 2026-08-30 | 2026-11-29, plus GH₵500.00 towards 2026-11-30 | nothing | GH₵500.00 | GH₵3,600.00 | GH₵500.00 |
+        | ACC-ELG-B1-05 | Ama Tenant (agency): by transfer into the owner's account | 2026-08-30 | 2026-11-29 | nothing | — | GH₵4,400.00 | — |
+        | ACC-ELG-B1-01 | Akua Expiring: no money recorded | 2026-10-30 (the paper default, so no deposit invoice) | — | GH₵1,800.00 due today | — | — | — |
+        | TEM-EST-B1-01 | Ama Tenant (landlord): six-monthly; the first half-year and deposit in cash, confirmed by the nominated adviser | 2026-04-30 | 2026-10-29 | GH₵27,000.00 due today (the second half-year), GH₵4,500.00 of it earned | — | GH₵9,000.00 | — |
+
+        - **Not billed:** ACC-ELG-B1-03 (Kojo Signing) is out for signature.
+        - **Cash on hand:** Kofi Manager GH₵14,600.00 and Akosua Manager GH₵3,350.00. Kojo Caretaker holds GH₵800.00 for Ama Owner-London (demo), after banking GH₵800.00. Kwabena Landlord holds GH₵36,000.00.
+        - **Unmatched:** one GH₵500.00 transfer into the agency's account (`UNKNOWN TRF 0001 (demo)`).
+
+        These are the units and names the web end-to-end specs read (ACC-LEG-B1-01, ACC-ELG-B1-04, ACC-LEG-B2-03, Kofi's and Esi's leases, Kojo, Ama Owner-London and the Legon compound house).
+    - **The dev database (`rent`)** is migrated and seeded, but on top of the M3 data. My reset (emptying the data tables after a backup) was refused by the permission system, so I did not reset it.
+        - **What that means:** the M3 demo leases keep their M3 dates, and the backfill bills them from 2026-10-29. Nothing is months in arrears, and ACC-ELG-B1-04 (at the M3 rent) is paid until 2028-01-28, with part of its advance invoice overdue.
+        - **The end-to-end specs need a fresh database,** as in CI. The backup is `backups/20261030T132525Z.dump`. To start fresh, stop `pnpm dev`, then:
+
+          ```
+          docker compose exec -T postgres dropdb --username=postgres --force rent
+          docker compose exec -T postgres psql --username=postgres --dbname=postgres -f /docker-entrypoint-initdb.d/01-bootstrap.sql
+          pnpm db:migrate && pnpm db:seed
+          ```
+- **The coordinator's six items:**
+    1. **Payment files:** `GET /payment-files/{documentId}/download` serves a cash or cheque photo, a transfer proof or a banking slip. It is open to people with `billing.view` within their scope, to anyone who may decide the record's open request, and to a caretaker for their own records.
+    2. **Approval payloads** carry `amountMinor` and the display fields. Subject types:
+        - `cash_record`, `cash_banking`, `payment` (reversals) and `invoice_line` (credit notes and write-offs);
+        - `direct_receipt` for transfers. The screen has no page for it, so it falls back to the payload's lease.
+    3. **Reversals** need `billing.manage`. A caretaker is refused (`apps/api/test/billing.int.test.ts`).
+    4. **Caretakers** get 403 on every billing read except their own cash records and cash on hand (the same test).
+    5. **`Idempotency-Key` passes the web app's rewrite.** `/api/v1/:path*` is a plain proxy, and the web's `lib/idempotency.ts` sends a UUID v4 key.
+    6. **Seed units:** they match on a fresh database (the table above).
+- **Design details settled while building (continued):**
+    8. **Approval first:** cash, cheques and transfers wait as records with an approval request. The payment exists only once approved.
+    9. **Lock order:** the lease, then the collector's cash, then the audit chain head (above).
+    10. **Someone else's cash:** recording or banking it needs `cash.bank_others` (owners in their own company, agency admins and accountants). Everyone else records and banks their own.
+    11. **Where a reversal takes money from:** where it is now (`collector`, `owner_account`, `agency_account` or `provider`). From a collector, never more than they hold.
+    12. **Owner names for caretakers** come from a narrow definer function. Cash on hand names the owner without opening the owner register to them.
+    13. **TINs** print masked on invoices and receipts, as M3 stores them for display. OQ-20 item 6 asks whether a VAT invoice needs them in full.
+    14. **Invoice and receipt PDFs** are for staff only. Tenants get them in M4b.
+- **For the review:**
+    - **Approval requests are company-wide (M1).** A property-scoped manager or accountant sees and may decide money requests for properties outside their scope. The payloads carry tenant names and amounts. Client owners cannot see approvals, and caretakers see only the requests they started. I recommend scoping approval requests by property before the pilot.
+    - **A rare deadlock in M3's cancel-signed flow.** The handler locks the audit chain head, then the lease. The daily transitions job locks the unit, the lease and then the chain head. Neither M3's tests nor these hit it.
+    - **Design detail 7 above** is still open: how one invoice orders rent and service charge.
+- **Tests:** listed with the full run in the report at the end of the milestone. The new integration tests are:
+    - **The ledger:** `packages/db/src/ledger.int.test.ts` (8).
+    - **Billing:** `packages/server/test/billing.int.test.ts` (16) and `billing-money.int.test.ts` (15).
+    - **Differential properties:** `billing-properties.int.test.ts` (4). Random leases run against the database and the reference model, 4 runs each by default (`M4A_PROPERTY_RUNS`); a deep run of 80 each passed in 337 s.
+    - **The cash flow:** `billing-flow.int.test.ts` (1).
+    - **The API:** `apps/api/test/billing.int.test.ts` (2).
+    - **The worker:** `apps/worker/src/billing.jobs.test.ts` (2).
+    - **Isolation:** M1's tests cover the new tables, with fixture rows for each.
+
 ## 6. Tests
 
 ★ marks the tests the roadmap requires for M4a.

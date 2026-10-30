@@ -62,7 +62,15 @@ const DOWNLOAD_SECONDS = 300;
 const UPLOAD_SECONDS = 600;
 
 export interface UploadPurpose {
-  readonly purpose: 'logo' | 'property_photo' | 'property_paper' | 'register_import' | 'lease_file';
+  readonly purpose:
+    | 'logo'
+    | 'property_photo'
+    | 'property_paper'
+    | 'register_import'
+    | 'lease_file'
+    | 'cash_photo'
+    | 'transfer_proof'
+    | 'banking_slip';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }
@@ -76,6 +84,18 @@ export const LEASE_FILE_UPLOAD: UploadPurpose = {
   contentTypes: ['application/pdf', 'image/jpeg', 'image/png'],
   maxBytes: 20_000_000,
 };
+
+/**
+ * Proof of money (M4a plan 4.8): a photo of the receipt-book page or the cheque, a transfer's proof
+ * (a screenshot or statement line) and a banking slip. Stored write-once as evidence.
+ */
+const MONEY_PROOF = {
+  contentTypes: ['image/jpeg', 'image/png', 'application/pdf'],
+  maxBytes: 10_000_000,
+} as const;
+export const CASH_PHOTO_UPLOAD: UploadPurpose = { purpose: 'cash_photo', ...MONEY_PROOF };
+export const TRANSFER_PROOF_UPLOAD: UploadPurpose = { purpose: 'transfer_proof', ...MONEY_PROOF };
+export const BANKING_SLIP_UPLOAD: UploadPurpose = { purpose: 'banking_slip', ...MONEY_PROOF };
 
 /** An upload checked and copied to write-once storage, waiting to be recorded as a document. */
 export interface StagedEvidence {

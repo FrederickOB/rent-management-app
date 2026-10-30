@@ -116,7 +116,7 @@ flowchart TB
 | `audit` | 14 | Hash-chained audit log, search, verification (AD-07) | core |
 | `rules` | 8 | Rules engine and localisation (TX-08; NFR localisation) | core |
 | `documents` | Platform | Files, PDF rendering, fingerprints, write-once storage (PR-04 storage) | core, audit, rules (retention) |
-| `ledger` | 8 | Books, accounts, journal, posting service, period locks (AC-01) | core |
+| `ledger` | 8 | Books, accounts, journal, posting service, period locks (AC-01) | core, audit (one `ledger.entry_posted` event per entry, M4a) |
 | `policy` | 14 | `PolicyService`, role permissions, scopes (AD-03; AD-04 in P2) | identity |
 | `approvals` | 14 | Two-person approvals (AD-05) | policy, audit, identity (step-up TOTP) |
 | `companies` | 14 | Companies and branding, owners, management agreements, settlement accounts (AD-01, AD-02) | policy, audit, documents, identity (invites), rules |
@@ -124,7 +124,7 @@ flowchart TB
 | `esign` | 2, 4 | Signing requests, secure links, one-time codes, evidence, certificate PDFs (TL-07; LN-02, LN-04 signing) | documents, audit |
 | `portfolio` | 1 | Portfolios, properties, blocks, units, codes, meters, amenities, import, billing bands (PR-01 to PR-10, PB-01) | companies (owners), documents, rules, audit, policy |
 | `tenancy` | 2 | Tenants, ID verification, leases, templates, rent schedule, occupancy, renewals, trackers, advance-cap check (TL-01 to TL-10, TL-12, TL-13, PB-09, TX-05, AR-05 check) | portfolio, esign, approvals, rules, companies, policy, documents, audit, identity (staff to notify) |
-| `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents |
+| `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents, policy, audit, companies (owner facts, settings), portfolio (a property's owner on a date), identity (collector names, memberships) |
 | `payments` | 3 | Providers, pay links, webhooks, verification, matching, unmatched queue, receipts, reconciliation (BC-02 to BC-04, BC-06, BC-12, BC-14) | billing, ledger, companies, documents |
 | `tax` | 8 | Rent tax per receipt, due dates, GRA payments, withholding tax (TX-01 to TX-07) | billing, ledger, rules, documents |
 | `maintenance` | 6 | Jobs, priorities, assignment, artisan job sheets, inspections (MI-01 to MI-12) | tenancy, portfolio, documents, esign, tasks, approvals |
@@ -401,6 +401,27 @@ erDiagram
 ```
 
 Receipt numbers come from a per-company counter row locked in the posting transaction, so they have no gaps. A reversed payment keeps its receipt and gets a credit receipt with its own number. `journal_entry.reverses_entry_id` is unique, so an entry can be reversed only once.
+
+**As built in M4a** (migrations 0012 to 0014; M4a plan, section 5):
+- **Tables:**
+    - the ledger: `ledger_account`, `book`, `journal_entry`, `journal_line` and `period_lock`;
+    - billing: `payment_reference`, `invoice`, `invoice_line`, `invoice_line_accrual`, `payment`, `payment_match`, `payment_reversal`, `receipt`, `company_counter`, `cash_record`, `direct_receipt`, `cash_banking`, `credit_carry_over`, `credit_note`, `write_off`, `allocation` and `idempotent_request`;
+    - the register: `property_ownership_correction` (M2 S5).
+- **Payments:** a payment row exists only once money is confirmed. Cash, cheques and direct transfers wait in their own records until a second person approves them. Provider payments and intents arrive in M4b.
+- **Who writes what:**
+    - Books are made by database triggers when an owner or a landlord or agency company is created.
+    - Books, the journal, period locks and every billing table are append-only, except the counters and the idempotency keys.
+    - `lease.billing_start_date` is set once, when the lease is signed.
+
+  The database refuses (`RA040` to `RA048`):
+    - journal writes by any role but `ledger_writer`;
+    - unbalanced books or entries with fewer than two lines;
+    - an account outside its kind of book;
+    - lines added to an entry from an earlier transaction;
+    - lines in a locked month;
+    - an owner change once a property has ledger entries;
+    - a billing start set other than at signing;
+    - an invoice for a lease already billed in another book.
 
 ### 3.5 Notices, signatures and messaging
 
@@ -966,9 +987,13 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `documents.rendered` | event: a PDF is recorded with its SHA-256 (emitted by `documents.render-pdf`); opens the signing request and queues its links | render request id | 5 | M3 |
 | `signing.completed` | event: a signing request finalised; marks the lease signed (`LeaseLifecycleService.onSigningCompleted`) | signing request id | 5 | M3 |
 | `signing.declined` | event: a signer declined; returns the lease to draft (`onSigningDeclined`) | signing request id | 5 | M3 |
-| `billing.generate-invoices` | daily 00:10 | lease id + cycle start | 5 | M4a |
-| `billing.accrue-periods` | daily 00:20, after invoices; catches up any missed day | invoice line id | 5, alert | M4a |
-| `billing.subledger-check` | nightly 03:00 | company + date | 3, alert on mismatch | M4a |
+| `billing.generate-invoices` | daily 00:10; fans out one `billing.generate-invoices.company` job per company | lease id + cycle start | 5 | M4a |
+| `billing.accrue-periods` | daily 00:20, after invoices; catches up any missed day; fans out per company | invoice line id | 5, alert | M4a |
+| `billing.subledger-check` | nightly 03:00; fans out per company | company + date | 3, alert on mismatch | M4a |
+| `lease.signed` | event (tenancy): issues the payment reference, the deposit invoice and any cycle already due, then accrues | event id; invoice per lease + cycle start | 5 | M4a |
+| `lease.activated` | event (tenancy): a renewal starts, so prepayments and the deposit carry over (P29) | event id; `P29:<new lease>` | 5 | M4a |
+| `lease.ended` | event (tenancy): a system credit note cancels lines for periods after the end | event id; one credit note per line | 5 | M4a |
+| `lease.cancelled` | event (tenancy): a signed lease cancelled before it starts; its lines are credited | event id; one credit note per line | 5 | M4a |
 | `billing.rent-reminders` | daily 08:00 | invoice id + ladder step | 3 | M4b |
 | `payments.process-webhook` | event: inbox row stored | provider + event id | 10, 1 min to 1 h, then dead letter | M4b |
 | `payments.verify-pending` | every 5 min | intent id + 5-minute window | 3 per run | M4b |
@@ -1022,7 +1047,17 @@ Sign-in codes are not a job: the auth request sends them straight to the SMS por
     - **Schedulers** call a `SECURITY DEFINER` function that returns company ids only.
     - **Platform admin aggregates** read `SECURITY DEFINER` views that return counts and totals, never rows.
     - **Support access** sets a company context only when an active, consented, time-boxed grant exists. Every query under it is audited.
-- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. M3 adds the same property policy to every tenancy, e-signing and messaging table with `property_id`, and tenant scope: a tenant-app transaction sets `app.tenant_scope` to the person's tenant records in that company, every table with `tenant_id` filters on it, a tenant session sees issued leases only and never templates, links or codes, and its property scope is the properties of its own leases (no owner records). Scoped staff see a tenant through its leases on in-scope properties, or as its creator before it has any lease. Journal lines follow in M4a.
+- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. M3 adds the same property policy to every tenancy, e-signing and messaging table with `property_id`, and tenant scope: a tenant-app transaction sets `app.tenant_scope` to the person's tenant records in that company, every table with `tenant_id` filters on it, a tenant session sees issued leases only and never templates, links or codes, and its property scope is the properties of its own leases (no owner records). Scoped staff see a tenant through its leases on in-scope properties, or as its creator before it has any lease.
+
+  M4a extends the policies to the ledger and billing:
+    - **Property scope:** journal lines and every billing table with `property_id`.
+    - **Payments:** follow the property or owner they belong to, or a match to an in-scope lease.
+    - **Books:** visible within the owner scope.
+    - **Banking:** visible to its collector and within the owner scope.
+    - **Idempotency keys:** each person sees only their own requests.
+    - **Tenant sessions:** read their own invoices, lines, allocations, payments and receipts. They read no journal row, book, cash record or correction.
+
+  Journal writes need `SET LOCAL ROLE ledger_writer`. `rent_app` is a member with `INHERIT FALSE`, so it gains no privilege from the role without switching to it.
 
 ### Data protection
 
