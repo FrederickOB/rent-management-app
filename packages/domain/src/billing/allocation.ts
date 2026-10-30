@@ -1,0 +1,131 @@
+import { DomainError } from '../errors';
+import type { AllocationPosting, LeaseDimensions, PaymentAmount } from '../ledger/posting';
+import {
+  inAllocationOrder,
+  lineBalance,
+  paymentShares,
+  postingClassOf,
+  type AllocationRow,
+  type BillingLine,
+  type CreditPool,
+} from './lines';
+
+/** A new allocation row a plan asks the caller to write. */
+export interface PlannedAllocation {
+  readonly lineId: string;
+  readonly paymentId: string | null;
+  readonly amountMinor: number;
+}
+
+export interface AllocationPlan {
+  readonly allocations: readonly PlannedAllocation[];
+  /** What is left: the payment's credit, held in prepayments (BC-07). */
+  readonly surplusMinor: number;
+  /** The same allocations, as the ledger posts them (P03). */
+  readonly postings: readonly AllocationPosting[];
+}
+
+/**
+ * Allocates a payment to a lease's open lines, oldest debt first (BC-07). The caller accrues
+ * every started line first (M4a plan 4.5, step 3), so a line is always income before it is paid:
+ * a started line still waiting for accrual is refused here. No line receives more than it owes.
+ */
+export function planAllocation(input: {
+  readonly lines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly paymentId: string;
+  readonly amountMinor: number;
+  readonly lease: LeaseDimensions;
+  /** The value date: lines whose period has started by then must be accrued. */
+  readonly valueDate: string;
+}): AllocationPlan {
+  if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor <= 0)
+    throw new DomainError('billing.bad_amount', 'A payment must be a positive amount');
+  const waiting = input.lines.find(
+    (l) => !l.accrued && l.periodStart !== null && l.periodStart <= input.valueDate,
+  );
+  if (waiting)
+    throw new DomainError('billing.accrue_first', `Line ${waiting.id} must be accrued first`);
+  let remaining = input.amountMinor;
+  const allocations: PlannedAllocation[] = [];
+  const postings: AllocationPosting[] = [];
+  for (const line of inAllocationOrder(input.lines)) {
+    if (remaining === 0) break;
+    const { outstandingMinor } = lineBalance(line, input.allocations);
+    if (outstandingMinor === 0) continue;
+    const amount = Math.min(outstandingMinor, remaining);
+    remaining -= amount;
+    allocations.push({ lineId: line.id, paymentId: input.paymentId, amountMinor: amount });
+    postings.push({
+      lease: input.lease,
+      invoiceLineId: line.id,
+      postingClass: postingClassOf(line),
+      amountMinor: amount,
+    });
+  }
+  return { allocations, surplusMinor: remaining, postings };
+}
+
+export interface AccrualPlan {
+  /** What becomes income: the line after credit notes. Zero means nothing posts. */
+  readonly amountMinor: number;
+  /** Payments that paid the line before it started (its advance allocations, kept). */
+  readonly advance: readonly PaymentAmount[];
+  /** Credit drawn now, first in, first out by payment: each is a new allocation row. */
+  readonly draws: readonly PaymentAmount[];
+  /** What the tenant now owes on it (1100). */
+  readonly owedMinor: number;
+}
+
+/**
+ * P02 for one line, as its period starts (AR-01; architecture section 6). The line first uses
+ * its own advance allocations, then the lease's credit, oldest payment first, and the rest is
+ * owed. `pools` is the lease's credit before this line; the caller reduces it by the draws.
+ */
+export function planAccrual(
+  line: BillingLine,
+  allocations: readonly AllocationRow[],
+  pools: readonly CreditPool[],
+): AccrualPlan {
+  if (line.accrued)
+    throw new DomainError('billing.already_accrued', `Line ${line.id} is already accrued`);
+  if (line.periodStart === null)
+    throw new DomainError('billing.not_recurring', `Line ${line.id} is not a charge period`);
+  const balance = lineBalance(line, allocations);
+  const advance = [...paymentShares(line.id, allocations)].map(([paymentId, amountMinor]) => ({
+    paymentId,
+    amountMinor,
+  }));
+  const advanceTotal = advance.reduce((sum, a) => sum + a.amountMinor, 0);
+  if (advanceTotal !== balance.settledMinor || balance.writtenOffMinor !== 0)
+    throw new DomainError(
+      'billing.unexpected_allocation',
+      `Line ${line.id} has allocations a line not yet started cannot have`,
+    );
+  let need = balance.outstandingMinor;
+  const draws: PaymentAmount[] = [];
+  for (const pool of pools) {
+    if (need === 0) break;
+    const amount = Math.min(pool.amountMinor, need);
+    if (amount <= 0) continue;
+    draws.push({ paymentId: pool.paymentId, amountMinor: amount });
+    need -= amount;
+  }
+  return { amountMinor: balance.netMinor, advance, draws, owedMinor: need };
+}
+
+/** Pools after some draws: the next line's starting credit. */
+export function drawFromPools(
+  pools: readonly CreditPool[],
+  draws: readonly PaymentAmount[],
+): CreditPool[] {
+  const taken = new Map<string, number>();
+  for (const d of draws) taken.set(d.paymentId, (taken.get(d.paymentId) ?? 0) + d.amountMinor);
+  return pools
+    .map((p) => ({ ...p, amountMinor: p.amountMinor - (taken.get(p.paymentId) ?? 0) }))
+    .filter((p) => {
+      if (p.amountMinor < 0)
+        throw new DomainError('billing.pool_overdrawn', `Payment ${p.paymentId} is overdrawn`);
+      return p.amountMinor > 0;
+    });
+}

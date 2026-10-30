@@ -216,3 +216,9 @@ Statutes were read from the Parliament repository, GRA, the Data Protection Comm
     - **Tax point:** the earliest of invoice, payment or supply. Dwellings stay exempt.
     - **Services:** no registration threshold.
     - Sources: [Act 1151](https://repository.parliament.gh/items/c2c7d45e-a150-4721-bca7-4f8b5980a737), [levies](https://repository.parliament.gh/items/562fcdd8-f035-46ee-929a-58ace152dfb6), [GRA AG/26/001](https://gra.gov.gh/wp-content/uploads/2026/08/Guidelines-On-Rental-Of-Commercial-Premises.pdf).
+    - **What M4a builds on, for the tax adviser to confirm (2026-10-30):**
+        1. **Base:** each rate (VAT 15%, NHIL 2.5%, GETFund 2.5%) applies to the line's net amount, with no levy inside the VAT base, rounded half up once per line.
+        2. **Service charge:** VAT and levies apply to service charge as well as rent (`vat.applies_to_service_charge`, on, unverified).
+        3. **Advances:** a payment made before its invoices exist issues them at once, so the payment is the tax point (M4a decision 4).
+        4. **Corrections:** a credit note on a line reduces the VAT and levies charged on it; a write-off leaves the VAT already charged payable. Is bad-debt relief available?
+        5. **Invoices:** numbered per company (`INV-000123`). Must they also go through GRA's E-VAT system?

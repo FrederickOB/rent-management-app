@@ -27,6 +27,10 @@ th { width: 40%; font-weight: 700; }
 tr, img { break-inside: avoid; }
 .amount { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .small { font-size: 8.5pt; color: #6b7280; }
+.lines th, .lines td { width: auto; }
+.lines .amount { text-align: right; }
+.lines .tax { padding-left: 6mm; color: #4b5563; }
+.reference { font-weight: 700; letter-spacing: 0.08em; }
 .letterhead { display: flex; align-items: center; gap: 6mm; padding-bottom: 4mm; }
 .letterhead .logo { max-width: 50mm; max-height: 18mm; object-fit: contain; }
 .letterhead .sender { font-size: 14pt; font-weight: 700; color: var(--brand-primary); }

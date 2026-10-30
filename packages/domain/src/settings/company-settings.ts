@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_INVOICE_LEAD_DAYS } from '../billing/invoicing';
 import { DEFAULT_SIGNING_REMINDER_HOURS } from '../esign/signing';
 
 /**
@@ -52,6 +53,9 @@ export const companySettingsSchema = z
       .min(1)
       .max(12)
       .optional(),
+    // M4a billing settings (plan decision 2), optional so stored settings stay valid.
+    /** BC-01: days before the due date that an invoice is issued. */
+    invoiceLeadDays: z.number().int().min(0).max(60).optional(),
   })
   .strict();
 
@@ -86,6 +90,15 @@ export function tenancySettingsOf(settings: CompanySettings): TenancySettings {
 /** Signing reminders (TL-07; M3 plan 4.8): 24 hours, 3 days and 7 days unless the company says otherwise. */
 export function signingReminderHoursOf(settings: CompanySettings): readonly number[] {
   return settings.signingReminderHours ?? DEFAULT_SIGNING_REMINDER_HOURS;
+}
+
+/** The M4a billing settings with their defaults applied (decision 2: 14 days). */
+export interface BillingSettings {
+  readonly invoiceLeadDays: number;
+}
+
+export function billingSettingsOf(settings: CompanySettings): BillingSettings {
+  return { invoiceLeadDays: settings.invoiceLeadDays ?? DEFAULT_INVOICE_LEAD_DAYS };
 }
 
 export const parseCompanySettings = (value: unknown): CompanySettings =>

@@ -1,5 +1,6 @@
 import { approvalsContract } from './approvals';
 import { auditContract } from './audit';
+import { arrearsContract, invoicesContract, paymentsContract } from './billing';
 import { companyContract } from './company';
 import { linksContract } from './links';
 import { meContract } from './me';
@@ -21,6 +22,7 @@ import {
 
 export * from './approvals';
 export * from './audit';
+export * from './billing';
 export * from './company';
 export * from './links';
 export * from './me';
@@ -47,6 +49,9 @@ export const contract = {
   signingRequests: signingRequestsContract,
   tenantApp: tenantAppContract,
   links: linksContract,
+  invoices: invoicesContract,
+  payments: paymentsContract,
+  arrears: arrearsContract,
 };
 
 export type Contract = typeof contract;

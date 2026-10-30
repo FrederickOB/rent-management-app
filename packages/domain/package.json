@@ -16,6 +16,8 @@
     "./tenancy": "./src/tenancy/index.ts",
     "./esign": "./src/esign/index.ts",
     "./messaging": "./src/messaging/index.ts",
+    "./ledger": "./src/ledger/index.ts",
+    "./billing": "./src/billing/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

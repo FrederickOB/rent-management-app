@@ -65,6 +65,14 @@ export const POLICY_ACTIONS = [
   'lease.cancel_signed',
   'lease_template.manage',
   'tenancy.view_own',
+  // M4a: the ledger and billing (plan section 4.17).
+  'billing.view',
+  'billing.manage',
+  'payment.record',
+  'payment.record_transfer',
+  'cash.bank',
+  'cash.bank_others',
+  'cash.view_own',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -228,6 +236,43 @@ const STAFF_MATRIX: Record<
   'lease_template.manage': ['owner:own_company', 'agency_admin'],
   // A tenant's own tenancies in the tenant app; staff use lease.view.
   'tenancy.view_own': [],
+  // M4a (plan section 4.17). Caretakers see only their own cash records and cash on hand
+  // (cash.view_own), never invoices, balances or owners' money.
+  'billing.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  // Requests credit notes and write-offs, and matches unmatched receipts; a second person decides.
+  'billing.manage': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  // Cash and cheques: caretakers too, on their assigned properties (scope applies).
+  'payment.record': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+  ],
+  // A transfer straight into the owner's or the agency's account (P28), with proof.
+  'payment.record_transfer': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+  ],
+  // Banking one's own cash (P07); cash.bank_others banks anyone's.
+  'cash.bank': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant', 'caretaker'],
+  'cash.bank_others': ['owner:own_company', 'agency_admin', 'accountant'],
+  'cash.view_own': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+  ],
 };
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {

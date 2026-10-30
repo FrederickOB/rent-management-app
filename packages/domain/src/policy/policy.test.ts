@@ -34,11 +34,18 @@ const COLUMNS: Column[] = [
 ];
 
 /**
- * The matrices in docs/plans/M1.md section 4.6, docs/plans/M2.md section 4.4 and
- * docs/plans/M3.md section 4.14. 1 = allowed. Approval decisions are tested separately; scope is
+ * The matrices in docs/plans/M1.md section 4.6, docs/plans/M2.md section 4.4,
+ * docs/plans/M3.md section 4.14 and docs/plans/M4a.md section 4.17. 1 = allowed. Approval decisions are tested separately; scope is
  * tested below.
  */
 const MATRIX: Partial<Record<PolicyAction, string>> = {
+  'billing.view': '11111010',
+  'billing.manage': '10111000',
+  'payment.record': '10111100',
+  'payment.record_transfer': '10111000',
+  'cash.bank': '10111100',
+  'cash.bank_others': '10101000',
+  'cash.view_own': '10111100',
   'tenant.view': '11111110',
   'tenant.view_details': '11111010',
   'tenant.manage': '10110000',
