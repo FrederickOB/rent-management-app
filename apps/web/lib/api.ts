@@ -1,5 +1,6 @@
 import { createApiClient, type ApiClient } from '@rent/contracts/client';
 import { isRecord } from './errors';
+import { keyedClient } from './idempotency';
 
 let client: ApiClient | undefined;
 
@@ -14,6 +15,19 @@ export function api(): ApiClient {
     fetch: followSessionState,
   });
   return client;
+}
+
+/**
+ * The client for one money write (M4a plan 4.15): every request it sends carries the form
+ * submission's Idempotency-Key, so a retry is answered from the first attempt, never recorded
+ * again. Take the key from the form's keeper (lib/idempotency) with `sendOnce`.
+ */
+export function keyedApi(key: string): ApiClient {
+  return keyedClient({
+    baseUrl: `${window.location.origin}/api/v1`,
+    key,
+    fetch: followSessionState,
+  });
 }
 
 /**

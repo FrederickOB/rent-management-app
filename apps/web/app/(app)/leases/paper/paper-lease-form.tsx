@@ -11,8 +11,9 @@ import { TenantPicker, UnitPicker } from '@/components/record-pickers';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
-import { TextField } from '@/components/ui/field';
+import { SelectField, TextField } from '@/components/ui/field';
 import { api } from '@/lib/api';
+import { billingStartChoices, billingStartNote } from '@/lib/billing-start';
 import { todayIn } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
 import {
@@ -65,9 +66,29 @@ export function PaperLeaseForm({
   const [scanError, setScanError] = useState<string | null>(null);
   const [noIdCopy, setNoIdCopy] = useState(false);
   const [tickError, setTickError] = useState<string | null>(null);
+  /** The first rent period to bill (M4a decision 1); blank for the default. */
+  const [billingStart, setBillingStart] = useState('');
 
   const fallbackUse = unit?.commercial ? 'commercial' : 'residential';
   const checked = useMemo(() => termsFromDraft(terms, fallbackUse), [terms, fallbackUse]);
+  const billing = useMemo(
+    () => (checked.terms ? billingStartChoices(checked.terms, today) : null),
+    [checked.terms, today],
+  );
+  // A choice the terms no longer offer (the start date changed) falls back to the default.
+  const chosenStart =
+    billing && billing.choices.some((c) => c.value === billingStart)
+      ? billingStart
+      : (billing?.defaultStart ?? '');
+  const startNote =
+    billing && checked.terms
+      ? billingStartNote({
+          chosen: chosenStart,
+          defaultStart: billing.defaultStart,
+          leaseStart: checked.terms.startDate,
+          hasDeposit: Boolean(checked.input?.depositMinor),
+        })
+      : null;
   const errors = tried ? checked.errors : {};
   const pProblems = tried ? partyProblems(parties, { paper: true, today }) : {};
   const signedProblem = !ISO_DATE.test(signedOn)
@@ -113,6 +134,10 @@ export function PaperLeaseForm({
         parties: partiesInput(parties, { paper: true }),
         scanUploadId,
         signedOn,
+        // Sent only when staff chose another period start than the default (decision 1).
+        ...(billing && chosenStart !== billing.defaultStart
+          ? { billingStartDate: chosenStart }
+          : {}),
       });
       router.push(`/leases/${lease.id}?saved=paper`);
     } catch (failure) {
@@ -166,6 +191,26 @@ export function PaperLeaseForm({
           <ProjectedSchedule terms={checked.terms} />
         </CardBody>
       </Card>
+
+      {billing ? (
+        <Card data-testid="billing-start">
+          <CardHeader
+            title="Billing"
+            description="The tenancy may have started before you used the platform. Only rent from the billing start is invoiced here; anything earlier comes in with opening balances."
+          />
+          <CardBody>
+            <SelectField
+              label="Billing starts"
+              hint="The first rent period to invoice. Choose an earlier one to bring recent arrears in, or a later one for months the tenant paid before."
+              value={chosenStart}
+              options={billing.choices}
+              onChange={(event) => setBillingStart(event.target.value)}
+              className="max-w-xl"
+            />
+            {startNote ? <Alert tone="info">{startNote}</Alert> : null}
+          </CardBody>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader

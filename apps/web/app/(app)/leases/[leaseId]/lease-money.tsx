@@ -1,0 +1,313 @@
+'use client';
+
+import type { InvoiceRow, LeaseBilling, PaymentRow } from '@rent/contracts';
+import Link from 'next/link';
+import { useCallback } from 'react';
+import { InvoiceStatusBadge, PaymentStatusBadge } from '@/components/billing-badges';
+import { secondaryLink, textLink } from '@/components/link-styles';
+import { Empty, Loading, LoadFailed } from '@/components/load-state';
+import { Alert } from '@/components/ui/alert';
+import { Card, CardBody, CardHeader } from '@/components/ui/card';
+import { Table, Td, Th } from '@/components/ui/table';
+import { api } from '@/lib/api';
+import {
+  INVOICE_KIND_LABELS,
+  moneyFacts,
+  NOT_BILLED_LABELS,
+  PAYMENT_METHOD_LABELS,
+  periodLabel,
+} from '@/lib/billing-format';
+import { formatBusinessDate } from '@/lib/business-dates';
+import { formatMinor } from '@/lib/tenancy-format';
+import { useLoad } from '@/lib/use-load';
+
+export interface MoneyPermissions {
+  /** billing.view: the money card, invoices and payments. */
+  readonly view: boolean;
+  /** payment.record: cash and cheques. */
+  readonly recordCash: boolean;
+  /** payment.record_transfer: transfers straight into an account. */
+  readonly recordTransfer: boolean;
+}
+
+const ROWS = 12;
+
+/** Ways to record money for this lease, as the policy allows; the API checks again. */
+function RecordLinks({
+  leaseId,
+  can,
+}: {
+  readonly leaseId: string;
+  readonly can: MoneyPermissions;
+}) {
+  if (!can.recordCash && !can.recordTransfer) return null;
+  return (
+    <div className="flex flex-wrap gap-2" role="group" aria-label="Record a payment">
+      {can.recordCash ? (
+        <Link href={`/cash/new?leaseId=${leaseId}`} className={secondaryLink}>
+          Record cash or cheque
+        </Link>
+      ) : null}
+      {can.recordTransfer ? (
+        <Link href={`/payments/transfer?leaseId=${leaseId}`} className={secondaryLink}>
+          Record a transfer
+        </Link>
+      ) : null}
+    </div>
+  );
+}
+
+interface MoneyData {
+  readonly billing: LeaseBilling;
+  /** Cash and cheques recorded for the lease and still waiting for a second person. */
+  readonly waitingMinor: number;
+  readonly waitingCount: number;
+}
+
+/**
+ * The lease's money (AR-02, AR-03, BC-11; plan 4.19): what is due and overdue, paid-until with
+ * partial cover, unearned rent, the deposit held, credit and the payment reference. The API
+ * derives every figure from the ledger and its sub-ledgers; none is typed in or stored.
+ */
+export function LeaseMoney({
+  leaseId,
+  unitCode,
+  can,
+}: {
+  readonly leaseId: string;
+  readonly unitCode: string;
+  readonly can: MoneyPermissions;
+}) {
+  const load = useCallback(async (): Promise<MoneyData> => {
+    const [billing, waiting] = await Promise.all([
+      api().invoices.leaseBilling({ leaseId }),
+      // Cash posts only once approved (BC-05); until then it is not in the figures, so say so.
+      api()
+        .payments.cashRecords({ leaseId, status: 'awaiting_approval' })
+        .catch(() => []),
+    ]);
+    return {
+      billing,
+      waitingMinor: waiting.reduce((sum, r) => sum + r.amountMinor, 0),
+      waitingCount: waiting.length,
+    };
+  }, [leaseId]);
+  const { state, reload } = useLoad(load);
+
+  return (
+    <Card data-testid="lease-money">
+      <CardHeader
+        title="Money"
+        description="Worked out from the ledger each time; nothing here is typed in."
+        actions={
+          state.status === 'ready' && state.data.billing.notBilledReason === null ? (
+            <RecordLinks leaseId={leaseId} can={can} />
+          ) : null
+        }
+      />
+      <CardBody>
+        {state.status === 'loading' ? <Loading what="the money summary" /> : null}
+        {state.status === 'error' ? (
+          <LoadFailed message={state.problem.message} onRetry={reload} />
+        ) : null}
+        {state.status === 'ready' ? <MoneySummary data={state.data} unitCode={unitCode} /> : null}
+      </CardBody>
+    </Card>
+  );
+}
+
+function MoneySummary({ data, unitCode }: { readonly data: MoneyData; readonly unitCode: string }) {
+  const { billing } = data;
+  return (
+    <>
+      {billing.notBilledReason ? (
+        <Alert tone="info" title="Not billed">
+          {NOT_BILLED_LABELS[billing.notBilledReason]}
+        </Alert>
+      ) : null}
+      {data.waitingCount > 0 ? (
+        <Alert tone="info">
+          {formatMinor(data.waitingMinor)} in cash or cheques is recorded and waiting for
+          confirmation. It is not in these figures until a second person approves it.
+        </Alert>
+      ) : null}
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
+        <p data-testid="money-reference">
+          <span className="text-slate-600">Payment reference: </span>
+          {billing.paymentReference ? (
+            <span className="font-mono text-base font-semibold tracking-wider">
+              {billing.paymentReference}
+            </span>
+          ) : (
+            <span className="text-slate-600">issued when the lease is signed</span>
+          )}
+        </p>
+        {billing.billingStartDate ? (
+          <p className="text-slate-700">
+            Billed from {formatBusinessDate(billing.billingStartDate)}
+          </p>
+        ) : null}
+      </div>
+      {billing.paymentReference ? (
+        <p className="text-sm text-slate-600">
+          Tenants quote it, with the unit code <span className="font-mono">{unitCode}</span>, when
+          they pay by transfer.
+        </p>
+      ) : null}
+      <dl className="grid gap-x-6 gap-y-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
+        {moneyFacts(billing).map((fact) => (
+          <div key={fact.key} className="min-w-0" data-testid={`money-${fact.key}`}>
+            <dt className="text-slate-600">{fact.label}</dt>
+            <dd className="text-lg font-semibold tabular-nums text-slate-900">{fact.value}</dd>
+            {fact.detail ? (
+              <dd className="text-sm font-medium text-slate-800" data-testid="money-partial">
+                {fact.detail}
+              </dd>
+            ) : null}
+            <dd className="text-xs text-slate-600">{fact.hint}</dd>
+          </div>
+        ))}
+      </dl>
+    </>
+  );
+}
+
+/** The lease's invoices, newest as the API orders them (BC-01). */
+export function LeaseInvoices({ leaseId }: { readonly leaseId: string }) {
+  const load = useCallback(() => api().invoices.list({ leaseId, limit: 100 }), [leaseId]);
+  const { state, reload } = useLoad(load);
+  // Newest due date first: the lease page answers "what is owed now"; the list has the rest.
+  const rows: readonly InvoiceRow[] =
+    state.status === 'ready'
+      ? [...state.data].sort((a, b) => (a.dueDate < b.dueDate ? 1 : a.dueDate > b.dueDate ? -1 : 0))
+      : [];
+  return (
+    <Card data-testid="lease-invoices">
+      <CardHeader
+        title="Invoices"
+        description="Issued ahead of each due date, one per billing cycle, and a deposit invoice at signing."
+      />
+      <CardBody>
+        {state.status === 'loading' ? <Loading what="invoices" /> : null}
+        {state.status === 'error' ? (
+          <LoadFailed message={state.problem.message} onRetry={reload} />
+        ) : null}
+        {state.status === 'ready' && rows.length === 0 ? <Empty>No invoices yet.</Empty> : null}
+        {rows.length ? (
+          <>
+            <Table caption="Invoices for this lease">
+              <thead>
+                <tr>
+                  <Th>Invoice</Th>
+                  <Th>For</Th>
+                  <Th>Due</Th>
+                  <Th className="text-right">Total</Th>
+                  <Th className="text-right">Still to pay</Th>
+                  <Th>Status</Th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.slice(0, ROWS).map((row) => (
+                  <tr key={row.id} data-testid="lease-invoice">
+                    <Td>
+                      <Link
+                        href={`/invoices/${row.id}`}
+                        className="font-mono font-medium underline underline-offset-2"
+                      >
+                        {row.number}
+                      </Link>
+                    </Td>
+                    <Td>
+                      {INVOICE_KIND_LABELS[row.kind]}
+                      {periodLabel(row.periodFrom, row.periodTo) ? (
+                        <p className="text-xs whitespace-nowrap text-slate-600">
+                          {periodLabel(row.periodFrom, row.periodTo)}
+                        </p>
+                      ) : null}
+                    </Td>
+                    <Td className="whitespace-nowrap">{formatBusinessDate(row.dueDate)}</Td>
+                    <Td className="text-right tabular-nums">{formatMinor(row.totalMinor)}</Td>
+                    <Td className="text-right tabular-nums">{formatMinor(row.outstandingMinor)}</Td>
+                    <Td>
+                      <InvoiceStatusBadge status={row.status} overdue={row.overdue} />
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+            <Link href={`/invoices?leaseId=${leaseId}`} className={textLink}>
+              {rows.length > ROWS ? `See all ${rows.length} invoices` : 'Open in Invoices'}
+            </Link>
+          </>
+        ) : null}
+      </CardBody>
+    </Card>
+  );
+}
+
+/** The lease's payments and their receipts (BC-07). */
+export function LeasePayments({ leaseId }: { readonly leaseId: string }) {
+  const load = useCallback(() => api().payments.list({ leaseId, limit: 100 }), [leaseId]);
+  const { state, reload } = useLoad(load);
+  const rows: readonly PaymentRow[] =
+    state.status === 'ready'
+      ? [...state.data].sort((a, b) =>
+          a.receivedOn < b.receivedOn ? 1 : a.receivedOn > b.receivedOn ? -1 : 0,
+        )
+      : [];
+  return (
+    <Card data-testid="lease-payments">
+      <CardHeader
+        title="Payments"
+        description="Each payment pays the oldest debt first; anything left over is held as credit."
+      />
+      <CardBody>
+        {state.status === 'loading' ? <Loading what="payments" /> : null}
+        {state.status === 'error' ? (
+          <LoadFailed message={state.problem.message} onRetry={reload} />
+        ) : null}
+        {state.status === 'ready' && rows.length === 0 ? <Empty>No payments yet.</Empty> : null}
+        {rows.length ? (
+          <>
+            <Table caption="Payments for this lease">
+              <thead>
+                <tr>
+                  <Th>Received</Th>
+                  <Th className="text-right">Amount</Th>
+                  <Th>How</Th>
+                  <Th>Receipt</Th>
+                  <Th>Status</Th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.slice(0, ROWS).map((row) => (
+                  <tr key={row.id} data-testid="lease-payment">
+                    <Td className="whitespace-nowrap">
+                      <Link
+                        href={`/payments/${row.id}`}
+                        className="font-medium underline underline-offset-2"
+                      >
+                        {formatBusinessDate(row.receivedOn)}
+                      </Link>
+                    </Td>
+                    <Td className="text-right tabular-nums">{formatMinor(row.amountMinor)}</Td>
+                    <Td>{PAYMENT_METHOD_LABELS[row.method]}</Td>
+                    <Td className="font-mono">{row.receiptNumber ?? '—'}</Td>
+                    <Td>
+                      <PaymentStatusBadge status={row.status} />
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+            {rows.length > ROWS ? (
+              <Link href={`/payments?leaseId=${leaseId}`} className={textLink}>
+                See all {rows.length} payments
+              </Link>
+            ) : null}
+          </>
+        ) : null}
+      </CardBody>
+    </Card>
+  );
+}

@@ -20,8 +20,10 @@ import { api } from '@/lib/api';
 import {
   APPROVAL_STATUS_LABELS,
   approvalActionLabel,
+  approvalFacts,
   approvalMoves,
   closeReasonLabel,
+  payloadLeaseId,
   payloadReason,
   personName,
   subjectHref,
@@ -53,23 +55,39 @@ const DECISION_LABELS: Record<ApprovalRow['decisions'][number]['kind'], string> 
 interface Subject {
   readonly title: string;
   readonly detail: string | null;
+  /** The lease's page. */
+  readonly href: string;
 }
 
-/** A line about the record a request is for: the lease's unit and tenant, when this person may see it. */
+/**
+ * A line about the lease a request is for, when this person may see it: the request's subject,
+ * or for a money request (M4a) the lease its payload names.
+ */
 async function describe(row: ApprovalRow): Promise<Subject | null> {
-  if (row.subjectType !== 'lease') return null;
+  const leaseId = row.subjectType === 'lease' ? row.subjectId : payloadLeaseId(row);
+  if (!leaseId) return null;
   try {
-    const lease = await api().leases.get({ leaseId: row.subjectId });
+    const lease = await api().leases.get({ leaseId });
     return lease.access === 'full'
       ? {
           title: `Lease for ${lease.unit.code}`,
           detail: `${lease.tenant.displayName} · starts ${formatBusinessDate(lease.terms.startDate)}`,
+          href: `/leases/${lease.id}`,
         }
-      : { title: `Lease for ${lease.unit.code}`, detail: null };
+      : { title: `Lease for ${lease.unit.code}`, detail: null, href: `/leases/${lease.id}` };
   } catch {
     return null;
   }
 }
+
+/** What the record link reads, for a money request whose record is not the lease. */
+const RECORD_LINKS: Record<string, string> = {
+  payment: 'Open the payment',
+  invoice: 'Open the invoice',
+  invoice_line: 'Open the invoice',
+  cash_record: 'Cash on hand',
+  cash_banking: 'Cash on hand',
+};
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
 export function ApprovalsView({ names }: { readonly names: readonly [string, string][] }) {
@@ -214,8 +232,12 @@ function ApprovalItem({
 }) {
   const { timeZone } = useApp();
   const moves = approvalMoves(row, personId, new Date());
-  const reason = payloadReason(row.payload);
-  const href = subjectHref(row);
+  // Money requests (M4a) are summarised fact by fact, their reason among the facts.
+  const facts = approvalFacts(row.actionType, row.payload);
+  const reason = facts.length ? null : payloadReason(row.payload);
+  const recordHref = subjectHref(row);
+  const href = subject?.href ?? recordHref;
+  const otherRecord = recordHref && recordHref !== href ? recordHref : null;
   const who = personName(row.initiatedBy, { personId }, people);
   const closed = closeReasonLabel(row.closeReason);
   const label = approvalActionLabel(row.actionType);
@@ -256,6 +278,12 @@ function ApprovalItem({
               <dd className="break-words">{reason}</dd>
             </div>
           ) : null}
+          {facts.map((fact) => (
+            <div key={fact.label} className="min-w-0" data-testid="approval-fact">
+              <dt className="text-slate-600">{fact.label}</dt>
+              <dd className="wrap-break-word">{fact.value}</dd>
+            </div>
+          ))}
           <div>
             <dt className="text-slate-600">
               {row.status === 'pending' || row.status === 'cooling_off'
@@ -271,6 +299,11 @@ function ApprovalItem({
             </div>
           ) : null}
         </dl>
+        {otherRecord ? (
+          <Link href={otherRecord} className="text-sm font-medium underline underline-offset-2">
+            {RECORD_LINKS[row.subjectType] ?? 'Open the record'}
+          </Link>
+        ) : null}
 
         {row.decisions.length ? (
           <ul className="space-y-1 text-sm" aria-label="Decisions">

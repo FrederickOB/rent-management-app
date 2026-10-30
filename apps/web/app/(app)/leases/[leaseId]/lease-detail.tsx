@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useCallback, useState } from 'react';
 import { AdvanceFlagAlert } from '@/components/advance-flag';
 import { useApp } from '@/components/app-context';
+import { secondaryLink } from '@/components/link-styles';
 import { PageHeader } from '@/components/page-header';
 import { LeaseStatusBadge, PaperBadge } from '@/components/tenancy-badges';
 import { Alert } from '@/components/ui/alert';
@@ -13,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { formatDate, formatTime } from '@/lib/format';
+import { isPayable } from '@/lib/lease-pick';
 import { COUNSEL_WARNING, wasSigned } from '@/lib/lease-view';
 import {
   BREAK_PARTY_LABELS,
@@ -23,6 +25,7 @@ import {
   termLabel,
 } from '@/lib/tenancy-format';
 import { LeaseActions } from './lease-actions';
+import { LeaseInvoices, LeaseMoney, LeasePayments, type MoneyPermissions } from './lease-money';
 import { LeaseDocuments, LeasePreview, LeaseSchedule } from './lease-panels';
 import { SigningPanel } from './lease-signing';
 import { LeaseTrackers } from './lease-trackers';
@@ -34,6 +37,8 @@ export interface LeasePermissions {
   readonly cancelSigned: boolean;
   readonly seeApprovals: boolean;
   readonly seeTenant: boolean;
+  /** M4a: the money card, invoices and payments, and recording money (plan 4.19). */
+  readonly money: MoneyPermissions;
 }
 
 const SAVED_NOTES: Record<string, string> = {
@@ -56,8 +61,17 @@ function Breadcrumb({ code }: { readonly code: string }) {
   );
 }
 
-/** What a caretaker sees (plan 4.14): the unit and the dates. */
-export function LeaseLimited({ lease }: { readonly lease: LimitedLease }) {
+/**
+ * What a caretaker sees (plan 4.14): the unit and the dates. A caretaker who collects cash
+ * records it from here (M4a plan 4.19), and sees nothing else of the lease's money.
+ */
+export function LeaseLimited({
+  lease,
+  canRecordCash = false,
+}: {
+  readonly lease: LimitedLease;
+  readonly canRecordCash?: boolean;
+}) {
   return (
     <>
       <Breadcrumb code={lease.unit.code} />
@@ -69,6 +83,11 @@ export function LeaseLimited({ lease }: { readonly lease: LimitedLease }) {
           <p className="text-sm text-slate-600">
             You see a lease&rsquo;s unit and dates. Ask a manager for its terms.
           </p>
+          {canRecordCash && isPayable(lease.status) ? (
+            <Link href={`/cash/new?leaseId=${lease.id}`} className={secondaryLink}>
+              Record cash or cheque for this lease
+            </Link>
+          ) : null}
         </CardBody>
       </Card>
     </>
@@ -132,6 +151,11 @@ export function LeaseDetail({
       ) : null}
 
       <LeaseActions lease={lease} can={can} onChanged={changed} />
+
+      {/* Money exists once a lease is signed (M4a decision 1): before that it is not billed. */}
+      {signed && can.money.view ? (
+        <LeaseMoney leaseId={lease.id} unitCode={lease.unit.code} can={can.money} />
+      ) : null}
 
       <Card data-testid="lease-terms">
         <CardHeader title="Terms" />
@@ -205,6 +229,12 @@ export function LeaseDetail({
       </Card>
 
       <LeaseSchedule lease={lease} signed={signed} />
+      {signed && can.money.view ? (
+        <>
+          <LeaseInvoices leaseId={lease.id} />
+          <LeasePayments leaseId={lease.id} />
+        </>
+      ) : null}
 
       <Card data-testid="lease-parties">
         <CardHeader
