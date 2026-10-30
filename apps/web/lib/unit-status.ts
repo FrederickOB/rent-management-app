@@ -14,10 +14,16 @@ import {
 
 /**
  * The availability changes a person may choose for a unit (PR-06): the domain's state machine
- * decides, so the form offers exactly what the API accepts. Occupancy comes from leases (M3).
+ * decides, so the form offers exactly what the API accepts. Occupancy comes from leases (M3): a
+ * lease holds the unit while it is occupied, and also while it is reserved between signature and
+ * start (PB-09), so both keep the unit available or under repair, as the API does.
  */
-export function availabilityChoices(from: Availability, status: DisplayStatus): Availability[] {
-  const occupied = status === 'occupied';
+export function availabilityChoices(
+  from: Availability,
+  status: DisplayStatus,
+  occupancy?: 'occupied' | 'reserved' | 'vacant',
+): Availability[] {
+  const occupied = status === 'occupied' || (occupancy !== undefined && occupancy !== 'vacant');
   return AVAILABILITY.filter((to) => {
     try {
       checkAvailabilityChange(from, to, { occupied });

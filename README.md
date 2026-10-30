@@ -90,6 +90,8 @@ Or, with oath-toolkit installed: `oathtool --totp -b OJSW45BNMRSW23ZNORXXI4BNONS
 
 **Demo register (M2).** The agency manages `ACC-LEG` (a compound house in Legon: blocks B1 and B2, 12 rooms, one under repair) and `ACC-ELG` (8 flats in East Legon) for OWN-01, and `ACC-OSU` (shops in block G, offices in block F1, one not lettable) for OWN-02. The self-managing landlord has `TEM-EST` (a house in Tema). GhanaPost codes in the demo use the unused `000` area.
 
+**Demo e-signing (M3).** `ACC-ELG-B1-03` has a lease out for signature: the tenant Kojo Signing (`+233 20 000 0040`) and his guarantor (`+233 20 000 0042`) get their links by SMS in the fake inbox, and Kofi Manager (for the landlord) and Akosua Manager (witness) by email in Mailpit. The worker must be running to render the PDF and send them. Each link opens the signing page on http://localhost:3702; "Send me a code" sends a code to the same inbox. Staff can also hand a link over from the lease (`POST /signing-requests/{id}/signers/{signerId}/link`). `apps/links` calls the API with the key in `LINKS_API_KEY`; locally both sides use a shared development key, which production refuses.
+
 ## Tenant app
 
 The tenant app is Expo (SDK 58) and needs **iOS 16.4 or later**. Tenants on older iPhones use WhatsApp and the links pages instead. `pnpm dev` starts its dev server; for Expo's interactive menu (`i` for the iOS simulator, `a` for Android, `w` for the web), run `pnpm --filter @rent/tenant start` in its own terminal. An Android emulator reaches your machine at 10.0.2.2, so start it with `EXPO_PUBLIC_API_URL=http://10.0.2.2:3700`.

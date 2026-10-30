@@ -742,9 +742,10 @@ export class RegisterService {
     const reason = checkStatusReason(input.reason);
     await withCompany(this.database, staffContext(staff), async (tx) => {
       const unit = await this.liveUnit(tx, unitId, { lock: true });
-      // Occupancy is derived from leases from M3; until then no unit is occupied.
+      // Occupancy comes from leases (PB-09): a unit a lease holds, reserved or occupied, stays
+      // available or under repair. The database refuses anything else as well.
       checkAvailabilityChange(unit.availability as Availability, input.availability, {
-        occupied: false,
+        occupied: await this.heldByLease(tx, unitId),
       });
       await this.withStatusReason(tx, reason, 'manual');
       await tx
@@ -783,17 +784,31 @@ export class RegisterService {
     });
   }
 
-  /** Archives a unit; its code stays taken (M3 refuses this while a lease is active). */
+  /** Archives a unit; its code stays taken. Refused while a lease holds it (PB-09). */
   async archiveUnit(actor: Actor | null, unitId: string): Promise<void> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.manage');
     await withCompany(this.database, staffContext(staff), async (tx) => {
       await this.liveUnit(tx, unitId);
+      if (await this.heldByLease(tx, unitId))
+        throw conflict('unit_has_lease', 'This unit has a lease, so it cannot be archived');
       await tx
         .update(schema.unit)
         .set({ archivedAt: new Date(), updatedAt: new Date() })
         .where(eq(schema.unit.id, unitId));
     });
+  }
+
+  /**
+   * Whether a lease holds the unit (out for signature, signed, active, ending or holding over),
+   * from the view the tenancy migration publishes. A lease waiting for signatures holds it too,
+   * so its signing never finds the unit archived or not lettable (M3 review finding 2).
+   */
+  private async heldByLease(tx: Tx, unitId: string): Promise<boolean> {
+    const result = await tx.execute<{ held: boolean }>(
+      sql`select exists (select 1 from unit_lease_hold where unit_id = ${unitId}) as held`,
+    );
+    return result.rows[0]?.held === true;
   }
 
   private async liveUnit(tx: Tx, unitId: string, options: { lock?: boolean } = {}) {

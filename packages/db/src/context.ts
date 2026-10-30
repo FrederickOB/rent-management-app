@@ -14,6 +14,15 @@ export interface ScopeContext {
   readonly propertyIds: readonly string[];
 }
 
+/**
+ * A tenant-app session in one company (TL-01; M3 plan 4.3): the signed-in person's tenant records
+ * there. The transaction then sees only those tenants' rows, and only the properties of their
+ * issued leases, through restrictive RLS policies.
+ */
+export interface TenantScopeContext {
+  readonly tenantIds: readonly string[];
+}
+
 /** Company context for one transaction (CLAUDE.md section 5, ADR-002). */
 export interface CompanyContext {
   readonly companyId: string;
@@ -22,6 +31,8 @@ export interface CompanyContext {
   readonly requestId?: string | null;
   /** Null or absent: the whole company. */
   readonly scope?: ScopeContext | null;
+  /** Set only for tenant sessions; never together with a staff scope. */
+  readonly tenantScope?: TenantScopeContext | null;
 }
 
 export type IsolationLevel = 'read committed' | 'repeatable read' | 'serializable';
@@ -52,6 +63,18 @@ export async function withCompany<T>(
   assertUuid(ctx.personId, 'personId');
   const scope = ctx.scope ?? null;
   if (scope) for (const id of [...scope.ownerIds, ...scope.propertyIds]) assertUuid(id, 'scope id');
+  const tenantScope = ctx.tenantScope ?? null;
+  switch (ctx.actorKind) {
+    case 'tenant':
+      // Without its tenant scope, a tenant session would see the whole company.
+      if (!tenantScope) throw new ContextError('A tenant session needs its tenant scope');
+      if (scope)
+        throw new ContextError('A transaction has a staff scope or a tenant scope, not both');
+      for (const id of tenantScope.tenantIds) assertUuid(id, 'tenant scope id');
+      break;
+    default:
+      if (tenantScope) throw new ContextError('Only a tenant session has a tenant scope');
+  }
   return database.db.transaction(async (tx) => {
     await tx.execute(sql`select
       set_config('app.company_id', ${ctx.companyId}, true),
@@ -66,6 +89,16 @@ export async function withCompany<T>(
         set_config('app.property_scope',
           app.resolve_property_scope(${owners}::uuid[], ${properties}::uuid[])::text, true),
         set_config('app.owner_scope', ${owners}, true)`);
+    }
+    if (tenantScope) {
+      // The tenant's own rows, then the register limited to the properties of its issued
+      // leases, and no owner records at all.
+      const tenants = `{${tenantScope.tenantIds.join(',')}}`;
+      await tx.execute(sql`select set_config('app.tenant_scope', ${tenants}, true)`);
+      await tx.execute(sql`select
+        set_config('app.property_scope',
+          app.resolve_tenant_property_scope(${tenants}::uuid[])::text, true),
+        set_config('app.owner_scope', '{}', true)`);
     }
     return fn(tx);
   }, options);

@@ -13,7 +13,9 @@ import {
   CompositeAlert,
   EmailAlert,
   FakeProvidersAddressLookup,
+  FakeProvidersIdentityVerification,
   FakeProvidersSms,
+  InMemoryIdentityVerification,
   InMemorySms,
   LocalKms,
   S3Storage,
@@ -21,6 +23,7 @@ import {
   type AddressLookupPort,
   type AlertPort,
   type EmailPort,
+  type IdentityVerificationPort,
   type KeyManagementPort,
   type SmsPort,
   type StoragePort,
@@ -38,6 +41,7 @@ import {
   DATABASE,
   EMAIL_PORT,
   FIELD_CIPHER,
+  IDENTITY_VERIFICATION_PORT,
   KMS_PORT,
   LOGGER,
   SMS_PORT,
@@ -55,6 +59,8 @@ export interface CoreOptions {
   readonly alerts?: AlertPort;
   /** Null switches lookups off; see addressLookupFor. */
   readonly addressLookup?: AddressLookupPort | null;
+  /** Null switches identity checks off; see identityVerificationFor. */
+  readonly identityVerification?: IdentityVerificationPort | null;
   readonly applicationName?: string;
 }
 
@@ -73,6 +79,18 @@ function addressLookupFor(config: AppConfig): AddressLookupPort | null {
   return config.FAKE_PROVIDERS_URL
     ? new FakeProvidersAddressLookup(config.FAKE_PROVIDERS_URL)
     : null;
+}
+
+/**
+ * Biometric identity checks (TL-02; OQ-22, OQ-39). No provider contract is signed yet, so checks
+ * run against the fake provider locally and in memory in tests; in production they stay off
+ * until the real adapter arrives, and staff see that checks are unavailable.
+ */
+function identityVerificationFor(config: AppConfig): IdentityVerificationPort | null {
+  if (config.FAKE_PROVIDERS_URL)
+    return new FakeProvidersIdentityVerification(config.FAKE_PROVIDERS_URL);
+  if (config.NODE_ENV === 'production') return null;
+  return new InMemoryIdentityVerification();
 }
 
 function storageFor(config: AppConfig): StoragePort {
@@ -132,6 +150,13 @@ export class CoreModule {
         useFactory: () =>
           options.addressLookup === undefined ? addressLookupFor(config) : options.addressLookup,
       },
+      {
+        provide: IDENTITY_VERIFICATION_PORT,
+        useFactory: () =>
+          options.identityVerification === undefined
+            ? identityVerificationFor(config)
+            : options.identityVerification,
+      },
       { provide: KMS_PORT, useFactory: () => kmsFor(config) },
       {
         provide: FIELD_CIPHER,
@@ -173,6 +198,7 @@ export class CoreModule {
         EMAIL_PORT,
         STORAGE_PORT,
         ADDRESS_LOOKUP_PORT,
+        IDENTITY_VERIFICATION_PORT,
         KMS_PORT,
         FIELD_CIPHER,
         ALERT_PORT,

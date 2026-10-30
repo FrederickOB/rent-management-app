@@ -125,13 +125,14 @@ export class JobsService {
   async send(
     name: string,
     payload: Record<string, unknown>,
-    options: { singletonKey?: string; tx?: Tx } = {},
+    options: { singletonKey?: string; tx?: Tx; startAfter?: Date } = {},
   ): Promise<void> {
     await this.boss.send(
       name,
       { ...payload, __job: name },
       {
         ...(options.singletonKey ? { singletonKey: options.singletonKey } : {}),
+        ...(options.startAfter ? { startAfter: options.startAfter } : {}),
         ...(options.tx ? { db: fromDrizzle(options.tx, sql) } : {}),
       },
     );

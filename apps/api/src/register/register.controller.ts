@@ -69,6 +69,9 @@ export class RegisterController {
         await this.register.archiveOwner(ctx.actor, input.ownerId);
         return ok;
       }),
+      revealTin: implement(contract.owners.revealTin).handler(({ input }) =>
+        this.owners.revealTin(ctx.actor, input.ownerId, input.reason),
+      ),
     };
   }
 

@@ -1,4 +1,5 @@
 {
   "extends": "@rent/config/tsconfig/nest.json",
+  "compilerOptions": { "jsx": "react-jsx" },
   "include": ["src", "test", "scripts", "vitest.config.ts"]
 }

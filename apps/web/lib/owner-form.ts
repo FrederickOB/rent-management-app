@@ -2,6 +2,7 @@ import type { OwnerRow } from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
 import { DEFAULT_TIME_ZONE, isValidTimeZone } from '@rent/domain/dates';
 import { checkOwnerReference, type OwnerKind } from '@rent/domain/portfolio';
+import { checkTin } from '@rent/domain/tenancy';
 import { changedFields } from './patch';
 import { domainProblem } from './register-format';
 
@@ -17,6 +18,13 @@ export interface OwnerDraft {
   readonly residenceCountry: string;
   readonly timeZone: string;
   readonly notes: string;
+  /** M3 tax fields (plan 4.13): rent tax (OQ-18) and VAT on commercial rent (OQ-20) read them. */
+  readonly lettingBusiness: boolean;
+  readonly vatRegistered: boolean;
+  /** A new TIN to store, encrypted; blank keeps the stored one, which is never shown here. */
+  readonly tin: string;
+  /** Clears the stored TIN. */
+  readonly removeTin: boolean;
 }
 
 export type OwnerErrors = Partial<Record<keyof OwnerDraft, string>>;
@@ -35,6 +43,10 @@ export function ownerDraftOf(row?: OwnerRow): OwnerDraft {
     residenceCountry: row?.residenceCountry ?? '',
     timeZone: row?.timeZone ?? DEFAULT_TIME_ZONE,
     notes: row?.notes ?? '',
+    lettingBusiness: row?.lettingBusiness ?? false,
+    vatRegistered: row?.vatRegistered ?? false,
+    tin: '',
+    removeTin: false,
   };
 }
 
@@ -58,6 +70,10 @@ export function ownerErrors(draft: OwnerDraft): OwnerErrors {
   if (!isValidTimeZone(draft.timeZone.trim()))
     errors.timeZone = 'Choose a time zone from the list, such as Africa/Accra';
   if (draft.notes.length > 1000) errors.notes = 'Use at most 1,000 characters';
+  if (draft.tin.trim() && !draft.removeTin) {
+    const problem = domainProblem(() => checkTin(draft.tin));
+    if (problem) errors.tin = problem;
+  }
   return errors;
 }
 
@@ -76,10 +92,19 @@ function values(draft: OwnerDraft) {
   };
 }
 
+/** The tax fields of a new owner, sent only when they say something (plan 4.13). */
+function taxValues(draft: OwnerDraft) {
+  return {
+    ...(draft.lettingBusiness ? { lettingBusiness: true } : {}),
+    ...(draft.vatRegistered ? { vatRegistered: true } : {}),
+    ...(draft.tin.trim() ? { tin: draft.tin.trim().toUpperCase() } : {}),
+  };
+}
+
 /** A new owner. An empty reference lets the API give the next free OWN-nn. */
 export function ownerCreateInput(draft: OwnerDraft): CreateOwnerInput {
   const reference = draft.reference.trim().toUpperCase();
-  return { ...values(draft), ...(reference ? { reference } : {}) };
+  return { ...values(draft), ...taxValues(draft), ...(reference ? { reference } : {}) };
 }
 
 /** Only what changed, so the audit log shows exactly what someone edited (AD-07). */
@@ -87,8 +112,23 @@ export function ownerPatch(row: OwnerRow, draft: OwnerDraft): UpdateOwnerInput {
   const before = values(ownerDraftOf(row));
   const after = values(draft);
   const patch: UpdateOwnerInput = changedFields(before, after);
+  const tax: UpdateOwnerInput = {
+    ...(draft.lettingBusiness !== (row.lettingBusiness ?? false)
+      ? { lettingBusiness: draft.lettingBusiness }
+      : {}),
+    ...(draft.vatRegistered !== (row.vatRegistered ?? false)
+      ? { vatRegistered: draft.vatRegistered }
+      : {}),
+    ...(draft.removeTin && row.tinMasked
+      ? { tin: null }
+      : draft.tin.trim() && !draft.removeTin
+        ? { tin: draft.tin.trim().toUpperCase() }
+        : {}),
+  };
   const reference = draft.reference.trim().toUpperCase();
-  return reference && reference !== row.reference ? { ...patch, reference } : patch;
+  return reference && reference !== row.reference
+    ? { ...patch, ...tax, reference }
+    : { ...patch, ...tax };
 }
 
 let regionNames: Intl.DisplayNames | null | undefined;

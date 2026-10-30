@@ -55,7 +55,9 @@ jobs:
         run: pnpm exec playwright install --with-deps --only-shell chromium
       # The test script brings up the rest of Compose (fake-providers) first. --continue goes on to
       # turbo, so one failing package does not stop the others; `pnpm test` would reject the flag.
-      - run: pnpm run test --continue
+      # The tenant app's Jest suites run in the Expo job, on a runner of their own: here they shared
+      # the CPUs with every database suite, and a first render took past their 60 s timeout (M3).
+      - run: pnpm run test --continue --filter='!@rent/tenant'
       - name: Show service logs
         if: failure()
         run: docker compose logs --no-color

@@ -36,6 +36,39 @@ export interface AuditSearch {
   readonly limit: number;
 }
 
+/**
+ * Row-change columns that the audit triggers now record only as changed, but that events written
+ * before then hold by value. They are shown to staff as the triggers show them today: a tenant's
+ * person link is a uuidv7, which tells when the person was first created (M3 review finding 13).
+ */
+const REDACTED_SINCE: Readonly<Record<string, readonly string[]>> = {
+  tenant: ['person_id'],
+};
+const REDACTED_VALUE = '[redacted]';
+
+/** An event's data as staff see it: columns recorded only as changed are never shown by value. */
+export function redactedEventData(
+  recordType: string | null,
+  data: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const columns = recordType ? REDACTED_SINCE[recordType] : undefined;
+  if (!columns || !data) return data;
+  const out: Record<string, unknown> = { ...data };
+  const changed = new Set(Array.isArray(data.redacted_changed) ? data.redacted_changed : []);
+  const before = data.before as Record<string, unknown> | undefined;
+  const after = data.after as Record<string, unknown> | undefined;
+  for (const column of columns) {
+    if (before && after && column in before && column in after && before[column] !== after[column])
+      changed.add(column);
+    for (const side of ['before', 'after'] as const) {
+      const row = out[side] as Record<string, unknown> | undefined;
+      if (row && column in row) out[side] = { ...row, [column]: REDACTED_VALUE };
+    }
+  }
+  if (changed.size > 0) out.redacted_changed = [...changed];
+  return out;
+}
+
 export interface ChainVerification {
   readonly ok: boolean;
   readonly events: number;
@@ -102,12 +135,84 @@ export class AuditService {
         .where(and(...conditions))
         .orderBy(desc(e.seq))
         .limit(filters.limit + 1);
-      const page = rows.slice(0, filters.limit);
+      const page = rows.slice(0, filters.limit).map((r) => ({
+        ...r,
+        data: redactedEventData(r.recordType, r.data as Record<string, unknown> | null),
+      }));
       return {
         events: page,
         nextBefore: rows.length > filters.limit ? (page.at(-1)?.seq ?? null) : null,
       };
     });
+  }
+
+  /**
+   * The events about a set of records, newest first, in the caller's transaction (timelines,
+   * M3). The caller has already decided which records the actor may see.
+   */
+  async forRecords(
+    tx: Tx,
+    records: readonly { readonly type: string; readonly id: string }[],
+    limit: number,
+  ): Promise<
+    {
+      occurredAt: Date;
+      action: string;
+      recordType: string | null;
+      recordId: string | null;
+      actorName: string | null;
+      data: Record<string, unknown> | null;
+    }[]
+  > {
+    if (records.length === 0) return [];
+    const e = schema.auditEvent;
+    const rows = await tx
+      .select({
+        occurredAt: e.occurredAt,
+        action: e.action,
+        recordType: e.recordType,
+        recordId: e.recordId,
+        actorName: schema.person.name,
+        data: e.data,
+      })
+      .from(e)
+      .leftJoin(schema.person, eq(schema.person.id, e.actorPersonId))
+      .where(
+        sql`(${e.recordType}, ${e.recordId}) in (${sql.join(
+          records.map((r) => sql`(${r.type}, ${r.id})`),
+          sql`, `,
+        )})`,
+      )
+      .orderBy(desc(e.seq))
+      .limit(limit);
+    return rows.map((r) => ({
+      ...r,
+      data: redactedEventData(r.recordType, (r.data as Record<string, unknown> | null) ?? null),
+    }));
+  }
+
+  /**
+   * The data of the newest event with this action about a record, in the caller's transaction
+   * (for example the hashes `signing.completed` put in the chain), or null when there is none.
+   */
+  async eventData(
+    tx: Tx,
+    event: { readonly action: string; readonly recordType: string; readonly recordId: string },
+  ): Promise<Record<string, unknown> | null> {
+    const e = schema.auditEvent;
+    const [row] = await tx
+      .select({ data: e.data })
+      .from(e)
+      .where(
+        and(
+          eq(e.action, event.action),
+          eq(e.recordType, event.recordType),
+          eq(e.recordId, event.recordId),
+        ),
+      )
+      .orderBy(desc(e.seq))
+      .limit(1);
+    return (row?.data as Record<string, unknown> | null | undefined) ?? null;
   }
 
   /** Recomputes a company's chain from its first event (nightly job, AD-07). */

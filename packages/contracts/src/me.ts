@@ -1,5 +1,6 @@
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
+import { scopeSchema } from './memberships';
 
 export const membershipSummarySchema = z.object({
   membershipId: z.string().uuid(),
@@ -8,6 +9,11 @@ export const membershipSummarySchema = z.object({
   companyKind: z.enum(['landlord', 'agency', 'platform']),
   role: z.string(),
   nominatedApprover: z.boolean(),
+  /**
+   * The owners and properties this membership is limited to (AD-02), so screens ask the policy
+   * the same question the API does. Always sent; optional so older clients keep their types.
+   */
+  scope: scopeSchema.optional(),
 });
 
 export const meSchema = z.object({

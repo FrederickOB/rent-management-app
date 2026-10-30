@@ -1,5 +1,13 @@
 import { deflateRawSync } from 'node:zlib';
 import { desc, schema, sql, withCompany, type Tx } from '@rent/db';
+import {
+  addDays,
+  addMonths,
+  businessDateOf,
+  instantFrom,
+  parseBusinessDate,
+  toIsoDate,
+} from '@rent/domain/dates';
 import type { ScopeIds } from '@rent/domain/policy';
 import { PROPERTY_COLUMNS, UNIT_COLUMNS, XLSX_CONTENT_TYPE } from '@rent/domain/portfolio';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -25,6 +33,7 @@ import {
   startServerTest,
   type ServerTestContext,
 } from './support';
+import { propertyWithUnits, tenancyServices, uploadLeaseFile } from './support/tenancy';
 
 type Staff = ReturnType<typeof staff>;
 type Cells = Record<string, string | number | null | undefined>;
@@ -690,6 +699,54 @@ describe('PR-08 import meters', () => {
   });
 });
 
+describe('PB-09 import of a unit a lease holds', () => {
+  it('reports an availability a leased unit cannot take at the dry run, and accepts under repair', async () => {
+    const s = tenancyServices(ctx);
+    const today = toIsoDate(businessDateOf(instantFrom(ctx.clock.now()), 'Africa/Accra'));
+    const start = toIsoDate(addDays(parseBusinessDate(today), -10));
+    const unitId = (
+      await propertyWithUnits(s, admin, {
+        areaCode: 'ACC',
+        propertyPart: 'HLD',
+        ownerId: ownerA,
+        units: [{ unitType: 'single_room', count: 1 }],
+      })
+    ).units['ACC-HLD-B1-01']!;
+    const tenant = (await s.tenants.create(admin, { kind: 'individual', displayName: 'Held' }))
+      .tenant;
+    await s.leases.recordPaper(admin, {
+      unitId,
+      tenantId: tenant.id,
+      startDate: start,
+      endDate: toIsoDate(addDays(addMonths(parseBusinessDate(start), 12), -1)),
+      monthlyRentMinor: 150_000,
+      cycle: 'monthly',
+      noticeDays: 30,
+      parties: [{ role: 'tenant', name: 'Held' }],
+      scanUploadId: await uploadLeaseFile(ctx, s, admin),
+      signedOn: today,
+    });
+    const row = (availability: string) => ({
+      'Property code': 'ACC-HLD',
+      'Block code': 'B1',
+      Unit: '01',
+      'Unit type': 'Single room',
+      Availability: availability,
+    });
+    const refused = await dryRun(admin, await workbook([], [row('Not lettable')]));
+    expect(refused.status).toBe('invalid');
+    expect(issuesAt(refused.report)('Units', 2)).toEqual([
+      expect.objectContaining({
+        column: 'Availability',
+        message: 'This unit has an active lease, so it can only be marked under repair',
+      }),
+    ]);
+    const accepted = await dryRun(admin, await workbook([], [row('Under repair')]));
+    expect(accepted.status).toBe('validated');
+    expect(accepted.report?.counts.units).toMatchObject({ update: 1 });
+  });
+});
+
 /** A one-entry zip whose headers say 100 bytes, while the entry inflates to 60 MB. */
 function understatedBomb(): Buffer {
   const name = Buffer.from('xl/worksheets/sheet1.xml');
@@ -726,6 +783,58 @@ describe('PR-08 import zip bombs', () => {
         column: null,
         message: 'This workbook is too large once unpacked',
       },
+    ]);
+  });
+});
+
+describe('PB-09 import of a unit a lease out for signature holds', () => {
+  it('reports at the dry run an availability the unit cannot take while the lease waits for signatures', async () => {
+    const s = tenancyServices(ctx);
+    const today = toIsoDate(businessDateOf(instantFrom(ctx.clock.now()), 'Africa/Accra'));
+    const start = toIsoDate(addMonths(parseBusinessDate(today), 1));
+    const unitId = (
+      await propertyWithUnits(s, admin, {
+        areaCode: 'ACC',
+        propertyPart: 'PND',
+        ownerId: ownerA,
+        units: [{ unitType: 'single_room', count: 1 }],
+      })
+    ).units['ACC-PND-B1-01']!;
+    const tenant = (await s.tenants.create(admin, { kind: 'individual', displayName: 'Pending' }))
+      .tenant;
+    const draft = await s.leases.createDraft(admin, {
+      unitId,
+      tenantId: tenant.id,
+      startDate: start,
+      endDate: toIsoDate(addDays(addMonths(parseBusinessDate(start), 12), -1)),
+      monthlyRentMinor: 150_000,
+      cycle: 'monthly',
+      noticeDays: 30,
+      parties: [
+        { role: 'tenant', name: 'Pending', phone: '+233200009911' },
+        { role: 'landlord', name: 'Admin', staffPersonId: admin.personId },
+        { role: 'witness', name: 'A Witness', phone: '+233200009912' },
+      ],
+    });
+    await s.leaseSigning.issue(admin, draft.id);
+    const refused = await dryRun(
+      admin,
+      await workbook(
+        [],
+        [
+          {
+            'Property code': 'ACC-PND',
+            'Block code': 'B1',
+            Unit: '01',
+            'Unit type': 'Single room',
+            Availability: 'Not lettable',
+          },
+        ],
+      ),
+    );
+    expect(refused.status).toBe('invalid');
+    expect(issuesAt(refused.report)('Units', 2)).toEqual([
+      expect.objectContaining({ column: 'Availability' }),
     ]);
   });
 });

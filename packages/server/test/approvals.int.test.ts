@@ -287,6 +287,31 @@ describe('AD-05 approvals engine', () => {
   });
 });
 
+describe('AD-05 the API says who may decide a request', () => {
+  it('tells an eligible second person they may, and nobody else, until it is decided', async () => {
+    const a = await agency('May Decide Co');
+    const { request } = await approvals.create(a.admin, {
+      actionType: rename.actionType,
+      subjectType: 'company',
+      subjectId: a.companyId,
+      payload: { from: a.name, to: 'May Decide Co Renamed' },
+    });
+    expect((await approvals.get(a.manager, request.id)).mayDecide).toBe(true);
+    const listed = await approvals.list(a.manager, 'open');
+    expect(listed.find((v) => v.request.id === request.id)?.mayDecide).toBe(true);
+    // The initiator never decides; an accountant sees requests, but not this kind to decide.
+    expect((await approvals.get(a.admin, request.id)).mayDecide).toBe(false);
+    expect((await approvals.get(a.accountant, request.id)).mayDecide).toBe(false);
+    await expect(
+      approvals.decide(a.accountant, request.id, { decision: 'approve' }),
+    ).rejects.toThrow();
+
+    const done = await approvals.decide(a.manager, request.id, { decision: 'approve' });
+    expect(done.request.status).toBe('approved');
+    expect(done.mayDecide).toBe(false);
+  });
+});
+
 describe('AD-05 single-user cooling-off', () => {
   it('waits 24 hours, then accepts the initiator confirming with a current TOTP code', async () => {
     const landlordId = await company(ctx, 'landlord', 'Solo Landlord');

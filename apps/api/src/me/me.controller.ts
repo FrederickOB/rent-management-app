@@ -25,6 +25,10 @@ function toMe(session: ResolvedSession): Me {
       companyKind: m.companyKind,
       role: m.role,
       nominatedApprover: m.nominatedApprover,
+      scope: {
+        owners: m.scope.owners ? [...m.scope.owners] : undefined,
+        properties: m.scope.properties ? [...m.scope.properties] : undefined,
+      },
     })),
   };
 }

@@ -7,3 +7,6 @@ export * from './approvals';
 export * from './rules';
 export * from './settings';
 export * from './portfolio';
+export * from './tenancy';
+export * from './esign';
+export * from './messaging';

@@ -104,3 +104,35 @@ export function loadProperty(propertyId: string): Promise<Loaded<PropertyDetailV
 export function loadUnit(unitId: string): Promise<Loaded<UnitDetailView>> {
   return load((api) => api.register.getUnit({ unitId }));
 }
+
+// M3: tenants, leases and templates (plan 4.16). Each returns a refusal or a missing record
+// instead of throwing, so the page can show "not found" or "no access".
+
+type TenantView = Awaited<ReturnType<ApiClient['tenants']['get']>>;
+type LeaseView = Awaited<ReturnType<ApiClient['leases']['get']>>;
+type TemplateView = Awaited<ReturnType<ApiClient['leaseTemplates']['get']>>;
+type ExpiringList = Awaited<ReturnType<ApiClient['leases']['expiring']>>;
+
+export function loadTenant(tenantId: string): Promise<Loaded<TenantView>> {
+  return load((api) => api.tenants.get({ tenantId }));
+}
+
+export function loadLease(leaseId: string): Promise<Loaded<LeaseView>> {
+  return load((api) => api.leases.get({ leaseId }));
+}
+
+export function loadTemplate(templateId: string): Promise<Loaded<TemplateView>> {
+  return load((api) => api.leaseTemplates.get({ templateId }));
+}
+
+/** Leases ending in the next `days` days (TL-09): the home page and the expiring list. */
+export function loadExpiring(days = 90): Promise<Loaded<ExpiringList>> {
+  return load((api) => api.leases.expiring({ days }));
+}
+
+type TemplateList = Awaited<ReturnType<ApiClient['leaseTemplates']['list']>>;
+
+/** The company's lease templates, with the three starters seeded on first use (TL-05). */
+export function loadTemplates(): Promise<Loaded<TemplateList>> {
+  return load((api) => api.leaseTemplates.list({}));
+}

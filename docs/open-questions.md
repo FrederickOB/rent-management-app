@@ -1,6 +1,6 @@
 # Open questions
 
-50 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+54 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -62,6 +62,9 @@
 | OQ-25 | Who publishes the tenant app in the App Store and Google Play, and are the developer accounts ready? (ADR-010) | Founder | M4b | The platform publishes one tenant app; landlords are not separate publishers. | Decided 2026-10-28: your company publishes one app. |
 | OQ-26 | Does the chosen Expo SDK still support iOS 15, as the PRD requires? (prd-issues 34) | Engineering | M1 | Use the newest SDK that supports iOS 15; if none does, ask to raise the NFR to the SDK's minimum. | Decided 2026-10-28: iOS 16.4 and above with Expo SDK 58. |
 | OQ-27 | Is Rent Control registration available digitally for integration? (PRD; TX-05, now MVP) | Founder with counsel | M3 | The Rent Control portal (rentcontrol.mwh.gov.gh) has no public API, so staff record the registration number and date. | Decided 2026-10-28: track registration and remind landlords until it is done; rent collection is never blocked. |
+| OQ-51 | Act 220 s.25(5) sets advance limits for tenancies of a month or less and for those over six months. Which limit, if any, applies to a fixed term longer than one month but not more than six? (M3 plan 4.12) | Counsel | M5 (compliance report) | No limit is applied to those terms, so the advance check raises no flag for them, and the lease records that no rule was found. | |
+| OQ-52 | Do Rent Control's 14 days (PNDCL 138 s.4) run from signing or from the start of the tenancy? Which tenancies must be registered: residential only, or commercial too? (TX-05) | Counsel | M3 | Count 14 days from signing, using the unverified `rent_control.registration_days` rule. Track residential leases, and commercial leases when the company chooses. | |
+| OQ-53 | Will counsel supply or review the starter tenancy agreements (residential, commercial and short fixed-term)? The legal clauses are placeholders until then. (TL-05, M3 decision 3) | Founder with counsel | M3, Gate 1 | Ship the starters with "Wording to be supplied by your lawyer" in each legal clause. Each template version records whether counsel has reviewed it, and the builder warns until it has. | |
 
 ## Product (founder)
 
@@ -78,6 +81,7 @@
 | OQ-36 | Annual prepayment discount and tier-change rules? (PRD section 21, open) | Founder | M10 | As the PRD recommends: upgrade now with proration, downgrade next cycle; discount set in configuration. | Decided 2026-10-28: as recommended. |
 | OQ-37 | Rates per tier and billing band? (PRD section 21) | Founder, from pricing research | M10 | Placeholder rates, editable in the admin console. | |
 | OQ-38 | How long is the free trial or guided onboarding period? (PB-08) | Founder | M10 | 30 days, configurable. | Decided 2026-10-28: as recommended. |
+| OQ-54 | Consent (CM-09) is recorded per channel, not per phone number or email. When staff change a tenant's or contact's phone or email, should the consent on record carry over to the new one, or must it be recorded again? (M3 review) | Founder, with counsel if needed | M6 (WhatsApp and broadcasts) | Ask again: a changed phone or email starts with no consent on that channel, and staff record the person's agreement for the new one. Until then, the edit forms say that consent stays with the new value and ask staff to check (M3). | |
 
 ## Research findings, 28 Oct 2026
 

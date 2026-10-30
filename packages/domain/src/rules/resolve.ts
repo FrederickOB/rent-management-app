@@ -41,3 +41,19 @@ export function resolveAsOf(rows: readonly RuleRow[], asOf: BusinessDate): RuleR
 /** Staff see a warning wherever an unverified value affects a legal outcome (CLAUDE.md section 7). */
 export const needsWarning = (row: Pick<RuleRow, 'verificationStatus'>): boolean =>
   row.verificationStatus !== 'verified';
+
+/**
+ * The words of that warning, from the verification status of the rule version a calculation
+ * used, so a message never calls a verified value unverified, or the reverse. Null when the
+ * rule is verified.
+ */
+export function verificationWarning(status: VerificationStatus): string | null {
+  switch (status) {
+    case 'verified':
+      return null;
+    case 'from_prd':
+      return 'taken from the PRD and not yet verified: counsel to confirm';
+    default:
+      return 'unverified: counsel to confirm';
+  }
+}
