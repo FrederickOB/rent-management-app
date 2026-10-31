@@ -439,12 +439,43 @@ export class LeaseLedgerModel {
     };
     // 1. Every entry balances within each book.
     for (const entry of this.entries) checkEntry(entry.lines, this.bookKind);
+    // The balances the checks below need, from one pass over the journal: each was a full scan
+    // per line or payment, which made the property tests slow (second review, CI timeouts).
+    // Rent counts from its period start; one-off and tax lines from their charge (P01, P32).
+    const owedFrom = new Map<string, string>();
+    for (const line of this.lines) {
+      const from = isRecurring(line.kind) ? line.periodStart : (line.chargedOn ?? null);
+      if (from !== null) owedFrom.set(line.id, from);
+    }
+    const receivables = new Map<string, number>();
+    const early = new Map<string, number>();
+    const cash = new Map<string, number>();
+    let leasePrepayments = 0;
+    let leaseDeposits = 0;
+    for (const entry of this.entries)
+      for (const l of entry.lines) {
+        if (l.bookId !== this.book) continue;
+        if (l.accountCode === '1100' && l.invoiceLineId) {
+          receivables.set(l.invoiceLineId, (receivables.get(l.invoiceLineId) ?? 0) + l.amountMinor);
+          const from = owedFrom.get(l.invoiceLineId);
+          if (from !== undefined && entry.valueDate < from)
+            early.set(l.invoiceLineId, (early.get(l.invoiceLineId) ?? 0) + l.amountMinor);
+        }
+        if (l.leaseId === this.lease.leaseId && l.accountCode === '2010')
+          leasePrepayments += l.amountMinor;
+        if (l.leaseId === this.lease.leaseId && l.accountCode === '2100')
+          leaseDeposits += l.amountMinor;
+        if (l.paymentId) {
+          const key = `${l.accountCode}|${l.paymentId}`;
+          cash.set(key, (cash.get(key) ?? 0) + l.amountMinor);
+        }
+      }
     // 2. Per line, 1100 equals what is outstanding once the line is charged, and nothing before.
     let prepaidOnLines = 0;
     let depositsHeld = 0;
     for (const line of this.lines) {
       const balance = lineBalance(line, this.allocations);
-      const receivable = this.balance('1100', { invoiceLineId: line.id });
+      const receivable = receivables.get(line.id) ?? 0;
       const cls = postingClassOf(line);
       const expected = cls === 'receivable' ? balance.outstandingMinor : 0;
       if (receivable !== expected)
@@ -457,30 +488,24 @@ export class LeaseLedgerModel {
       (sum, p) => sum + paymentCredit(p, this.allocations),
       0,
     );
-    const prepayments = -this.balance('2010', { leaseId: this.lease.leaseId });
+    const prepayments = 0 - leasePrepayments;
     if (prepayments !== prepaidOnLines + credit)
       fail(`2010 is ${prepayments}, expected ${prepaidOnLines} on lines plus ${credit} credit`);
-    // 2b. As of any day before a period starts, nothing is owed on it: no entry dated earlier
+    // 2b. As of any day before a line is owed, nothing is owed on it: no entry dated earlier
     // touches its receivable (P03 classifies by the day money arrived).
     for (const line of this.lines) {
-      // Rent from its period start; one-off and tax lines from their charge (P01, P32).
-      const from = isRecurring(line.kind) ? line.periodStart : (line.chargedOn ?? null);
-      if (from === null) continue;
-      const early = balanceOf(
-        this.entries.filter((e) => e.valueDate < from).flatMap((e) => e.lines),
-        { bookId: this.book, accountCode: '1100', invoiceLineId: line.id },
-      );
-      if (early !== 0) fail(`1100 for ${line.id} is ${early} before its period starts`);
+      const before = early.get(line.id) ?? 0;
+      if (before !== 0) fail(`1100 for ${line.id} is ${before} before its period starts`);
     }
     // 4. 2100 equals deposits received less what left them.
-    const deposits = -this.balance('2100', { leaseId: this.lease.leaseId });
+    const deposits = 0 - leaseDeposits;
     if (deposits !== depositsHeld) fail(`2100 is ${deposits}, expected ${depositsHeld}`);
     // 7. Per payment, allocations net of reversals plus credit equal the payment; a reversed one is nil.
     for (const p of this.payments) {
       const allocated = this.allocations
         .filter((a) => a.source === 'payment' && a.paymentId === p.id)
         .reduce((sum, a) => sum + a.amountMinor, 0);
-      const cashHeld = this.balance(p.cash, { paymentId: p.id });
+      const cashHeld = cash.get(`${p.cash}|${p.id}`) ?? 0;
       if (p.reversed) {
         if (allocated !== 0) fail(`reversed ${p.id} still allocates ${allocated}`);
         if (cashHeld !== 0) fail(`reversed ${p.id} still holds ${cashHeld} on its cash side`);

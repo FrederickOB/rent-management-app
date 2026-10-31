@@ -11,30 +11,42 @@ import { leaseArbitrary, operationsArbitrary, ScenarioRunner } from './testing/s
  */
 describe('P27 and P24 what a line can take', () => {
   it('creditableMinor and writeOffableMinor are exactly what the credit note and write-off accept', () => {
-    fc.assert(
-      fc.property(leaseArbitrary, operationsArbitrary(true), (lease, ops) => {
-        const run = new ScenarioRunner(lease);
-        for (const op of ops) {
-          run.apply(op);
-          const { lines, allocations, payments } = run.model;
-          for (const line of lines) {
-            const taxLines = lines.filter((l) => l.baseLineId === line.id);
-            const credit = (amountMinor: number) =>
-              planCreditNote({ line, taxLines, allocations, payments, amountMinor });
-            const creditable = creditableMinor(line, allocations);
-            expect(creditable).toBeGreaterThanOrEqual(0);
-            if (creditable > 0) expect(() => credit(creditable)).not.toThrow();
-            expect(() => credit(creditable + 1)).toThrow(DomainError);
-            const writeOff = (amountMinor: number) =>
-              planWriteOff({ line, allocations, amountMinor });
-            const writable = writeOffableMinor(line, allocations);
-            expect(writable).toBeGreaterThanOrEqual(0);
-            if (writable > 0) expect(() => writeOff(writable)).not.toThrow();
-            expect(() => writeOff(writable + 1)).toThrow(DomainError);
-          }
-        }
-      }),
-      { numRuns: 150 },
-    );
+    // Every check expects a refusal for a pesewa more; their stack traces are never read, and
+    // capturing them was most of this test's time (CI timed out at 30 s), so none is captured.
+    const stackTraceLimit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 0;
+    try {
+      runCaps();
+    } finally {
+      Error.stackTraceLimit = stackTraceLimit;
+    }
   });
 });
+
+function runCaps(): void {
+  fc.assert(
+    fc.property(leaseArbitrary, operationsArbitrary(true), (lease, ops) => {
+      const run = new ScenarioRunner(lease);
+      for (const op of ops) {
+        run.apply(op);
+        const { lines, allocations, payments } = run.model;
+        for (const line of lines) {
+          const taxLines = lines.filter((l) => l.baseLineId === line.id);
+          const credit = (amountMinor: number) =>
+            planCreditNote({ line, taxLines, allocations, payments, amountMinor });
+          const creditable = creditableMinor(line, allocations);
+          expect(creditable).toBeGreaterThanOrEqual(0);
+          if (creditable > 0) expect(() => credit(creditable)).not.toThrow();
+          expect(() => credit(creditable + 1)).toThrow(DomainError);
+          const writeOff = (amountMinor: number) =>
+            planWriteOff({ line, allocations, amountMinor });
+          const writable = writeOffableMinor(line, allocations);
+          expect(writable).toBeGreaterThanOrEqual(0);
+          if (writable > 0) expect(() => writeOff(writable)).not.toThrow();
+          expect(() => writeOff(writable + 1)).toThrow(DomainError);
+        }
+      }
+    }),
+    { numRuns: 150 },
+  );
+}
