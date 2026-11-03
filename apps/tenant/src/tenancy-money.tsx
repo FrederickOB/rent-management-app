@@ -1,7 +1,15 @@
+import type { LeaseStatus } from '@rent/domain/tenancy';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { api } from './api';
-import { dueNowLabel, formatMoney, formatTime, nextDueLabel, paidUntilLabel } from './format';
+import {
+  dueNowLabel,
+  formatMoney,
+  formatTime,
+  nextDueLabel,
+  paidUntilLabel,
+  rentToCome,
+} from './format';
 import { openFetchedUrl } from './open-url';
 import { toProblem, type Problem } from './problems';
 import { useSession } from './session';
@@ -25,7 +33,17 @@ function payLinkMessage(problem: Problem): string {
  * browser, as To sign does; the link is used once and never kept. The figures reload when the
  * person comes back (`refreshTick`), and, offline, the last copy shows with when it was fetched.
  */
-export function TenancyMoney({ leaseId, refreshTick }: { leaseId: string; refreshTick: number }) {
+export function TenancyMoney({
+  leaseId,
+  status,
+  endDate,
+  refreshTick,
+}: {
+  leaseId: string;
+  status: LeaseStatus;
+  endDate: string;
+  refreshTick: number;
+}) {
   const { expire } = useSession();
   // Async, so even a client that throws at once becomes a failed load.
   const load = useCallback(async () => api.tenantMoney.billing({ leaseId }), [leaseId]);
@@ -81,7 +99,11 @@ export function TenancyMoney({ leaseId, refreshTick }: { leaseId: string; refres
         value={paidUntilLabel(figures.paidUntil, figures.partial)}
         testID="paid-until"
       />
-      <Fact label="Next payment" value={nextDueLabel(figures.nextDue)} testID="next-due" />
+      <Fact
+        label="Next payment"
+        value={nextDueLabel(figures.nextDue, rentToCome(status, endDate, figures.paidUntil))}
+        testID="next-due"
+      />
       {figures.creditMinor > 0 ? (
         <Fact
           label="Credit"

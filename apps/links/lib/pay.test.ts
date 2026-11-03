@@ -5,7 +5,11 @@ import {
   checkoutHref,
   checksFrom,
   chooseView,
+  cappedByAdvance,
   errorCode,
+  failureText,
+  isChargeReference,
+  maximumReason,
   isIntentId,
   justPaid,
   newSubmissionId,
@@ -217,5 +221,81 @@ describe('BC-04 pay page screens', () => {
     expect(justPaid({ trxref: 'pay_123', reference: 'pay_123' })).toBe(true);
     expect(justPaid({ intent: 'not-an-id' })).toBe(false);
     expect(justPaid({})).toBe(false);
+  });
+});
+
+describe('BC-04 and AR-05 pay page: the most a tenant may pay', () => {
+  const LANDLORD = 'Osu Ridge Property Managers';
+  const block = {
+    policy: 'block',
+    limitMonths: 6,
+    capMinor: 900_000,
+    ruleUnverified: true,
+  } as const;
+
+  it('says the maximum is the rent left to the end of the lease when no advance limit binds', () => {
+    expect(maximumReason(LANDLORD, LIMITS)).toBe('That is the rent left to the end of your lease.');
+    // Under `warn`, more is accepted (and flagged for staff), so the end of the lease still sets it.
+    const warn = { ...LIMITS, advance: { ...block, policy: 'warn' as const } };
+    expect(cappedByAdvance(warn)).toBe(false);
+    expect(maximumReason(LANDLORD, warn)).toBe('That is the rent left to the end of your lease.');
+    // Under `block`, with the end of the lease nearer than the limit, the lease still sets it.
+    expect(cappedByAdvance({ minMinor: 100, maxMinor: 400_000, advance: block })).toBe(false);
+  });
+
+  it('under `block`, says plainly that the landlord takes rent only so far ahead', () => {
+    const capped = { minMinor: 100, maxMinor: 900_000, advance: block };
+    expect(cappedByAdvance(capped)).toBe(true);
+    expect(maximumReason(LANDLORD, capped)).toBe(
+      'Osu Ridge Property Managers takes rent at most 6 months ahead, so the most you can pay now is what is due and up to 6 months more, less anything you have already paid ahead.',
+    );
+    expect(payProblemText('PAYMENT.AMOUNT_TOO_LARGE', capped)).toBe(
+      'You can pay at most GH₵9,000.00: what is due now and up to 6 months of rent ahead, less anything already paid ahead.',
+    );
+    expect(maximumReason(LANDLORD, { ...capped, advance: { ...block, limitMonths: 1 } })).toMatch(
+      /at most 1 month ahead/,
+    );
+    // Never a word on whether a payment is lawful or compliant.
+    for (const text of [
+      maximumReason(LANDLORD, capped),
+      payProblemText('AMOUNT_TOO_LARGE', capped),
+    ])
+      expect(text).not.toMatch(/compliant|legal|lawful|law/i);
+  });
+});
+
+describe('BC-04 pay page: why a payment failed', () => {
+  it('words the provider’s failure codes plainly, and falls back to the API’s own message', () => {
+    expect(failureText('PROVIDER_STEP_UNSUPPORTED', null, 'Kwabena Owusu')).toBe(
+      'Your MoMo network asked for an extra step, such as a code sent to your phone, which this page cannot take yet. Pay by card or from another MoMo network, or pay Kwabena Owusu directly.',
+    );
+    expect(failureText('PROVIDER_STEP_UNSUPPORTED', null, null)).toMatch(
+      /pay your landlord directly/,
+    );
+    expect(failureText('PROVIDER_CHARGE_FAILED', 'ignored', null)).toBe(
+      'The payment did not go through. Check the number, the network and your balance, then try again.',
+    );
+    expect(failureText('PROVIDER_REFUSED', null, null)).toMatch(/refused this payment/);
+    expect(failureText('PROVIDERS_UNAVAILABLE', null, null)).toMatch(/not available just now/);
+    expect(failureText(null, 'Insufficient funds', null)).toBe('Insufficient funds');
+    expect(failureText(undefined, null, null)).toBeNull();
+  });
+});
+
+describe('BC-04 card return page', () => {
+  it('takes only a charge reference, never a pay link’s token', () => {
+    expect(isChargeReference(`pi-${'0a'.repeat(16)}`)).toBe(true);
+    expect(isChargeReference(`pi-${'0A'.repeat(16)}`)).toBe(false);
+    expect(isChargeReference('Tz8wzlGq2fz3T8ulnkmXH5m9vDkYB1dC0aCqfbnT2Xw')).toBe(false);
+    expect(isChargeReference(undefined)).toBe(false);
+  });
+});
+
+describe('BC-04 pay page after a part payment', () => {
+  it('keeps the form under the thanks while something is still due', () => {
+    const paid = { screen: 'paid', methods: ['momo', 'card'], startAgain: false } as const;
+    expect(chooseView({ ...paid, intentStatus: 'confirmed', dueNowMinor: 50_000 })).toBe('pay');
+    expect(chooseView({ ...paid, intentStatus: 'confirmed', dueNowMinor: 0 })).toBe('paid');
+    expect(chooseView({ ...paid, intentStatus: 'pending', dueNowMinor: 50_000 })).toBe('waiting');
   });
 });

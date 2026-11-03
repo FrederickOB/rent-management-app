@@ -5,6 +5,7 @@ import {
   paidUntilLabel,
   paymentMethodLabel,
   rentLabel,
+  rentToCome,
 } from '../src/format';
 import { byLandlord } from '../src/payment-groups';
 import { TWO_LANDLORDS } from './fixtures';
@@ -59,5 +60,27 @@ describe('TL-12 one landlord never sees another landlord’s money', () => {
       'name:Osu Ridge Property Managers',
       'name:Kwabena Owusu',
     ]);
+  });
+});
+
+describe('TL-01 and BC-04 the next payment when no invoice is out yet', () => {
+  it('says the next invoice is not out yet while the lease has rent to come', () => {
+    // The API names only issued invoices, 14 days before they fall due.
+    expect(nextDueLabel(null, true)).toBe('The next invoice is not out yet');
+    expect(nextDueLabel(null, false)).toBe('Nothing more to pay on this lease');
+    expect(nextDueLabel({ dueDate: '2026-12-01', amountMinor: 140_000 }, true)).toBe(
+      'GH₵1,400.00 on 1 December 2026',
+    );
+  });
+
+  it('knows which leases have rent to come', () => {
+    expect(rentToCome('active', '2027-11-02', null)).toBe(true);
+    expect(rentToCome('active', '2027-11-02', '2027-10-31')).toBe(true);
+    expect(rentToCome('active', '2027-11-02', '2027-11-02')).toBe(false);
+    expect(rentToCome('signed', '2027-11-02', null)).toBe(true);
+    expect(rentToCome('ending', '2026-12-31', '2026-11-30')).toBe(true);
+    expect(rentToCome('holding_over', '2026-01-31', '2026-10-31')).toBe(true);
+    expect(rentToCome('ended', '2026-10-31', '2026-09-30')).toBe(false);
+    expect(rentToCome('terminated', '2027-10-31', null)).toBe(false);
   });
 });

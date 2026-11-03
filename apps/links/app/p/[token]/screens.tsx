@@ -7,7 +7,9 @@ import {
   cedis,
   checkoutHref,
   day,
+  failureText,
   isMethodValue,
+  maximumReason,
   payProblemText,
   when,
   type MethodValue,
@@ -85,7 +87,15 @@ function Received({ intent }: { intent: PayIntent }) {
 }
 
 /** What became of the payment the tenant just made, when it is no longer waiting. */
-function Outcome({ intent, fresh }: { intent: PayIntent | null; fresh: boolean }) {
+function Outcome({
+  intent,
+  fresh,
+  landlordName,
+}: {
+  intent: PayIntent | null;
+  fresh: boolean;
+  landlordName: string;
+}) {
   if (!intent) return null;
   if (intent.status === 'confirmed') {
     return fresh ? (
@@ -99,12 +109,13 @@ function Outcome({ intent, fresh }: { intent: PayIntent | null; fresh: boolean }
   }
   // An old failure says nothing useful on a later visit.
   if (!fresh || (intent.status !== 'failed' && intent.status !== 'abandoned')) return null;
+  const why = failureText(intent.failureCode, intent.message, landlordName);
   return (
     <p className="panel problem" role="alert">
       {intent.status === 'failed'
         ? `Your payment of ${cedis(intent.amountMinor)} did not go through.`
         : `Your payment of ${cedis(intent.amountMinor)} was not completed.`}
-      {intent.message ? ` ${intent.message}` : ''} Nothing was taken. You can try again.
+      {why ? ` ${why}` : ''} Nothing was taken. You can try again.
     </p>
   );
 }
@@ -142,7 +153,8 @@ export function PayScreen({
   query: Query;
   submissionId: string;
 }) {
-  const problem = payProblemText(query.error, page.amounts);
+  const limits = { ...page.amounts, advance: page.advance ?? null };
+  const problem = payProblemText(query.error, limits);
   const momo = page.methods.includes('momo');
   const card = page.methods.includes('card');
   const typedAmount = Number(query.amount);
@@ -153,7 +165,7 @@ export function PayScreen({
   return (
     <>
       <h1>Pay rent to {page.landlord.name}</h1>
-      <Outcome intent={intent} fresh={fresh} />
+      <Outcome intent={intent} fresh={fresh} landlordName={page.landlord.name} />
       {stillWaiting ? (
         <p className="panel notice">
           Your earlier payment of {cedis(stillWaiting.amountMinor)} has not finished yet. If you
@@ -189,8 +201,8 @@ export function PayScreen({
           />
           <p id="amount-hint" className="small hint">
             Pay all of it or part of it: any amount from {cedis(page.amounts.minMinor)} to{' '}
-            {cedis(page.amounts.maxMinor)}, the rent left to the end of your lease. More than is due
-            now is kept as credit for the months ahead.
+            {cedis(page.amounts.maxMinor)}. {maximumReason(page.landlord.name, limits)} More than is
+            due now is kept as credit for the months ahead.
           </p>
           <fieldset>
             <legend>How do you want to pay?</legend>

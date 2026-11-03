@@ -10,6 +10,7 @@ export async function GET(
   if (!isToken(token)) return notFoundResponse();
   const result = await receiptDocument(token, clientFrom(request.headers));
   if (result.ok) return seeOther(result.value.url);
-  if (result.status === 404) return notFoundResponse();
+  // Back to the page whatever went wrong: it explains a PDF not ready, and is itself not found
+  // for a link the API does not know.
   return backToReceipt(token, { download: 'unavailable' });
 }

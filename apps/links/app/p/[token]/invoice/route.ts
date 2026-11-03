@@ -13,6 +13,7 @@ export async function GET(
   if (!isToken(token)) return notFoundResponse();
   const result = await payInvoiceDocument(token, clientFrom(request.headers));
   if (result.ok) return seeOther(result.value.url);
-  if (result.status === 404) return notFoundResponse();
+  // The API says 404 both for a PDF still being rendered and for a link it does not know. Back
+  // to the page either way: it explains the first, and is itself not found for the second.
   return backToPay(token, { invoice: 'unavailable' });
 }

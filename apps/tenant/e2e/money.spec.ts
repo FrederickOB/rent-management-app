@@ -5,8 +5,9 @@ import {
   type BrowserContext,
   type Page,
 } from '@playwright/test';
+import { formatBusinessDate } from '@rent/domain/dates';
 import { format, money } from '@rent/domain/money';
-import { approveMomoPrompt, firstInvoiceIssued, leaseBilling } from './money-support';
+import { approveMomoPrompt, firstInvoiceIssued, leaseBilling, ownBilling } from './money-support';
 import {
   companyName,
   freshPhone,
@@ -129,8 +130,13 @@ test.describe('TL-01 and BC-04 the tenant app’s money screens', () => {
     const fromAgency = groupOf(agencyName);
     await expect(fromAgency.getByTestId('due-now')).toContainText(cedis(own.dueNowMinor));
     await expect(fromAgency.getByTestId('paid-until')).toContainText('No rent paid yet');
+    // The next invoice as the tenant's own answer has it. A lease that starts today has none out
+    // yet (invoices go out 14 days before they fall due), with eleven months still to come.
+    const mine = await ownBilling(page.request, agencyLeaseId);
     await expect(fromAgency.getByTestId('next-due')).toContainText(
-      /GH₵[\d,]+\.\d\d on \d{1,2} \w+ \d{4}/,
+      mine.nextDue
+        ? `${cedis(mine.nextDue.amountMinor)} on ${formatBusinessDate(mine.nextDue.dueDate)}`
+        : 'The next invoice is not out yet',
     );
     if (own.paymentReference)
       await expect(fromAgency.getByTestId('payment-reference')).toContainText(own.paymentReference);
@@ -192,17 +198,24 @@ test.describe('TL-01 and BC-04 the tenant app’s money screens', () => {
       await expect(row.getByTestId('receipt-number')).toBeVisible({ timeout: 2_000 });
     }).toPass({ timeout: 60_000 });
 
-    const link = page.waitForResponse((r) =>
-      /^\/me\/receipts\/[^/]+\/download$/.test(new URL(r.url()).pathname),
-    );
-    const opened = page.waitForEvent('popup');
-    await row.getByTestId('download-receipt').click();
-    const tab = await opened;
-    const { url } = (await (await link).json()) as { url: string };
+    // Its PDF is rendered by another job: until then the app says it is not ready, and the
+    // tenant taps again.
+    let url = '';
+    await expect(async () => {
+      const link = page.waitForResponse((r) =>
+        /^\/me\/receipts\/[^/]+\/download$/.test(new URL(r.url()).pathname),
+      );
+      const opened = page.waitForEvent('popup');
+      await row.getByTestId('download-receipt').click();
+      const tab = await opened;
+      const answer = await link;
+      if (!tab.isClosed()) await tab.close();
+      expect(answer.status(), 'the receipt PDF is ready').toBe(200);
+      url = ((await answer.json()) as { url: string }).url;
+    }).toPass({ intervals: [2_000], timeout: 60_000 });
     const receipt = await page.request.get(url);
     expect(receipt.status()).toBe(200);
     expect(receipt.headers()['content-type']).toContain('application/pdf');
-    await tab.close();
     // Nothing from the other landlord in this box.
     await expect(fromAgency).not.toContainText(house.code);
     await expect(fromAgency).not.toContainText(landlordName);
@@ -219,8 +232,12 @@ test.describe('TL-01 and BC-04 the tenant app’s money screens', () => {
       await expect(fromAgency.getByTestId('money-as-of')).toContainText('may be out of date');
       await expect(fromAgency.getByTestId('due-now')).toContainText('Nothing due now');
       await expect(fromAgency.getByTestId('pay')).toHaveCount(0);
-      // Nothing cached holds a link or a token.
-      const stored = await page.evaluate(() => JSON.stringify({ ...window.localStorage }));
+      // Nothing cached holds a link or a token: the app's own cache, in the browser's storage.
+      const stored = await page.evaluate(() =>
+        JSON.stringify(
+          Object.entries(window.localStorage).filter(([key]) => key.startsWith('rent.cache.')),
+        ),
+      );
       expect(stored).toContain(room.code);
       expect(stored).not.toMatch(/:\/\/|\/[lp]\/[A-Za-z0-9_-]{43}/);
     } finally {

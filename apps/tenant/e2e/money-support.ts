@@ -63,6 +63,19 @@ export async function leaseBilling(api: APIRequestContext, leaseId: string) {
   }>(await api.get(`/leases/${leaseId}/billing`), 'the lease’s billing');
 }
 
+const API = (process.env.API_BASE_URL ?? 'http://localhost:3700').replace(/\/+$/, '');
+
+/**
+ * A lease's money as the signed-in tenant's own endpoint answers it (`GET /me/leases/:id/billing`),
+ * through the browser context's session: what the app is given to show.
+ */
+export async function ownBilling(request: APIRequestContext, leaseId: string) {
+  return ok<{
+    dueNowMinor: number;
+    nextDue: { dueDate: string; amountMinor: number } | null;
+  }>(await request.get(`${API}/me/leases/${leaseId}/billing`), 'the tenant’s own billing');
+}
+
 /** Waits until billing has issued the lease's first rent invoice. */
 export async function firstInvoiceIssued(api: APIRequestContext, leaseId: string): Promise<void> {
   await expect

@@ -232,7 +232,12 @@ function TenancyRow({
         <Text style={styles.more}>See the lease ›</Text>
       </Pressable>
       {isBilled(tenancy.status) ? (
-        <TenancyMoney leaseId={tenancy.leaseId} refreshTick={moneyTick} />
+        <TenancyMoney
+          leaseId={tenancy.leaseId}
+          status={tenancy.status}
+          endDate={tenancy.endDate}
+          refreshTick={moneyTick}
+        />
       ) : null}
     </View>
   );

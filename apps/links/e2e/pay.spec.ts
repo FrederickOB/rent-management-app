@@ -48,6 +48,8 @@ let lease: PayLease;
 let payPath: string;
 /** The receipt link the ★ payment's receipt SMS carries. */
 let receiptPath: string | null = null;
+/** The card payment's charge reference, as the provider's return address carries it. */
+let cardReference: string | null = null;
 
 function meter(page: Page) {
   const transfers: Promise<number>[] = [];
@@ -189,13 +191,15 @@ test.describe('BC-04 pay page', () => {
     await page.getByLabel('Amount to pay (GH₵)').fill(typed(RENT_MINOR * 100));
     await page.getByLabel('Card', { exact: true }).check();
     await page.getByRole('button', { name: 'Pay', exact: true }).click();
-    await expect(page.getByRole('alert')).toContainText('You can pay at most');
+    await expect(page.locator('main').getByRole('alert')).toContainText('You can pay at most');
     // Nothing was charged, and the form keeps the choice.
     await expect(page.getByLabel('Card', { exact: true })).toBeChecked();
     await page.getByLabel('MTN MoMo', { exact: true }).check();
     await page.getByLabel('Amount to pay (GH₵)').fill('10');
     await page.getByRole('button', { name: 'Pay', exact: true }).click();
-    await expect(page.getByRole('alert')).toHaveText('Enter the MoMo number to charge.');
+    await expect(page.locator('main').getByRole('alert')).toHaveText(
+      'Enter the MoMo number to charge.',
+    );
   });
 
   test('takes part payment by card, through the provider’s checkout, and shows what is left', async ({
@@ -216,13 +220,18 @@ test.describe('BC-04 pay page', () => {
     await expect(page.getByRole('heading', { name: 'Fake checkout' })).toBeVisible();
     const reference = await page.locator('tr', { hasText: 'Reference' }).locator('td').innerText();
     await page.getByRole('button', { name: 'Pay' }).click();
-    // Paystack sends the tenant back with the reference; the fake may not, so return as it would.
-    if (!page.url().includes(payPath))
-      await page.goto(`${payPath}?trxref=${reference}&reference=${reference}`);
-    await expect(page.getByRole('status')).toContainText(
-      `Thank you. We have received ${cedis(part)}.`,
+    cardReference = reference;
+    // Paystack sends the payer to the return page with the charge's reference (its callback_url);
+    // the fake checkout does not redirect, so go there as Paystack would.
+    if (!page.url().includes('/p/return')) await page.goto(`/p/return?reference=${reference}`);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(
+      'Thank you: your payment is received',
       { timeout: 30_000 },
     );
+    await expect(page.locator('main').getByRole('status')).toContainText(/Receipt number \S+/);
+    // Back on the pay link, the part payment counts and the rest is what is due.
+    await page.goto(payPath);
+    await expect(page.getByText(`Last payment through this link: ${cedis(part)}`)).toBeVisible();
     expect(await dueNow(page)).toBe(cedis(before.dueNowMinor - part));
     await expect(page.getByLabel('Amount to pay (GH₵)')).toHaveValue(
       typed(before.dueNowMinor - part),
@@ -238,7 +247,9 @@ test.describe('BC-04 pay page', () => {
     await page.getByLabel('Amount to pay (GH₵)').fill('1');
     await page.getByLabel('AT Money', { exact: true }).check();
     await page.getByRole('button', { name: 'Pay', exact: true }).click();
-    await expect(page.getByRole('alert')).toHaveText('Enter the MoMo number to charge.');
+    await expect(page.locator('main').getByRole('alert')).toHaveText(
+      'Enter the MoMo number to charge.',
+    );
     await context.close();
   });
 });
@@ -271,10 +282,9 @@ test.describe('BC-04 and BC-06 the tenant pays by MoMo and gets a receipt within
     await completeCharge(charge.reference);
 
     // The page checks again by itself, then thanks the tenant with the receipt number.
-    await expect(page.getByRole('status').filter({ hasText: 'Thank you' })).toContainText(
-      `We have received ${cedis(before.dueNowMinor)}.`,
-      { timeout: 45_000 },
-    );
+    await expect(
+      page.locator('main').getByRole('status').filter({ hasText: 'Thank you' }),
+    ).toContainText(`We have received ${cedis(before.dueNowMinor)}.`, { timeout: 45_000 });
     await expect(page.getByText(/Receipt number \S+/)).toBeVisible({ timeout: 30_000 });
     const after = await leaseBilling(api, lease.leaseId);
     expect(after.dueNowMinor).toBe(0);
@@ -322,6 +332,43 @@ test.describe('BC-06 the receipt link', () => {
     expect(file.status()).toBe(200);
     expect(file.headers()['content-type']).toContain('application/pdf');
     expect((await file.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
+  });
+});
+
+test.describe('BC-04 the card return page', () => {
+  test('shows the payment’s status and receipt only, with no cookie and a strict policy', async ({
+    page,
+    request,
+  }) => {
+    expect(cardReference, 'the card payment ran first').not.toBeNull();
+    const path = `/p/return?reference=${cardReference}`;
+    const response = await request.get(path, { headers: { cookie: 'session=elsewhere' } });
+    expect(response.status()).toBe(200);
+    const headers = response.headersArray();
+    expect(headerValues(headers, 'set-cookie')).toEqual([]);
+    expect(policyShape(headerValues(headers, 'content-security-policy')[0] ?? '')).toEqual(
+      STRICT_POLICY,
+    );
+    expect(headerValues(headers, 'cache-control').join(', ')).toContain('no-store');
+    await page.goto(path);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(
+      'Thank you: your payment is received',
+    );
+    // The reference reveals the payment's outcome, never the invoice or the tenancy.
+    const text = await page.locator('main').innerText();
+    for (const secret of [lease.unitCode, 'Kojo Payer', 'Invoice', 'Due now', payPath.slice(3)])
+      expect(text).not.toContain(secret);
+    await noSidewaysScroll(page);
+  });
+
+  test('a reference nobody knows, or no reference, is not found', async ({ page }) => {
+    for (const path of [`/p/return?reference=pi-${'0'.repeat(32)}`, '/p/return']) {
+      const response = await page.goto(path);
+      expect(response?.status(), path).toBe(404);
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText(
+        'We could not find this payment',
+      );
+    }
   });
 });
 

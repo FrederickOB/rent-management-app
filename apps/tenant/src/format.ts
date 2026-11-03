@@ -125,13 +125,32 @@ export function paidUntilLabel(
     : `Paid until ${formatDate(paidUntil)}`;
 }
 
-/** `GH₵2,200.00 on 1 December 2026`, or that nothing more is billed. */
+/**
+ * `GH₵2,200.00 on 1 December 2026`: the next invoice due after today with something left on it.
+ * The API names only invoices already issued (14 days before they fall due), so when it names
+ * none, a lease with rent still to come has simply no invoice out yet (`rentToCome`); only a lease
+ * paid to its end, or over, has nothing more to pay.
+ */
 export function nextDueLabel(
   nextDue: { readonly dueDate: string; readonly amountMinor: number } | null,
+  rentToCome = false,
 ): string {
-  return nextDue
-    ? `${formatMoney(nextDue.amountMinor)} on ${formatDate(nextDue.dueDate)}`
-    : 'Nothing more to pay on this lease';
+  if (nextDue) return `${formatMoney(nextDue.amountMinor)} on ${formatDate(nextDue.dueDate)}`;
+  return rentToCome ? 'The next invoice is not out yet' : 'Nothing more to pay on this lease';
+}
+
+/**
+ * Whether a lease still has rent to come: it is signed or in force and not paid to its last day.
+ * A tenant holding over pays month by month, so always has.
+ */
+export function rentToCome(
+  status: LeaseStatus,
+  endDate: string,
+  paidUntil: string | null,
+): boolean {
+  if (status === 'holding_over') return true;
+  if (status !== 'signed' && status !== 'active' && status !== 'ending') return false;
+  return paidUntil === null || paidUntil < endDate;
 }
 
 const PAYMENT_METHOD_LABELS: Readonly<Record<string, string>> = {

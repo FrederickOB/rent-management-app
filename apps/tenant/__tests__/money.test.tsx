@@ -216,6 +216,18 @@ describe('TL-01 and BC-04 the tenant app’s money screens: Home', () => {
     expect(within(agency!).queryByTestId('tenancy-money')).not.toBeOnTheScreen();
   });
 
+  it('says the next invoice is not out yet for a new lease, not that nothing more is owed', async () => {
+    mockBilling.mockImplementation(({ leaseId }: { leaseId: string }) =>
+      Promise.resolve({ ...BILLING[leaseId]!, nextDue: null, paidUntil: null, partial: null }),
+    );
+    await render(<Home />);
+    const [agency] = await groups();
+    expect(within(agency!).getByTestId('next-due')).toHaveTextContent(
+      ends('The next invoice is not out yet'),
+    );
+    expect(within(agency!).getByTestId('paid-until')).toHaveTextContent(ends('No rent paid yet'));
+  });
+
   it('opens payments and receipts', async () => {
     await render(<Home />);
     await groups();

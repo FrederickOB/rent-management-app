@@ -95,6 +95,7 @@ export default async function PayLinkPage({
     methods: page.methods,
     intentStatus: intent?.status ?? null,
     startAgain: query.step === 'again',
+    dueNowMinor: page.dueNowMinor,
   });
   switch (view) {
     case 'closed':

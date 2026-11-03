@@ -136,9 +136,44 @@ export function errorCode(code: string): string {
   return /^[A-Z0-9_.]{1,64}$/.test(code) ? code : 'ERROR';
 }
 
+/**
+ * The company's limit on rent paid ahead (AR-05), where its `advance_rent_policy` is `warn` or
+ * `block`. Under `block` the API already caps the amounts at it; under `warn` more is accepted.
+ */
+export interface AdvanceLimit {
+  readonly policy: 'warn' | 'block';
+  readonly limitMonths: number;
+  readonly capMinor: number;
+  readonly ruleUnverified: boolean;
+}
+
 export interface AmountLimits {
   readonly minMinor: number;
   readonly maxMinor: number;
+  readonly advance?: AdvanceLimit | null;
+}
+
+/**
+ * Whether the advance limit, not the end of the lease, sets the most a tenant may pay: under
+ * `block` the API caps the amounts at the limit, so the maximum then equals it.
+ */
+export function cappedByAdvance(limits: AmountLimits): boolean {
+  return limits.advance?.policy === 'block' && limits.maxMinor >= limits.advance.capMinor;
+}
+
+/** "1 month", "6 months". */
+const months = (n: number) => (n === 1 ? '1 month' : `${n} months`);
+
+/**
+ * Why the most a tenant may pay is what it is (decision 7; AR-05). Normally it is the rent left
+ * to the end of the lease. Where the landlord takes rent only so far ahead (`block`), it is what
+ * is due now plus that many months, less what is already paid ahead. Never a word on whether a
+ * payment is lawful: the rule behind the limit is the landlord's setting, and unverified (TX-08).
+ */
+export function maximumReason(landlordName: string, limits: AmountLimits): string {
+  return cappedByAdvance(limits)
+    ? `${landlordName} takes rent at most ${months(limits.advance!.limitMonths)} ahead, so the most you can pay now is what is due and up to ${months(limits.advance!.limitMonths)} more, less anything you have already paid ahead.`
+    : 'That is the rent left to the end of your lease.';
 }
 
 /**
@@ -153,7 +188,9 @@ export function payProblemText(code: string | undefined, limits: AmountLimits): 
   if (has('AMOUNT_TOO_SMALL') || has('AMOUNT_TOO_LOW'))
     return `Pay at least ${cedis(limits.minMinor)}.`;
   if (has('AMOUNT_TOO_LARGE') || has('AMOUNT_TOO_HIGH'))
-    return `You can pay at most ${cedis(limits.maxMinor)}: the rent left to the end of your lease.`;
+    return cappedByAdvance(limits)
+      ? `You can pay at most ${cedis(limits.maxMinor)}: what is due now and up to ${months(limits.advance!.limitMonths)} of rent ahead, less anything already paid ahead.`
+      : `You can pay at most ${cedis(limits.maxMinor)}: the rent left to the end of your lease.`;
   if (code === 'METHOD_REQUIRED') return 'Choose how you want to pay.';
   if (code === 'PHONE_REQUIRED') return 'Enter the MoMo number to charge.';
   if (has('PHONE'))
@@ -166,6 +203,34 @@ export function payProblemText(code: string | undefined, limits: AmountLimits): 
     return 'We could not reach the payment service. Try again in a few minutes.';
   return 'We could not start the payment. Check the amount and the number, then try again.';
 }
+
+/**
+ * Why a payment failed, in plain words, from the intent's failure code (M4b review 19). The
+ * API's own message is shown only when the code is one this page does not know.
+ */
+export function failureText(
+  code: string | null | undefined,
+  message: string | null,
+  landlordName: string | null,
+): string | null {
+  const landlord = landlordName ?? 'your landlord';
+  switch (code) {
+    case 'PROVIDER_STEP_UNSUPPORTED':
+      return `Your MoMo network asked for an extra step, such as a code sent to your phone, which this page cannot take yet. Pay by card or from another MoMo network, or pay ${landlord} directly.`;
+    case 'PROVIDER_CHARGE_FAILED':
+      return 'The payment did not go through. Check the number, the network and your balance, then try again.';
+    case 'PROVIDER_REFUSED':
+      return 'The payment provider refused this payment. Check the details and try again.';
+    case 'PROVIDERS_UNAVAILABLE':
+      return `Online payment is not available just now. Try again shortly, or pay ${landlord} directly.`;
+    default:
+      return message;
+  }
+}
+
+/** A card payment's reference, as the provider's return address carries it (`pi-` and 32 hex). */
+export const isChargeReference = (value: string | undefined): value is string =>
+  typeof value === 'string' && /^pi-[0-9a-f]{32}$/.test(value);
 
 export type PayView = 'closed' | 'settled' | 'paid' | 'unavailable' | 'waiting' | 'pay';
 
@@ -180,25 +245,33 @@ export function chooseView(input: {
   readonly methods: readonly string[];
   readonly intentStatus: IntentStatus | null;
   readonly startAgain: boolean;
+  /**
+   * What is due now. The API shows `paid` for an hour after a payment, and still takes one while
+   * something is due (a part payment): then the form stays, under the thanks.
+   */
+  readonly dueNowMinor?: number;
 }): PayView {
   switch (input.screen) {
     case 'expired':
     case 'revoked':
       return 'closed';
-    case 'settled':
     case 'paid':
+      if ((input.dueNowMinor ?? 0) <= 0) return 'paid';
+      break;
+    case 'settled':
     case 'unavailable':
       return input.screen;
     default:
-      if (input.methods.length === 0) return 'unavailable';
-      return isWaiting(input.intentStatus) && !input.startAgain ? 'waiting' : 'pay';
+      break;
   }
+  if (input.methods.length === 0) return 'unavailable';
+  return isWaiting(input.intentStatus) && !input.startAgain ? 'waiting' : 'pay';
 }
 
 /**
  * The tenant has just made the payment the page follows: it is in the address, put there by the
- * form's redirect, or the provider's checkout has just sent them back (Paystack adds `trxref`
- * and `reference` to the return address).
+ * form's redirect. (`trxref` and `reference` were Paystack's return to this page; the provider now
+ * returns to `/p/return` instead, which never carries the pay link's token.)
  */
 export function justPaid(query: Readonly<Record<string, string | undefined>>): boolean {
   return isIntentId(query.intent) || returnedFromCheckout(query);

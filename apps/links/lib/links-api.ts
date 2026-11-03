@@ -2,7 +2,7 @@ import {
   DEV_LINKS_API_KEY,
   LINK_TOKEN_PATTERN,
   LINKS_API_KEY_HEADER,
-  type INTENT_STATUSES,
+  type PayIntent,
   type PayPage,
   type ReceiptPage,
   type SigningPage,
@@ -18,19 +18,7 @@ const API = (process.env.API_BASE_URL ?? 'http://localhost:3700').replace(/\/+$/
 const KEY = process.env.LINKS_API_KEY ?? DEV_LINKS_API_KEY;
 
 export { LINK_TOKEN_PATTERN };
-export type { PayPage, ReceiptPage, SigningPage };
-
-/** A payment started from a pay link, as the API reports it (the contract's intent schema). */
-export interface PayIntent {
-  readonly intentId: string;
-  readonly status: (typeof INTENT_STATUSES)[number];
-  readonly amountMinor: number;
-  /** Card payments continue on the provider's checkout page. */
-  readonly checkoutUrl: string | null;
-  /** For example "Approve the payment on your phone". */
-  readonly message: string | null;
-  readonly receiptNumber: string | null;
-}
+export type { PayIntent, PayPage, ReceiptPage, SigningPage };
 
 /** The browser behind a request, as this server sees it: evidence for the signing record. */
 export interface Client {
@@ -159,3 +147,16 @@ export const openReceipt = (token: string, client: Client) =>
 
 export const receiptDocument = (token: string, client: Client) =>
   call<{ url: string }>('/links/receipt/document', { token, client });
+
+/**
+ * The card return page (M4b review 14): the provider sends the payer to
+ * `/p/return?reference=…`, with the charge's reference and no pay-link token. The answer is the
+ * payment's status and receipt number only, never the invoice or the tenant.
+ */
+export const payReturned = (reference: string, client: Client) =>
+  call<{
+    status: PayIntent['status'];
+    receiptNumber: string | null;
+    message: string | null;
+    failureCode: string | null;
+  }>('/links/pay/return', { reference, client });
