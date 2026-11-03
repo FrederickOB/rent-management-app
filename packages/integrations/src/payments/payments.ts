@@ -51,6 +51,11 @@ export interface ChargeInitialised {
   readonly status: ChargeStatus;
   /** What the provider asks the payer to do, such as "Approve the payment on your phone". */
   readonly displayText?: string;
+  /**
+   * A next step the provider asks for that this product does not support yet, such as a code
+   * sent to the payer (`send_otp`); the charge cannot finish here (M4b review 19; OQ-01).
+   */
+  readonly unsupportedStep?: string;
 }
 
 /**
@@ -109,6 +114,23 @@ export interface RefundResult {
   readonly status: 'pending' | 'processed' | 'failed';
 }
 
+/**
+ * Money taken back from a successful charge (M4b review items 2 and 17): a refund (ours, or made
+ * at the provider) or a chargeback the payer's bank won. `processed` means the money has left.
+ */
+export interface ProviderReversal {
+  readonly kind: 'refund' | 'chargeback';
+  /** The provider's id for the refund or dispute. */
+  readonly id: string;
+  readonly status: 'pending' | 'processed' | 'failed';
+  readonly amountMinor: number;
+}
+
+/** A refund or chargeback made in a range, with the charge it is about (reconciliation). */
+export interface ListedReversal extends ProviderReversal {
+  readonly reference: string;
+}
+
 /** A bank the provider settles to (ADR-008). */
 export interface Bank {
   readonly code: string;
@@ -150,8 +172,15 @@ export interface PaymentsPort {
   /** Settlements paid out in the range. */
   listSettlements(range: InstantRange): Promise<ProviderSettlement[]>;
   createSubaccount(request: SubaccountRequest): Promise<{ subaccountCode: string }>;
-  /** Refunds a charge to its payer (P31). */
+  /**
+   * Refunds a charge to its payer (P31). Like Paystack, a charge already refunded is refused:
+   * ask `reversals` first, never call this blind on a retry.
+   */
   refund(request: RefundRequest): Promise<RefundResult>;
+  /** Every refund and chargeback against a charge; empty when there is none. */
+  reversals(reference: string): Promise<ProviderReversal[]>;
+  /** Refunds and chargebacks made in the range, whatever day their charge was paid. */
+  listReversals(range: InstantRange): Promise<ListedReversal[]>;
   /** The account's name at the bank, where the provider can check it; null where it cannot. */
   resolveAccount(check: {
     readonly bankCode: string;
@@ -201,7 +230,7 @@ export interface PaymentsTestControls {
    * The payer's bank charges a successful payment back: it becomes `reversed`, the next settlement
    * to its subaccount deducts it, and a signed `charge.dispute.resolve` webhook is returned.
    */
-  chargeback(reference: string): Promise<PaymentWebhookRequest>;
+  chargeback(reference: string, amountMinor?: number): Promise<PaymentWebhookRequest>;
   /** A successful payment to a subaccount that did not come from our pay page, with its webhook. */
   payExternal(
     payment: ExternalPayment,
@@ -328,6 +357,14 @@ interface MemoryCharge {
   settled: boolean;
   /** Charged back after it was paid: deducted from the next settlement once. */
   chargedBack?: { readonly amountMinor: number; deducted: boolean };
+  /** Refunds and disputes against it, oldest first. */
+  reversals: {
+    kind: 'refund' | 'chargeback';
+    id: string;
+    status: ProviderReversal['status'];
+    amountMinor: number;
+    createdAt: string;
+  }[];
 }
 
 /** Banks the fakes settle to: fictional codes, never a real institution's. */
@@ -348,10 +385,11 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
   private readonly subaccounts = new Map<string, SubaccountRequest>();
   private readonly charges = new Map<string, MemoryCharge>();
   private readonly settlements: ProviderSettlement[] = [];
-  private readonly refunds = new Map<string, RefundResult>();
   private counter = 0;
   /** Set to make initialiseCharge fail as a provider outage would (BC-02 failover tests). */
   failCharges = false;
+  /** Set to make refunds wait at the provider (`pending`) until `completeRefund` (Paystack does). */
+  pendingRefunds = false;
 
   constructor(
     private readonly secretKey = 'sk_test_in_memory',
@@ -374,6 +412,7 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
       amountMinor: request.amountMinor,
       feesMinor: 0,
       settled: false,
+      reversals: [],
     });
     // A MoMo charge with a phone sends the approval prompt there; anything else needs a page.
     const prompt = request.channel === 'momo' && request.customer.phone !== undefined;
@@ -427,19 +466,76 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
   async refund(request: RefundRequest): Promise<RefundResult> {
     const charge = this.charges.get(request.reference);
     if (!charge) throw notFound(this.provider, 'transaction');
-    const existing = this.refunds.get(request.reference);
-    if (existing) return existing;
+    // Paystack refuses a second refund of a charge, and one of a charge that is not paid.
+    if (charge.reversals.some((r) => r.kind === 'refund' && r.status !== 'failed'))
+      throw invalidRequest(this.provider, 'Transaction has been fully reversed');
     if (charge.status !== 'success') throw invalidRequest(this.provider, 'charge not refundable');
     if (!isWholePesewas(request.amountMinor) || request.amountMinor > charge.amountMinor)
       throw invalidRequest(
         this.provider,
         'refund amount must be whole pesewas, at most the charge',
       );
-    charge.status = 'reversed';
-    charge.chargedBack = { amountMinor: request.amountMinor, deducted: false };
-    const result: RefundResult = { refundReference: `rf-${++this.counter}`, status: 'processed' };
-    this.refunds.set(request.reference, result);
-    return result;
+    const refund = {
+      kind: 'refund' as const,
+      id: `rf-${++this.counter}`,
+      status: this.pendingRefunds ? ('pending' as const) : ('processed' as const),
+      amountMinor: request.amountMinor,
+      createdAt: new Date().toISOString(),
+    };
+    charge.reversals.push(refund);
+    if (refund.status === 'processed') this.takeBack(charge, refund.amountMinor);
+    return { refundReference: refund.id, status: refund.status };
+  }
+
+  async reversals(reference: string): Promise<ProviderReversal[]> {
+    const charge = this.charges.get(reference);
+    if (!charge) throw notFound(this.provider, 'transaction');
+    return [...charge.reversals].reverse().map(({ createdAt: _at, ...r }) => r);
+  }
+
+  async listReversals(range: InstantRange): Promise<ListedReversal[]> {
+    const window = rangeMillis(this.provider, range);
+    return [...this.charges.values()].flatMap((charge) =>
+      charge.reversals
+        .filter((r) => inRange(r.createdAt, window))
+        .map(({ createdAt: _at, ...r }) => ({ ...r, reference: charge.request.reference })),
+    );
+  }
+
+  /**
+   * Test control: a pending refund finishes at the provider (`processed` or `failed`); returns
+   * the signed `refund.processed` or `refund.failed` webhook Paystack would send.
+   */
+  async completeRefund(
+    reference: string,
+    status: 'processed' | 'failed',
+  ): Promise<PaymentWebhookRequest> {
+    const charge = this.charges.get(reference);
+    const refund = charge?.reversals.find((r) => r.kind === 'refund' && r.status === 'pending');
+    if (!charge || !refund) throw notFound(this.provider, 'refund');
+    refund.status = status;
+    if (status === 'processed') this.takeBack(charge, refund.amountMinor);
+    return this.signed({
+      event: `refund.${status}`,
+      data: {
+        id: refund.id,
+        status,
+        amount: refund.amountMinor,
+        currency: 'GHS',
+        transaction_reference: reference,
+      },
+    });
+  }
+
+  /** Money taken back from a paid charge: a whole one is reversed; the next settlement deducts it. */
+  private takeBack(charge: MemoryCharge, amountMinor: number): void {
+    const waiting =
+      charge.chargedBack && !charge.chargedBack.deducted ? charge.chargedBack.amountMinor : 0;
+    const taken = charge.reversals
+      .filter((r) => r.status === 'processed')
+      .reduce((sum, r) => sum + r.amountMinor, 0);
+    if (taken >= charge.amountMinor) charge.status = 'reversed';
+    charge.chargedBack = { amountMinor: waiting + amountMinor, deducted: false };
   }
 
   async resolveAccount(check: {
@@ -489,20 +585,30 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
     return this.signed({ event: 'charge.success', data: this.paystackView(charge) });
   }
 
-  async chargeback(reference: string): Promise<PaymentWebhookRequest> {
+  async chargeback(reference: string, amountMinor?: number): Promise<PaymentWebhookRequest> {
     const charge = this.charges.get(reference);
     if (!charge) throw notFound(this.provider, 'transaction');
     if (charge.status !== 'success')
       throw conflict(this.provider, 'only a paid charge is disputed');
-    charge.status = 'reversed';
-    charge.chargedBack = { amountMinor: charge.amountMinor, deducted: false };
+    const amount = amountMinor ?? charge.amountMinor;
+    if (!isWholePesewas(amount) || amount > charge.amountMinor)
+      throw invalidRequest(this.provider, 'a chargeback is at most the charge');
+    const id = String(++this.counter);
+    charge.reversals.push({
+      kind: 'chargeback',
+      id,
+      status: 'processed',
+      amountMinor: amount,
+      createdAt: new Date().toISOString(),
+    });
+    this.takeBack(charge, amount);
     return this.signed({
       event: 'charge.dispute.resolve',
       data: {
-        id: ++this.counter,
+        id: Number(id),
         status: 'resolved',
-        resolution: 'declined',
-        refund_amount: charge.amountMinor,
+        resolution: 'merchant-accepted',
+        refund_amount: amount,
         currency: 'GHS',
         transaction: { id: charge.id, reference: charge.request.reference },
       },
@@ -536,6 +642,7 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
       feesMinor: payment.feesMinor ?? 0,
       paidAt: new Date().toISOString(),
       settled: false,
+      reversals: [],
     };
     this.charges.set(reference, charge);
     return {
@@ -553,15 +660,13 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
     };
     for (const charge of this.charges.values()) {
       const code = charge.request.subaccountCode;
-      if (charge.chargedBack && !charge.chargedBack.deducted && charge.settled)
-        group(code).back.push(charge);
+      const waiting = !!charge.chargedBack && !charge.chargedBack.deducted;
+      if (waiting && charge.settled) group(code).back.push(charge);
       if (charge.settled) continue;
-      if (charge.status === 'success') group(code).paid.push(charge);
       // Refunded or charged back before it was paid out: settled and deducted together.
-      else if (charge.status === 'reversed' && charge.chargedBack) {
+      if (charge.status === 'success' || (charge.status === 'reversed' && charge.chargedBack))
         group(code).paid.push(charge);
-        group(code).back.push(charge);
-      }
+      if (waiting) group(code).back.push(charge);
     }
     const settledAt = new Date().toISOString();
     const created = [...due].map(([subaccountCode, { paid, back }]): ProviderSettlement => {
@@ -687,6 +792,98 @@ export const paystackTransaction = z.object({
 });
 export const paystackEnvelope = <T extends z.ZodType>(data: T) =>
   z.object({ status: z.literal(true), data });
+
+const objectId = z.union([z.number().int(), z.string().min(1)]);
+/** A charge as a refund or dispute names it: its id, or the transaction itself. */
+const namedTransaction = z.union([
+  objectId,
+  z.object({ id: objectId.optional(), reference: z.string().min(1).optional() }).loose(),
+]);
+
+/**
+ * A Paystack refund, as the refund API lists it. `settlement` and `deducted_amount` say which
+ * payout it was taken from and how much (documented fields; their use is an assumption, OQ-01).
+ */
+export const paystackRefund = z
+  .object({
+    id: objectId,
+    transaction: namedTransaction.nullable().optional(),
+    dispute: objectId.nullable().optional(),
+    amount: minor,
+    deducted_amount: minor.nullable().optional(),
+    status: z.string().min(1),
+    settlement: objectId.nullable().optional(),
+  })
+  .loose();
+
+/** A Paystack dispute (chargeback request), as the dispute API lists it. */
+export const paystackDispute = z
+  .object({
+    id: objectId,
+    refund_amount: minor.nullable().optional(),
+    status: z.string().min(1),
+    resolution: z.string().nullable().optional(),
+    transaction: namedTransaction.nullable().optional(),
+  })
+  .loose();
+
+/**
+ * A charge's refunds and chargebacks from Paystack's refund and dispute lists (M4b review items 2
+ * and 17). Refund states map directly. A dispute takes money only once resolved in the payer's
+ * favour, which Paystack records as `merchant-accepted` with a refund amount; one the merchant
+ * won (`declined`) took nothing. That reading is an assumption until Paystack confirms it (OQ-01).
+ */
+export function toReversals(
+  refunds: readonly z.infer<typeof paystackRefund>[],
+  disputes: readonly z.infer<typeof paystackDispute>[],
+): ProviderReversal[] {
+  const out: ProviderReversal[] = [];
+  for (const r of refunds)
+    out.push({
+      kind: 'refund',
+      id: String(r.id),
+      status: r.status === 'processed' ? 'processed' : r.status === 'failed' ? 'failed' : 'pending',
+      amountMinor: r.amount,
+    });
+  for (const d of disputes) {
+    const resolved = d.status === 'resolved';
+    if (resolved && d.resolution !== 'merchant-accepted') continue;
+    const amount = d.refund_amount ?? 0;
+    if (resolved && amount <= 0) continue;
+    out.push({
+      kind: 'chargeback',
+      id: String(d.id),
+      status: resolved ? 'processed' : 'pending',
+      amountMinor: amount,
+    });
+  }
+  return out;
+}
+
+/** As toReversals, for lists across charges: each names its charge's reference, or is left out. */
+export function listedReversals(
+  refunds: readonly z.infer<typeof paystackRefund>[],
+  disputes: readonly z.infer<typeof paystackDispute>[],
+): ListedReversal[] {
+  const out: ListedReversal[] = [];
+  for (const r of refunds) {
+    const reference = namedReference(r.transaction);
+    if (reference) out.push({ ...toReversals([r], [])[0]!, reference });
+  }
+  for (const d of disputes) {
+    const reference = namedReference(d.transaction);
+    const [reversal] = toReversals([], [d]);
+    if (reference && reversal) out.push({ ...reversal, reference });
+  }
+  return out;
+}
+
+/** The reference a refund or dispute names, when it carries the transaction itself. */
+export const namedReference = (t: z.infer<typeof namedTransaction> | null | undefined) =>
+  t && typeof t === 'object' ? (t.reference ?? null) : null;
+/** The transaction id a refund or dispute names. */
+export const namedId = (t: z.infer<typeof namedTransaction> | null | undefined) =>
+  t === null || t === undefined ? null : typeof t === 'object' ? (t.id ?? null) : t;
 const initializeResponse = paystackEnvelope(
   z.object({
     reference: z.string().min(1),
@@ -945,6 +1142,29 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
     return response.data.map((b) => ({ code: b.code, name: b.name }));
   }
 
+  /** As Paystack: the charge's refunds and disputes, by its transaction id. */
+  async reversals(reference: string): Promise<ProviderReversal[]> {
+    const transaction = await this.fetchTransaction(reference);
+    if (transaction.id === undefined) return [];
+    const query = new URLSearchParams({ transaction: String(transaction.id) });
+    const refunds = await this.call(paystackEnvelope(z.array(paystackRefund)), `/refund?${query}`);
+    const disputes = await this.call(
+      paystackEnvelope(z.array(paystackDispute)),
+      `/dispute?${query}`,
+    );
+    return toReversals(refunds.data, disputes.data);
+  }
+
+  async listReversals(range: InstantRange): Promise<ListedReversal[]> {
+    const query = new URLSearchParams({ ...range });
+    const refunds = await this.call(paystackEnvelope(z.array(paystackRefund)), `/refund?${query}`);
+    const disputes = await this.call(
+      paystackEnvelope(z.array(paystackDispute)),
+      `/dispute?${query}`,
+    );
+    return listedReversals(refunds.data, disputes.data);
+  }
+
   verifyWebhookSignature(rawBody: Buffer | string, headers: WebhookHeaders): boolean {
     return verifyPaystackSignature(this.secretKey, rawBody, headers);
   }
@@ -976,14 +1196,14 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
     );
   }
 
-  async chargeback(reference: string): Promise<PaymentWebhookRequest> {
+  async chargeback(reference: string, amountMinor?: number): Promise<PaymentWebhookRequest> {
     const response = z
       .object({ webhook: z.object({ rawBody: z.string(), signature: z.string() }) })
       .safeParse(
         await requestJson<unknown>(
           this.provider,
           `${this.baseUrl}/payments/_test/chargebacks/${encodeURIComponent(reference)}`,
-          { body: {} },
+          { body: amountMinor === undefined ? {} : { amount: amountMinor } },
         ),
       );
     if (!response.success) throw unexpectedResponse(this.provider);

@@ -26,6 +26,7 @@ import {
   planCreditNote,
   planTaxDraws,
   planPaymentReversal,
+  planReopenedDraws,
   planWriteOff,
   referenceFrom,
   REFERENCE_PAYLOAD_LENGTH,
@@ -302,7 +303,8 @@ export class BillingEngine {
     /** The tax point when a payment made it issue (decision 4): that payment's value date. */
     taxPoint?: string,
   ) {
-    const vat = await this.vatFor(tx, state, today);
+    // VAT as of the tax point: an advance recorded late is taxed at its own day's rate (review).
+    const vat = await this.vatFor(tx, state, taxPoint ?? today);
     return this.issue(tx, state, {
       taxPoint,
       kind: 'cycle',
@@ -763,7 +765,7 @@ export class BillingEngine {
     /** The payment's value date: the tax point of what it makes issue (decision 4). */
     valueDate: string = today,
   ) {
-    const vat = await this.vatFor(tx, state, today);
+    const vat = await this.vatFor(tx, state, valueDate);
     if (!vat) return [];
     const issued = await this.issuedCycleStarts(tx, state.lease.id);
     const pending = this.cycles(state).filter((c) => !issued.has(c.cycleStart));
@@ -1166,8 +1168,16 @@ export class BillingEngine {
     companyKind: string,
   ): Promise<('collector' | 'owner_account' | 'agency_account' | 'provider')[]> {
     switch (payment.row.cashAccount) {
-      case '1050':
-        return ['provider'];
+      case '1050': {
+        // Once the provider has paid it out (P22), the money sits in the account it settled to,
+        // so a reversal takes it from there (architecture P21b; M4b review F3).
+        const settled = await this.settledInto(tx, payment.id);
+        return settled === '1010'
+          ? ['owner_account']
+          : settled === '1070'
+            ? ['agency_account']
+            : ['provider'];
+      }
       case '1010':
         return ['owner_account'];
       case '1070':
@@ -1185,6 +1195,22 @@ export class BillingEngine {
         return options;
       }
     }
+  }
+
+  /**
+   * Where a provider payment's money went when the provider paid it out (P22: Dr 1010 or 1070 on
+   * the payment), or null while it is still with the provider.
+   */
+  async settledInto(tx: Tx, paymentId: string): Promise<'1010' | '1070' | null> {
+    const rows = await tx.execute<{ account_code: string }>(
+      sql`select l.account_code from journal_line l
+          join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
+          where e.rule = 'P22' and l.payment_id = ${paymentId}
+            and l.account_code in ('1010', '1070') and l.amount_minor > 0
+          limit 1`,
+    );
+    const code = rows.rows[0]?.account_code;
+    return code === '1010' || code === '1070' ? code : null;
   }
 
   /** What a collector holds in a book (1060 for that collector), from the journal. */
@@ -1352,6 +1378,7 @@ export class BillingEngine {
       reverses: { reversalId, reason: input.note },
       linesFrom: lines,
     });
+    for (const s of states) await this.drawCreditToOpen(tx, s, input.today, input.requestedBy);
     return { reversalId, receiptId };
   }
 
@@ -1480,7 +1507,63 @@ export class BillingEngine {
         parts.some((p) => p.released.some((r) => r.paymentId === payment.id))
       )
         await this.carryStranded(tx, state, payment, input.valueDate);
+    await this.drawCreditToOpen(tx, state, input.valueDate, input.createdBy);
     return creditNoteId;
+  }
+
+  /**
+   * Spare credit pays debt a correction reopened (M4b review F4): after a reversal or a credit
+   * note, an accrued period left owing while the lease holds credit is paid from it at once,
+   * oldest payment first, by a P02 credit draw keyed on the line and its allocations so far.
+   * So ageing, reminders and paid-until agree with the credit the tenant holds.
+   */
+  async drawCreditToOpen(
+    tx: Tx,
+    state: LeaseState,
+    valueDate: string,
+    causedBy: string | null,
+  ): Promise<number> {
+    const pools = creditPools(state.payments, state.allocations);
+    if (pools.length === 0) return 0;
+    const book = requireBook(state.book);
+    const plans = planReopenedDraws(state.lines, state.allocations, pools);
+    for (const plan of plans) {
+      const n = state.allocations.filter((a) => a.lineId === plan.lineId).length;
+      const posted = await this.posting.post(tx, {
+        companyId: state.company.id,
+        rule: 'P02',
+        key: `P02:${plan.lineId}:redraw:${n}`,
+        valueDate,
+        lines: creditDrawLines({
+          bookId: book.bookId,
+          lease: dimsOf(state.lease),
+          invoiceLineId: plan.lineId,
+          draws: plan.draws,
+        }),
+        record: { type: 'invoice_line', id: plan.lineId },
+        causedBy,
+      });
+      await this.writeAllocations(
+        tx,
+        state,
+        plan.draws.map((d) => ({
+          lineId: plan.lineId,
+          source: 'payment' as const,
+          paymentId: d.paymentId,
+          amountMinor: d.amountMinor,
+        })),
+        {
+          valueDate,
+          accountingDate:
+            posted?.accountingDate ??
+            (await this.posting.accountingDate(tx, [book.bookId], valueDate)),
+          recordType: 'accrual',
+          recordId: plan.lineId,
+          entryId: posted?.entryId ?? null,
+        },
+      );
+    }
+    return plans.length;
   }
 
   /** P24: writes off a debt still owed on a charged line (two-person approval). */

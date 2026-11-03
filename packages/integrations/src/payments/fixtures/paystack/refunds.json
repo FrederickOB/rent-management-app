@@ -1,0 +1,29 @@
+{
+  "_assumption": "Built from Paystack's documented refund fields (settlement, deducted_amount, fully_deducted, dispute, transaction); not recorded from a live account. M4b assumes a refund taken out of a payout names that settlement, with the amount in deducted_amount, and that a dispute the payer won (a lost dispute) is deducted the same way, as a refund with `dispute` set: Paystack does not document how chargebacks appear in settlements (OQ-01). This refund is of a charge paid before the settlement.",
+  "status": true,
+  "message": "Refunds retrieved",
+  "data": [
+    {
+      "id": 6001020,
+      "integration": 100001,
+      "domain": "test",
+      "transaction": { "id": 4099260400, "reference": "pi-0192f5a8111172228333444455550000" },
+      "dispute": null,
+      "amount": 20000,
+      "deducted_amount": 20000,
+      "currency": "GHS",
+      "channel": "mobile_money",
+      "fully_deducted": true,
+      "refunded_by": "test@example.test",
+      "refunded_at": "2026-11-03T15:00:00.000Z",
+      "expected_at": "2026-11-13T15:00:00.000Z",
+      "settlement": 3090001,
+      "customer_note": "Refund",
+      "merchant_note": "Refund",
+      "created_at": "2026-11-03T15:00:00.000Z",
+      "updated_at": "2026-11-04T01:00:00.000Z",
+      "status": "processed"
+    }
+  ],
+  "meta": { "total": 1, "page": 1, "pageCount": 1 }
+}

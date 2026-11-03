@@ -8,6 +8,7 @@ import { DocumentsModule } from '../documents/documents.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { MessagingService } from '../messaging/messaging.service';
+import { RulesModule } from '../rules/rules.module';
 import { PolicyModule } from '../policy/policy.module';
 import { TenancyModule } from '../tenancy/tenancy.module';
 import { PayLinksService } from './pay-links.service';
@@ -50,6 +51,7 @@ const SERVICES = [
     LedgerModule,
     MessagingModule,
     PolicyModule,
+    RulesModule,
     TenancyModule,
   ],
   providers: SERVICES,

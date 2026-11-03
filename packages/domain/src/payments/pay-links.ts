@@ -40,6 +40,26 @@ export function checkPayAmount(amountMinor: number, limits: PayLinkAmounts): num
   return amountMinor;
 }
 
+/**
+ * The most a pay link may take ahead under a company's advance rent limit (AR-05; M4b review
+ * 15): what is due now, plus whole months up to the limit, less what the tenant already holds
+ * ahead (unearned rent and credit). The months come from the rules table (unverified); the
+ * caller applies the policy: `block` caps the amount, `warn` accepts it and flags it.
+ */
+export function advanceCapMinor(input: {
+  readonly dueNowMinor: number;
+  /** Rent and service charge for one month. */
+  readonly monthlyMinor: number;
+  readonly limitMonths: number;
+  /** Already paid ahead: unearned rent and credit. */
+  readonly aheadMinor: number;
+}): number {
+  for (const v of [input.dueNowMinor, input.monthlyMinor, input.limitMonths, input.aheadMinor])
+    if (!Number.isSafeInteger(v) || v < 0)
+      throw new DomainError('payment.bad_amount', 'Advance limits are whole, zero or more');
+  return input.dueNowMinor + Math.max(0, input.limitMonths * input.monthlyMinor - input.aheadMinor);
+}
+
 /** Pay links expire when the invoice is settled, or after 60 days (M4b plan 4.3). */
 export const PAY_LINK_DAYS = 60;
 

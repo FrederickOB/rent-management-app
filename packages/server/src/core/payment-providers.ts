@@ -78,6 +78,9 @@ export class PaymentProviders {
  * provider payments at all.
  */
 export function paymentProvidersFor(config: AppConfig): PaymentProviders {
+  // The fake provider never takes rent in production (M4b review 18), whatever built the config.
+  if (config.NODE_ENV === 'production' && config.FAKE_PROVIDERS_URL)
+    throw new Error('FAKE_PROVIDERS_URL must not be set in production');
   if (config.PAYSTACK_SECRET_KEY)
     return new PaymentProviders([
       {

@@ -150,6 +150,11 @@ export const managementAgreement = pgTable(
     ownerId: uuid().notNull(),
     destination: text().notNull(),
     effectiveFrom: day().notNull(),
+    /**
+     * The approved request that set it (M4b review: where rent goes is a settlement account change,
+     * so every agreement needs a second person). Null only for rows written before that rule.
+     */
+    approvalRequestId: uuid(),
     createdBy: uuid().references(() => person.id),
     createdAt: tsNow(),
   },
@@ -160,6 +165,14 @@ export const managementAgreement = pgTable(
       columns: [t.companyId, t.ownerId],
       foreignColumns: [owner.companyId, owner.id],
     }),
+    foreignKey({
+      name: 'management_agreement_approval_fk',
+      columns: [t.companyId, t.approvalRequestId],
+      foreignColumns: [approvalRequest.companyId, approvalRequest.id],
+    }),
+    uniqueIndex('management_agreement_approval_key')
+      .on(t.companyId, t.approvalRequestId)
+      .where(sql`${t.approvalRequestId} is not null`),
     index('management_agreement_owner_idx').on(t.companyId, t.ownerId, t.effectiveFrom),
     check(
       'management_agreement_destination_check',
@@ -196,6 +209,14 @@ export const paymentIntent = pgTable(
     provider: text(),
     providerReference: text(),
     settlementAccountId: uuid().notNull(),
+    /**
+     * Paid ahead beyond the advance rent limit while the company's policy is `warn` (AR-05; M4b
+     * review 15): accepted and flagged for the lease's compliance report. The limit and its rule
+     * version are recorded as they stood.
+     */
+    advanceOverLimit: boolean().notNull().default(false),
+    advanceLimitMonths: integer(),
+    advanceRuleId: uuid(),
     status: text().notNull().default('initiated'),
     checkoutUrl: text(),
     message: text(),
@@ -275,8 +296,14 @@ export const webhookInbox = pgTable(
     eventId: text().notNull(),
     eventType: text(),
     reference: text(),
-    rawBody: text().notNull(),
-    /** The signature header only, as received. */
+    /**
+     * The body as received, for a request with a valid signature. A bad-signature request keeps
+     * only its size and hash (M4b review 6): enough to investigate, nothing an attacker chose.
+     */
+    rawBody: text(),
+    bodySha256: text(),
+    bodyBytes: integer(),
+    /** The signature header only, as received; for a bad signature, the request's address too. */
     headers: jsonb().notNull(),
     signatureValid: boolean().notNull(),
     status: text().notNull(),
@@ -297,6 +324,7 @@ export const webhookInbox = pgTable(
       sql`${t.status} in ('received', 'rejected', 'processed', 'ignored', 'failed')`,
     ),
     check('webhook_inbox_rejected_check', sql`${t.signatureValid} or ${t.status} = 'rejected'`),
+    check('webhook_inbox_body_check', sql`not ${t.signatureValid} or ${t.rawBody} is not null`),
   ],
 );
 
@@ -320,6 +348,14 @@ export const providerSettlement = pgTable(
     deductionsMinor: minor().notNull(),
     netMinor: minor().notNull(),
     settledAt: timestamp({ withTimezone: true }).notNull(),
+    /**
+     * The charges it paid out, as the provider listed them: a payment posted after the settlement
+     * was reconciled is settled when it appears (M4b review item 16).
+     */
+    chargeReferences: text()
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
     createdAt: tsNow(),
   },
   (t) => [
@@ -333,7 +369,8 @@ export const providerSettlement = pgTable(
     check('provider_settlement_currency_check', sql`${t.currency} = 'GHS'`),
     check(
       'provider_settlement_amounts_check',
-      sql`${t.grossMinor} >= 0 and ${t.feesMinor} >= 0 and ${t.deductionsMinor} >= 0 and ${t.netMinor} >= 0`,
+      // The net may be below zero: deductions larger than what was paid out (M4b review F6).
+      sql`${t.grossMinor} >= 0 and ${t.feesMinor} >= 0 and ${t.deductionsMinor} >= 0`,
     ),
   ],
 );
@@ -509,11 +546,12 @@ export const unmatchedRefund = pgTable(
     }),
     uniqueIndex('unmatched_refund_one_live')
       .on(t.companyId, t.paymentId)
-      .where(sql`${t.status} in ('awaiting_approval', 'approved', 'refunded')`),
+      .where(sql`${t.status} in ('awaiting_approval', 'approved', 'sent', 'refunded')`),
     check('unmatched_refund_amount_check', sql`${t.amountMinor} > 0`),
     check(
       'unmatched_refund_status_check',
-      sql`${t.status} in ('awaiting_approval', 'approved', 'refunded', 'failed', 'rejected')`,
+      // `sent`: the provider accepted the refund and has not finished it (M4b review).
+      sql`${t.status} in ('awaiting_approval', 'approved', 'sent', 'refunded', 'failed', 'rejected')`,
     ),
     check(
       'unmatched_refund_posted_check',

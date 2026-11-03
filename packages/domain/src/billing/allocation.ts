@@ -194,3 +194,43 @@ export function planTaxDraws(
   }
   return out;
 }
+
+/**
+ * Credit to debt a correction reopened (M4b review F4). A payment reversed, or money released by
+ * a credit note, can leave a rent or service-charge period that has accrued owing while the lease
+ * still holds credit from other payments. That credit pays it at once, as P02 draws it when a
+ * period starts: in allocation order, oldest payment first, each line's VAT and levies straight
+ * after it. Deposits and one-off charges are not drawn (as at accrual). `pools` is the lease's
+ * credit now; each plan is a credit draw (Dr 2010, Cr 1100) with its new allocation rows.
+ */
+export function planReopenedDraws(
+  lines: readonly BillingLine[],
+  allocations: readonly AllocationRow[],
+  pools: readonly CreditPool[],
+): { readonly lineId: string; readonly draws: readonly PaymentAmount[] }[] {
+  const drawn = (line: BillingLine) =>
+    line.accrued && line.periodStart !== null && line.baseLineId === null;
+  const base = new Map(lines.map((l) => [l.id, l]));
+  let left = pools.filter((p) => p.amountMinor > 0);
+  const out: { lineId: string; draws: PaymentAmount[] }[] = [];
+  for (const line of inAllocationOrder(lines)) {
+    if (left.length === 0) break;
+    const parent = line.baseLineId === null ? line : base.get(line.baseLineId);
+    if (!parent || !drawn(parent)) continue;
+    let need = lineBalance(line, allocations).outstandingMinor;
+    if (need <= 0) continue;
+    const draws: PaymentAmount[] = [];
+    for (const pool of left) {
+      if (need === 0) break;
+      const amount = Math.min(pool.amountMinor, need);
+      if (amount <= 0) continue;
+      draws.push({ paymentId: pool.paymentId, amountMinor: amount });
+      need -= amount;
+    }
+    if (draws.length > 0) {
+      out.push({ lineId: line.id, draws });
+      left = drawFromPools(left, draws);
+    }
+  }
+  return out;
+}

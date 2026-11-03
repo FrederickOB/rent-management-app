@@ -1,0 +1,31 @@
+{
+  "_assumption": "Built from Paystack's documented dispute fields; not recorded from a live account. A dispute takes money only once resolved in the payer's favour (`merchant-accepted`, with its refund amount); one the merchant won (`declined`) took nothing (OQ-01).",
+  "status": true,
+  "message": "Disputes retrieved",
+  "data": [
+    {
+      "id": 880010,
+      "refund_amount": 50000,
+      "currency": "GHS",
+      "status": "resolved",
+      "resolution": "merchant-accepted",
+      "transaction": { "id": 4099260516, "reference": "pi-0192f5a8111172228333444455557777" }
+    },
+    {
+      "id": 880011,
+      "refund_amount": 70000,
+      "currency": "GHS",
+      "status": "resolved",
+      "resolution": "declined",
+      "transaction": { "id": 4099260516, "reference": "pi-0192f5a8111172228333444455557777" }
+    },
+    {
+      "id": 880012,
+      "refund_amount": 10000,
+      "currency": "GHS",
+      "status": "awaiting-merchant-feedback",
+      "resolution": null,
+      "transaction": { "id": 4099260516, "reference": "pi-0192f5a8111172228333444455557777" }
+    }
+  ]
+}

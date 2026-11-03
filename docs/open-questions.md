@@ -102,6 +102,10 @@ Claude researched these from the pages linked. They are background for your lawy
         - The charge endpoint takes `subaccount` and `bearer` as transaction initialisation does, so a MoMo charge settles to the subaccount and the subaccount bears the fee.
         - A settlement names its subaccount, and its `deductions` field carries the chargebacks and refunds taken out of the payout.
         - Account-name checks (`/bank/resolve`) may not work for Ghanaian banks; a 422 is read as "cannot check", and the approver sees that the name was not confirmed.
+        - **Settlement deductions (M4b review):** Paystack documents `deductions` on a settlement, and `settlement`, `deducted_amount`, `fully_deducted` and `dispute` on each refund. We read a settlement's deductions from the refunds that name it. We assume a dispute the payer won is deducted the same way, as a refund with `dispute` set, because Paystack does not document how chargebacks appear in settlements.
+        - **Disputes:** a dispute takes money only once resolved `merchant-accepted` with a refund amount; one resolved `declined` (the merchant won) took nothing.
+        - **Refund and dispute lists** take the charge's transaction id in their `transaction` filter, and list the transaction itself or its id.
+        - **MoMo next steps:** a charge answered `pay_offline` waits for approval on the phone, which we support. Any other next step (`send_otp`, `send_pin`, `send_birthday`, `send_phone`, `open_url`) fails the payment with "this network needs a step we don't support yet". Which Ghanaian networks ask for an OTP needs confirming before launch.
 - **OQ-02 Second provider:**
     - **Flutterwave** documents splits to Ghanaian bank accounts; MoMo destinations are not documented.
     - **Hubtel**'s checkout has no split field, so it would collect into a platform balance, which D1 rules out.

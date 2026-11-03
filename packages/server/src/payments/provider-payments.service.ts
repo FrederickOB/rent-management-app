@@ -43,6 +43,7 @@ export type ReferenceOutcome =
   | 'unmatched'
   | 'not_paid'
   | 'unknown_subaccount'
+  | 'currency_differs'
   | 'unknown';
 
 /**
@@ -85,6 +86,22 @@ export class ProviderPaymentsService {
     if (intent) return this.confirmIntent(intent.companyId, intent.intentId, provider, verified);
     if (verified.status !== 'success') return 'not_paid';
     return this.receiveCharge(provider, verified);
+  }
+
+  /** The company whose subaccount a charge was paid to, from the provider's own record. */
+  async companyOfCharge(provider: string, reference: string): Promise<string | null> {
+    if (!this.providers.has(provider)) return null;
+    const verified = await this.providers
+      .get(provider)
+      .verifyTransaction(reference)
+      .catch(() => null);
+    if (!verified) return null;
+    const account = await withSystem(this.database, {}, (tx) =>
+      tx.execute<{ company_id: string }>(
+        sql`select company_id from app.settlement_by_subaccount(${provider}, ${verified.subaccountCode})`,
+      ),
+    );
+    return account.rows[0]?.company_id ?? null;
   }
 
   /** The company and intent a reference belongs to, from the narrow system function (ids only). */
@@ -138,6 +155,16 @@ export class ProviderPaymentsService {
       switch (result.kind) {
         case 'reject':
           await set({ failureReason: `verification_${result.reason}` });
+          if (result.reason === 'currency_differs')
+            // Only cedis are ever posted: a person looks at it (review item 7).
+            await this.flag(tx, companyId, {
+              kind: 'amount_differs',
+              provider,
+              reference: intent.reference,
+              propertyId: intent.propertyId,
+              detail: `The provider confirmed this payment in ${verified.currency.slice(0, 3)}, not cedis. Nothing was posted; check it with the provider and the tenant.`,
+              dedupeKey: `currency_differs:${provider}:${intent.reference}`,
+            });
           return 'rejected' as const;
         case 'not_paid':
           if (result.status === 'pending') {
@@ -231,6 +258,19 @@ export class ProviderPaymentsService {
       return 'unknown_subaccount';
     }
     const companyId = found.company_id;
+    if (verified.currency !== 'GHS') {
+      // Only cedis are ever posted (CLAUDE.md section 4; review item 7): a person looks at it.
+      await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+        this.flag(tx, companyId, {
+          kind: 'amount_differs',
+          provider,
+          reference: verified.reference,
+          detail: `The provider confirmed a payment in ${verified.currency.slice(0, 3)}, not cedis. Nothing was posted; check it with the provider.`,
+          dedupeKey: `currency_differs:${provider}:${verified.reference}`,
+        }),
+      );
+      return 'currency_differs';
+    }
     const sourceId = uuidv5(`${provider}:${verified.reference}`, PROVIDER_CHARGE_NAMESPACE);
     const narration =
       verified.metadata.narration ??
@@ -300,21 +340,61 @@ export class ProviderPaymentsService {
   }
 
   /**
-   * A chargeback or a refund made at the provider (P21b; plan 4.8): once the provider verifies
-   * the charge as reversed, the payment is reversed from what it pays for now, the money is taken
-   * back from provider clearing (the next settlement deducts it), a credit receipt is issued and
-   * managers are told. Our own refund of unmatched money (P31) is not a chargeback.
+   * Our own refund of unmatched money behind a provider reference (P31), still going or done: a
+   * refund event about it is ours to follow, never a chargeback (M4b review item 2).
    */
-  async recordChargeback(provider: string, reference: string): Promise<'reversed' | 'ignored'> {
+  async ownRefund(
+    provider: string,
+    reference: string,
+  ): Promise<{ companyId: string; refundId: string } | null> {
+    const ref = await this.paymentRef(provider, reference);
+    if (!ref) return null;
+    const [refund] = await withCompany(
+      this.database,
+      { companyId: ref.company_id, actorKind: 'system' },
+      (tx) =>
+        tx
+          .select({ id: schema.unmatchedRefund.id })
+          .from(schema.unmatchedRefund)
+          .where(
+            and(
+              eq(schema.unmatchedRefund.paymentId, ref.payment_id),
+              sql`${schema.unmatchedRefund.status} in ('awaiting_approval', 'approved', 'sent', 'refunded')`,
+            ),
+          ),
+    );
+    return refund ? { companyId: ref.company_id, refundId: refund.id } : null;
+  }
+
+  private async paymentRef(provider: string, reference: string) {
     const refs = await withSystem(this.database, {}, (tx) =>
       tx.execute<{ company_id: string; payment_id: string; reversed: boolean }>(
-        sql`select company_id, payment_id, reversed from app.provider_payment_refs(${provider}, ${`{${reference}}`}::text[])`,
+        sql`select company_id, payment_id, reversed from app.provider_payment_refs(${provider}, ${`{"${reference.replace(/"/g, '')}"}`}::text[])`,
       ),
     );
-    const ref = refs.rows[0];
+    return refs.rows[0] ?? null;
+  }
+
+  /**
+   * A chargeback or a refund made at the provider (P21b; plan 4.8; M4b review items 2, 17, 20).
+   * The provider is asked what was taken back; a webhook body is never trusted. Our own refund
+   * (P31), a failed refund and a dispute still open are not chargebacks. When the money taken
+   * back equals the payment, the payment is reversed from what it pays for now, the money taken
+   * from provider clearing (the next settlement deducts it), a credit receipt issued and the
+   * people who see that property told. A part taken back is left for a person (an exception).
+   */
+  async recordChargeback(
+    provider: string,
+    reference: string,
+  ): Promise<'reversed' | 'ignored' | 'partial'> {
+    if (!this.providers.has(provider)) return 'ignored';
+    const ref = await this.paymentRef(provider, reference);
     if (!ref || ref.reversed) return 'ignored';
-    const verified = await this.providers.get(provider).verify(reference);
-    if (verified.status !== 'reversed' || verified.reference !== reference) return 'ignored';
+    if (await this.ownRefund(provider, reference)) return 'ignored';
+    const taken = (await this.providers.get(provider).reversals(reference))
+      .filter((r) => r.status === 'processed')
+      .reduce((sum, r) => sum + r.amountMinor, 0);
+    if (taken <= 0) return 'ignored';
     const companyId = ref.company_id;
     const done = await withCompany(
       this.database,
@@ -327,15 +407,30 @@ export class ProviderPaymentsService {
           .where(
             and(
               eq(schema.unmatchedRefund.paymentId, ref.payment_id),
-              sql`${schema.unmatchedRefund.status} in ('approved', 'refunded')`,
+              sql`${schema.unmatchedRefund.status} in ('awaiting_approval', 'approved', 'sent', 'refunded')`,
             ),
           );
-        if (refund) return false;
+        if (refund) return 'ignored' as const;
+        const [current] = await paymentsByIds(tx, [ref.payment_id]);
+        if (!current || current.reversedAccountingDate) return 'ignored' as const;
+        if (taken !== current.amountMinor) {
+          await this.flag(tx, companyId, {
+            kind: 'not_successful_at_provider',
+            provider,
+            reference,
+            paymentId: current.id,
+            propertyId: current.row.propertyId,
+            amountMinor: taken,
+            detail: `The provider took back ${format(money(taken))} of this ${format(money(current.amountMinor))} payment (a part refund or chargeback). Nothing was reversed: record the correction that matches what was taken back, with a second person's approval.`,
+            dedupeKey: `partial_reversal:${provider}:${reference}:${taken}`,
+          });
+          return 'partial' as const;
+        }
         const leases = await this.leasesOf(tx, ref.payment_id);
         await lockLeases(tx, companyId, leases);
         await lockCounters(tx, companyId);
         const [payment] = await paymentsByIds(tx, [ref.payment_id]);
-        if (!payment || payment.reversedAccountingDate) return false;
+        if (!payment || payment.reversedAccountingDate) return 'ignored' as const;
         const states: LeaseState[] = [];
         for (const leaseId of leases) states.push(await this.engine.load(tx, companyId, leaseId));
         const company = await companyRecord(tx, companyId);
@@ -347,8 +442,11 @@ export class ProviderPaymentsService {
           requestedBy: null,
           today: toIsoDate(businessDateOf(instantFrom(this.clock.now()), company!.timeZone)),
         });
-        // Everyone who sees provider payments is told (plan 4.8: a manager alert).
-        for (const personId of await membersWhoCan(tx, this.policy, company!, 'payments.view'))
+        // The people who see provider payments for this property are told (plan 4.8; review 20).
+        for (const personId of await membersWhoCan(tx, this.policy, company!, 'payments.view', {
+          propertyId: payment.row.propertyId,
+          ownerId: payment.row.ownerId,
+        }))
           await queueMessage(tx, companyId, {
             recipient: { type: 'staff', personId },
             purpose: 'staff_notice',
@@ -358,10 +456,10 @@ export class ProviderPaymentsService {
             propertyId: payment.row.propertyId,
             related: { type: 'payment', id: payment.id },
           });
-        return true;
+        return 'reversed' as const;
       },
     );
-    if (!done) return 'ignored';
+    if (done !== 'reversed') return done;
     await this.alerts.raise({
       severity: 'warning',
       code: 'payments.chargeback',

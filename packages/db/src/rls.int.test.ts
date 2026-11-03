@@ -222,6 +222,9 @@ async function seedCompany(companyId: string) {
     );
     await seedMoney(companyId, {
       initiator,
+      initiatorMembership,
+      approver,
+      approverMembership,
       requestId: requests[0]!.id,
       documentId: docs[0]!.id,
       ownerId: owners[0]!.id,
@@ -242,6 +245,9 @@ async function seedMoney(
   companyId: string,
   ids: {
     initiator: string;
+    initiatorMembership: string;
+    approver: string;
+    approverMembership: string;
     requestId: string;
     documentId: string;
     ownerId: string;
@@ -429,6 +435,9 @@ async function seedPayments(
   companyId: string,
   ids: {
     initiator: string;
+    initiatorMembership: string;
+    approver: string;
+    approverMembership: string;
     requestId: string;
     ownerId: string;
     propertyId: string;
@@ -452,9 +461,20 @@ async function seedPayments(
     "insert into provider_subaccount (company_id, settlement_account_id, provider, subaccount_code) values ($1, $2, 'paystack', $3)",
     [companyId, accountId, `ACCT_${randomBytes(6).toString('hex')}`],
   );
+  // Where the owner's rent goes is set only through a request a second person approved (RA056).
+  const { rows: agreementRequests } = await app.query<{ id: string }>(
+    `insert into approval_request (company_id, action_type, subject_type, subject_id, payload, payload_hash, initiated_by,
+       initiator_membership_id, mode, status, expires_at)
+     values ($1, 'management_agreement.change', 'owner', $2, '{}', 'h', $3, $4, 'two_person', 'pending', now() + interval '1 day') returning id`,
+    [companyId, ids.ownerId, ids.initiator, ids.initiatorMembership],
+  );
   await app.query(
-    "insert into management_agreement (company_id, owner_id, destination, effective_from) values ($1, $2, 'owner_account', current_date)",
-    [companyId, ids.ownerId],
+    "insert into approval_decision (company_id, request_id, decided_by, decided_by_membership_id, kind, payload_hash) values ($1, $2, $3, $4, 'approve', 'h')",
+    [companyId, agreementRequests[0]!.id, ids.approver, ids.approverMembership],
+  );
+  await app.query(
+    "insert into management_agreement (company_id, owner_id, destination, effective_from, approval_request_id) values ($1, $2, 'owner_account', current_date, $3)",
+    [companyId, ids.ownerId, agreementRequests[0]!.id],
   );
   const { rows: links } = await app.query<{ id: string }>(
     `insert into secure_link (company_id, property_id, tenant_id, purpose, token_hash, invoice_id, expires_at)

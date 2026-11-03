@@ -141,6 +141,20 @@
       "when": 1793699382133,
       "tag": "0019_payments_security",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793707123320,
+      "tag": "0020_payments_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793707124040,
+      "tag": "0021_payments_review_security",
+      "breakpoints": true
     }
   ]
 }

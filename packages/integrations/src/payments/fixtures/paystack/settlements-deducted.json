@@ -1,0 +1,24 @@
+{
+  "status": true,
+  "message": "Settlements retrieved",
+  "data": [
+    {
+      "id": 3090002,
+      "domain": "test",
+      "status": "success",
+      "currency": "GHS",
+      "integration": 100001,
+      "total_amount": 180000,
+      "effective_amount": 113510,
+      "total_fees": 3490,
+      "total_processed": 180000,
+      "deductions": 63000,
+      "settlement_date": "2026-11-05T00:00:00.000Z",
+      "settled_by": null,
+      "createdAt": "2026-11-05T01:00:00.000Z",
+      "updatedAt": "2026-11-05T01:00:00.000Z",
+      "subaccount": { "id": 77001, "subaccount_code": "ACCT_fake0001" }
+    }
+  ],
+  "meta": { "total": 1, "page": 1, "pageCount": 1 }
+}

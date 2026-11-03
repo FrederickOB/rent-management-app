@@ -180,6 +180,16 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
       async handle({ companyId, refundId }, ctx) {
         const outcome = await deps.queue.refundWithProvider(companyId, refundId);
         ctx.logger.info({ outcome }, 'unmatched refund');
+        // Still being made at the provider: asked again in 10 minutes, unless its webhook comes
+        // first (P31 posts only once the provider says it is done; M4b review item 2).
+        if (outcome === 'pending') {
+          const again = new Date(deps.clock.now().getTime() + 10 * 60_000);
+          await ctx.enqueue(
+            REFUND_JOB,
+            { companyId, refundId },
+            { startAfter: again, singletonKey: `${refundId}:${again.toISOString()}` },
+          );
+        }
       },
     }),
   ] as JobDefinition<never>[];

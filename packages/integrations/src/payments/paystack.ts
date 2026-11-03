@@ -3,11 +3,17 @@ import { ProviderError, requestJson } from '../http';
 import { unexpectedResponse } from '../validation';
 import {
   checkChargeRequest,
+  listedReversals,
+  namedId,
+  namedReference,
   parsePaystackWebhook,
+  paystackDispute,
   paystackEnvelope,
+  paystackRefund,
   paystackSettlement,
   paystackTransaction,
   toCharge,
+  toReversals,
   toSettlement,
   toTransaction,
   verifyPaystackSignature,
@@ -15,9 +21,11 @@ import {
   type ChargeInitialised,
   type ChargeRequest,
   type InstantRange,
+  type ListedReversal,
   type MomoNetwork,
   type PaymentsPort,
   type PaymentWebhookEvent,
+  type ProviderReversal,
   type ProviderSettlement,
   type ProviderTransaction,
   type RefundRequest,
@@ -45,6 +53,12 @@ import {
  * - A settlement object names its subaccount, and its `deductions` field carries chargebacks and
  *   refunds taken out of the payout.
  * - Account-name checks for Ghanaian banks may be unavailable; a 422 is read as "cannot check".
+ * - What a settlement deducted (M4b review 8): Paystack documents `deductions` on a settlement and
+ *   `settlement`, `deducted_amount` and `dispute` on each refund, but not how chargebacks appear.
+ *   We read a settlement's deductions from the refunds that name it, and assume a dispute the payer
+ *   won is deducted as a refund with `dispute` set. Anything the refunds do not explain is raised
+ *   by reconciliation as a difference for a person.
+ * - Refunds and disputes are listed for a charge by its transaction id (`transaction` filter).
  */
 export const PAYSTACK_API = 'https://api.paystack.co';
 
@@ -81,6 +95,8 @@ export class LiveKeyRefused extends Error {
 export const isLivePaystackKey = (key: string): boolean => key.startsWith('sk_live_');
 
 const PAGE_SIZE = 100;
+/** How far back a refund deducted from a settlement may have been made. */
+const REFUND_LOOKBACK_MS = 90 * 86_400_000;
 const pageMeta = z
   .object({ page: z.number().int(), pageCount: z.number().int() })
   .partial()
@@ -147,14 +163,16 @@ export class PaystackPayments implements PaymentsPort {
         },
       );
       const status = response.data.status;
+      // `pay_offline`: the approval prompt went to the phone, which is the flow we support. Any
+      // other next step (a code, a PIN, a birthday, a page to open) is not built yet (OQ-01).
+      const waiting = ['pay_offline', 'pending', 'ongoing', 'processing'].includes(status);
+      const final = status === 'success' || status === 'failed' || status === 'abandoned';
       return {
         provider: this.provider,
         providerReference: response.data.reference,
-        status:
-          status === 'success' || status === 'failed' || status === 'abandoned'
-            ? status
-            : 'pending',
+        status: final ? (status as 'success' | 'failed' | 'abandoned') : 'pending',
         ...(response.data.display_text ? { displayText: response.data.display_text } : {}),
+        ...(!final && !waiting ? { unsupportedStep: status.slice(0, 40) } : {}),
       };
     }
     const response = await this.call(
@@ -214,6 +232,7 @@ export class PaystackPayments implements PaymentsPort {
 
   async listSettlements(range: InstantRange): Promise<ProviderSettlement[]> {
     const out: ProviderSettlement[] = [];
+    let refunds: Awaited<ReturnType<PaystackPayments['refundsSince']>> | null = null;
     for (let page = 1; ; page += 1) {
       const response = await this.call(
         paystackEnvelope(z.array(paystackSettlement)).extend({ meta: pageMeta }),
@@ -221,21 +240,123 @@ export class PaystackPayments implements PaymentsPort {
         `/settlement?${new URLSearchParams({ from: range.from, to: range.to, perPage: String(PAGE_SIZE), page: String(page) })}`,
       );
       for (const s of response.data) {
-        const charges = await this.call(
-          paystackEnvelope(z.array(paystackTransaction)),
-          'GET',
-          `/settlement/${encodeURIComponent(String(s.id))}/transactions`,
-        );
-        out.push(
-          toSettlement(
-            s,
-            charges.data.map((t) => t.reference),
-          ),
-        );
+        const references = await this.settlementReferences(String(s.id));
+        // The refunds (and lost disputes) this payout deducted, by the settlement they name.
+        let deducted: { reference: string; amountMinor: number }[] = [];
+        if ((s.deductions ?? 0) > 0) {
+          refunds ??= await this.refundsSince(range);
+          deducted = await this.deductedFrom(String(s.id), refunds);
+        }
+        out.push(toSettlement(s, references, deducted));
       }
       const pages = response.meta?.pageCount ?? 1;
       if (page >= pages || response.data.length === 0) return out;
     }
+  }
+
+  /** Every charge a settlement paid out, over every page. */
+  private async settlementReferences(settlementId: string): Promise<string[]> {
+    const references: string[] = [];
+    for (let page = 1; ; page += 1) {
+      const charges = await this.call(
+        paystackEnvelope(z.array(paystackTransaction)).extend({ meta: pageMeta }),
+        'GET',
+        `/settlement/${encodeURIComponent(settlementId)}/transactions?${new URLSearchParams({ perPage: String(PAGE_SIZE), page: String(page) })}`,
+      );
+      references.push(...charges.data.map((t) => t.reference));
+      const pages = charges.meta?.pageCount ?? 1;
+      if (page >= pages || charges.data.length === 0) return references;
+    }
+  }
+
+  /** Refunds made from 90 days before a range to its end, every page. */
+  private async refundsSince(range: InstantRange): Promise<z.infer<typeof paystackRefund>[]> {
+    const from = new Date(Date.parse(range.from) - REFUND_LOOKBACK_MS).toISOString();
+    return this.pages(paystackRefund, '/refund', { from, to: range.to });
+  }
+
+  private async deductedFrom(
+    settlementId: string,
+    refunds: readonly z.infer<typeof paystackRefund>[],
+  ): Promise<{ reference: string; amountMinor: number }[]> {
+    const out: { reference: string; amountMinor: number }[] = [];
+    for (const r of refunds) {
+      if (r.settlement === null || r.settlement === undefined) continue;
+      if (String(r.settlement) !== settlementId) continue;
+      const amountMinor = r.deducted_amount ?? 0;
+      if (amountMinor <= 0) continue;
+      let reference = namedReference(r.transaction);
+      const id = namedId(r.transaction);
+      if (!reference && id !== null) {
+        const tx = await this.call(
+          paystackEnvelope(paystackTransaction),
+          'GET',
+          `/transaction/${encodeURIComponent(String(id))}`,
+        );
+        reference = tx.data.reference;
+      }
+      if (reference) out.push({ reference, amountMinor });
+    }
+    return out;
+  }
+
+  /**
+   * Refunds and disputes made in a range, every page (M4b review item 16). A refund or dispute
+   * that names its charge only by id is looked up for the charge's reference.
+   */
+  async listReversals(range: InstantRange): Promise<ListedReversal[]> {
+    const refunds = await this.pages(paystackRefund, '/refund', range);
+    const disputes = await this.pages(paystackDispute, '/dispute', range);
+    for (const item of [...refunds, ...disputes]) {
+      if (namedReference(item.transaction)) continue;
+      const id = namedId(item.transaction);
+      if (id === null) continue;
+      const tx = await this.call(
+        paystackEnvelope(paystackTransaction),
+        'GET',
+        `/transaction/${encodeURIComponent(String(id))}`,
+      );
+      item.transaction = { id, reference: tx.data.reference };
+    }
+    return listedReversals(refunds, disputes);
+  }
+
+  private async pages<T extends z.ZodType>(
+    item: T,
+    path: string,
+    range: InstantRange,
+  ): Promise<z.infer<T>[]> {
+    const out: z.infer<T>[] = [];
+    for (let page = 1; ; page += 1) {
+      const response = await this.call(
+        paystackEnvelope(z.array(item)).extend({ meta: pageMeta }),
+        'GET',
+        `${path}?${new URLSearchParams({ from: range.from, to: range.to, perPage: String(PAGE_SIZE), page: String(page) })}`,
+      );
+      out.push(...(response.data as z.infer<T>[]));
+      const pages = response.meta?.pageCount ?? 1;
+      if (page >= pages || response.data.length === 0) return out;
+    }
+  }
+
+  async reversals(reference: string): Promise<ProviderReversal[]> {
+    const transaction = await this.fetchTransaction(reference);
+    if (transaction.id === undefined) return [];
+    const query = new URLSearchParams({
+      transaction: String(transaction.id),
+      perPage: String(PAGE_SIZE),
+    });
+    const refunds = await this.call(
+      paystackEnvelope(z.array(paystackRefund)),
+      'GET',
+      `/refund?${query}`,
+    );
+    const disputes = await this.call(
+      paystackEnvelope(z.array(paystackDispute)),
+      'GET',
+      `/dispute?${query}`,
+    );
+    return toReversals(refunds.data, disputes.data);
   }
 
   async createSubaccount(request: SubaccountRequest): Promise<{ subaccountCode: string }> {

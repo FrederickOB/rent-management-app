@@ -5,6 +5,7 @@ import {
   type Alert,
   type PaymentWebhookRequest,
 } from '@rent/integrations';
+import { isoNow } from '../../src/billing/records';
 import { createLogger } from '../../src/core/logging/logger';
 import { PaymentProviders } from '../../src/core/payment-providers';
 import { MESSAGE_SEND_JOB, messageRequestSchema } from '../../src/core/messages';
@@ -86,8 +87,8 @@ export function paymentsServices(ctx: ServerTestContext, s: TenancyServices, b: 
     links,
     providerPayments,
     s.policy,
+    s.rules,
   );
-  const webhooks = new WebhooksService(ctx.database, providers, alertPort, providerPayments);
   const queue = new QueueService(
     ctx.database,
     s.policy,
@@ -98,6 +99,15 @@ export function paymentsServices(ctx: ServerTestContext, s: TenancyServices, b: 
     providers,
     s.cipher,
     alertPort,
+    ctx.clock,
+  );
+  const webhooks = new WebhooksService(
+    ctx.database,
+    providers,
+    alertPort,
+    providerPayments,
+    queue,
+    ctx.config,
     ctx.clock,
   );
   const receipts = new ReceiptsService(
@@ -135,6 +145,8 @@ export function paymentsServices(ctx: ServerTestContext, s: TenancyServices, b: 
     second,
     providers,
     alerts,
+    alertPort,
+    logger,
     accounts,
     providerPayments,
     links,
@@ -184,6 +196,35 @@ export async function activeAccount(
   const companyId = (requester as { companyId: string }).companyId;
   await p.accounts.ready(companyId, accountId);
   return accountId;
+}
+
+/**
+ * A management agreement in force today (decision 6; M4b review item 1): asked by one person 49
+ * hours ago on the test clock and approved by another, so the first day that starts 24 hours
+ * after the approval has begun. Returns the approval request's id.
+ */
+export async function agreementInForce(
+  ctx: ServerTestContext,
+  s: TenancyServices,
+  p: PaymentsServices,
+  requester: Staff,
+  approver: Staff,
+  ownerId: string,
+  destination: 'owner_account' | 'agency_client_account',
+): Promise<string> {
+  const back = 49 * 3_600_000;
+  ctx.clock.advance(-back);
+  try {
+    const view = await p.accounts.setAgreement(requester, ownerId, {
+      destination,
+      effectiveFrom: isoNow(ctx.clock, 'Africa/Accra'),
+    });
+    const approvalId = view.openRequest!.approvalId;
+    await s.approvals.decide(approver, approvalId, { decision: 'approve' });
+    return approvalId;
+  } finally {
+    ctx.clock.advance(back);
+  }
 }
 
 /** Runs the outbox's queued messages, as the worker's send job would. */

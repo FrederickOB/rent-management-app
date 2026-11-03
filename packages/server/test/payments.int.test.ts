@@ -16,6 +16,7 @@ import {
 } from './support/billing';
 import {
   activeAccount,
+  agreementInForce,
   CLIENT,
   deliverWebhook,
   issueReceipts,
@@ -165,14 +166,8 @@ beforeAll(async () => {
     ownerId: ownerA,
   });
   agencyAccount = await activeAccount(ctx, s, p, agency.admin, secondAdmin, { holder: 'agency' });
-  await p.accounts.setAgreement(agency.admin, ownerA, {
-    destination: 'owner_account',
-    effectiveFrom: plusDays(today, -30),
-  });
-  await p.accounts.setAgreement(agency.admin, ownerB, {
-    destination: 'agency_client_account',
-    effectiveFrom: plusDays(today, -30),
-  });
+  await agreementInForce(ctx, s, p, agency.admin, secondAdmin, ownerA, 'owner_account');
+  await agreementInForce(ctx, s, p, agency.admin, secondAdmin, ownerB, 'agency_client_account');
 });
 
 afterAll(async () => {
@@ -862,18 +857,12 @@ describe('ADR-008 settlement account changes', () => {
       available: false,
       reason: 'no_agreement',
     });
-    await p.accounts.setAgreement(agency.admin, owner, {
-      destination: 'owner_account',
-      effectiveFrom: today,
-    });
+    await agreementInForce(ctx, s, p, agency.admin, secondAdmin, owner, 'owner_account');
     expect((await moneyCard(ctx, b, agency.companyId, leaseId)).payLink).toMatchObject({
       available: false,
       reason: 'no_active_account',
     });
-    await p.accounts.setAgreement(agency.admin, owner, {
-      destination: 'agency_client_account',
-      effectiveFrom: today,
-    });
+    await agreementInForce(ctx, s, p, agency.admin, secondAdmin, owner, 'agency_client_account');
     expect((await moneyCard(ctx, b, agency.companyId, leaseId)).payLink).toMatchObject({
       available: true,
     });

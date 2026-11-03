@@ -45,6 +45,9 @@ export class PayLinksController {
       status: implement(contract.payLinks.status).handler(async ({ input }) =>
         serialize(await this.page.status(input.token, clientOf(input.client), input.intentId)),
       ),
+      returned: implement(contract.payLinks.returned).handler(async ({ input }) =>
+        serialize(await this.page.returned(input.reference, clientOf(input.client))),
+      ),
       invoiceDocument: implement(contract.payLinks.invoiceDocument).handler(async ({ input }) => ({
         url: await this.page.invoiceDocument(input.token, clientOf(input.client)),
       })),

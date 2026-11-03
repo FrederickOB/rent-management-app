@@ -52,3 +52,21 @@ describe('BC-02 live rent collection waits for counsel (decision 3; OQ-03)', () 
     expect(paymentProvidersFor(loadConfig(base)).names()).toEqual(['paystack']);
   });
 });
+
+describe('NFR-SEC the fake payment provider never takes rent in production (M4b review 18)', () => {
+  it('refuses to start, both when the configuration is read and when providers are built', () => {
+    const production = {
+      ...base,
+      NODE_ENV: 'production' as const,
+      LINKS_API_KEY: 'k'.repeat(40),
+      PAYMENTS_CUSTOMER_EMAIL_DOMAIN: 'pay.example.test',
+      FAKE_PROVIDERS_URL: 'http://localhost:4010',
+    };
+    expect(() => loadConfig(production)).toThrow(/FAKE_PROVIDERS_URL/);
+    // A configuration that skipped the check (another entry point) is refused all the same.
+    const { FAKE_PROVIDERS_URL: _unset, ...withoutFake } = production;
+    const config = { ...loadConfig(withoutFake), FAKE_PROVIDERS_URL: 'http://localhost:4010' };
+    expect(() => paymentProvidersFor(config)).toThrow(/FAKE_PROVIDERS_URL/);
+    expect(paymentProvidersFor(loadConfig(withoutFake)).names()).toEqual([]);
+  });
+});

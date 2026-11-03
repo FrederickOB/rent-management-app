@@ -308,6 +308,39 @@ export function paymentsContract(
       });
     });
 
+    it('refuses a second refund of a charge, and lists the refund against it (M4b review item 2)', async () => {
+      const request = charge();
+      await h.port.initialiseCharge(request);
+      await h.port.completeCharge(request.reference, { status: 'success' });
+      expect(await h.port.reversals(request.reference)).toEqual([]);
+      const refund = await h.port.refund({ reference: request.reference, amountMinor: 150_000 });
+      expect(await h.port.reversals(request.reference)).toEqual([
+        {
+          kind: 'refund',
+          id: refund.refundReference,
+          status: refund.status,
+          amountMinor: 150_000,
+        },
+      ]);
+      // As Paystack does: a charge already refunded is refused, so a retry must ask first.
+      await refusedWith(h.port.refund({ reference: request.reference, amountMinor: 150_000 }), 400);
+    });
+
+    it('lists a part chargeback against its charge and by day; the charge stays paid (M4b review items 16, 17)', async () => {
+      const request = charge({ amountMinor: 90_000 });
+      await h.port.initialiseCharge(request);
+      await h.port.completeCharge(request.reference, { status: 'success' });
+      await h.port.chargeback(request.reference, 30_000);
+      expect(await h.port.reversals(request.reference)).toEqual([
+        expect.objectContaining({ kind: 'chargeback', status: 'processed', amountMinor: 30_000 }),
+      ]);
+      expect((await h.port.verify(request.reference)).status).toBe('success');
+      const listed = await h.port.listReversals(around(60_000, 60_000));
+      expect(listed.filter((r) => r.reference === request.reference)).toEqual([
+        expect.objectContaining({ kind: 'chargeback', amountMinor: 30_000 }),
+      ]);
+    });
+
     it('lists banks and checks an account’s name where it can (ADR-008)', async () => {
       const banks = await h.port.listBanks();
       expect(banks.length).toBeGreaterThan(0);

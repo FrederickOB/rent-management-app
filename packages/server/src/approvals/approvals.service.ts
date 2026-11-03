@@ -467,6 +467,30 @@ export class ApprovalsService {
     return new Map(rows.map((r) => [r.subjectId, r.id]));
   }
 
+  /** Open requests of one action for these subjects, with what each asked (M4b review item 1). */
+  async openRequestsFor(
+    tx: Tx,
+    subjectIds: readonly string[],
+    actionType: string,
+  ): Promise<Map<string, { id: string; payload: unknown }>> {
+    if (subjectIds.length === 0) return new Map();
+    const rows = await tx
+      .select({
+        id: schema.approvalRequest.id,
+        subjectId: schema.approvalRequest.subjectId,
+        payload: schema.approvalRequest.payload,
+      })
+      .from(schema.approvalRequest)
+      .where(
+        and(
+          inArray(schema.approvalRequest.subjectId, [...subjectIds]),
+          inArray(schema.approvalRequest.status, ['pending', 'cooling_off']),
+          eq(schema.approvalRequest.actionType, actionType),
+        ),
+      );
+    return new Map(rows.map((r) => [r.subjectId, { id: r.id, payload: r.payload }]));
+  }
+
   async list(actor: Actor | null, which: 'open' | 'closed'): Promise<ApprovalView[]> {
     const staff = asStaff(actor);
     this.policy.assert(staff, 'approval.view');

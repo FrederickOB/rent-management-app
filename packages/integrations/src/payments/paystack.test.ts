@@ -38,7 +38,11 @@ function replay(routes: Record<string, { status?: number; file: string }>) {
       body: init?.body ? JSON.parse(String(init.body)) : undefined,
       authorization: headers.get('authorization'),
     });
-    const key = `${method} ${url.pathname}${url.pathname === '/transaction' || url.pathname === '/settlement' ? `#${url.searchParams.get('page')}` : ''}`;
+    const paged =
+      url.pathname === '/transaction' ||
+      url.pathname === '/settlement' ||
+      url.pathname.endsWith('/transactions');
+    const key = `${method} ${url.pathname}${paged ? `#${url.searchParams.get('page')}` : ''}`;
     const route = routes[key];
     if (!route) return new Response('{"status":false,"message":"Not found"}', { status: 404 });
     return new Response(fixture(route.file), {
@@ -183,7 +187,10 @@ describe('BC-02 the Paystack adapter (recorded responses)', () => {
   it('lists settlements with their charges, and reads deductions out of the payout', async () => {
     const { port } = replay({
       'GET /settlement#1': { file: 'settlements.json' },
-      'GET /settlement/3090001/transactions': { file: 'settlement-transactions.json' },
+      'GET /settlement/3090001/transactions#1': { file: 'settlement-transactions.json' },
+      'GET /settlement/3090001/transactions#2': { file: 'settlement-transactions-page-2.json' },
+      // The refunds the payout deducted, by the settlement they name (fixture assumption).
+      'GET /refund': { file: 'refunds.json' },
     });
     const [settlement] = await port.listSettlements({
       from: '2026-11-04T00:00:00.000Z',
@@ -199,8 +206,11 @@ describe('BC-02 the Paystack adapter (recorded responses)', () => {
       deductionsMinor: 20_000,
       netMinor: 205_564,
       settledAt: '2026-11-04T00:00:00.000Z',
+      // The second charge is on the second page.
       references: ['pi-0192f5a8111172228333444455557777', 'pi-0192f5a8111172228333444455559999'],
-      deductedReferences: [],
+      deductedReferences: [
+        { reference: 'pi-0192f5a8111172228333444455550000', amountMinor: 20_000 },
+      ],
     });
     expect(settlement!.grossMinor - settlement!.feesMinor - settlement!.deductionsMinor).toBe(
       settlement!.netMinor,
@@ -280,5 +290,119 @@ describe('BC-02 the Paystack adapter (recorded responses)', () => {
       true,
     );
     expect(new PaystackPayments({ secretKey: KEY, liveCollection: 'disabled' }).live).toBe(false);
+  });
+});
+
+/** As `replay`, keyed on method, path and `page` (when asked) and the `transaction` filter. */
+function replayPages(routes: Record<string, { status?: number; file: string }>) {
+  const calls: URL[] = [];
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    calls.push(url);
+    const base = `${init?.method ?? 'GET'} ${url.pathname}`;
+    const page = url.searchParams.get('page');
+    const transaction = url.searchParams.get('transaction');
+    const route =
+      routes[`${base}#${page}`] ?? routes[`${base}?transaction=${transaction}`] ?? routes[base];
+    if (!route) return new Response('{"status":false,"message":"Not found"}', { status: 404 });
+    return new Response(fixture(route.file), {
+      status: route.status ?? 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const port = new PaystackPayments({
+    secretKey: KEY,
+    liveCollection: 'disabled',
+    baseUrl: 'https://api.paystack.test',
+    fetch: fetchImpl,
+  });
+  return { port, calls };
+}
+
+describe('BC-02 the Paystack adapter reads refunds, disputes and deductions (M4b review)', () => {
+  it('reads every page of a settlement’s charges and the refunds it deducted (review item 6)', async () => {
+    const { port, calls } = replayPages({
+      'GET /settlement#1': { file: 'settlements-deducted.json' },
+      'GET /settlement/3090002/transactions#1': {
+        file: 'settlement-3090002-transactions-page-1.json',
+      },
+      'GET /settlement/3090002/transactions#2': {
+        file: 'settlement-3090002-transactions-page-2.json',
+      },
+      'GET /refund#1': { file: 'refunds-deducted.json' },
+      'GET /transaction/4099260520': { file: 'transaction-by-id.json' },
+    });
+    const [settlement] = await port.listSettlements({
+      from: '2026-11-05T00:00:00.000Z',
+      to: '2026-11-06T00:00:00.000Z',
+    });
+    expect(settlement).toMatchObject({
+      settlementId: '3090002',
+      grossMinor: 180_000,
+      feesMinor: 3_490,
+      deductionsMinor: 63_000,
+      netMinor: 113_510,
+      references: ['pi-0192f5a8111172228333444455551111', 'pi-0192f5a8111172228333444455552222'],
+      // A refund that carries its charge, and a lost dispute deducted as a refund that names
+      // its charge by id only (fixture assumption, OQ-01). The pending refund deducted nothing.
+      deductedReferences: [
+        { reference: 'pi-0192f5a8111172228333444455557777', amountMinor: 33_000 },
+        { reference: 'pi-0192f5a8111172228333444455559999', amountMinor: 30_000 },
+      ],
+    });
+    const deducted = settlement!.deductedReferences.reduce((sum, d) => sum + d.amountMinor, 0);
+    expect(deducted).toBe(settlement!.deductionsMinor);
+    // Refunds are read from 90 days before the settlement's day.
+    const refunds = calls.find((u) => u.pathname === '/refund')!;
+    expect(refunds.searchParams.get('from')).toBe('2026-08-07T00:00:00.000Z');
+  });
+
+  it('lists a charge’s refunds and the disputes that took money (review items 2 and 17)', async () => {
+    const reference = 'pi-0192f5a8111172228333444455557777';
+    const { port, calls } = replayPages({
+      [`GET /transaction/verify/${reference}`]: { file: 'verify-success.json' },
+      'GET /refund?transaction=4099260516': { file: 'refunds-for-transaction.json' },
+      'GET /dispute?transaction=4099260516': { file: 'disputes-for-transaction.json' },
+    });
+    expect(await port.reversals(reference)).toEqual([
+      { kind: 'refund', id: '6001010', status: 'failed', amountMinor: 20_000 },
+      { kind: 'refund', id: '6001011', status: 'pending', amountMinor: 20_000 },
+      { kind: 'chargeback', id: '880010', status: 'processed', amountMinor: 50_000 },
+      { kind: 'chargeback', id: '880012', status: 'pending', amountMinor: 10_000 },
+    ]);
+    expect(calls.filter((u) => u.pathname === '/refund')[0]!.searchParams.get('transaction')).toBe(
+      '4099260516',
+    );
+  });
+
+  it('lists the day’s refunds and disputes with their charges (review item 16)', async () => {
+    const { port } = replayPages({
+      'GET /refund#1': { file: 'refunds-deducted.json' },
+      'GET /dispute#1': { file: 'disputes-for-transaction.json' },
+      'GET /transaction/4099260520': { file: 'transaction-by-id.json' },
+    });
+    const listed = await port.listReversals({
+      from: '2026-11-04T00:00:00.000Z',
+      to: '2026-11-05T00:00:00.000Z',
+    });
+    expect(listed.map((r) => [r.kind, r.reference, r.status, r.amountMinor])).toEqual([
+      ['refund', 'pi-0192f5a8111172228333444455557777', 'processed', 33_000],
+      ['refund', 'pi-0192f5a8111172228333444455559999', 'processed', 30_000],
+      ['refund', 'pi-0192f5a8111172228333444455553333', 'pending', 5_000],
+      ['chargeback', 'pi-0192f5a8111172228333444455557777', 'processed', 50_000],
+      ['chargeback', 'pi-0192f5a8111172228333444455557777', 'pending', 10_000],
+    ]);
+  });
+
+  it('reports a MoMo step it cannot take, such as an OTP, instead of waiting (review item 19)', async () => {
+    const { port } = replay({ 'POST /charge': { file: 'charge-send-otp.json' } });
+    expect(
+      await port.initialiseCharge({
+        ...charge,
+        channel: 'momo',
+        customer: { email: 'tenant@example.test', phone: '+233200000003' },
+        momoNetwork: 'telecel',
+      }),
+    ).toMatchObject({ status: 'pending', unsupportedStep: 'send_otp' });
   });
 });

@@ -449,10 +449,16 @@ export class BillingReadService {
       : [];
     const unverified = new Set(rules.filter((r) => r.status !== 'verified').map((r) => r.id));
     const today = await this.today(tx, staff.companyId);
+    // Credit the lease holds pays periods as they start (P02): what is left to pay after it is
+    // what the walk and ageing count, so an invoice paid ahead is never overdue (M4b review F5).
+    const walks = new Map<string, ReturnType<BillingEngine['walk']>>();
+    for (const leaseId of leaseIds)
+      walks.set(leaseId, this.engine.walk(await this.engine.load(tx, staff.companyId, leaseId)));
     return rows.map((r) => {
       const mine = lines.filter((l) => l.invoiceId === r.id);
       const balances = mine.map((l) => lineBalance(l, allocations));
-      const outstanding = balances.reduce((s, b) => s + b.outstandingMinor, 0);
+      const walk = walks.get(r.leaseId)!;
+      const outstanding = mine.reduce((s, l) => s + remainingAfterWalk(l, allocations, walk), 0);
       return {
         id: r.id,
         number: formatInvoiceNumber(r.number),
@@ -1366,7 +1372,8 @@ export class BillingReadService {
             .where(
               and(
                 inArray(schema.unmatchedRefund.paymentId, ids),
-                inArray(schema.unmatchedRefund.status, ['awaiting_approval', 'approved']),
+                // `sent`: the provider is still making it; shown as approved (M4b review item 2).
+                inArray(schema.unmatchedRefund.status, ['awaiting_approval', 'approved', 'sent']),
               ),
             )
         : [];
@@ -1410,7 +1417,10 @@ export class BillingReadService {
             ? {
                 refundId: refund.id,
                 approvalId: refund.approvalId,
-                status: refund.status as 'awaiting_approval' | 'approved',
+                status:
+                  refund.status === 'awaiting_approval'
+                    ? ('awaiting_approval' as const)
+                    : ('approved' as const),
               }
             : null,
         };

@@ -21,6 +21,7 @@ import {
 import { settlementEntryLines, shareSettlementFees } from '@rent/domain/ledger';
 import { format, money } from '@rent/domain/money';
 import { reconcileSettlement, reconcileTransactions } from '@rent/domain/payments';
+import { DomainError } from '@rent/domain/errors';
 import type { AlertPort, ProviderSettlement } from '@rent/integrations';
 import { companyRecord } from '../companies/companies.service';
 import { cashAccountFor } from '../companies/settlement-destinations';
@@ -113,6 +114,7 @@ export class ReconciliationService {
     );
     let processed = 0;
     let exceptions = 0;
+    const posted: string[] = [];
     for (const reference of result.toProcess) {
       // Missed by the webhook and verify-pending (an outage): the normal path posts it once.
       const outcome = await this.payments.processReference(provider, reference);
@@ -124,9 +126,28 @@ export class ReconciliationService {
           'unmatched',
           'already_posted',
         ].includes(outcome)
-      )
+      ) {
         processed += 1;
+        posted.push(reference);
+      }
       this.logger.info({ provider, outcome }, 'reconciliation processed a missed provider payment');
+    }
+    // A payment posted after its settlement was reconciled is settled now (review item 16).
+    await this.settleLate(provider, posted);
+    // Taken back at the provider and not reversed here: the chargeback path checks with the
+    // provider, so a missed refund or dispute webhook is caught (review item 16). So are refunds
+    // and disputes made today against charges paid on earlier days.
+    const listedReversals = await port.listReversals(range);
+    const reversedRefs = [
+      ...new Set([
+        ...result.toReverse,
+        ...listedReversals.filter((r) => r.status === 'processed').map((r) => r.reference),
+      ]),
+    ];
+    for (const reference of reversedRefs) {
+      if (await this.payments.ownRefund(provider, reference)) continue;
+      const outcome = await this.payments.recordChargeback(provider, reference);
+      this.logger.info({ provider, outcome }, 'reconciliation checked a reversal at the provider');
     }
     for (const exception of result.exceptions) {
       if (exception.kind === 'missing_here' && result.toProcess.includes(exception.reference)) {
@@ -154,6 +175,23 @@ export class ReconciliationService {
         local?.company_id ??
         (await this.payments.intentByReference(exception.reference))?.companyId ??
         null;
+      if (!companyId && exception.kind === 'currency_differs') {
+        // Not ours yet: its company is the one its subaccount settles to.
+        const owner = await this.payments.companyOfCharge(provider, exception.reference);
+        if (owner) {
+          await withCompany(this.database, { companyId: owner, actorKind: 'system' }, (tx) =>
+            this.payments.flag(tx, owner, {
+              kind: 'amount_differs',
+              provider,
+              reference: exception.reference,
+              detail: describe(exception),
+              dedupeKey: `currency_differs:${provider}:${exception.reference}`,
+            }),
+          );
+          exceptions += 1;
+          continue;
+        }
+      }
       if (!companyId) {
         await this.alerts.raise({
           severity: 'warning',
@@ -165,7 +203,8 @@ export class ReconciliationService {
       }
       await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
         this.payments.flag(tx, companyId, {
-          kind: exception.kind,
+          // A charge in another currency is shown as an amount that differs (review item 7).
+          kind: exception.kind === 'currency_differs' ? 'amount_differs' : exception.kind,
           provider,
           reference: exception.reference,
           paymentId: local?.payment_id ?? null,
@@ -193,6 +232,7 @@ export class ReconciliationService {
       if (settlement.status !== 'success') continue;
       if (await this.settlement(provider, settlement)) posted += 1;
     }
+    await this.clearing(provider, day);
     return posted;
   }
 
@@ -228,7 +268,11 @@ export class ReconciliationService {
             eq(schema.providerSettlement.settlementRef, s.settlementId),
           ),
         );
-      if (existing) return false;
+      if (existing) {
+        // Reconciled before: settle any of its payments posted since (review item 16).
+        await this.settleLateIn(tx, companyId, provider, existing.id);
+        return false;
+      }
       const [account] = await tx
         .select()
         .from(schema.settlementAccount)
@@ -248,6 +292,7 @@ export class ReconciliationService {
           deductionsMinor: s.deductionsMinor,
           netMinor: s.netMinor,
           settledAt: new Date(s.settledAt),
+          chargeReferences: [...s.references],
         })
         .returning({ id: schema.providerSettlement.id });
       const settlementRowId = row!.id;
@@ -293,6 +338,7 @@ export class ReconciliationService {
       );
       // Deductions: the reversed payments the provider names, in the book their reversal took
       // the money back from (P21b, Cr 1050).
+      // Deductions: the reversed or refunded payments the provider names (P21b or P31, Cr 1050).
       const deductionBooks = await this.reversalBooks(
         tx,
         payments.map((p) => p.id),
@@ -309,6 +355,7 @@ export class ReconciliationService {
         ...result.parts.map((p) => p.bookId),
         ...deductions.map((d) => d.bookId),
       ]);
+      const unposted: string[] = [];
       for (const bookId of books2) {
         const part = result.parts.find((p) => p.bookId === bookId);
         const shares = part
@@ -329,19 +376,34 @@ export class ReconciliationService {
           deductions: deductions.filter((d) => d.bookId === bookId),
         });
         if (lines.length === 0) continue;
-        await this.posting.post(tx, {
-          companyId,
-          rule: 'P22',
-          key: `P22:${settlementRowId}:${bookId}`,
-          valueDate: toIsoDate(
-            businessDateOf(instantFrom(new Date(s.settledAt)), company!.timeZone),
-          ),
-          lines,
-          record: { type: 'provider_settlement', id: settlementRowId },
-          causedBy: null,
-        });
+        // Each book in a savepoint: one that cannot post is raised, and the rest still post
+        // (review F6).
+        try {
+          await tx.transaction((sp) =>
+            this.posting.post(sp, {
+              companyId,
+              rule: 'P22',
+              key: `P22:${settlementRowId}:${bookId}`,
+              valueDate: toIsoDate(
+                businessDateOf(instantFrom(new Date(s.settledAt)), company!.timeZone),
+              ),
+              lines,
+              record: { type: 'provider_settlement', id: settlementRowId },
+              causedBy: null,
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          unposted.push(error.message);
+        }
       }
       const problems: string[] = [];
+      for (const reason of unposted)
+        problems.push(`part of it could not be posted (${reason.slice(0, 120)})`);
+      if (s.netMinor < 0)
+        problems.push(
+          `the provider paid out nothing and kept back ${format(money(-s.netMinor))} more than this settlement held; check how it recovers that sum`,
+        );
       if (result.unknownReferences.length > 0)
         problems.push(
           `${result.unknownReferences.length} payment(s) in the report are not ours or not posted yet`,
@@ -370,6 +432,184 @@ export class ReconciliationService {
     });
   }
 
+  /**
+   * Payments posted after the settlement that paid them out was reconciled (review item 16):
+   * each settled now, once, by its own P22 entry keyed on the payment. Its share of the fees was
+   * already taken with the others (recorded as a known gap in the plan), so it settles in full.
+   */
+  async settleLate(provider: string, references: readonly string[]): Promise<number> {
+    if (references.length === 0) return 0;
+    const refs = await withSystem(this.database, {}, (tx) =>
+      tx.execute<{ company_id: string }>(
+        sql`select distinct company_id from app.provider_payment_refs(${provider}, ${`{${references.map((r) => `"${r.replace(/"/g, '')}"`).join(',')}}`}::text[])`,
+      ),
+    );
+    let settled = 0;
+    for (const { company_id: companyId } of refs.rows)
+      settled += await withCompany(
+        this.database,
+        { companyId, actorKind: 'system' },
+        async (tx) => {
+          const rows = await tx
+            .select({ id: schema.providerSettlement.id })
+            .from(schema.providerSettlement)
+            .where(
+              and(
+                eq(schema.providerSettlement.provider, provider),
+                sql`${schema.providerSettlement.chargeReferences} && ${`{${references.map((r) => `"${r.replace(/"/g, '')}"`).join(',')}}`}::text[]`,
+              ),
+            );
+          let n = 0;
+          for (const row of rows) n += await this.settleLateIn(tx, companyId, provider, row.id);
+          return n;
+        },
+      );
+    return settled;
+  }
+
+  /** Settles a reconciled settlement's payments that have no P22 line yet. */
+  private async settleLateIn(
+    tx: Tx,
+    companyId: string,
+    provider: string,
+    settlementRowId: string,
+  ): Promise<number> {
+    const [row] = await tx
+      .select()
+      .from(schema.providerSettlement)
+      .where(eq(schema.providerSettlement.id, settlementRowId));
+    if (!row || row.chargeReferences.length === 0) return 0;
+    const late = await tx
+      .select({
+        id: schema.payment.id,
+        bookId: schema.payment.bookId,
+        amountMinor: schema.payment.amountMinor,
+      })
+      .from(schema.payment)
+      .where(
+        and(
+          eq(schema.payment.provider, provider),
+          inArray(schema.payment.providerReference, row.chargeReferences),
+          sql`not exists (select 1 from journal_line l where l.company_id = ${schema.payment.companyId}
+                and l.payment_id = ${schema.payment.id} and l.account_code = '1050'
+                and l.settlement_id is not null and l.amount_minor < 0)`,
+        ),
+      );
+    if (late.length === 0) return 0;
+    const [account] = await tx
+      .select()
+      .from(schema.settlementAccount)
+      .where(eq(schema.settlementAccount.id, row.settlementAccountId));
+    const company = await companyRecord(tx, companyId);
+    const to = cashAccountFor(account!.holder as 'owner' | 'agency', company!.kind);
+    const books = await this.booksOf(
+      tx,
+      late.map((p) => p.id),
+    );
+    for (const payment of late) {
+      await this.posting.post(tx, {
+        companyId,
+        rule: 'P22',
+        key: `P22:${settlementRowId}:payment:${payment.id}`,
+        valueDate: toIsoDate(businessDateOf(instantFrom(row.settledAt), company!.timeZone)),
+        lines: settlementEntryLines({
+          bookId: books.get(payment.id) ?? payment.bookId,
+          to,
+          provider,
+          settlementId: settlementRowId,
+          settlementAccountId: account!.id,
+          shares: [{ paymentId: payment.id, grossMinor: payment.amountMinor, feesMinor: 0 }],
+          deductions: [],
+        }),
+        record: { type: 'provider_settlement', id: settlementRowId },
+        causedBy: null,
+      });
+    }
+    return late.length;
+  }
+
+  /**
+   * Invariant 11 (review item 11): provider clearing (1050) for each settlement account equals
+   * what the provider still holds unsettled for its subaccount: successful charges of the last
+   * 14 days not yet paid out, less refunds and chargebacks not yet deducted. Any difference is
+   * raised for a person, once a day per account.
+   */
+  async clearing(provider: string, day: string): Promise<number> {
+    const port = this.providers.get(provider);
+    const from = ReconciliationService.dayRange(
+      toIsoDate(addDays(parseBusinessDate(day), -13)),
+    ).from;
+    // To the end of the day after: everything posted so far, whatever the clock's lag.
+    const range = {
+      from,
+      to: ReconciliationService.dayRange(toIsoDate(addDays(parseBusinessDate(day), 1))).to,
+    };
+    const [charges, settlements, reversals] = [
+      await port.listTransactions(range),
+      await port.listSettlements(range),
+      await port.listReversals(range),
+    ];
+    const paidOut = new Set(settlements.flatMap((x) => x.references));
+    const deducted = new Map<string, number>();
+    for (const d of settlements.flatMap((x) => x.deductedReferences))
+      deducted.set(d.reference, (deducted.get(d.reference) ?? 0) + d.amountMinor);
+    const owed = new Map<string, number>();
+    const add = (code: string, amount: number) => owed.set(code, (owed.get(code) ?? 0) + amount);
+    const subaccountOf = new Map<string, string>();
+    // Every account the provider shows activity for is compared, even with nothing unsettled.
+    for (const settlement of settlements) add(settlement.subaccountCode, 0);
+    for (const c of charges) {
+      add(c.subaccountCode, 0);
+      subaccountOf.set(c.reference, c.subaccountCode);
+      if (c.currency !== 'GHS') continue;
+      if ((c.status === 'success' || c.status === 'reversed') && !paidOut.has(c.reference))
+        add(c.subaccountCode, c.amountMinor);
+    }
+    const taken = new Map<string, number>();
+    for (const r of reversals)
+      if (r.status === 'processed')
+        taken.set(r.reference, (taken.get(r.reference) ?? 0) + r.amountMinor);
+    for (const [reference, amount] of taken) {
+      const code = subaccountOf.get(reference);
+      const left = amount - (deducted.get(reference) ?? 0);
+      if (code && left > 0) add(code, -left);
+    }
+    let raised = 0;
+    for (const [code, providerMinor] of owed) {
+      const found = await withSystem(this.database, {}, (tx) =>
+        tx.execute<{ company_id: string; settlement_account_id: string }>(
+          sql`select company_id, settlement_account_id from app.settlement_by_subaccount(${provider}, ${code})`,
+        ),
+      );
+      const owner = found.rows[0];
+      if (!owner) continue;
+      const companyId = owner.company_id;
+      raised += await withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
+        const held = await tx.execute<{ total: string | null }>(
+          sql`select coalesce(sum(amount_minor), 0)::text as total from journal_line
+                where account_code = '1050' and provider = ${provider}
+                  and settlement_account_id = ${owner.settlement_account_id}`,
+        );
+        const ourMinor = Number(held.rows[0]?.total ?? 0);
+        if (ourMinor === providerMinor) return 0;
+        const [account] = await tx
+          .select({ ownerId: schema.settlementAccount.ownerId })
+          .from(schema.settlementAccount)
+          .where(eq(schema.settlementAccount.id, owner.settlement_account_id));
+        await this.payments.flag(tx, companyId, {
+          kind: 'settlement_difference',
+          provider,
+          ownerId: account?.ownerId ?? null,
+          amountMinor: Math.abs(ourMinor - providerMinor),
+          detail: `Provider clearing does not agree with the provider: our books hold ${format(money(ourMinor))} not yet paid out to this account, the provider ${format(money(providerMinor))} (invariant 11). Check recent payments, refunds and chargebacks.`,
+          dedupeKey: `clearing:${provider}:${owner.settlement_account_id}:${day}`,
+        });
+        return 1;
+      });
+    }
+    return raised;
+  }
+
   /** The book each payment's money now sits in: its match's book when matched, else its own. */
   private async booksOf(tx: Tx, paymentIds: readonly string[]): Promise<Map<string, string>> {
     if (paymentIds.length === 0) return new Map();
@@ -386,7 +626,7 @@ export class ReconciliationService {
     const rows = await tx.execute<{ payment_id: string; book_id: string }>(
       sql`select distinct l.payment_id, l.book_id from journal_line l
           join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
-          where e.rule = 'P21' and l.account_code = '1050' and l.amount_minor < 0
+          where e.rule in ('P21', 'P31') and l.account_code = '1050' and l.amount_minor < 0
             and l.payment_id = any(${`{${paymentIds.join(',')}}`}::uuid[])`,
     );
     return new Map(rows.rows.map((r) => [r.payment_id, r.book_id]));
@@ -403,5 +643,7 @@ function describe(e: ReturnType<typeof reconcileTransactions>['exceptions'][numb
       return `The provider lists ${format(money(e.providerMinor))} where we recorded ${format(money(e.localMinor))}.`;
     case 'not_successful_at_provider':
       return `We recorded a payment the provider lists as ${e.status}.`;
+    case 'currency_differs':
+      return `The provider lists a charge in ${e.currency.slice(0, 3)}, not cedis. Nothing was posted; check it with the provider.`;
   }
 }

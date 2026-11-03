@@ -295,68 +295,129 @@ export class QueueService {
   }
 
   /**
-   * The refund job (plan 4.12): makes an approved provider refund outside any transaction, then
-   * posts P31 (Dr 2090, Cr 1050) in the book holding the suspense. Idempotent: a refund already
-   * made is not made again (the provider keys it on the charge).
+   * The refund job (plan 4.12; M4b review item 2): makes an approved provider refund outside any
+   * transaction and posts P31 (Dr 2090, Cr 1050) only once the provider says it is `processed`.
+   * It always asks the provider first what refunds the charge already has, so a retry never sends
+   * a second refund: one already there is followed, not repeated. `pending` waits (the refund is
+   * `sent`) for the webhook or the next check; `failed` posts nothing and marks the refund failed.
    */
-  async refundWithProvider(companyId: string, refundId: string): Promise<'refunded' | 'skipped'> {
+  async refundWithProvider(
+    companyId: string,
+    refundId: string,
+  ): Promise<'refunded' | 'pending' | 'failed' | 'skipped'> {
     const ctx = { companyId, actorKind: 'system' as const };
     const loaded = await withCompany(this.database, ctx, async (tx) => {
       const [refund] = await tx
         .select()
         .from(schema.unmatchedRefund)
         .where(eq(schema.unmatchedRefund.id, refundId));
-      if (!refund || refund.status !== 'approved') return null;
+      if (!refund || !['approved', 'sent'].includes(refund.status)) return null;
       const [payment] = await paymentsByIds(tx, [refund.paymentId]);
       return payment ? { refund, payment } : null;
     });
     if (!loaded) return 'skipped';
     const { refund, payment } = loaded;
     if (!payment.row.provider || !payment.row.providerReference) return 'skipped';
-    let result;
-    try {
-      result = await this.providers.get(payment.row.provider).refund({
-        reference: payment.row.providerReference,
-        amountMinor: refund.amountMinor,
-      });
-    } catch (error) {
-      if (error instanceof ProviderError && !error.retryable) {
-        await withCompany(this.database, ctx, (tx) =>
-          tx
-            .update(schema.unmatchedRefund)
-            .set({
-              status: 'failed',
-              failureReason: 'provider_refused',
-              updatedAt: this.clock.now(),
-            })
-            .where(
-              and(
-                eq(schema.unmatchedRefund.id, refundId),
-                eq(schema.unmatchedRefund.status, 'approved'),
-              ),
-            ),
-        );
-        await this.alerts.raise({
-          severity: 'warning',
-          code: 'payments.refund_refused',
-          message: 'The provider refused a refund of unmatched money',
-          context: { companyId, refundId },
+    const port = this.providers.get(payment.row.provider);
+    // Ask first (never refund blind): our own refund is the charge's refund, if it has one.
+    const existing = (await port.reversals(payment.row.providerReference)).filter(
+      (r) =>
+        r.kind === 'refund' && (!refund.providerRefundRef || r.id === refund.providerRefundRef),
+    );
+    let state: { id: string; status: 'pending' | 'processed' | 'failed' } | null =
+      existing.find((r) => r.status !== 'failed') ?? existing[0] ?? null;
+    if (!state && refund.status === 'approved') {
+      try {
+        const made = await port.refund({
+          reference: payment.row.providerReference,
+          amountMinor: refund.amountMinor,
         });
-        return 'skipped';
+        state = { id: made.refundReference, status: made.status };
+      } catch (error) {
+        if (error instanceof ProviderError && !error.retryable) {
+          await this.refundFailed(ctx, refundId, 'provider_refused');
+          return 'failed';
+        }
+        throw error;
       }
-      throw error;
     }
-    await withCompany(this.database, ctx, async (tx) => {
+    if (!state) {
+      // Marked sent, yet the provider shows no refund: a person must look.
+      await this.alerts.raise({
+        severity: 'warning',
+        code: 'payments.refund_missing',
+        message: 'A refund we sent is not listed by the provider',
+        context: { companyId, refundId },
+      });
+      return 'pending';
+    }
+    if (state.status === 'failed') {
+      await this.refundFailed(ctx, refundId, 'provider_failed');
+      return 'failed';
+    }
+    const found = state;
+    return withCompany(this.database, ctx, async (tx) => {
       await lockPayment(tx, companyId, payment.id);
       const [current] = await tx
         .select()
         .from(schema.unmatchedRefund)
         .where(eq(schema.unmatchedRefund.id, refundId))
         .for('update');
-      if (current?.status !== 'approved') return;
-      await this.postRefund(tx, companyId, refundId, payment, '1050', result.refundReference);
+      if (!current || !['approved', 'sent'].includes(current.status)) return 'skipped' as const;
+      if (found.status === 'pending') {
+        if (current.status === 'approved')
+          await tx
+            .update(schema.unmatchedRefund)
+            .set({ status: 'sent', providerRefundRef: found.id, updatedAt: this.clock.now() })
+            .where(eq(schema.unmatchedRefund.id, refundId));
+        return 'pending' as const;
+      }
+      await this.postRefund(tx, companyId, refundId, payment, '1050', found.id);
+      return 'refunded' as const;
     });
-    return 'refunded';
+  }
+
+  /** The approved or sent refund behind a provider reference, if any (for refund webhooks). */
+  async ownRefundFor(
+    companyId: string,
+    paymentId: string,
+  ): Promise<{ id: string; status: string } | null> {
+    const [row] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+      tx
+        .select({ id: schema.unmatchedRefund.id, status: schema.unmatchedRefund.status })
+        .from(schema.unmatchedRefund)
+        .where(
+          and(
+            eq(schema.unmatchedRefund.paymentId, paymentId),
+            sql`${schema.unmatchedRefund.status} in ('approved', 'sent', 'refunded')`,
+          ),
+        ),
+    );
+    return row ?? null;
+  }
+
+  private async refundFailed(
+    ctx: { companyId: string; actorKind: 'system' },
+    refundId: string,
+    reason: string,
+  ): Promise<void> {
+    await withCompany(this.database, ctx, (tx) =>
+      tx
+        .update(schema.unmatchedRefund)
+        .set({ status: 'failed', failureReason: reason, updatedAt: this.clock.now() })
+        .where(
+          and(
+            eq(schema.unmatchedRefund.id, refundId),
+            sql`${schema.unmatchedRefund.status} in ('approved', 'sent')`,
+          ),
+        ),
+    );
+    await this.alerts.raise({
+      severity: 'warning',
+      code: 'payments.refund_failed',
+      message: 'A refund of unmatched money failed at the provider; nothing was posted',
+      context: { companyId: ctx.companyId, refundId },
+    });
   }
 
   async closeStaleRefunds(tx: Tx, paymentId: string): Promise<void> {

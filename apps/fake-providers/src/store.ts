@@ -46,6 +46,13 @@ export interface FakeTransaction {
   settlementId?: number;
   /** Refunded or charged back: deducted from the next settlement to its subaccount, once. */
   chargedBack?: { readonly amount: number; deductedIn?: number };
+  /** Its refunds and disputes, as Paystack's refund and dispute APIs list them (M4b review). */
+  reversals?: {
+    readonly kind: 'refund' | 'dispute';
+    readonly id: number;
+    readonly amount: number;
+    readonly createdAt: string;
+  }[];
 }
 
 export interface FakeSettlement {

@@ -63,6 +63,20 @@ export const payPageSchema = z.object({
   partial: z.object({ monthStart: isoDate, amountMinor: minor }).nullable(),
   amounts: z.object({ prefillMinor: minor, minMinor: minor, maxMinor: minor }),
   methods: z.array(z.enum(['momo', 'card'])),
+  /**
+   * M4b review 15: the company's advance rent limit (AR-05), where its policy is `warn` or
+   * `block` and a rule applies. Under `block` the amounts already stop at `capMinor`; under
+   * `warn` a payment past it is accepted and flagged. The rule is unverified until counsel says.
+   */
+  advance: z
+    .object({
+      policy: z.enum(['warn', 'block']),
+      limitMonths: z.number().int(),
+      capMinor: minor,
+      ruleUnverified: z.boolean(),
+    })
+    .nullable()
+    .optional(),
   /** The latest payment started from this link, if any. */
   latest: z
     .object({
@@ -85,6 +99,12 @@ const intentSchema = z.object({
   /** For example "Approve the payment on your phone". */
   message: z.string().nullable(),
   receiptNumber: z.string().nullable(),
+  /**
+   * M4b review 19: why a payment failed, for the page: PROVIDER_CHARGE_FAILED,
+   * PROVIDER_STEP_UNSUPPORTED (the network asked for a step not built yet, such as an OTP),
+   * PROVIDER_REFUSED or PROVIDERS_UNAVAILABLE. Null otherwise.
+   */
+  failureCode: z.string().nullable().optional(),
 });
 /** A payment started from a pay link, as `start` and `status` answer. */
 export type PayIntent = z.infer<typeof intentSchema>;
@@ -132,6 +152,22 @@ export const payLinksContract = {
     })
     .input(z.object({ token, client, intentId: uuid }).strict())
     .output(intentSchema),
+  returned: oc
+    .route({
+      method: 'POST',
+      path: '/links/pay/return',
+      summary:
+        'The card return page, ${LINKS_ORIGIN}/p/return?reference=…: the payment’s status and receipt number by its charge reference, with no pay-link token and no invoice details (M4b review 14)',
+    })
+    .input(z.object({ reference: z.string().regex(/^pi-[0-9a-f]{32}$/), client }).strict())
+    .output(
+      z.object({
+        status: z.enum(INTENT_STATUSES),
+        receiptNumber: z.string().nullable(),
+        message: z.string().nullable(),
+        failureCode: z.string().nullable(),
+      }),
+    ),
   invoiceDocument: oc
     .route({
       method: 'POST',
@@ -217,8 +253,22 @@ export type SettlementAccountView = z.infer<typeof settlementAccountSchema>;
 export const managementAgreementSchema = z.object({
   ownerId: uuid,
   ownerName: z.string(),
+  /** The agreement in force today. */
   destination: z.enum(RENT_DESTINATIONS).nullable(),
   effectiveFrom: isoDate.nullable(),
+  /**
+   * M4b review: a change is a request a second person approves (`management_agreement.change`),
+   * in force no earlier than 24 hours after approval. `next`: approved, starting later.
+   */
+  next: z
+    .object({ destination: z.enum(RENT_DESTINATIONS), effectiveFrom: isoDate })
+    .nullable()
+    .optional(),
+  /** A change still waiting for a second person. */
+  openRequest: z
+    .object({ approvalId: uuid, destination: z.enum(RENT_DESTINATIONS), effectiveFrom: isoDate })
+    .nullable()
+    .optional(),
 });
 
 export const settlementContract = {
@@ -274,7 +324,12 @@ export const settlementContract = {
     })
     .output(z.array(managementAgreementSchema)),
   setAgreement: oc
-    .route({ method: 'PUT', path: '/owners/{ownerId}/management-agreement' })
+    .route({
+      method: 'PUT',
+      path: '/owners/{ownerId}/management-agreement',
+      summary:
+        'Ask to change where an owner’s rent goes: a second person approves, the owner is told, and it takes effect no earlier than 24 hours after approval (never back-dated)',
+    })
     .input(
       z.object({
         ownerId: uuid,

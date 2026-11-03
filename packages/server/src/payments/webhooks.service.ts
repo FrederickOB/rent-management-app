@@ -2,22 +2,46 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { eq, schema, sql, withSystem, type Database, type PoolClient } from '@rent/db';
 import type { AlertPort, WebhookHeaders } from '@rent/integrations';
+import type { Clock } from '../core/clock';
+import type { AppConfig } from '../core/config';
 import type { JobsService } from '../core/jobs/jobs.service';
 import type { AppLogger } from '../core/logging/logger';
 import type { PaymentProviders } from '../core/payment-providers';
-import { ALERT_PORT, DATABASE, PAYMENT_PROVIDERS } from '../core/tokens';
+import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
+import { ALERT_PORT, CLOCK, CONFIG, DATABASE, PAYMENT_PROVIDERS } from '../core/tokens';
+import { SigningHasher } from '../esign/secrets';
 import { ProviderPaymentsService } from './provider-payments.service';
+import { QueueService } from './queue.service';
 
 export const PROCESS_WEBHOOK_JOB = 'payments.process-webhook';
 
-/** Event types that mean a charge was paid, and those that mean it was taken back. */
+/** Event types that mean a charge was paid, and those about money taken back from one. */
 const PAID_EVENTS = new Set(['charge.success']);
-const REVERSED_EVENTS = new Set(['charge.dispute.resolve', 'refund.processed']);
+const REVERSED_EVENTS = new Set([
+  'charge.dispute.resolve',
+  'refund.processed',
+  'refund.failed',
+  'refund.pending',
+  'refund.processing',
+]);
 
-/** The headers kept with a stored webhook: the signature only, never anything else sent. */
-const KEPT_HEADERS = ['x-paystack-signature'];
+/** The headers kept with a stored webhook: the signature, and what identifies the sender's software. */
+const KEPT_HEADERS = ['x-paystack-signature', 'user-agent', 'content-type'];
 
-export type IntakeResult = 'stored' | 'duplicate' | 'rejected' | 'unknown_provider';
+/** The largest body a provider sends (Paystack's events are a few kilobytes): 64 KB. */
+export const WEBHOOK_MAX_BYTES = 64 * 1024;
+
+/**
+ * Bad-signature requests (M4b review 6): each address may send a few before it is refused
+ * without being stored, and the security alert goes at most once per provider in a window.
+ */
+export const WEBHOOK_LIMITS = {
+  rejectedPerAddress: { count: 20, windowMinutes: 10 },
+  alertsPerProvider: { count: 1, windowMinutes: 15 },
+} as const satisfies Record<string, RateLimit>;
+
+export type IntakeResult =
+  'stored' | 'duplicate' | 'rejected' | 'too_large' | 'rate_limited' | 'unknown_provider';
 
 /**
  * Provider webhooks (CLAUDE.md section 8; M4b plan 4.4). The intake stores the raw request in the
@@ -28,25 +52,56 @@ export type IntakeResult = 'stored' | 'duplicate' | 'rejected' | 'unknown_provid
  */
 @Injectable()
 export class WebhooksService {
+  private readonly hasher: SigningHasher;
+
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(PAYMENT_PROVIDERS) private readonly providers: PaymentProviders,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Inject(ProviderPaymentsService) private readonly payments: ProviderPaymentsService,
-  ) {}
+    @Inject(QueueService) private readonly queue: QueueService,
+    @Inject(CONFIG) config: AppConfig,
+    @Inject(CLOCK) private readonly clock: Clock,
+  ) {
+    this.hasher = new SigningHasher(config.BETTER_AUTH_SECRET);
+  }
 
-  async intake(provider: string, rawBody: Buffer, headers: WebhookHeaders): Promise<IntakeResult> {
+  /**
+   * Stores a webhook (M4b review 6): a signed one whole; a bad-signature or oversized one only as
+   * its size, its hash, a few headers and the sender's address as a keyed hash, never its body.
+   * An address sending many bad ones is refused without anything stored, and the security alert
+   * is raised at most once per provider in a window.
+   */
+  async intake(
+    provider: string,
+    rawBody: Buffer,
+    headers: WebhookHeaders,
+    clientIp = 'unknown',
+  ): Promise<IntakeResult> {
     if (!this.providers.has(provider)) return 'unknown_provider';
     const port = this.providers.get(provider);
-    const valid = port.verifyWebhookSignature(rawBody, headers);
+    const tooLarge = rawBody.length > WEBHOOK_MAX_BYTES;
+    const valid = !tooLarge && port.verifyWebhookSignature(rawBody, headers);
+    const now = this.clock.now().getTime();
+    const address = this.hasher.address(clientIp);
+    if (
+      !valid &&
+      !(await consumeRateLimit(
+        this.database,
+        `webhook:rejected:${address}`,
+        WEBHOOK_LIMITS.rejectedPerAddress,
+        now,
+      ))
+    )
+      return 'rate_limited';
     const event = valid ? port.parseWebhook(rawBody) : null;
-    const raw = rawBody.toString('utf8');
-    const eventId =
-      event?.eventId ?? `unparsed:${createHash('sha256').update(rawBody).digest('hex')}`;
+    const hash = createHash('sha256').update(rawBody).digest('hex');
+    const eventId = event?.eventId ?? `unparsed:${hash}`;
     const kept: Record<string, string> = {};
     for (const [name, value] of Object.entries(headers))
       if (KEPT_HEADERS.includes(name.toLowerCase()) && typeof value === 'string')
         kept[name.toLowerCase()] = value.slice(0, 512);
+    if (!valid) kept['x-sender-address-hash'] = address;
     const inserted = await withSystem(this.database, {}, (tx) =>
       tx
         .insert(schema.webhookInbox)
@@ -55,11 +110,13 @@ export class WebhooksService {
           eventId: eventId.slice(0, 200),
           eventType: event?.type.slice(0, 100) ?? null,
           reference: event?.reference.slice(0, 120) ?? null,
-          rawBody: raw,
+          rawBody: valid ? rawBody.toString('utf8') : null,
+          bodySha256: hash,
+          bodyBytes: rawBody.length,
           headers: kept,
           signatureValid: valid,
           status: valid ? (event ? 'received' : 'ignored') : 'rejected',
-          outcome: valid ? (event ? null : 'unparsed') : 'bad_signature',
+          outcome: valid ? (event ? null : 'unparsed') : tooLarge ? 'too_large' : 'bad_signature',
         })
         .onConflictDoNothing({
           target: [schema.webhookInbox.provider, schema.webhookInbox.eventId],
@@ -68,13 +125,22 @@ export class WebhooksService {
         .returning({ id: schema.webhookInbox.id }),
     );
     if (!valid) {
-      await this.alerts.raise({
-        severity: 'critical',
-        code: 'payments.webhook_bad_signature',
-        message: 'A payments webhook arrived with a bad signature; it was stored as rejected',
-        context: { provider, inboxId: inserted[0]?.id ?? null },
-      });
-      return 'rejected';
+      if (
+        await consumeRateLimit(
+          this.database,
+          `webhook:alert:${provider}`,
+          WEBHOOK_LIMITS.alertsPerProvider,
+          now,
+        )
+      )
+        await this.alerts.raise({
+          severity: 'critical',
+          code: 'payments.webhook_bad_signature',
+          message:
+            'Payments webhooks are arriving with a bad signature or too large; they are stored as rejected (body not kept). Further ones in the next 15 minutes are not alerted again.',
+          context: { provider, inboxId: inserted[0]?.id ?? null },
+        });
+      return tooLarge ? 'too_large' : 'rejected';
     }
     return inserted.length > 0 ? 'stored' : 'duplicate';
   }
@@ -93,9 +159,14 @@ export class WebhooksService {
     let status: 'processed' | 'ignored' = 'processed';
     if (row.eventType && PAID_EVENTS.has(row.eventType))
       outcome = await this.payments.processReference(row.provider, row.reference);
-    else if (row.eventType && REVERSED_EVENTS.has(row.eventType))
-      outcome = await this.payments.recordChargeback(row.provider, row.reference);
-    else {
+    else if (row.eventType && REVERSED_EVENTS.has(row.eventType)) {
+      // Our own refund of unmatched money is followed to its end (P31 posts only once the
+      // provider says it is processed); anything else may be a chargeback (review item 2).
+      const own = await this.payments.ownRefund(row.provider, row.reference);
+      outcome = own
+        ? `refund_${await this.queue.refundWithProvider(own.companyId, own.refundId)}`
+        : await this.payments.recordChargeback(row.provider, row.reference);
+    } else {
       outcome = 'not_handled';
       status = 'ignored';
     }

@@ -1653,21 +1653,32 @@ async function ensureSettlementAccounts(
   }
   for (const p of pending) await services.accounts.ready(p.companyId, p.accountId);
   // Where each agency owner's rent goes (decision 6): owner A's own account, owner B's through
-  // the agency's client account.
+  // the agency's client account. Each is a request a second person approves, in force 24 hours
+  // after approval (M4b review item 1): asked 74 hours ago on the seed's clock and confirmed by
+  // the agency's sole admin after her cooling-off 49 hours ago (OQ-29), so in force today.
   const admin = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
   const agreements = await services.accounts.agreements(admin);
-  const since = toIsoDate(
-    addDays(
-      parseBusinessDate(toIsoDate(businessDateOf(instantFrom(new Date()), 'Africa/Accra'))),
-      -90,
-    ),
-  );
-  for (const owner of await owners(AGENCY)) {
-    if (agreements.find((a) => a.ownerId === owner.id)?.destination) continue;
-    await services.accounts.setAgreement(admin, owner.id, {
-      destination: owner.reference === 'OWN-01' ? 'owner_account' : 'agency_client_account',
-      effectiveFrom: since,
-    });
+  const asked: string[] = [];
+  seedClock.offsetMs = -74 * 3_600_000;
+  try {
+    const askedOn = toIsoDate(businessDateOf(instantFrom(seedClock.now()), 'Africa/Accra'));
+    for (const owner of await owners(AGENCY)) {
+      const current = agreements.find((a) => a.ownerId === owner.id);
+      if (current?.destination || current?.openRequest) continue;
+      const view = await services.accounts.setAgreement(admin, owner.id, {
+        destination: owner.reference === 'OWN-01' ? 'owner_account' : 'agency_client_account',
+        effectiveFrom: askedOn,
+      });
+      if (view.openRequest) asked.push(view.openRequest.approvalId);
+    }
+    seedClock.offsetMs = -49 * 3_600_000;
+    for (const approvalId of asked)
+      await services.approvals.decide(admin, approvalId, {
+        decision: 'self_confirm',
+        code: await demoTotp(),
+      });
+  } finally {
+    seedClock.offsetMs = 0;
   }
   return pending.length;
 }

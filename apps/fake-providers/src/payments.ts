@@ -285,11 +285,18 @@ export function registerPayments(
         }
         tx.status = 'reversed';
         tx.chargedBack = { amount };
+        const id = ids.nextNumber();
+        (tx.reversals ??= []).push({
+          kind: 'refund',
+          id,
+          amount,
+          createdAt: new Date().toISOString(),
+        });
         return reply.send({
           status: true,
           message: 'Refund has been queued for processing',
           data: {
-            id: ids.nextNumber(),
+            id,
             transaction: transactionView(tx),
             amount,
             currency: 'GHS',
@@ -297,6 +304,57 @@ export function registerPayments(
           },
         });
       });
+
+      // Refunds and disputes: one charge's (Paystack's `transaction` filter, its id), or every
+      // charge's made in a range (`from` and `to`).
+      const reversalsOf = (query: unknown, kind: 'refund' | 'dispute') => {
+        const q = query as { transaction?: string; from?: string; to?: string };
+        const range = q.from && q.to ? { from: Date.parse(q.from), to: Date.parse(q.to) } : null;
+        return [...store.transactions.values()]
+          .filter((t) => q.transaction === undefined || t.id === Number(q.transaction))
+          .flatMap((tx) =>
+            (tx.reversals ?? [])
+              .filter((r) => r.kind === kind)
+              .filter((r) => {
+                if (!range) return true;
+                const at = Date.parse(r.createdAt);
+                return at >= range.from && at < range.to;
+              })
+              .map((r) => ({ tx, r })),
+          );
+      };
+      api.get('/refund', async (request, reply) =>
+        reply.send({
+          status: true,
+          message: 'Refunds retrieved',
+          data: reversalsOf(request.query, 'refund').map(({ tx, r }) => ({
+            id: r.id,
+            transaction: { id: tx.id, reference: tx.reference },
+            dispute: null,
+            amount: r.amount,
+            deducted_amount: tx.chargedBack?.deductedIn === undefined ? 0 : r.amount,
+            currency: 'GHS',
+            status: 'processed',
+            settlement: tx.chargedBack?.deductedIn ?? null,
+            created_at: r.createdAt,
+          })),
+        }),
+      );
+      api.get('/dispute', async (request, reply) =>
+        reply.send({
+          status: true,
+          message: 'Disputes retrieved',
+          data: reversalsOf(request.query, 'dispute').map(({ tx, r }) => ({
+            id: r.id,
+            refund_amount: r.amount,
+            currency: 'GHS',
+            status: 'resolved',
+            resolution: 'merchant-accepted',
+            transaction: { id: tx.id, reference: tx.reference },
+            created_at: r.createdAt,
+          })),
+        }),
+      );
 
       api.get('/bank', async (_request, reply) =>
         reply.send({ status: true, message: 'Banks retrieved', data: BANKS }),
@@ -430,15 +488,27 @@ export function registerPayments(
       if (tx.status !== 'success') {
         return reply.code(409).send({ error: 'only a paid charge is disputed' });
       }
-      tx.status = 'reversed';
-      tx.chargedBack = { amount: tx.amount };
+      const asked = (request.body as { amount?: unknown } | undefined)?.amount;
+      const amount =
+        typeof asked === 'number' && Number.isSafeInteger(asked) && asked > 0 && asked <= tx.amount
+          ? asked
+          : tx.amount;
+      if (amount === tx.amount) tx.status = 'reversed';
+      tx.chargedBack = { amount };
+      const disputeId = ids.nextNumber();
+      (tx.reversals ??= []).push({
+        kind: 'dispute',
+        id: disputeId,
+        amount,
+        createdAt: new Date().toISOString(),
+      });
       const rawBody = JSON.stringify({
         event: 'charge.dispute.resolve',
         data: {
-          id: ids.nextNumber(),
+          id: disputeId,
           status: 'resolved',
-          resolution: 'declined',
-          refund_amount: tx.amount,
+          resolution: 'merchant-accepted',
+          refund_amount: amount,
           currency: 'GHS',
           transaction: { id: tx.id, reference: tx.reference },
         },

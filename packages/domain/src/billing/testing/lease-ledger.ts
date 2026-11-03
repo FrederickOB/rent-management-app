@@ -19,7 +19,13 @@ import {
   writeOffLines,
   type LeaseDimensions,
 } from '../../ledger/posting';
-import { drawFromPools, planAccrual, planAllocation, planTaxDraws } from '../allocation';
+import {
+  drawFromPools,
+  planAccrual,
+  planAllocation,
+  planReopenedDraws,
+  planTaxDraws,
+} from '../allocation';
 import { linesAfterEnd, planCreditNote, planPaymentReversal, planWriteOff } from '../corrections';
 import type { InvoiceLineDraft } from '../invoicing';
 import {
@@ -365,6 +371,38 @@ export class LeaseLedgerModel {
         credit: plan.creditMinor > 0 ? { lease: this.lease, amountMinor: plan.creditMinor } : null,
       }),
     );
+    this.drawCreditToOpen();
+  }
+
+  /**
+   * Spare credit pays debt a correction reopened (M4b review F4), as the engine does after a
+   * reversal or a credit note: P02 credit draws dated today, one entry per line.
+   */
+  drawCreditToOpen(): void {
+    for (const plan of planReopenedDraws(
+      this.lines,
+      this.allocations,
+      creditPools(this.livePayments(), this.allocations),
+    )) {
+      const n = this.allocations.filter((a) => a.lineId === plan.lineId).length;
+      for (const draw of plan.draws)
+        this.addAllocation({
+          lineId: plan.lineId,
+          source: 'payment',
+          paymentId: draw.paymentId,
+          amountMinor: draw.amountMinor,
+        });
+      this.post(
+        'P02',
+        `P02:${plan.lineId}:redraw:${n}`,
+        creditDrawLines({
+          bookId: this.book,
+          lease: this.lease,
+          invoiceLineId: plan.lineId,
+          draws: plan.draws,
+        }),
+      );
+    }
   }
 
   /** P27 on a base line, its tax lines following. */
@@ -394,6 +432,7 @@ export class LeaseLedgerModel {
       );
     }
     this.post('P27', `P27:${key}`, lines);
+    this.drawCreditToOpen();
   }
 
   /** P24 on a charged line still owed. */

@@ -1,6 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { desc, eq, inArray, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
-import { businessDateOf, formatBusinessDate, instantFrom, toIsoDate } from '@rent/domain/dates';
+import {
+  addDays,
+  businessDateOf,
+  formatBusinessDate,
+  instantFrom,
+  toIsoDate,
+} from '@rent/domain/dates';
 import {
   maskAccountNumber,
   RENT_DESTINATIONS,
@@ -33,6 +39,11 @@ import { membersWhoCan } from './members';
 export const SETTLEMENT_ADD_ACTION = 'settlement_account.change';
 export const SETTLEMENT_RETIRE_ACTION = 'settlement_account.retire';
 export const SETTLEMENT_APPROVED_EVENT = 'settlement_account.approved';
+/**
+ * Where an owner's rent goes (decision 6) is a settlement account change too (CLAUDE.md section 5;
+ * M4b review item 1): a second person approves it, and it takes effect 24 hours after that.
+ */
+export const AGREEMENT_ACTION = 'management_agreement.change';
 /** The job that sets an approved account up with the providers and activates it after 24 hours. */
 export const SETTLEMENT_READY_JOB = SETTLEMENT_APPROVED_EVENT;
 
@@ -61,8 +72,17 @@ export interface SettlementAccountView {
 export interface AgreementView {
   readonly ownerId: string;
   readonly ownerName: string;
+  /** The agreement in force today, if any. */
   readonly destination: RentDestination | null;
   readonly effectiveFrom: string | null;
+  /** An approved change that takes effect later (24 hours after its approval, or as asked). */
+  readonly next: { readonly destination: RentDestination; readonly effectiveFrom: string } | null;
+  /** A change still waiting for a second person. */
+  readonly openRequest: {
+    readonly approvalId: string;
+    readonly destination: RentDestination;
+    readonly effectiveFrom: string;
+  } | null;
 }
 
 const uuid = z.string().uuid();
@@ -79,6 +99,17 @@ const accountPayload = z
     accountNameChecked: z.string().nullable(),
     /** Still waiting for this decision: false once approved, rejected or retired. */
     awaiting: z.boolean(),
+  })
+  .strict();
+const agreementPayload = z
+  .object({
+    ownerId: uuid,
+    ownerName: z.string(),
+    destination: z.enum(RENT_DESTINATIONS),
+    /** What is in force when asked, for the approver to compare. */
+    currentDestination: z.enum(RENT_DESTINATIONS).nullable(),
+    /** The day asked for; it takes effect no earlier than 24 hours after approval. */
+    effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   })
   .strict();
 const retirePayload = z
@@ -325,21 +356,68 @@ export class SettlementAccountsService {
         .from(schema.owner)
         .where(sql`${schema.owner.archivedAt} is null`)
         .orderBy(schema.owner.displayName);
+      const open = await this.approvals.openRequestsFor(
+        tx,
+        owners.map((o) => o.id),
+        AGREEMENT_ACTION,
+      );
       const out: AgreementView[] = [];
-      for (const o of owners) {
-        const agreement = await currentAgreement(tx, o.id, today);
-        out.push({
-          ownerId: o.id,
-          ownerName: o.legalName ?? o.displayName,
-          destination: agreement?.destination ?? null,
-          effectiveFrom: agreement?.effectiveFrom ?? null,
-        });
-      }
+      for (const o of owners)
+        out.push(await this.agreementView(tx, o.id, o.legalName ?? o.displayName, today, open));
       return out;
     });
   }
 
-  /** Sets where an owner's rent goes from a date: a new row, never an edit (decision 6). */
+  private async agreementView(
+    tx: Tx,
+    ownerId: string,
+    ownerName: string,
+    today: string,
+    open: ReadonlyMap<string, { id: string; payload: unknown }>,
+  ): Promise<AgreementView> {
+    const agreement = await currentAgreement(tx, ownerId, today);
+    const [later] = await tx
+      .select({
+        destination: schema.managementAgreement.destination,
+        effectiveFrom: schema.managementAgreement.effectiveFrom,
+      })
+      .from(schema.managementAgreement)
+      .where(
+        sql`${schema.managementAgreement.ownerId} = ${ownerId} and ${schema.managementAgreement.effectiveFrom} > ${today}`,
+      )
+      .orderBy(
+        desc(schema.managementAgreement.effectiveFrom),
+        desc(schema.managementAgreement.createdAt),
+      )
+      .limit(1);
+    const request = open.get(ownerId);
+    const asked = request ? agreementPayload.safeParse(request.payload) : null;
+    return {
+      ownerId,
+      ownerName,
+      destination: agreement?.destination ?? null,
+      effectiveFrom: agreement?.effectiveFrom ?? null,
+      next: later
+        ? { destination: later.destination as RentDestination, effectiveFrom: later.effectiveFrom }
+        : null,
+      openRequest:
+        request && asked?.success
+          ? {
+              approvalId: request.id,
+              destination: asked.data.destination,
+              effectiveFrom: asked.data.effectiveFrom,
+            }
+          : null,
+    };
+  }
+
+  /**
+   * Asks to set where an owner's rent goes from a date (decision 6; M4b review item 1). Like a
+   * settlement account, it is a request a second person approves, the owner is told by SMS and
+   * email, and nothing changes until it is approved: the agreement is then written (a new row,
+   * never an edit) taking effect on the day asked or, if later, the first day that starts at
+   * least 24 hours after the approval. A day before today is refused.
+   */
   async setAgreement(
     actor: Actor | null,
     ownerId: string,
@@ -351,22 +429,38 @@ export class SettlementAccountsService {
       throw conflict('not_an_agency', 'A landlord’s rent always goes to their own account');
     if (!(RENT_DESTINATIONS as readonly string[]).includes(input.destination))
       throw invalid('destination', 'Choose where this owner’s rent goes');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.effectiveFrom))
+      throw invalid('effective_from', 'Choose the day it starts');
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const owner = (await ownerFacts(tx, [ownerId])).get(ownerId);
       if (!owner) throw notFound('Owner');
-      await tx.insert(schema.managementAgreement).values({
-        companyId: staff.companyId,
-        ownerId,
-        destination: input.destination,
-        effectiveFrom: input.effectiveFrom,
-        createdBy: staff.personId,
+      const today = await this.today(tx, staff.companyId);
+      if (input.effectiveFrom < today)
+        throw invalid(
+          'effective_from_past',
+          'Where rent goes cannot change in the past; choose today or a later day',
+        );
+      const current = await currentAgreement(tx, ownerId, today);
+      await this.approvals.createInTx(tx, staff, {
+        actionType: AGREEMENT_ACTION,
+        subjectType: 'owner',
+        subjectId: ownerId,
+        propertyId: null,
+        payload: {
+          ownerId,
+          ownerName: owner.name.slice(0, 200),
+          destination: input.destination,
+          currentDestination: current?.destination ?? null,
+          effectiveFrom: input.effectiveFrom,
+        },
       });
-      return {
-        ownerId,
-        ownerName: owner.name,
-        destination: input.destination,
-        effectiveFrom: input.effectiveFrom,
-      };
+      await this.alert(tx, staff.companyId, 'owner', ownerId, {
+        subject: 'A change to where your rent goes was requested',
+        body: `For ${owner.name}: someone asked for your rent to go to ${destinationWords(input.destination)} from ${formatBusinessDate(input.effectiveFrom)}. It needs a second person's approval and takes effect no earlier than 24 hours after that. If you did not expect this, contact your agent at once.`,
+        related: { type: 'owner', id: ownerId },
+      });
+      const open = await this.approvals.openRequestsFor(tx, [ownerId], AGREEMENT_ACTION);
+      return this.agreementView(tx, ownerId, owner.name, today, open);
     });
   }
 
@@ -478,6 +572,38 @@ export class SettlementAccountsService {
       },
     });
     this.approvals.register({
+      actionType: AGREEMENT_ACTION,
+      eligibleRoles: APPROVERS,
+      schema: agreementPayload,
+      onePerSubject: true,
+      currentPayload: async (tx, request) => {
+        const proposed = request.payload as z.infer<typeof agreementPayload>;
+        const company = await companyRecord(tx, request.companyId);
+        const today = isoNow(this.clock, company?.timeZone ?? 'Africa/Accra');
+        // What is in force now: if it changed since the request, the approver saw something else.
+        const current = await currentAgreement(tx, proposed.ownerId, today);
+        return { ...proposed, currentDestination: current?.destination ?? null };
+      },
+      execute: async (tx, request, payload) => {
+        const company = await companyRecord(tx, request.companyId);
+        const timeZone = company?.timeZone ?? 'Africa/Accra';
+        const effectiveFrom = agreementStart(this.clock.now(), timeZone, payload.effectiveFrom);
+        await tx.insert(schema.managementAgreement).values({
+          companyId: request.companyId,
+          ownerId: payload.ownerId,
+          destination: payload.destination,
+          effectiveFrom,
+          approvalRequestId: request.id,
+          createdBy: request.initiatedBy,
+        });
+        await this.alert(tx, request.companyId, 'owner', payload.ownerId, {
+          subject: 'A change to where your rent goes was approved',
+          body: `For ${payload.ownerName}: your rent goes to ${destinationWords(payload.destination)} from ${formatBusinessDate(effectiveFrom)} (${timeZone}). If you did not expect this, contact your agent at once.`,
+          related: { type: 'owner', id: payload.ownerId },
+        });
+      },
+    });
+    this.approvals.register({
       actionType: SETTLEMENT_RETIRE_ACTION,
       eligibleRoles: APPROVERS,
       schema: retirePayload,
@@ -533,14 +659,19 @@ export class SettlementAccountsService {
     companyId: string,
     holder: 'owner' | 'agency',
     ownerId: string | null,
-    message: { subject: string; body: string; accountId: string },
+    message: {
+      subject: string;
+      body: string;
+      accountId?: string;
+      related?: { type: string; id: string };
+    },
   ): Promise<void> {
     const common = {
       purpose: 'settlement_alert' as const,
       subject: message.subject,
       body: message.body.slice(0, 4_000),
       channels: ['sms', 'email'] as ('sms' | 'email')[],
-      related: { type: 'settlement_account', id: message.accountId },
+      related: message.related ?? { type: 'settlement_account', id: message.accountId! },
     };
     if (holder !== 'agency' && ownerId) {
       await queueMessage(tx, companyId, { ...common, recipient: { type: 'owner', ownerId } });
@@ -652,3 +783,23 @@ export class SettlementAccountsService {
 }
 
 export type { StaffActor };
+
+/** The words for where rent goes, in an owner's alert. */
+function destinationWords(destination: RentDestination): string {
+  return destination === 'owner_account' ? 'your own bank account' : 'your agent’s client account';
+}
+
+/**
+ * The first day an approved agreement may take effect: the day asked for, or, if later, the first
+ * day that starts at least 24 hours after the approval (M4b review item 1). So rent is redirected
+ * no sooner than a settlement account, and never back-dated.
+ */
+export function agreementStart(approvedAt: Date, timeZone: string, asked: string): string {
+  const dayAfterWait = toIsoDate(
+    addDays(
+      businessDateOf(instantFrom(new Date(approvedAt.getTime() + 24 * 3_600_000)), timeZone),
+      1,
+    ),
+  );
+  return asked > dayAfterWait ? asked : dayAfterWait;
+}

@@ -264,6 +264,70 @@
     5. **A verified amount that differs** from the intent posts the money actually received, allocates it normally and raises a reconciliation exception.
 - **Not in this step:** the tenant app (step 9), the CI size budgets and the review subagent (step 10) belong to the screens and the report. The fake-providers Docker image must be rebuilt (`docker compose up -d --build fake-providers`) before the e2e tests use the new endpoints.
 
+**2026-11-03, review fixes (the playbook's posting-rules audit at 207c740 and the general review of 5f2b391..4c21fda).** Each fix has a regression test named after its requirement, in `packages/server/test/payments-review.int.test.ts` unless another file is named. Migrations `0020_payments_review` (generated) and `0021_payments_review_security` (hand-written).
+
+- **Must fix:**
+    1. **Management agreements** (ADR-008; CLAUDE.md section 5):
+        - every agreement, the first included, is a request (`management_agreement.change`) that owners or agency admins approve, the initiator never;
+        - the owner is told by SMS and email when it is asked and when it is approved;
+        - on approval it is written to take effect on the day asked or, if later, the first day that starts at least 24 hours after the approval; a day before today is refused;
+        - the database refuses an agreement without such a request (`RA056`).
+    2. **P31 refunds:**
+        - posted only once the provider says `processed`;
+        - `pending` leaves the refund `sent`, followed by its webhook or a check every 10 minutes;
+        - `failed` marks it failed and posts nothing;
+        - every run asks the provider first (`reversals`), so a retry never sends a second refund;
+        - a refund event about our own refund is followed, never treated as a chargeback;
+        - the in-memory fake now refuses a second refund and can keep one pending (`pendingRefunds`, `completeRefund`).
+    3. **P22 counts P31 deductions** as it counts P21 ones, so the settlement debits the account with the real net and 1050 clears.
+    4. **No reversal of refunded money:** a payment with a refund asked for, pending or done cannot be reversed, by the service or by the database (`RA055` on `payment_reversal`).
+    5. **Reversing a settled provider payment:** once P22 has paid it out, the reversal's only option is the account it settled to (1010 or 1070, P21b); before that, provider clearing (1050). The wrong-lease flow (reverse, then record it again as a transfer into that account on the right lease) is tested. A payment reversed by staff before it settles still settles into 1050 later; recording it again there is not built (see notes).
+    6. **The Paystack adapter's settlements:**
+        - every page of a settlement's charges is read;
+        - `deductedReferences` comes from the refunds that name the settlement (`settlement`, `deducted_amount`), looked up to 90 days back;
+        - **assumption, in the fixtures and OQ-01:** a dispute the payer won is deducted as a refund with `dispute` set; Paystack does not document how chargebacks appear in a settlement;
+        - a test runs the job path end to end through the adapter.
+    7. **Currency:** the intent path, money with no intent, and transaction reconciliation all compare it exactly. A charge in another currency is never posted; it becomes an exception (shown as `amount_differs`, its detail naming the currency).
+    8. **Negative-net settlements:** `provider_settlement.net_minor` may be below zero; the settlement posts and raises an exception. Each book's P22 posts in a savepoint, so one that cannot post is raised and the rest still post.
+- **Should fix:**
+    9. **Credit pays reopened debt:** after a reversal or a credit note, spare credit, oldest payment first, pays any accrued rent or service-charge period left owing, by a P02 credit draw (`P02:<line>:redraw:<n>`), in the engine and the reference model alike. Domain tests: `packages/domain/src/billing/reopened.test.ts`, including a property test.
+    10. **The invoice list counts credit** as the walk and ageing do: `outstandingMinor` and `overdue` come from what remains after the walk.
+    11. **Invariant 11:** after the settlements run, provider clearing (1050) per settlement account is compared with what the provider still holds unsettled for its subaccount (charges not paid out, less refunds and chargebacks not deducted, over 14 days). Any difference is raised once a day.
+    12. **Failover after a lost answer:** only a clear "down" (503, 429) moves to the next provider. A timeout or any other ambiguous error first asks the same provider for the charge: it exists → it is followed; 404 → the next provider may take it; no answer → the intent stays with that provider for verify-pending.
+    13. **The webhook flood:**
+        - bad-signature and oversized requests keep only their size, a SHA-256 of the body, three headers and the sender's address as a keyed hash;
+        - 20 per address per 10 minutes, then 429 with nothing stored;
+        - one alert per provider per 15 minutes;
+        - bodies over 64 KB are refused with 413.
+    14. **The card return page** carries no pay-link token: `callback_url` is `${LINKS_ORIGIN}/p/return?reference=<charge reference>`. The page calls `POST /links/pay/return` with `{ reference, client }` and gets `{ status, receiptNumber, message, failureCode }` only. A pending payment is checked with its provider. Rate-limited per address and per reference.
+    15. **`advance_rent_policy` on the pay page:** the rule for the term (`advance_rent.max_months.*`, unverified) as of today gives a cap: what is due now, plus the limit's months of rent and service charge, less what is already held ahead.
+        - `block` stops the amounts at the cap;
+        - `warn` shows it, accepts more, and records `advance_over_limit` with the limit and rule on the intent, for the compliance report (M5);
+        - `off` is unchanged.
+    16. **Reconciliation catches reversals:** charges the provider lists as reversed, and refunds and disputes made that day (`listReversals`), go through the chargeback path. A payment posted after its settlement was reconciled is settled when it appears (`P22:<settlement>:payment:<id>`, from the references now stored on `provider_settlement`).
+    17. **Part refunds and disputes:** a payment is reversed only when what the provider took back equals it; a part is an exception for a person.
+    18. **The fake provider in production:** the configuration already refused `FAKE_PROVIDERS_URL` in production; building the providers now refuses it too.
+    19. **Charge status:** a `failed` charge fails the intent with `PROVIDER_CHARGE_FAILED`. A next step we do not support (`send_otp`, `send_pin` and the like) fails it with `PROVIDER_STEP_UNSUPPORTED` (OQ-01). The intent view carries `failureCode`.
+    20. **Chargeback alerts** go only to people whose scope covers the payment's property or owner.
+    21. **CI:** the backup job starts `fake-providers` with the other services, because the seed takes its demo payments through it.
+- **Tests strengthened** (new tests; the old ones are unchanged):
+    - TL-12: the intruder is a tenant of another lease in the same company;
+    - BC-07: the webhook, the status poll, verify-pending and reconciliation race on one charge, then a second event id;
+    - ADR-008: an account waits its 24 hours (the database holds it whatever the application's clock says), and the pay link is refused until the ready job activates it.
+- **Recorded rather than fixed** (the review's notes):
+    - **Fees on a settlement that names a payment we have not posted:** the settlement's fees are shared over the payments we have. A payment posted later settles in full with no fee share, so the totals are right but that payment's fee is on the others.
+    - **The VAT rule date for invoices issued by a back-dated advance:** fixed. The rule is read as of the tax point (the payment's value date), in `issueCycle` and `issueForAdvance`.
+    - **M4a plan 4.9, "reverse and record again":** for a provider payment, recording it again means a transfer into the account it settled to. Before it settles, a staff reversal credits 1050 and the later settlement leaves 1050 short, which invariant 11 raises. Re-matching unsettled provider money to another lease is not built.
+    - **Raw webhook bodies** have no retention rule: added `data_retention.other.webhook_bodies` as `unverified`, with no value (0021).
+    - **`suggestions()`** loads every lease's full state on each request, and the invoice list now loads each listed lease's state for the walk. Both are fine at pilot volumes; they need a summary query before many hundreds of leases.
+    - **Many pay links per invoice:** see deviation 4.
+- **Existing tests changed with the founder's approval** (2026-11-03):
+    - `payments.int.test.ts` (item 1): the setup and the "says why a pay link cannot go" test set agreements through `agreementInForce` (asked 49 hours ago and approved by a second admin). No assertion changed.
+    - The Paystack settlement test (item 6): its replay adds the refunds that name the settlement (`refunds.json`, which carries the deduction assumption) and serves the second charge from a second page, keeping the settlement's totals. `deductedReferences: []` became the one deduction of 20,000 pesewas. The references list is unchanged; it now needs the second page to be complete.
+    - `corrections.test.ts` "restores every line and the credit exactly" (item 9). The P21 claim is now asserted on the reversal's own rows (they take back exactly the payment's share). What the later payment's credit redrew is allowed for in the outstanding; the 2100 and 1050 assertions are unchanged.
+    - `billing.int.test.ts` P29 carry-over (item 9). The arrears are now an unpaid one-off charge of 100,000 raised before the credit note, with all twelve months paid; the 70,000 credit still carries to the renewal. No service raises one-off charges yet, so the test issues it through the engine.
+    - `rls.int.test.ts` fixture (item 1). The agreement names a `management_agreement.change` request approved by the fixture's second person. No assertion changed.
+
 ## 6. Tests
 
 ★ marks the tests the playbook requires for M4.
@@ -312,6 +376,7 @@ The Paystack adapter uses the existing HTTP client in `packages/integrations`.
 1. **No second real provider** until OQ-02 (decision 1).
 2. **A minimal management agreement** arrives here for settlement destinations; fees wait for M9 (decision 6).
 3. **Pay links are per invoice;** the page shows the lease's whole amount due, because payments go to the oldest debt first.
+4. **Many pay links per invoice** (review): the plan says one link per invoice, but tokens are stored only as hashes, so a link cannot be sent again. Each reminder, staff send and tenant-app request mints a new link for the same invoice. Each expires when its invoice is settled, or after 60 days.
 
 ## 10. Deferred
 

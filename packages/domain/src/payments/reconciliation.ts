@@ -31,11 +31,18 @@ export type TransactionException =
       readonly kind: 'not_successful_at_provider';
       readonly reference: string;
       readonly status: string;
-    };
+    }
+  /** A charge in another currency: never posted, left for a person (M4b review item 7). */
+  | { readonly kind: 'currency_differs'; readonly reference: string; readonly currency: string };
 
 export interface TransactionReconciliation {
   /** Successful at the provider and unknown here: verify and post through the normal path. */
   readonly toProcess: readonly string[];
+  /**
+   * Taken back at the provider (refunded or charged back) and not reversed here: checked with the
+   * provider through the chargeback path, so a missed webhook is caught (M4b review item 16).
+   */
+  readonly toReverse: readonly string[];
   readonly exceptions: readonly TransactionException[];
   readonly matched: number;
 }
@@ -47,15 +54,30 @@ export function reconcileTransactions(
   const ours = new Map(local.map((p) => [p.reference, p]));
   const theirs = new Map(provider.map((c) => [c.reference, c]));
   const toProcess: string[] = [];
+  const toReverse: string[] = [];
   const exceptions: TransactionException[] = [];
   let matched = 0;
   for (const charge of provider) {
     const payment = ours.get(charge.reference);
+    // Only cedis are ever posted (CLAUDE.md section 4): any other currency waits for a person.
+    if (charge.currency !== 'GHS') {
+      if (charge.status === 'success' || payment)
+        exceptions.push({
+          kind: 'currency_differs',
+          reference: charge.reference,
+          currency: charge.currency,
+        });
+      continue;
+    }
     if (!payment) {
       if (charge.status === 'success') {
         toProcess.push(charge.reference);
         exceptions.push({ kind: 'missing_here', reference: charge.reference });
       }
+      continue;
+    }
+    if (charge.status === 'reversed' && !payment.reversed) {
+      toReverse.push(charge.reference);
       continue;
     }
     if (charge.status !== 'success' && !payment.reversed) {
@@ -80,7 +102,7 @@ export function reconcileTransactions(
   for (const payment of local)
     if (!theirs.has(payment.reference) && !payment.reversed)
       exceptions.push({ kind: 'missing_at_provider', reference: payment.reference });
-  return { toProcess, exceptions, matched };
+  return { toProcess, toReverse, exceptions, matched };
 }
 
 export interface SettlementReport {
