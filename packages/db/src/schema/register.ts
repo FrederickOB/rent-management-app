@@ -177,6 +177,38 @@ export const propertyOwnership = pgTable(
   ],
 );
 
+/**
+ * A same-day correction of a property's owner (M2 deferred S5; M4a decision 6): the ownership row
+ * it supersedes, which views and checks then ignore. Append-only, and refused once the property
+ * has invoices or ledger entries (until a transfer flow exists).
+ */
+export const propertyOwnershipCorrection = pgTable(
+  'property_ownership_correction',
+  {
+    id: id(),
+    companyId: companyId(),
+    propertyId: uuid().notNull(),
+    ownershipId: uuid().notNull(),
+    reason: text().notNull(),
+    correctedBy: uuid().references(() => person.id),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('property_ownership_correction_company_id_id_key').on(t.companyId, t.id),
+    unique('property_ownership_correction_once').on(t.companyId, t.ownershipId),
+    foreignKey({
+      name: 'property_ownership_correction_property_fk',
+      columns: [t.companyId, t.propertyId],
+      foreignColumns: [property.companyId, property.id],
+    }),
+    foreignKey({
+      name: 'property_ownership_correction_row_fk',
+      columns: [t.companyId, t.ownershipId],
+      foreignColumns: [propertyOwnership.companyId, propertyOwnership.id],
+    }),
+  ],
+);
+
 /** A block within a property (PR-01). A property without blocks has one default block, B1. */
 export const block = pgTable(
   'block',

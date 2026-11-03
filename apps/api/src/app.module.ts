@@ -2,17 +2,20 @@ import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ORPCModule } from '@orpc/nest';
 import { ApprovalsModule } from '@rent/server/approvals';
+import { BillingModule } from '@rent/server/billing';
 import { AuditModule } from '@rent/server/audit';
 import { CompaniesModule } from '@rent/server/companies';
 import { CoreModule, type CoreOptions } from '@rent/server/core';
 import { DocumentsModule } from '@rent/server/documents';
 import { EsignModule } from '@rent/server/esign';
 import { IdentityModule } from '@rent/server/identity';
+import { LedgerModule } from '@rent/server/ledger';
 import { MessagingModule } from '@rent/server/messaging';
 import { PolicyModule } from '@rent/server/policy';
 import { PortfolioModule } from '@rent/server/portfolio';
 import { RulesModule } from '@rent/server/rules';
 import { TenancyModule } from '@rent/server/tenancy';
+import { BillingController } from './billing/billing.controller';
 import { CompanyController } from './company/company.controller';
 import { GovernanceController } from './governance/governance.controller';
 import { toORPCError } from './http/errors';
@@ -46,6 +49,8 @@ export class AppModule {
         EsignModule,
         TenancyModule,
         MessagingModule,
+        LedgerModule,
+        BillingModule,
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -69,6 +74,7 @@ export class AppModule {
         TenantAppController,
         SigningRequestsController,
         LinksController,
+        BillingController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

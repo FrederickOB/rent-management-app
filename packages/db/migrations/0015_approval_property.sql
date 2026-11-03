@@ -1,0 +1,1 @@
+ALTER TABLE "approval_request" ADD COLUMN "property_id" uuid;

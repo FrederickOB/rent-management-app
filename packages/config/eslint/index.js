@@ -33,6 +33,20 @@ export const MODULE_MAP = {
     'identity',
   ],
   messaging: ['tenancy', 'esign', 'companies', 'identity', 'audit', 'policy'],
+  // M4a (plan 4.1): the ledger in layer 1 (it audits each entry), billing in layer 5.
+  ledger: ['audit'],
+  billing: [
+    'tenancy',
+    'ledger',
+    'approvals',
+    'rules',
+    'documents',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+  ],
 };
 
 const DB_DRIVERS = [
@@ -144,6 +158,7 @@ export function createConfig({ repoRoot }) {
           { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
         ],
         'rent/no-role-checks': 'error',
+        'rent/ledger-writes': 'error',
         'no-restricted-imports': [
           'error',
           {
@@ -176,6 +191,11 @@ export function createConfig({ repoRoot }) {
       // Decorators make NestJS constructor parameters look unused to the linter.
       files: ['packages/server/**/*.ts', 'apps/api/**/*.ts', 'apps/worker/**/*.ts'],
       rules: { '@typescript-eslint/consistent-type-imports': 'off' },
+    },
+    {
+      // The posting service is the one writer of the journal (ADR-003); the rule's own tests name it.
+      files: ['packages/server/src/ledger/**/*.ts', 'packages/config/eslint/**/*.js'],
+      rules: { 'rent/ledger-writes': 'off' },
     },
     {
       files: ['packages/server/src/**/*.ts'],

@@ -11,6 +11,7 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { useApp } from '@/components/app-context';
+import { EvidenceButton } from '@/components/evidence-button';
 import { Alert } from '@/components/ui/alert';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,9 +21,13 @@ import { api } from '@/lib/api';
 import {
   APPROVAL_STATUS_LABELS,
   approvalActionLabel,
+  approvalEvidence,
+  approvalFacts,
   approvalMoves,
   closeReasonLabel,
+  payloadLeaseId,
   payloadReason,
+  payloadSubject,
   personName,
   subjectHref,
   type ApprovalRow,
@@ -53,23 +58,62 @@ const DECISION_LABELS: Record<ApprovalRow['decisions'][number]['kind'], string> 
 interface Subject {
   readonly title: string;
   readonly detail: string | null;
+  /** The lease's page. */
+  readonly href: string;
 }
 
-/** A line about the record a request is for: the lease's unit and tenant, when this person may see it. */
-async function describe(row: ApprovalRow): Promise<Subject | null> {
-  if (row.subjectType !== 'lease') return null;
+/** The lease's line, fetched from the API: for a lease's own request, or a payload without names. */
+async function fetchSubject(leaseId: string): Promise<Subject | null> {
   try {
-    const lease = await api().leases.get({ leaseId: row.subjectId });
+    const lease = await api().leases.get({ leaseId });
     return lease.access === 'full'
       ? {
           title: `Lease for ${lease.unit.code}`,
           detail: `${lease.tenant.displayName} · starts ${formatBusinessDate(lease.terms.startDate)}`,
+          href: `/leases/${lease.id}`,
         }
-      : { title: `Lease for ${lease.unit.code}`, detail: null };
+      : { title: `Lease for ${lease.unit.code}`, detail: null, href: `/leases/${lease.id}` };
   } catch {
     return null;
   }
 }
+
+/**
+ * A line about the lease a request is for, when this person may see it. A money request (M4a)
+ * names its unit and tenant in its payload; otherwise the lease is fetched, once per lease for
+ * the whole list (`leases` holds the fetches already started).
+ */
+/** The lease line a money request's payload gives, ready to show without a fetch. */
+function namedSubject(row: ApprovalRow): Subject | null {
+  const named = payloadSubject(row);
+  return named?.leaseId
+    ? { title: named.title, detail: named.detail, href: `/leases/${named.leaseId}` }
+    : null;
+}
+
+async function describe(
+  row: ApprovalRow,
+  leases: Map<string, Promise<Subject | null>>,
+): Promise<Subject | null> {
+  if (payloadSubject(row)) return namedSubject(row);
+  const leaseId = row.subjectType === 'lease' ? row.subjectId : payloadLeaseId(row);
+  if (!leaseId) return null;
+  let fetched = leases.get(leaseId);
+  if (!fetched) {
+    fetched = fetchSubject(leaseId);
+    leases.set(leaseId, fetched);
+  }
+  return fetched;
+}
+
+/** What the record link reads, for a money request whose record is not the lease. */
+const RECORD_LINKS: Record<string, string> = {
+  payment: 'Open the payment',
+  invoice: 'Open the invoice',
+  invoice_line: 'Open the invoice',
+  cash_record: 'Cash on hand',
+  cash_banking: 'Cash on hand',
+};
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
 export function ApprovalsView({ names }: { readonly names: readonly [string, string][] }) {
@@ -109,8 +153,9 @@ export function ApprovalsView({ names }: { readonly names: readonly [string, str
       if (!current()) return;
       setRows(list);
       setProblem(null);
+      const leases = new Map<string, Promise<Subject | null>>();
       const described = await Promise.all(
-        list.map(async (r) => [r.id, await describe(r)] as const),
+        list.map(async (r) => [r.id, await describe(r, leases)] as const),
       );
       if (!current()) return;
       setSubjects(new Map(described.filter((d): d is readonly [string, Subject] => d[1] !== null)));
@@ -185,7 +230,7 @@ export function ApprovalsView({ names }: { readonly names: readonly [string, str
               <li key={row.id}>
                 <ApprovalItem
                   row={row}
-                  subject={subjects.get(row.id) ?? null}
+                  subject={subjects.get(row.id) ?? namedSubject(row)}
                   personId={me.personId}
                   people={people}
                   onChanged={changed}
@@ -214,14 +259,22 @@ function ApprovalItem({
 }) {
   const { timeZone } = useApp();
   const moves = approvalMoves(row, personId, new Date());
-  const reason = payloadReason(row.payload);
-  const href = subjectHref(row);
+  // Money requests (M4a) are summarised fact by fact, their reason among the facts. The unit and
+  // tenant are not repeated when the lease line above names them.
+  const facts = approvalFacts(row.actionType, row.payload).filter(
+    (fact) => !(subject && (fact.label === 'Unit' || fact.label === 'Tenant')),
+  );
+  const evidence = approvalEvidence(row.actionType, row.payload);
+  const reason = facts.length ? null : payloadReason(row.payload);
+  const recordHref = subjectHref(row);
+  const href = subject?.href ?? recordHref;
+  const otherRecord = recordHref && recordHref !== href ? recordHref : null;
   const who = personName(row.initiatedBy, { personId }, people);
   const closed = closeReasonLabel(row.closeReason);
   const label = approvalActionLabel(row.actionType);
 
   return (
-    <Card data-testid="approval">
+    <Card data-testid="approval" data-approval-id={row.id}>
       <CardHeader
         title={label}
         description={
@@ -256,6 +309,12 @@ function ApprovalItem({
               <dd className="break-words">{reason}</dd>
             </div>
           ) : null}
+          {facts.map((fact) => (
+            <div key={fact.label} className="min-w-0" data-testid="approval-fact">
+              <dt className="text-slate-600">{fact.label}</dt>
+              <dd className="wrap-break-word">{fact.value}</dd>
+            </div>
+          ))}
           <div>
             <dt className="text-slate-600">
               {row.status === 'pending' || row.status === 'cooling_off'
@@ -271,6 +330,19 @@ function ApprovalItem({
             </div>
           ) : null}
         </dl>
+        {evidence || otherRecord ? (
+          <div className="flex flex-wrap items-center gap-3">
+            {/* The approver checks the photo, proof or slip before deciding (BC-05, P07, P28). */}
+            {evidence ? (
+              <EvidenceButton documentId={evidence.documentId} kind={evidence.kind} />
+            ) : null}
+            {otherRecord ? (
+              <Link href={otherRecord} className="text-sm font-medium underline underline-offset-2">
+                {RECORD_LINKS[row.subjectType] ?? 'Open the record'}
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
 
         {row.decisions.length ? (
           <ul className="space-y-1 text-sm" aria-label="Decisions">

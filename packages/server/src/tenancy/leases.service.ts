@@ -21,6 +21,7 @@ import {
   instantToDate,
   toIsoDate,
 } from '@rent/domain/dates';
+import { checkBillingStart, firstPeriodStartOnOrAfter } from '@rent/domain/billing';
 import { DomainError } from '@rent/domain/errors';
 import { SIGNER_ROLES, type SignerRole } from '@rent/domain/esign';
 import { normalisePhone } from '@rent/domain/phone';
@@ -46,13 +47,14 @@ import { staffActor, type StaffActor } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
 import { sqlStateOf } from '../core/db-errors';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
+import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, LEASE_FILE_UPLOAD } from '../documents/documents.service';
 import { activeMemberIds } from '../identity/memberships';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { unitPlace } from '../portfolio/register-read.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
-import { LeaseLifecycleService } from './lease-lifecycle.service';
+import { LEASE_CANCELLED_EVENT, LeaseLifecycleService } from './lease-lifecycle.service';
 import {
   assertStaffParties,
   companyFacts,
@@ -168,6 +170,11 @@ export class LeasesService {
       schema: cancelSignedPayload,
       // One cancellation waits at a time for a lease; a second would only ask the same question.
       onePerSubject: true,
+      // The lease row first, before the decision is audited: the transitions job takes the lease
+      // before the audit chain head too, so the two never wait on each other (review 3).
+      prepare: async (tx, request) => {
+        await leaseRow(tx, (request.payload as CancelSignedPayload).leaseId, { lock: true });
+      },
       currentPayload: async (tx, request) => {
         const proposed = request.payload as CancelSignedPayload;
         const row = await leaseRow(tx, proposed.leaseId);
@@ -204,6 +211,13 @@ export class LeasesService {
           recordType: 'lease',
           recordId: row.id,
           data: { approvalRequestId: request.id },
+        });
+        // Billing cancels the lease's invoices (M4a plan 4.4); money paid stays as credit.
+        await enqueueOutbox(tx, {
+          companyId: row.companyId,
+          type: LEASE_CANCELLED_EVENT,
+          payload: { leaseId: row.id },
+          idempotencyKey: `${LEASE_CANCELLED_EVENT}:${row.id}`,
         });
       },
     });
@@ -501,6 +515,7 @@ export class LeasesService {
       const signedOn = parseBusinessDate(input.signedOn);
       if (compareDates(signedOn, parseBusinessDate(todayIn(this.clock, company.timeZone))) > 0)
         throw invalid('signed_on_future', 'The signing date cannot be in the future');
+      const billingStartDate = this.paperBillingStart(input, todayIn(this.clock, company.timeZone));
       const leaseId = await this.insertDraft(
         tx,
         staff,
@@ -521,12 +536,15 @@ export class LeasesService {
           signedAt: instantToDate(startOfDay(signedOn, company.timeZone)),
           source: 'paper',
           signedDocumentId: documentId,
+          billingStartDate,
         });
       } catch (error) {
         throw leaseWriteError(error);
       }
       return leaseId;
     });
+    // The scan's plain copy goes only now, so a refused or failed write can be sent again.
+    await this.documents.discardStagedUpload(staged);
     return this.view(staff, id);
   }
 
@@ -651,6 +669,7 @@ export class LeasesService {
         'lease_stamped_copy',
       ),
     }));
+    await this.documents.discardStagedUpload(staged);
     return this.view(staff, leaseId);
   }
 
@@ -691,6 +710,7 @@ export class LeasesService {
           }
         : {}),
     }));
+    if (staged) await this.documents.discardStagedUpload(staged);
     return this.view(staff, leaseId);
   }
 
@@ -769,6 +789,7 @@ export class LeasesService {
       actionType: CANCEL_SIGNED_ACTION,
       subjectType: 'lease',
       subjectId: row.id,
+      propertyId: row.propertyId,
       payload: {
         leaseId: row.id,
         reason: why.slice(0, 500),
@@ -779,6 +800,22 @@ export class LeasesService {
   }
 
   // Internals ------------------------------------------------------------------------------------
+
+  /**
+   * Where a paper lease's billing starts (M4a decision 1): the first rent period that starts on
+   * or after the day it is recorded, unless staff choose another period start (an earlier one
+   * brings recent arrears in; a later one leaves out months paid before the platform).
+   */
+  private paperBillingStart(input: PaperLeaseInput, today: string): string {
+    const terms = checkLeaseTerms({ ...input, use: input.use ?? 'residential' });
+    if (!input.billingStartDate) return firstPeriodStartOnOrAfter(terms, today);
+    try {
+      return checkBillingStart(terms, input.billingStartDate);
+    } catch (error) {
+      if (error instanceof DomainError) throw invalid('billing_start', error.message);
+      throw error;
+    }
+  }
 
   private async insertDraft(
     tx: Tx,

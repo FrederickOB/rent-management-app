@@ -44,12 +44,13 @@ import {
 import type { AddressLookupPort, GhanaPostAddress } from '@rent/integrations';
 import { v7 as uuidv7 } from 'uuid';
 import type { Clock } from '../core/clock';
-import { isUniqueViolation, withRegisterChecks } from '../core/db-errors';
+import { isUniqueViolation, sqlStateOf, withRegisterChecks } from '../core/db-errors';
 import { conflict, forbidden, invalid, notFound } from '../core/errors';
 import { ADDRESS_LOOKUP_PORT, CLOCK, DATABASE } from '../core/tokens';
 import { staffActor } from '../companies/companies.service';
 import { OwnersService } from '../companies/owners.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
+import { lockPropertyOwner, propertyHasLedger } from './ownership';
 import type { AddressInput, NewBlock, NewProperty, UnitBatch } from './register.types';
 
 type StaffActor = ReturnType<typeof staffActor>;
@@ -484,6 +485,7 @@ export class RegisterService {
     const from = parseBusinessDate(input.effectiveFrom);
     await withRegisterChecks(() =>
       withCompany(this.database, staffContext(staff), async (tx) => {
+        await lockPropertyOwner(tx, staff.companyId, propertyId);
         // Locked, so two changes at once cannot both pass the date check and double the shares.
         const [property] = await tx
           .select({ id: schema.property.id })
@@ -492,10 +494,18 @@ export class RegisterService {
           .for('update');
         if (!property) throw notFound('Property');
         const ownerId = await this.ownerFor(tx, staff, input.ownerId);
+        await this.refuseOnceBilled(tx, staff.companyId, propertyId);
         const [latest] = await tx
           .select({ effectiveFrom: sql<string>`max(${schema.propertyOwnership.effectiveFrom})` })
           .from(schema.propertyOwnership)
-          .where(eq(schema.propertyOwnership.propertyId, propertyId));
+          .where(
+            and(
+              eq(schema.propertyOwnership.propertyId, propertyId),
+              sql`not exists (select 1 from property_ownership_correction c
+                  where c.company_id = ${schema.propertyOwnership.companyId}
+                    and c.ownership_id = ${schema.propertyOwnership.id})`,
+            ),
+          );
         if (
           latest?.effectiveFrom &&
           compareDates(from, parseBusinessDate(latest.effectiveFrom)) <= 0
@@ -506,7 +516,67 @@ export class RegisterService {
           );
         await this.insertOwnership(tx, staff, propertyId, ownerId, toIsoDate(from));
       }),
-    );
+    ).catch(ownerFixedError);
+  }
+
+  /**
+   * Corrects a property's owner on the same date (M2 deferred S5; M4a decision 6): the latest
+   * ownership rows are superseded by the right owner from the same day, so a property filed under
+   * the wrong owner stops showing to that owner's people at once. Only before the property has
+   * any invoice, payment or ledger entry; after that, owner changes wait for a transfer flow.
+   */
+  async correctOwner(
+    actor: Actor | null,
+    propertyId: string,
+    input: { readonly ownerId: string; readonly reason: string },
+  ): Promise<void> {
+    const staff = staffActor(actor);
+    this.policy.assert(staff, 'owner.manage');
+    const reason = input.reason.trim();
+    if (reason.length < 5) throw invalid('reason_required', 'Say why the owner is being corrected');
+    await withRegisterChecks(() =>
+      withCompany(this.database, staffContext(staff), async (tx) => {
+        await lockPropertyOwner(tx, staff.companyId, propertyId);
+        const [property] = await tx
+          .select({ id: schema.property.id })
+          .from(schema.property)
+          .where(and(eq(schema.property.id, propertyId), isNull(schema.property.archivedAt)))
+          .for('update');
+        if (!property) throw notFound('Property');
+        const ownerId = await this.ownerFor(tx, staff, input.ownerId);
+        await this.refuseOnceBilled(tx, staff.companyId, propertyId);
+        const latest = await tx.execute<{ id: string; owner_id: string; effective_from: string }>(
+          sql`select po.id, po.owner_id, po.effective_from::text from property_ownership po
+              where po.property_id = ${propertyId}
+                and not exists (select 1 from property_ownership_correction c
+                                where c.company_id = po.company_id and c.ownership_id = po.id)
+                and po.effective_from = (
+                  select max(p2.effective_from) from property_ownership p2
+                  where p2.company_id = po.company_id and p2.property_id = po.property_id
+                    and not exists (select 1 from property_ownership_correction c2
+                                    where c2.company_id = p2.company_id and c2.ownership_id = p2.id))`,
+        );
+        const rows = latest.rows;
+        if (rows.length === 0) throw notFound('Ownership');
+        if (rows.length === 1 && rows[0]!.owner_id === ownerId)
+          throw invalid('owner_unchanged', 'That owner is already the owner on record');
+        await tx.insert(schema.propertyOwnershipCorrection).values(
+          rows.map((r) => ({
+            companyId: staff.companyId,
+            propertyId,
+            ownershipId: r.id,
+            reason: reason.slice(0, 300),
+            correctedBy: staff.personId,
+          })),
+        );
+        await this.insertOwnership(tx, staff, propertyId, ownerId, rows[0]!.effective_from);
+      }),
+    ).catch(ownerFixedError);
+  }
+
+  /** Decision 6: once a property has ledger entries, its owner stays until a transfer flow exists. */
+  private async refuseOnceBilled(tx: Tx, companyId: string, propertyId: string): Promise<void> {
+    if (await propertyHasLedger(tx, companyId, propertyId)) throw ownerFixed();
   }
 
   /**
@@ -525,7 +595,9 @@ export class RegisterService {
                         and c.owner_id = ${ownerId})
               or exists (select 1 from property_ownership o
                          where o.company_id = p.company_id and o.property_id = p.id
-                           and o.owner_id = ${ownerId} and o.effective_from > current_date))`,
+                           and o.owner_id = ${ownerId} and o.effective_from > current_date
+                           and not exists (select 1 from property_ownership_correction c
+                                           where c.company_id = o.company_id and c.ownership_id = o.id)))`,
       );
       if ((held.rows[0]?.n ?? 0) > 0)
         throw invalid(
@@ -820,4 +892,16 @@ export class RegisterService {
     if (!row) throw notFound('Unit');
     return row;
   }
+}
+
+const ownerFixed = () =>
+  conflict(
+    'owner_fixed',
+    'This property already has invoices or payments, so its owner cannot change until ownership transfers are supported',
+  );
+
+/** The database's refusal of an owner change on a billed property (RA045), as a clear conflict. */
+function ownerFixedError(error: unknown): never {
+  if (sqlStateOf(error) === 'RA045') throw ownerFixed();
+  throw error;
 }

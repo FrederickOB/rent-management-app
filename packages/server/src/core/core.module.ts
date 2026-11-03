@@ -32,6 +32,7 @@ import { systemClock, type Clock } from './clock';
 import { loadConfig, type AppConfig } from './config';
 import { DbKeyStore } from './crypto/db-key-store';
 import { FieldCipher } from './crypto/field-cipher';
+import { IdempotencyStore } from './idempotency';
 import { createLogger, type AppLogger } from './logging/logger';
 import {
   ADDRESS_LOOKUP_PORT,
@@ -159,6 +160,11 @@ export class CoreModule {
       },
       { provide: KMS_PORT, useFactory: () => kmsFor(config) },
       {
+        provide: IdempotencyStore,
+        inject: [DATABASE],
+        useFactory: (database: Database) => new IdempotencyStore(database),
+      },
+      {
         provide: FIELD_CIPHER,
         inject: [KMS_PORT, DATABASE],
         useFactory: (kms: KeyManagementPort, database: Database) => {
@@ -202,6 +208,7 @@ export class CoreModule {
         KMS_PORT,
         FIELD_CIPHER,
         ALERT_PORT,
+        IdempotencyStore,
       ],
     };
   }

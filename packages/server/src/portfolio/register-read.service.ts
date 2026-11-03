@@ -364,6 +364,8 @@ export class RegisterReadService {
             from property_ownership po
             join owner o on o.company_id = po.company_id and o.id = po.owner_id
             where po.property_id = ${propertyId}
+              and not exists (select 1 from property_ownership_correction c
+                              where c.company_id = po.company_id and c.ownership_id = po.id)
             order by po.effective_from desc, po.share_bps desc`,
       );
       const units = await tx.execute<UnitSqlRow>(

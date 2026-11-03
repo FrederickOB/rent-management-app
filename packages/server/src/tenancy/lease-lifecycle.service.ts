@@ -37,6 +37,10 @@ import {
 /** The event other modules (and the e-signing phase's copies to parties) react to. */
 export const LEASE_SIGNED_EVENT = 'lease.signed';
 export const LEASE_ENDED_EVENT = 'lease.ended';
+/** A signed lease's start date came (M4a: a renewal carries its balances over, P29). */
+export const LEASE_ACTIVATED_EVENT = 'lease.activated';
+/** A signed lease was cancelled before its start, with approval (M4a: its invoices are cancelled). */
+export const LEASE_CANCELLED_EVENT = 'lease.cancelled';
 
 export interface MarkSignedInput {
   readonly leaseId: string;
@@ -46,6 +50,11 @@ export interface MarkSignedInput {
   readonly source: 'esign' | 'paper';
   /** The final signed PDF, or for paper the scan. Required for paper. */
   readonly signedDocumentId?: string | null;
+  /**
+   * Where billing starts (M4a decision 1): an e-signed lease bills from its start; a paper lease
+   * from the period the caller checked (by default the first starting on or after today).
+   */
+  readonly billingStartDate?: string | null;
 }
 
 export interface TrackerRuleSet {
@@ -128,6 +137,8 @@ export class LeaseLifecycleService {
           signedAt: input.signedAt,
           signingMethod: input.source,
           signedDocumentId: input.signedDocumentId ?? null,
+          billingStartDate:
+            input.source === 'esign' ? row.startDate : (input.billingStartDate ?? row.startDate),
           rentControlApplies: trackers.rentControl.applies,
           rentControlDeadline: trackers.rentControl.deadline,
           rentControlRuleId: trackers.rentControl.applies
@@ -292,10 +303,18 @@ export class LeaseLifecycleService {
     for (const lease of starting.rows) {
       await lockUnit(tx, companyId, lease.unit_id);
       await this.statusReason(tx, 'Lease started');
-      await tx
+      const started = await tx
         .update(schema.lease)
         .set({ status: 'active', activatedOn: lease.start_date, updatedAt: this.clock.now() })
-        .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, 'signed')));
+        .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, 'signed')))
+        .returning({ renewsLeaseId: schema.lease.renewsLeaseId });
+      if (started[0])
+        await enqueueOutbox(tx, {
+          companyId,
+          type: LEASE_ACTIVATED_EVENT,
+          payload: { leaseId: lease.id, renewsLeaseId: started[0].renewsLeaseId },
+          idempotencyKey: `${LEASE_ACTIVATED_EVENT}:${lease.id}`,
+        });
       changes += 1;
     }
     // 2. Leases past their end date: held over, and ended once the next lease has started, after
@@ -355,7 +374,7 @@ export class LeaseLifecycleService {
           tx,
           next.endReason === 'renewed' ? 'Renewed' : 'The next lease on the unit started',
         );
-        await tx
+        const ended = await tx
           .update(schema.lease)
           .set({
             status: 'ended',
@@ -363,7 +382,15 @@ export class LeaseLifecycleService {
             endedOn: next.endedOn,
             updatedAt: this.clock.now(),
           })
-          .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, status)));
+          .where(and(eq(schema.lease.id, lease.id), eq(schema.lease.status, status)))
+          .returning({ id: schema.lease.id });
+        if (ended[0])
+          await enqueueOutbox(tx, {
+            companyId,
+            type: LEASE_ENDED_EVENT,
+            payload: { leaseId: lease.id, reason: next.endReason },
+            idempotencyKey: `${LEASE_ENDED_EVENT}:${lease.id}`,
+          });
         break;
       }
     }
