@@ -74,25 +74,28 @@ export function TerminationPanel({
   readonly agency: boolean;
   readonly can: TerminationPermissions;
 }) {
+  const manage = can.manage;
   const load = useCallback(async () => {
     // The newest request first, as the API orders them.
     const [latest] = await api().earlyTermination.list({ leaseId });
-    // The settlement with nothing agreed yet: where the form starts, or all a reader sees. Decision
-    // 9: one that would credit back tax the tenant withheld is refused, in the API's own words.
-    const preview = mayRequestAgain(latest?.status ?? null)
-      ? await api()
-          .earlyTermination.preview({ leaseId, charges: [], deductions: [] })
-          .then(
-            (figures) => ({ figures, refused: null }),
-            (failure: unknown) => {
-              const refused = creditNoteWithheld(failure);
-              if (refused === null) throw failure;
-              return { figures: null, refused };
-            },
-          )
-      : { figures: null, refused: null };
+    // The settlement with nothing agreed yet: where the form starts. Working it out needs
+    // billing.manage (M5 review), so a reader sees only a request already made. Decision 9: one
+    // that would credit back tax the tenant withheld is refused, in the API's own words.
+    const preview =
+      manage && mayRequestAgain(latest?.status ?? null)
+        ? await api()
+            .earlyTermination.preview({ leaseId, charges: [], deductions: [] })
+            .then(
+              (figures) => ({ figures, refused: null }),
+              (failure: unknown) => {
+                const refused = creditNoteWithheld(failure);
+                if (refused === null) throw failure;
+                return { figures: null, refused };
+              },
+            )
+        : { figures: null, refused: null };
     return { current: latest ?? null, ...preview };
-  }, [leaseId]);
+  }, [leaseId, manage]);
   const { state, reload } = useLoad(load);
   const [notice, setNotice] = useState<string | null>(null);
   const requestKeeper = useIdempotencyKeeper();
@@ -141,16 +144,18 @@ export function TerminationPanel({
           </Alert>
         ) : null}
         {state.status === 'ready' && state.data.figures ? (
-          can.manage ? (
-            <RequestForm
-              leaseId={leaseId}
-              initial={state.data.figures}
-              keeper={requestKeeper}
-              onDone={changed}
-            />
-          ) : (
-            <TerminationSteps figures={state.data.figures} charges={[]} deductions={[]} />
-          )
+          <RequestForm
+            leaseId={leaseId}
+            initial={state.data.figures}
+            keeper={requestKeeper}
+            onDone={changed}
+          />
+        ) : null}
+        {state.status === 'ready' && !manage && !current ? (
+          <p className="text-sm text-slate-700" data-testid="termination-not-asked">
+            No settlement has been asked for yet. Someone who manages billing works it out and asks
+            for it; a second person approves it.
+          </p>
         ) : null}
         <p className="text-xs text-slate-600">{TERMINATION_TAX_NOTE}</p>
       </CardBody>

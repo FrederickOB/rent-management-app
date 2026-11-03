@@ -14,6 +14,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextField } from '@/components/ui/field';
+import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { RECEIVING_ACCOUNT_LABELS } from '@/lib/billing-format';
 import { openFetchedLink, saveFile } from '@/lib/browser-files';
@@ -22,8 +23,11 @@ import { toProblem } from '@/lib/errors';
 import {
   dueCounts,
   dueList,
+  dueRuleText,
   monthOf,
   monthPeriod,
+  NOT_ASSESSED_EVENT_LABELS,
+  NOT_ASSESSED_REASON_LABELS,
   parsePeriod,
   periodWords,
   previousMonth,
@@ -64,6 +68,7 @@ export function RentTaxView({
         canPay={canPay}
         ownerNames={new Map(owners.map((o) => [o.id, o.label]))}
       />
+      <NotAssessedSection ownerNames={new Map(owners.map((o) => [o.id, o.label]))} />
       <ReportSection
         owners={owners}
         initialOwnerId={initialOwnerId ?? (owners.length === 1 ? owners[0]!.id : null)}
@@ -76,9 +81,9 @@ export function RentTaxView({
 }
 
 /**
- * What is due to GRA (TX-02): every item still owed, oldest due first, with the alerts at 21 and
- * 28 days after the rent was received. Items the tenant withheld are the tenant's to pay and are
- * not on it.
+ * What is due to GRA (TX-02): every item still owed, oldest due first, with the alert days its
+ * rules rows set, said from the items themselves (CLAUDE.md section 7). Items the tenant withheld
+ * are the tenant's to pay and are not on it.
  */
 function DueSection({
   today,
@@ -94,14 +99,16 @@ function DueSection({
   const items = state.status === 'ready' ? dueList(state.data) : [];
   const counts = dueCounts(items, today);
   const rules = state.status === 'ready' ? state.data.flatMap((item) => item.rules) : [];
+  // The due and alert days the items' own rules rows hold (CLAUDE.md section 7).
+  const rule = dueRuleText(items);
   return (
     <Card data-testid="rent-tax-due">
       <CardHeader
         title="Due to GRA"
         description={
           state.status === 'ready' && items.length
-            ? `${items.length} item${items.length === 1 ? '' : 's'} owed: ${counts.overdue} overdue, ${counts.alerted} alerted at 21 or 28 days.`
-            : 'Rent tax is due 30 days after the rent was received. Alerts go to accountants and admins at 21 and 28 days.'
+            ? `${items.length} item${items.length === 1 ? '' : 's'} owed: ${counts.overdue} overdue, ${counts.alerted} past an alert day. Rent tax is ${rule.due}${rule.alerts ? `; accountants and admins are alerted ${rule.alerts}` : ''}.`
+            : 'What is owed to GRA, oldest due first, with the alerts its rules set.'
         }
         actions={
           canPay ? (
@@ -130,6 +137,78 @@ function DueSection({
             linkPayments
           />
         ) : null}
+      </CardBody>
+    </Card>
+  );
+}
+
+/**
+ * Rent tax not worked out when the money posted (TX-08; M5 review 7), because a rules row was
+ * missing or held a value this version cannot apply: an exception list for staff. A daily run
+ * assesses each once the rules allow; until then it is listed here, and shown only when there is
+ * something to see.
+ */
+function NotAssessedSection({ ownerNames }: { readonly ownerNames: ReadonlyMap<string, string> }) {
+  const load = useCallback(() => api().rentTax.notAssessed({ open: 'true' }), []);
+  const { state, reload } = useLoad(load);
+  if (state.status === 'loading' || (state.status === 'ready' && state.data.length === 0))
+    return null;
+  return (
+    <Card data-testid="rent-tax-not-assessed">
+      <CardHeader
+        title="Rent tax not worked out"
+        description="These receipts’ rent tax could not be worked out, because a tax rule was missing or could not be applied. It is worked out once the rules table allows; until then no rent tax is recorded for them."
+      />
+      <CardBody>
+        {state.status === 'error' ? (
+          <LoadFailed message={state.problem.message} onRetry={reload} />
+        ) : (
+          <Table caption="Rent tax not worked out">
+            <thead>
+              <tr>
+                <Th>Date</Th>
+                <Th>Lease</Th>
+                <Th>What</Th>
+                <Th>Why</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {state.data.map((row) => (
+                <tr key={row.eventKey} data-testid="not-assessed-row">
+                  <Td className="whitespace-nowrap">
+                    {row.paymentId ? (
+                      <Link
+                        href={`/payments/${row.paymentId}`}
+                        className="font-medium underline underline-offset-2"
+                      >
+                        {formatBusinessDate(row.valueDate)}
+                      </Link>
+                    ) : (
+                      formatBusinessDate(row.valueDate)
+                    )}
+                  </Td>
+                  <Td>
+                    <Link
+                      href={`/leases/${row.leaseId}`}
+                      className="font-mono underline underline-offset-2"
+                    >
+                      {row.unitCode}
+                    </Link>
+                    <p className="text-xs text-slate-600">
+                      {ownerNames.get(row.ownerId) ?? 'An owner'}
+                    </p>
+                  </Td>
+                  <Td>{NOT_ASSESSED_EVENT_LABELS[row.event]}</Td>
+                  <Td className="min-w-64 space-y-1">
+                    <p className="font-medium">{NOT_ASSESSED_REASON_LABELS[row.reason]}</p>
+                    {row.ruleKey ? <p className="font-mono text-xs">{row.ruleKey}</p> : null}
+                    <p className="text-xs text-slate-700">{row.message}</p>
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
       </CardBody>
     </Card>
   );
@@ -301,6 +380,16 @@ function ReportBody({
     { key: 'base', label: 'Rent taxed', value: report.totals.baseMinor },
     { key: 'tax', label: 'Rent tax', value: report.totals.taxMinor },
     { key: 'withheld', label: 'Withheld by tenants', value: report.totals.withheldMinor },
+    // M5 review 3: the tenant pays it to GRA, so it is not in what the owner still owes.
+    ...(report.totals.withheldAwaitingCertificateMinor === undefined
+      ? []
+      : [
+          {
+            key: 'awaiting-certificate',
+            label: 'Withheld by the tenant, awaiting the certificate',
+            value: report.totals.withheldAwaitingCertificateMinor,
+          },
+        ]),
     { key: 'paid', label: 'Paid to GRA', value: report.totals.paidToGraMinor },
     {
       key: 'certificates',

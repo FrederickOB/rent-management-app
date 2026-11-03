@@ -36,6 +36,73 @@ export const TAX_ITEM_KIND_LABELS: Record<TaxItemKind, string> = {
   withholding_offset: 'Replaced by withholding',
 };
 
+/**
+ * What an item is the tax on, in words. A receipt's item that names a withholding is the tax on
+ * cash the withholding released and the payment then put on another month (M5 review).
+ */
+export function taxItemLabel(item: {
+  readonly kind: TaxItemKind;
+  readonly withholdingId?: string | null;
+}): string {
+  if (item.kind === 'receipt' && item.withholdingId)
+    return 'Tax on rent this payment now covers, after the withholding moved it';
+  return TAX_ITEM_KIND_LABELS[item.kind];
+}
+
+/** The days the items' rules rows hold (`rent_tax.due_days_after_receipt`, `rent_tax.alert_days`). */
+export interface DueRuleFacts {
+  readonly dueDays?: number | null;
+  readonly alertDays?: readonly number[];
+}
+
+const dayList = (days: readonly number[]): string => {
+  const sorted = [...new Set(days)].sort((a, b) => a - b).map(String);
+  return sorted.length <= 1
+    ? (sorted[0] ?? '')
+    : `${sorted.slice(0, -1).join(', ')} and ${sorted.at(-1)}`;
+};
+
+/**
+ * The due rule in words, from the items' own rules rows, never a value written in the code
+ * (CLAUDE.md section 7): `due 30 days after the rent was received` and `at 21 and 28 days`. Items
+ * under different rule versions are named together; with none known, each item's date speaks.
+ */
+export function dueRuleText(items: readonly DueRuleFacts[]): {
+  readonly due: string;
+  readonly alerts: string | null;
+} {
+  const dueDays = [
+    ...new Set(items.flatMap((i) => (typeof i.dueDays === 'number' ? [i.dueDays] : []))),
+  ];
+  const alertSets = [
+    ...new Set(items.flatMap((i) => (i.alertDays?.length ? [dayList(i.alertDays)] : []))),
+  ];
+  const due =
+    dueDays.length === 0
+      ? 'due by the date shown on each item'
+      : `due ${dayList(dueDays)} days after the rent was received`;
+  const alerts =
+    alertSets.length === 0
+      ? null
+      : alertSets.length === 1
+        ? `at ${alertSets[0]} days`
+        : `${alertSets.map((set) => `at ${set} days`).join(' or ')}, by each item’s rule`;
+  return { due, alerts };
+}
+
+/** Why a receipt's rent tax was not assessed (TX-08), as the API names the reason. */
+export const NOT_ASSESSED_REASON_LABELS: Record<'rule_missing' | 'rule_unsupported', string> = {
+  rule_missing: 'No rules row was in force for it',
+  rule_unsupported: 'Its rules row holds a value this version cannot apply',
+};
+
+/** What was not assessed: money received, credit carried to a renewal, or tax withheld. */
+export const NOT_ASSESSED_EVENT_LABELS: Record<'receipt' | 'carry_over' | 'withholding', string> = {
+  receipt: 'Rent received',
+  carry_over: 'Credit carried to a renewal',
+  withholding: 'Withheld by the tenant',
+};
+
 /** Still owed to GRA by the owner: an item withheld by the tenant is the tenant's to pay (P19). */
 const OWED: ReadonlySet<RentTaxStatus> = new Set(['open', 'part_paid']);
 export const isOwed = (status: RentTaxStatus): boolean => OWED.has(status);
@@ -65,7 +132,7 @@ export type DueState =
 const days = (from: string, to: string): number =>
   daysBetween(parseBusinessDate(from), parseBusinessDate(to));
 
-/** Where an item stands on `today` (TX-02): due, alerted at 21 or 28 days, or overdue. */
+/** Where an item stands on `today` (TX-02): due, past an alert day its rule sets, or overdue. */
 export function dueState(item: DueItem, today: string): DueState {
   if (!isOwed(item.status) || item.dueDate === null) return { kind: 'none' };
   const daysLeft = days(today, item.dueDate);
@@ -127,6 +194,8 @@ export interface OwedItem extends DueItem {
 /** A receipt's rent tax as the screens show it: what it was worked out on, and where it stands. */
 export interface TaxItemRow extends OwedItem {
   readonly kind?: TaxItemKind;
+  /** On a receipt: the withholding that released the cash this tax is on (M5 review). */
+  readonly withholdingId?: string | null;
   /** A rule the item used is not verified (the API's flag): the row says so (section 7). */
   readonly warning?: boolean;
   /** The payment taxed; none on tax withheld by the tenant without a payment. */

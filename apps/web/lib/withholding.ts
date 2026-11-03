@@ -477,3 +477,101 @@ export function differsWarning(
   const which = named.map((line) => `${line.invoiceNumber} ${line.label}`).join('; ');
   return `${named.length === 1 ? 'This amount is' : 'These amounts are'} not ${rateLabel(rateBps)} of the line${named.length === 1 ? '' : 's'}: ${which}. Check against the tenant’s advice or certificate before recording; it is recorded as typed.`;
 }
+
+// M5 review: how a withholding's rent tax was treated, and a sole uploader's fresh request -------
+
+export type RentTaxTreatment = 'accrued' | 'letting_business' | 'not_assessed';
+
+/**
+ * How the withholding's rent tax was treated when it was recorded, which its certificate (P20)
+ * follows (M5 review 1). Null for withholding recorded before the API said.
+ */
+export function treatmentText(treatment: RentTaxTreatment | null | undefined): string | null {
+  switch (treatment) {
+    case 'accrued':
+      return 'Its rent tax is the amount withheld; once confirmed, the certificate settles it.';
+    case 'letting_business':
+      return 'The owner lets property as a business and is taxed on income, so the certificate is a tax credit for them.';
+    case 'not_assessed':
+      return 'Its rent tax was not worked out when it was recorded, because a rules row was missing, so the certificate is a tax credit for the owner.';
+    default:
+      return null;
+  }
+}
+
+type RequestStatus = SelfConfirmation['status'];
+
+export type SelfDecisionState =
+  /** Nothing for this person to decide themselves. */
+  | { readonly kind: 'none' }
+  /** A request is open and the cooling-off has not passed. */
+  | {
+      readonly kind: 'waiting';
+      readonly decision: 'confirm' | 'withdraw';
+      readonly approvalId: string;
+      readonly until: string | null;
+    }
+  /** A request is open and the cooling-off has passed: decide it with a TOTP code. */
+  | {
+      readonly kind: 'ready';
+      readonly decision: 'confirm' | 'withdraw';
+      readonly approvalId: string;
+    }
+  /**
+   * The last request lapsed (rejected, withdrawn or expired) and none is open: its uploader may
+   * ask again to confirm it, or to withdraw it, when the API says so.
+   */
+  | {
+      readonly kind: 'lapsed';
+      readonly decision: 'confirm' | 'withdraw';
+      readonly status: RequestStatus;
+      readonly mayRequest: boolean;
+    };
+
+const OPEN: ReadonlySet<RequestStatus> = new Set(['pending', 'cooling_off']);
+
+/**
+ * Where a sole uploader's own decision on their certificate stands at `now` (decision 7; M5
+ * review 4): a request to confirm it or to withdraw it, each decided after the cooling-off with
+ * a code through the approvals engine. Only its uploader ever decides it this way.
+ */
+export function selfDecisionState(
+  certificate: {
+    readonly uploadedBy: string;
+    readonly selfConfirmation?: SelfConfirmation | null;
+    readonly selfWithdrawal?: SelfConfirmation | null;
+    readonly mayRequestSelfDecision?: boolean;
+  },
+  personId: string,
+  now: Date,
+): SelfDecisionState {
+  if (certificate.uploadedBy !== personId) return { kind: 'none' };
+  const requests = [
+    { decision: 'withdraw' as const, request: certificate.selfWithdrawal ?? null },
+    { decision: 'confirm' as const, request: certificate.selfConfirmation ?? null },
+  ];
+  const open = requests.find((r) => r.request && OPEN.has(r.request.status));
+  if (open?.request) {
+    const ready =
+      open.request.coolingOffUntil !== null && new Date(open.request.coolingOffUntil) <= now;
+    return ready
+      ? { kind: 'ready', decision: open.decision, approvalId: open.request.approvalId }
+      : {
+          kind: 'waiting',
+          decision: open.decision,
+          approvalId: open.request.approvalId,
+          until: open.request.coolingOffUntil,
+        };
+  }
+  const lapsed = requests.find(
+    (r) => r.request && !OPEN.has(r.request.status) && r.request.status !== 'approved',
+  );
+  if (lapsed?.request)
+    return {
+      kind: 'lapsed',
+      decision: lapsed.decision,
+      status: lapsed.request.status,
+      mayRequest: certificate.mayRequestSelfDecision === true,
+    };
+  return { kind: 'none' };
+}

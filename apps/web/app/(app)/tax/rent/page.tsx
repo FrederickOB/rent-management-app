@@ -11,8 +11,9 @@ export const metadata: Metadata = { title: 'Rent tax' };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Rent tax (TX-01 to TX-03, TX-08; M5 plan 5.8): what is due to GRA with the 21- and 28-day
- * alerts, and the report by owner and period, receipt by receipt, with its PDF and CSV. Recording
+ * Rent tax (TX-01 to TX-03, TX-08; M5 plan 5.8): what is due to GRA with the alerts its rules
+ * set, receipts whose tax could not be worked out, and the report by owner and period, receipt by
+ * receipt, with its PDF and CSV. Recording
  * a GRA payment needs tax.manage; the API checks every request again.
  */
 export default async function RentTaxPage({
@@ -35,7 +36,7 @@ export default async function RentTaxPage({
     <>
       <PageHeader
         title="Rent tax"
-        description="Rent tax is worked out on each receipt of rent, advances included, and is due to GRA 30 days after the rent was received."
+        description="Rent tax is worked out on each receipt of rent, advances included, and is due to GRA by the days its rules set after the rent was received."
       />
       <RentTaxView
         owners={

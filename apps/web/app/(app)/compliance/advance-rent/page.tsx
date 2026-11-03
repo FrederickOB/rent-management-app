@@ -25,7 +25,7 @@ export default async function AdvanceRentReportPage() {
     <>
       <PageHeader
         title="Advance rent report"
-        description="Leases paid further ahead than the limit the Rent Act sets for their term (Act 220 s.25(5)), when your company checks advances. The limit is not yet verified by counsel."
+        description="Leases paid further ahead than the limit the Rent Act sets for their term (Act 220 s.25(5)), when your company checks advances. Each row names the rule it was judged by, and whether counsel has verified it."
       />
       <AdvanceReportView seeSettings={allowed(me, 'company.update')} />
     </>

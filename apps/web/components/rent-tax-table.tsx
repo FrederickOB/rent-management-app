@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { rateLabel } from '@/lib/billing-format';
 import { formatBusinessDate } from '@/lib/business-dates';
-import { isOwed, TAX_ITEM_KIND_LABELS, type TaxItemRow } from '@/lib/rent-tax';
+import { isOwed, taxItemLabel, type TaxItemRow } from '@/lib/rent-tax';
 import { formatMinor } from '@/lib/tenancy-format';
 import { DueBadge, RentTaxStatusBadge } from './tax-badges';
 import { Table, Td, Th } from './ui/table';
@@ -57,8 +57,10 @@ export function RentTaxTable({
               {item.receiptNumber ? (
                 <p className="font-mono text-xs text-slate-600">{item.receiptNumber}</p>
               ) : null}
-              {item.kind && item.kind !== 'receipt' ? (
-                <p className="text-xs text-slate-700">{TAX_ITEM_KIND_LABELS[item.kind]}</p>
+              {item.kind && (item.kind !== 'receipt' || item.withholdingId) ? (
+                <p className="text-xs text-slate-700">
+                  {taxItemLabel({ kind: item.kind, withholdingId: item.withholdingId ?? null })}
+                </p>
               ) : null}
             </Td>
             {ownerNames ? <Td>{ownerNames.get(item.ownerId) ?? 'An owner'}</Td> : null}

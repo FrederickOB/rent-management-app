@@ -36,7 +36,8 @@ import {
   formLines,
   HELD_AS_ADVANCE,
   rateNote,
-  selfConfirmState,
+  selfDecisionState,
+  treatmentText,
   suggestionFor,
   withholdingForm,
   withholdingMoves,
@@ -193,9 +194,12 @@ function WithholdingItem({
   );
   const [open, setOpen] = useState<'upload' | 'reject' | 'write_off' | null>(null);
   const certificate = record.certificate;
+  // Decision 7 and review 4: a sole uploader's own request to confirm or withdraw it.
   const self = certificate
-    ? selfConfirmState(certificate, personId, new Date())
+    ? selfDecisionState(certificate, personId, new Date())
     : ({ kind: 'none' } as const);
+  // Once confirmed, what the certificate did says it; before, how it will be treated.
+  const treatment = record.status === 'certified' ? null : treatmentText(record.rentTaxTreatment);
   const effect =
     record.status === 'certified' ? certificateEffect(certificate?.debitAccount ?? null) : null;
   return (
@@ -236,6 +240,17 @@ function WithholdingItem({
           The amount is not {rateLabel(record.rateBps)} of the lines it was withheld on. Check it
           against the tenant’s advice or certificate.
         </Alert>
+      ) : null}
+      {/* M5 review: what a person must act on, such as rent tax already paid to GRA. */}
+      {(record.warnings ?? []).map((text) => (
+        <Alert key={text} tone="warning" live={false}>
+          <span data-testid="withholding-warning">{text}</span>
+        </Alert>
+      ))}
+      {treatment ? (
+        <p className="text-sm text-slate-700" data-testid="withholding-treatment">
+          {treatment}
+        </p>
       ) : null}
       <RulesWarning rules={[record.rule]} live={false} />
       <RuleList
@@ -299,11 +314,12 @@ function WithholdingItem({
           <span data-testid="confirm-blocked">{moves.confirmBlocked}</span>
         </Alert>
       ) : null}
-      {/* Decision 7 (OQ-29): nobody else can confirm it, so its uploader does, after the cooling-off. */}
+      {/* Decision 7 (OQ-29): nobody else can decide it, so its uploader does, after the cooling-off. */}
       {self.kind === 'waiting' ? (
         <Alert tone="info" live={false}>
           <span data-testid="self-confirm-waiting">
-            Nobody else in your company can confirm this certificate, so you confirm it yourself
+            Nobody else in your company can decide this certificate, so you{' '}
+            {self.decision === 'confirm' ? 'confirm' : 'withdraw'} it yourself
             {self.until
               ? ` after ${formatTime(self.until, timeZone)}`
               : ' once the waiting time has passed'}
@@ -312,16 +328,21 @@ function WithholdingItem({
         </Alert>
       ) : null}
       {self.kind === 'ready' ? (
-        <SelfConfirm approvalId={self.approvalId} onDone={onChanged} />
+        <SelfConfirm approvalId={self.approvalId} decision={self.decision} onDone={onChanged} />
       ) : null}
-      {self.kind === 'closed' ? (
-        <Alert tone="warning" live={false}>
-          <span data-testid="self-confirm-closed">
-            Your request to confirm it yourself was closed (
-            {APPROVAL_STATUS_LABELS[self.status].toLowerCase()}). The certificate is still waiting
-            to be confirmed.
-          </span>
-        </Alert>
+      {self.kind === 'lapsed' && certificate ? (
+        <div className="space-y-2">
+          <Alert tone="warning" live={false}>
+            <span data-testid="self-confirm-closed">
+              Your request to {self.decision === 'confirm' ? 'confirm' : 'withdraw'} it yourself was
+              closed ({APPROVAL_STATUS_LABELS[self.status].toLowerCase()}). The certificate is still
+              waiting to be confirmed.
+            </span>
+          </Alert>
+          {self.mayRequest ? (
+            <SelfDecisionRequest certificateId={certificate.id} onDone={onChanged} />
+          ) : null}
+        </div>
       ) : null}
 
       {open === 'upload' ? (
@@ -404,9 +425,12 @@ function WithholdingItem({
  */
 function SelfConfirm({
   approvalId,
+  decision,
   onDone,
 }: {
   readonly approvalId: string;
+  /** Review 4: the request may be to withdraw the certificate instead (rejected, nothing posted). */
+  readonly decision: 'confirm' | 'withdraw';
   readonly onDone: (text: string) => Promise<void>;
 }) {
   const [code, setCode] = useState('');
@@ -423,7 +447,11 @@ function SelfConfirm({
     setPending(true);
     try {
       await api().approvals.decide({ id: approvalId, decision: 'self_confirm', code });
-      await onDone('Confirmed the certificate yourself, after the cooling-off.');
+      await onDone(
+        decision === 'confirm'
+          ? 'Confirmed the certificate yourself, after the cooling-off.'
+          : 'Withdrew the certificate. Nothing was posted; upload the right one when it comes.',
+      );
     } catch (failure) {
       setError(toProblem(failure).message);
       setPending(false);
@@ -434,12 +462,17 @@ function SelfConfirm({
     <form
       onSubmit={submit}
       noValidate
-      aria-label="Confirm the certificate yourself"
+      aria-label={
+        decision === 'confirm'
+          ? 'Confirm the certificate yourself'
+          : 'Withdraw the certificate yourself'
+      }
       className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4"
     >
       <p className="text-sm text-slate-700">
-        Nobody else in your company can confirm this certificate, and the cooling-off has passed.
-        Confirm it yourself with a code from your authenticator app.
+        Nobody else in your company can decide this certificate, and the cooling-off has passed.{' '}
+        {decision === 'confirm' ? 'Confirm' : 'Withdraw'} it yourself with a code from your
+        authenticator app.
       </p>
       {error ? <Alert tone="error">{error}</Alert> : null}
       <TextField
@@ -451,10 +484,70 @@ function SelfConfirm({
         onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
         className="max-w-xs"
       />
-      <Button type="submit" pending={pending}>
-        Confirm it myself
+      <Button
+        type="submit"
+        pending={pending}
+        variant={decision === 'confirm' ? 'primary' : 'danger'}
+      >
+        {decision === 'confirm' ? 'Confirm it myself' : 'Withdraw it'}
       </Button>
     </form>
+  );
+}
+
+/**
+ * Review 4: after a sole uploader's request lapsed, they ask again to confirm the certificate or
+ * to withdraw it. Either is a fresh request with its own cooling-off, decided with a code then.
+ */
+function SelfDecisionRequest({
+  certificateId,
+  onDone,
+}: {
+  readonly certificateId: string;
+  readonly onDone: (text: string) => Promise<void>;
+}) {
+  const [pending, setPending] = useState<'confirm' | 'withdraw' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function ask(decision: 'confirm' | 'withdraw') {
+    setPending(decision);
+    setError(null);
+    try {
+      await api().withholding.requestSelfDecision({ certificateId, decision });
+      await onDone(
+        decision === 'confirm'
+          ? 'Asked again to confirm the certificate. Confirm it yourself after the cooling-off, with a code from your authenticator app.'
+          : 'Asked to withdraw the certificate. Withdraw it yourself after the cooling-off, with a code from your authenticator app.',
+      );
+    } catch (failure) {
+      setError(toProblem(failure).message);
+      setPending(null);
+    }
+  }
+
+  return (
+    <div className="space-y-2" role="group" aria-label="Decide the certificate yourself">
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          pending={pending === 'confirm'}
+          disabled={pending !== null}
+          onClick={() => void ask('confirm')}
+        >
+          Ask again to confirm
+        </Button>
+        <Button
+          size="sm"
+          variant="danger"
+          pending={pending === 'withdraw'}
+          disabled={pending !== null}
+          onClick={() => void ask('withdraw')}
+        >
+          Withdraw this certificate
+        </Button>
+      </div>
+    </div>
   );
 }
 

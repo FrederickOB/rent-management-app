@@ -14,7 +14,7 @@ import { paymentAdvanceLabel } from '@/lib/advance-compliance';
 import { api } from '@/lib/api';
 import { rateLabel } from '@/lib/billing-format';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
-import { isOwed, TAX_ITEM_KIND_LABELS } from '@/lib/rent-tax';
+import { dueRuleText, isOwed, taxItemLabel } from '@/lib/rent-tax';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
 
@@ -43,7 +43,9 @@ export function PaymentTax({ paymentId }: { readonly paymentId: string }) {
     <Card data-testid="payment-tax">
       <CardHeader
         title="Rent tax"
-        description="Worked out on the rent this receipt newly covers, advances included, and due to GRA 30 days after the money arrived."
+        description={`Worked out on the rent this receipt newly covers, advances included, and ${
+          state.status === 'ready' ? dueRuleText(state.data.items).due : 'due by the date shown'
+        }.`}
       />
       <CardBody>
         {state.status === 'loading' ? <Loading what="rent tax" /> : null}
@@ -73,7 +75,7 @@ export function PaymentTax({ paymentId }: { readonly paymentId: string }) {
                   {state.data.items.map((item) => (
                     <tr key={item.id} data-testid="payment-tax-item">
                       <Td>
-                        {TAX_ITEM_KIND_LABELS[item.kind]}
+                        {taxItemLabel(item)}
                         <p className="text-xs text-slate-600">
                           {formatBusinessDate(item.valueDate)}
                         </p>
