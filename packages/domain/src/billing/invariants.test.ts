@@ -148,3 +148,19 @@ describe('AR-02 paid-until moves back only on a reversal, credit note or schedul
     );
   });
 });
+
+describe('BC-07 one invoice is paid month by month (M4b decision 9)', () => {
+  it('no later month of an invoice holds money while an earlier one is open, with no corrections', () => {
+    fc.assert(
+      fc.property(leaseArbitrary, operationsArbitrary(false), (lease, ops) => {
+        const run = new ScenarioRunner(lease);
+        run.model.checkMonthByMonth();
+        for (const op of ops) {
+          run.apply(op);
+          run.model.checkMonthByMonth();
+        }
+      }),
+      runs,
+    );
+  });
+});

@@ -127,6 +127,20 @@
       "when": 1793389938297,
       "tag": "0017_carry_deposit_payment",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793699362142,
+      "tag": "0018_payments",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793699382133,
+      "tag": "0019_payments_security",
+      "breakpoints": true
     }
   ]
 }

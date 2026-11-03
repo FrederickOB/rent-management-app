@@ -50,6 +50,7 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   'payments.match': '10111000',
   'settlement_account.change': '10100000',
   'payment.refund_unmatched': '10101000',
+  'settlement_account.reveal': '10100000',
   'tenant.view': '11111110',
   'tenant.view_details': '11111010',
   'tenant.manage': '10110000',

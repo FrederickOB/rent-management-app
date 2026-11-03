@@ -55,7 +55,7 @@ const positive = (amount: number, what: string): number => {
 const total = (amounts: readonly { readonly amountMinor: number }[]): number =>
   amounts.reduce((sum, a) => sum + positive(a.amountMinor, 'An amount'), 0);
 
-const cashDims = (cash: CashSide): LineDimensions => ({
+const cashDims = (cash: Omit<CashSide, 'account'>): LineDimensions => ({
   collectorId: cash.collectorId ?? null,
   provider: cash.provider ?? null,
   settlementAccountId: cash.settlementAccountId ?? null,
@@ -361,6 +361,15 @@ export function unmatchedMatchLines(input: {
   readonly bookId: string;
   /** Where the money sits, in both books when they differ (1070 for an agency's client account). */
   readonly holding: CashSide;
+  /**
+   * Money already settled by the provider (P22) sits in parts: its net in the account it was paid
+   * into, its fee in 5200 (M4b). When given, these move between the books instead of `holding`;
+   * they add up to the payment.
+   */
+  readonly holdings?: readonly {
+    readonly side: Omit<CashSide, 'account'> & { readonly account: CashAccount | '5200' };
+    readonly amountMinor: number;
+  }[];
   readonly paymentId: string;
   readonly lease: LeaseDimensions;
   readonly allocations: readonly AllocationPosting[];
@@ -379,17 +388,23 @@ export function unmatchedMatchLines(input: {
     paymentId: input.paymentId,
   };
   if (input.suspenseBookId === input.bookId) return compactLines([suspense, ...credits]);
-  const holding = {
-    accountCode: input.holding.account,
-    paymentId: input.paymentId,
-    ...cashDims(input.holding),
-  };
-  return compactLines([
-    suspense,
-    { ...holding, bookId: input.suspenseBookId, amountMinor: -amount },
-    { ...holding, bookId: input.bookId, amountMinor: amount, ...input.lease },
-    ...credits,
-  ]);
+  const parts: NonNullable<typeof input.holdings> = input.holdings ?? [
+    { side: input.holding, amountMinor: amount },
+  ];
+  if (parts.reduce((sum, p) => sum + positive(p.amountMinor, 'A holding'), 0) !== amount)
+    throw new DomainError('ledger.holdings_differ', 'The money moved must add up to the payment');
+  const moves = parts.flatMap((part) => {
+    const holding = {
+      accountCode: part.side.account,
+      paymentId: input.paymentId,
+      ...cashDims(part.side),
+    };
+    return [
+      { ...holding, bookId: input.suspenseBookId, amountMinor: -part.amountMinor },
+      { ...holding, bookId: input.bookId, amountMinor: part.amountMinor, ...input.lease },
+    ];
+  });
+  return compactLines([suspense, ...moves, ...credits]);
 }
 
 /** P24: a debt two people agree will not be paid becomes an expense (5900) and stops being owed. */

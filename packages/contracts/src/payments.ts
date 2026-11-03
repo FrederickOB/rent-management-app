@@ -86,6 +86,9 @@ const intentSchema = z.object({
   message: z.string().nullable(),
   receiptNumber: z.string().nullable(),
 });
+/** A payment started from a pay link, as `start` and `status` answer. */
+export type PayIntent = z.infer<typeof intentSchema>;
+export const payIntentSchema = intentSchema;
 
 export const payLinksContract = {
   open: oc
@@ -129,6 +132,59 @@ export const payLinksContract = {
     })
     .input(z.object({ token, client, intentId: uuid }).strict())
     .output(intentSchema),
+  invoiceDocument: oc
+    .route({
+      method: 'POST',
+      path: '/links/pay/invoice',
+      summary:
+        'A 5-minute link to the invoice PDF: how an invoice reaches the tenant with the first reminder (BC-09)',
+    })
+    .input(z.object({ token, client }).strict())
+    .output(download),
+};
+
+export const RECEIPT_SCREENS = ['receipt', 'preparing', 'expired', 'revoked'] as const;
+
+/** A receipt link's page (BC-06; plan 4.6): a 30-day link to a receipt, served as 5-minute downloads. */
+export const receiptPageSchema = z.object({
+  /** `preparing`: the PDF is still being made; the figures are final already. */
+  screen: z.enum(RECEIPT_SCREENS),
+  landlord: z.object({
+    name: z.string(),
+    phone: z.string().nullable(),
+    email: z.string().nullable(),
+  }),
+  timeZone: z.string(),
+  linkExpiresAt: iso,
+  receiptNumber: z.string(),
+  kind: z.enum(['receipt', 'credit_receipt']),
+  amountMinor: minor,
+  receivedOn: isoDate,
+  tenantName: z.string(),
+  unitCode: z.string(),
+  propertyName: z.string(),
+  paidUntil: isoDate.nullable(),
+  downloadable: z.boolean(),
+});
+export type ReceiptPage = z.infer<typeof receiptPageSchema>;
+
+export const receiptLinksContract = {
+  open: oc
+    .route({
+      method: 'POST',
+      path: '/links/receipt/open',
+      summary: 'Open a receipt link: the receipt’s figures (BC-06)',
+    })
+    .input(z.object({ token, client }).strict())
+    .output(receiptPageSchema),
+  document: oc
+    .route({
+      method: 'POST',
+      path: '/links/receipt/document',
+      summary: 'A 5-minute link to the receipt PDF',
+    })
+    .input(z.object({ token, client }).strict())
+    .output(download),
 };
 
 export const settlementAccountSchema = z.object({
@@ -148,7 +204,13 @@ export const settlementAccountSchema = z.object({
   /** Set up with the provider as a subaccount. */
   providerReady: z.boolean(),
   createdAt: iso,
+  /** The request that added it. */
   approvalId: uuid.nullable(),
+  /** M4b: a request about the account still waiting for a decision: adding it, or retiring it. */
+  openRequest: z
+    .object({ kind: z.enum(['add', 'retire']), approvalId: uuid })
+    .nullable()
+    .optional(),
 });
 export type SettlementAccountView = z.infer<typeof settlementAccountSchema>;
 
@@ -195,6 +257,15 @@ export const settlementContract = {
     })
     .input(z.object({ accountId: uuid, reason: z.string().trim().min(5).max(500) }))
     .output(z.object({ approval: approvalSchema })),
+  reveal: oc
+    .route({
+      method: 'POST',
+      path: '/settlement-accounts/{accountId}/reveal',
+      summary:
+        'Show an account number in full: needs the permission and a reason, and is audited (CLAUDE.md section 10)',
+    })
+    .input(z.object({ accountId: uuid, reason: z.string().trim().min(5).max(500) }))
+    .output(z.object({ accountNumber: z.string() })),
   agreements: oc
     .route({
       method: 'GET',
@@ -327,6 +398,8 @@ export const tenantBillingSchema = z.object({
 export const tenantPaymentSchema = z.object({
   id: uuid,
   leaseId: uuid,
+  /** M4b: the landlord's company, optional so clients written before it keep their types. */
+  companyId: uuid.optional(),
   landlordName: z.string(),
   amountMinor: minor,
   receivedOn: isoDate,

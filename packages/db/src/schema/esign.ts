@@ -230,6 +230,10 @@ export const secureLink = pgTable(
     signerId: uuid(),
     /** The message that carried the link, when one did (the FK is in the security migration). */
     messageId: uuid(),
+    /** A pay link's invoice (M4b plan 4.3); the FK is in the M4b security migration. */
+    invoiceId: uuid(),
+    /** A receipt link's receipt (M4b plan 4.6); the FK is in the M4b security migration. */
+    receiptId: uuid(),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
     revokedAt: ts(),
     revokeReason: text(),
@@ -257,12 +261,19 @@ export const secureLink = pgTable(
     index('secure_link_signer_idx').on(t.companyId, t.signerId),
     check(
       'secure_link_purpose_check',
-      sql`${t.purpose} in ('sign', 'signed_copy', 'pay', 'job_sheet')`,
+      sql`${t.purpose} in ('sign', 'signed_copy', 'pay', 'receipt', 'job_sheet')`,
     ),
     check(
       'secure_link_signer_check',
       sql`${t.purpose} not in ('sign', 'signed_copy') or ${t.signerId} is not null`,
     ),
+    check(
+      'secure_link_pay_check',
+      sql`(${t.purpose} = 'pay') = (${t.invoiceId} is not null) and (${t.purpose} = 'receipt') = (${t.receiptId} is not null)`,
+    ),
+    index('secure_link_invoice_idx')
+      .on(t.companyId, t.invoiceId)
+      .where(sql`${t.invoiceId} is not null`),
     check('secure_link_token_check', sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
     check('secure_link_revoke_check', sql`(${t.revokedAt} is null) = (${t.revokeReason} is null)`),
   ],

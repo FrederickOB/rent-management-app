@@ -1,0 +1,27 @@
+{
+  "status": true,
+  "message": "Refund has been queued for processing",
+  "data": {
+    "transaction": {
+      "id": 4099260516,
+      "reference": "pi-0192f5a8111172228333444455557777",
+      "amount": 150000,
+      "currency": "GHS"
+    },
+    "integration": 100001,
+    "deducted_amount": 0,
+    "channel": null,
+    "merchant_note": "Refund for transaction pi-0192f5a8111172228333444455557777 by test@example.test",
+    "customer_note": "Refund for transaction pi-0192f5a8111172228333444455557777",
+    "status": "pending",
+    "refunded_by": "test@example.test",
+    "expected_at": "2026-11-13T09:00:00.000Z",
+    "currency": "GHS",
+    "domain": "test",
+    "amount": 150000,
+    "fully_deducted": false,
+    "id": 6001001,
+    "createdAt": "2026-11-03T09:30:00.000Z",
+    "updatedAt": "2026-11-03T09:30:00.000Z"
+  }
+}

@@ -47,6 +47,22 @@ export const MODULE_MAP = {
     'portfolio',
     'identity',
   ],
+  // M4b (plan 4.1): provider payments in layer 6, above billing; it sends through messaging.
+  payments: [
+    'billing',
+    'tenancy',
+    'ledger',
+    'approvals',
+    'messaging',
+    'esign',
+    'documents',
+    'rules',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+  ],
 };
 
 const DB_DRIVERS = [

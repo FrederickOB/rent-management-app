@@ -16,6 +16,7 @@ import {
 } from '@rent/domain/billing';
 import {
   LeaseLedgerModel,
+  monthByMonthBreak,
   moveOutDay,
   operationArbitrary,
   receivedOn,
@@ -30,7 +31,13 @@ import {
   toIsoDate,
 } from '@rent/domain/dates';
 import { INCOME_ACCOUNTS, type AccountCode, type CashAccount } from '@rent/domain/ledger';
-import { checkLeaseTerms, rentSchedule, type RentCycle } from '@rent/domain/tenancy';
+import {
+  checkLeaseTerms,
+  CYCLE_MONTHS,
+  RENT_CYCLES,
+  rentSchedule,
+  type RentCycle,
+} from '@rent/domain/tenancy';
 import fc from 'fast-check';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startServerTest, type ServerTestContext } from './support';
@@ -95,7 +102,7 @@ const leaseArbitrary: fc.Arbitrary<DiffLease> = fc.record({
   shortFinalDays: fc.integer({ min: 0, max: 20 }),
   rent: fc.integer({ min: 100, max: 2_000_000 }),
   serviceCharge: fc.option(fc.integer({ min: 100, max: 200_000 }), { nil: null }),
-  cycle: fc.constantFrom<RentCycle>('monthly', 'quarterly', 'six_monthly', 'annual'),
+  cycle: fc.constantFrom<RentCycle>(...RENT_CYCLES),
   advanceExtra: fc.option(fc.integer({ min: 0, max: 12 }), { nil: null }),
   deposit: fc.option(fc.integer({ min: 100, max: 2_000_000 }), { nil: null }),
   vat: fc.boolean(),
@@ -109,8 +116,10 @@ const plusDays = (date: string, n: number) => toIsoDate(addDays(parseBusinessDat
 /** Lease terms the domain accepts, or null (as the domain's own scenarios filter them). */
 function termsOf(l: DiffLease) {
   const start = plusDays(today, l.startOffset);
+  // A two-yearly cycle needs a two-year term (M4b decision 9).
+  const termMonths = l.cycle === 'two_yearly' ? 24 : l.months;
   const end = plusDays(
-    toIsoDate(addMonths(parseBusinessDate(start), l.months)),
+    toIsoDate(addMonths(parseBusinessDate(start), termMonths)),
     -1 - l.shortFinalDays,
   );
   try {
@@ -122,10 +131,11 @@ function termsOf(l: DiffLease) {
       noticeDays: 30,
       use: 'residential',
     });
-    const months = { monthly: 1, quarterly: 3, six_monthly: 6, annual: 12 };
-    const cycle: RentCycle = months[l.cycle] <= probe.periodCount ? l.cycle : 'monthly';
+    const cycle: RentCycle = CYCLE_MONTHS[l.cycle] <= probe.periodCount ? l.cycle : 'monthly';
     const advance =
-      l.advanceExtra === null ? null : Math.min(months[cycle] + l.advanceExtra, probe.periodCount);
+      l.advanceExtra === null
+        ? null
+        : Math.min(CYCLE_MONTHS[cycle] + l.advanceExtra, probe.periodCount);
     return checkLeaseTerms({
       startDate: start,
       endDate: end,
@@ -658,6 +668,9 @@ describe('AR-01 recognition plus prepayments equal what was prepaid', () => {
               run.leaseId,
             ]));
           expect(recognised + held).toBe(prepaid);
+          // M4b decision 9: with no corrections, each invoice is paid month by month.
+          const { state } = await dbState(run);
+          expect(monthByMonthBreak(state.lines, state.allocations)).toBeNull();
           await agree(run);
         }),
       ),

@@ -247,3 +247,105 @@ describe('BC-07 invoice status', () => {
     expect(invoiceStatusOf([b(0, 0), b(0, 0)])).toBe('voided');
   });
 });
+
+describe('BC-07 one invoice is paid month by month (M4b decision 9)', () => {
+  /** An annual invoice: twelve months of rent and service charge, VAT on both, one due date. */
+  function annualInvoice(withVat: boolean): BillingLine[] {
+    const lines: BillingLine[] = [];
+    for (let m = 0; m < 12; m += 1) {
+      const month = new Date(Date.UTC(2026, 10 + m, 1)).toISOString().slice(0, 10);
+      for (const kind of ['rent', 'service_charge'] as const) {
+        const base = line({
+          kind,
+          dueDate: '2026-11-01',
+          periodStart: month,
+          periodEnd: month,
+          amountMinor: kind === 'rent' ? 150_000 : 20_000,
+        });
+        lines.push(base);
+        if (withVat)
+          for (const tax of ['vat', 'nhil', 'getfund'] as const)
+            lines.push(
+              line({
+                kind: tax,
+                baseLineId: base.id,
+                rateBps: 1500,
+                dueDate: '2026-11-01',
+                periodStart: null,
+                periodEnd: null,
+                amountMinor: 1_000,
+              }),
+            );
+      }
+    }
+    // Creation order must not matter: shuffle by reversing.
+    return lines.reverse();
+  }
+
+  it('orders each month’s rent, then its service charge, each with its VAT and levies, before the next month', () => {
+    const order = inAllocationOrder(annualInvoice(true)).map(
+      (l) => `${l.kind}${l.periodStart ? `@${l.periodStart.slice(0, 7)}` : ''}`,
+    );
+    expect(order.slice(0, 10)).toEqual([
+      'rent@2026-11',
+      'vat',
+      'nhil',
+      'getfund',
+      'service_charge@2026-11',
+      'vat',
+      'nhil',
+      'getfund',
+      'rent@2026-12',
+      'vat',
+    ]);
+    expect(order).toHaveLength(96);
+  });
+
+  it('pays a part payment on an annual invoice month by month, not all rent first', () => {
+    const lines = annualInvoice(false);
+    const plan = planAllocation({
+      lines,
+      allocations: [],
+      paymentId: 'p1',
+      amountMinor: 170_000 * 3 + 100_000,
+      lease,
+      valueDate: '2026-10-20',
+    });
+    const paid = plan.allocations.map((a) => {
+      const l = lines.find((x) => x.id === a.lineId) as BillingLine;
+      return [l.kind, l.periodStart?.slice(0, 7), a.amountMinor];
+    });
+    expect(paid).toEqual([
+      ['rent', '2026-11', 150_000],
+      ['service_charge', '2026-11', 20_000],
+      ['rent', '2026-12', 150_000],
+      ['service_charge', '2026-12', 20_000],
+      ['rent', '2027-01', 150_000],
+      ['service_charge', '2027-01', 20_000],
+      ['rent', '2027-02', 100_000],
+    ]);
+    expect(plan.surplusMinor).toBe(0);
+  });
+
+  it('still pays the oldest invoice first, and a deposit before the months of its due date', () => {
+    const older = line({
+      kind: 'service_charge',
+      dueDate: '2026-10-01',
+      periodStart: '2026-10-01',
+      accrued: true,
+    });
+    const deposit = line({ kind: 'deposit', dueDate: '2026-11-01' });
+    const oneOff = line({ kind: 'one_off', dueDate: '2026-11-01' });
+    const order = inAllocationOrder([oneOff, ...annualInvoice(false).slice(0, 4), deposit, older]);
+    expect(order.map((l) => l.kind)).toEqual([
+      'service_charge',
+      'deposit',
+      'rent',
+      'service_charge',
+      'rent',
+      'service_charge',
+      'one_off',
+    ]);
+    expect(order[0]?.id).toBe(older.id);
+  });
+});

@@ -355,9 +355,9 @@ async function seedMoney(
      values ($1, $2, $3, $4, $5, 'payment', $6, 150000, current_date, current_date, 'payment', $6, $7)`,
     [...lease, lineId, paymentId, receiptEntry],
   );
-  await app.query(
+  const { rows: receipts } = await app.query<{ id: string }>(
     `insert into receipt (company_id, property_id, tenant_id, lease_id, number, kind, payment_id, amount_minor)
-     values ($1, $2, $3, $4, 1, 'receipt', $5, 150000)`,
+     values ($1, $2, $3, $4, 1, 'receipt', $5, 150000) returning id`,
     [...lease, paymentId],
   );
   await app.query(
@@ -410,6 +410,104 @@ async function seedMoney(
   await app.query(
     "insert into idempotent_request (company_id, key, operation, person_id, request_hash) values ($1, 'fixture-key', 'fixture', $2, $3)",
     [companyId, ids.initiator, '0'.repeat(64)],
+  );
+  await seedPayments(companyId, {
+    ...ids,
+    bookId,
+    invoiceId: invoices[0]!.id,
+    paymentId,
+    receiptId: receipts[0]!.id,
+    entryId: receiptEntry,
+  });
+}
+
+/**
+ * Provider payments (M4b): one row in each of their company tables. The unmatched refund needs
+ * money with no lease, so a direct transfer waiting for its lease is recorded too.
+ */
+async function seedPayments(
+  companyId: string,
+  ids: {
+    initiator: string;
+    requestId: string;
+    ownerId: string;
+    propertyId: string;
+    tenantId: string;
+    leaseId: string;
+    bookId: string;
+    invoiceId: string;
+    paymentId: string;
+    receiptId: string;
+    entryId: string;
+  },
+) {
+  const accountId = randomUUID();
+  await app.query(
+    `insert into settlement_account (id, company_id, holder, owner_id, bank_code, bank_name, account_name, number_encrypted,
+       number_index, number_masked, approval_request_id, created_by)
+     values ($1, $2, 'owner', $3, 'GCB', 'GCB Bank', 'Owner', '\\x01', 'index', '•••• 6789', $4, $5)`,
+    [accountId, companyId, ids.ownerId, ids.requestId, ids.initiator],
+  );
+  await app.query(
+    "insert into provider_subaccount (company_id, settlement_account_id, provider, subaccount_code) values ($1, $2, 'paystack', $3)",
+    [companyId, accountId, `ACCT_${randomBytes(6).toString('hex')}`],
+  );
+  await app.query(
+    "insert into management_agreement (company_id, owner_id, destination, effective_from) values ($1, $2, 'owner_account', current_date)",
+    [companyId, ids.ownerId],
+  );
+  const { rows: links } = await app.query<{ id: string }>(
+    `insert into secure_link (company_id, property_id, tenant_id, purpose, token_hash, invoice_id, expires_at)
+     values ($1, $2, $3, 'pay', $4, $5, now() + interval '60 days') returning id`,
+    [companyId, ids.propertyId, ids.tenantId, randomBytes(32).toString('hex'), ids.invoiceId],
+  );
+  await app.query(
+    `insert into payment_intent (company_id, property_id, tenant_id, lease_id, invoice_id, secure_link_id, submission_id,
+       amount_minor, method, reference, settlement_account_id)
+     values ($1, $2, $3, $4, $5, $6, 'fixture-submission-0001', 150000, 'card', $7, $8)`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.tenantId,
+      ids.leaseId,
+      ids.invoiceId,
+      links[0]!.id,
+      `pi_${randomBytes(12).toString('hex')}`,
+      accountId,
+    ],
+  );
+  await app.query(
+    `insert into provider_settlement (company_id, provider, settlement_ref, settlement_account_id, subaccount_code, gross_minor,
+       fees_minor, deductions_minor, net_minor, settled_at)
+     values ($1, 'paystack', 'stl-1', $2, 'ACCT_x', 150000, 2925, 0, 147075, now())`,
+    [companyId, accountId],
+  );
+  await app.query(
+    `insert into reconciliation_exception (company_id, kind, provider, reference, detail, dedupe_key)
+     values ($1, 'missing_here', 'paystack', 'ref-1', 'A fixture', 'fixture')`,
+    [companyId],
+  );
+  await app.query(
+    `insert into reminder_sent (company_id, property_id, tenant_id, lease_id, invoice_id, offset_days, status, step_date)
+     values ($1, $2, $3, $4, $5, -7, 'skipped', current_date)`,
+    [companyId, ids.propertyId, ids.tenantId, ids.leaseId, ids.invoiceId],
+  );
+  await app.query(
+    `insert into receipt_delivery (company_id, property_id, tenant_id, lease_id, receipt_id, payment_id, message_id, confirmed_at)
+     values ($1, $2, $3, $4, $5, $6, gen_random_uuid(), now())`,
+    [companyId, ids.propertyId, ids.tenantId, ids.leaseId, ids.receiptId, ids.paymentId],
+  );
+  const unmatched = randomUUID();
+  await app.query(
+    `insert into payment (id, company_id, method, amount_minor, received_on, accounting_date, owner_id, book_id, cash_account,
+       source_type, source_id, entry_id)
+     values ($1, $2, 'bank_transfer', 1000, current_date, current_date, $3, $4, '1010', 'direct_receipt', gen_random_uuid(), $5)`,
+    [unmatched, companyId, ids.ownerId, ids.bookId, ids.entryId],
+  );
+  await app.query(
+    `insert into unmatched_refund (company_id, payment_id, owner_id, amount_minor, reason, approval_request_id, requested_by)
+     values ($1, $2, $3, 1000, 'A fixture', $4, $5)`,
+    [companyId, unmatched, ids.ownerId, ids.requestId, ids.initiator],
   );
 }
 

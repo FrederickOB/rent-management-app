@@ -20,6 +20,7 @@
     "./ledger": "./src/ledger/index.ts",
     "./billing": "./src/billing/index.ts",
     "./messaging": "./src/messaging/index.ts",
+    "./payments": "./src/payments/index.ts",
     "./testing": "./test/support/index.ts"
   },
   "scripts": {

@@ -1,7 +1,13 @@
 import fc from 'fast-check';
 import { addDays, addMonths, parseBusinessDate, toIsoDate } from '../../dates';
 import type { CashAccount } from '../../ledger/accounts';
-import { checkLeaseTerms, type LeaseTerms, type RentCycle } from '../../tenancy/lease-terms';
+import {
+  checkLeaseTerms,
+  CYCLE_MONTHS,
+  RENT_CYCLES,
+  type LeaseTerms,
+  type RentCycle,
+} from '../../tenancy/lease-terms';
 import { rentSchedule } from '../../tenancy/schedule';
 import {
   cyclesToIssue,
@@ -37,16 +43,18 @@ export const leaseArbitrary: fc.Arbitrary<ScenarioLease> = fc
     shortFinalDays: fc.integer({ min: 0, max: 20 }),
     rent: fc.integer({ min: 100, max: 5_000_000 }),
     serviceCharge: fc.option(fc.integer({ min: 100, max: 500_000 }), { nil: null }),
-    cycle: fc.constantFrom<RentCycle>('monthly', 'quarterly', 'six_monthly', 'annual'),
+    cycle: fc.constantFrom<RentCycle>(...RENT_CYCLES),
     advanceExtra: fc.option(fc.integer({ min: 0, max: 24 }), { nil: null }),
     deposit: fc.option(fc.integer({ min: 100, max: 5_000_000 }), { nil: null }),
     vat: fc.option(fc.boolean(), { nil: null }),
   })
   .map((r): ScenarioLease | null => {
     const start = addDays(parseBusinessDate('2026-01-01'), r.startOffset);
-    const end = addDays(addMonths(start, r.months), -1 - r.shortFinalDays);
+    // A two-yearly cycle needs a two-year term (M4b decision 9): rent paid two years ahead.
+    const months = r.cycle === 'two_yearly' ? 24 : r.months;
+    const end = addDays(addMonths(start, months), -1 - r.shortFinalDays);
     try {
-      const cycleMonths = { monthly: 1, quarterly: 3, six_monthly: 6, annual: 12 }[r.cycle];
+      const cycleMonths = CYCLE_MONTHS[r.cycle];
       const probe = checkLeaseTerms({
         startDate: toIsoDate(start),
         endDate: toIsoDate(end),
@@ -56,9 +64,10 @@ export const leaseArbitrary: fc.Arbitrary<ScenarioLease> = fc
         use: 'residential',
       });
       const cycle: RentCycle = cycleMonths <= probe.periodCount ? r.cycle : 'monthly';
-      const months = { monthly: 1, quarterly: 3, six_monthly: 6, annual: 12 }[cycle];
       const advance =
-        r.advanceExtra === null ? null : Math.min(months + r.advanceExtra, probe.periodCount);
+        r.advanceExtra === null
+          ? null
+          : Math.min(CYCLE_MONTHS[cycle] + r.advanceExtra, probe.periodCount);
       const terms = checkLeaseTerms({
         startDate: toIsoDate(start),
         endDate: toIsoDate(end),

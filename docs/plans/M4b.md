@@ -231,6 +231,39 @@
 9. The tenant app's screens and cache.
 10. CI budgets, seed, the review subagent, the report.
 
+### Progress
+
+**2026-11-03, the backend: steps 0 to 8 and the seed (step 10).** Everything outside `apps/web`, `apps/links` and `apps/tenant`; those screens are built alongside, against the contracts below.
+
+- **Step 0, decision 9:**
+    - **Allocation order** (`packages/domain/src/billing/lines.ts`): due date first, so the oldest invoice still goes first; then the deposit, the charge periods month by month (each month's rent, then its service charge), and one-off charges; each VAT or levy line straight after its line. `docs/architecture.md` section 6 says so.
+    - **The two-yearly cycle:** `two_yearly` (24 months, "Every two years") in `RENT_CYCLES` and `CYCLE_MONTHS`, and so in the contracts, the API, the lease document template and the advance check (`warn` flags it and `block` refuses it; `off` records it).
+    - **The reference model** checks month by month (`monthByMonthBreak`, `LeaseLedgerModel.checkMonthByMonth`), in the domain's property tests and against the database in the differential test.
+    - **Existing tests:** none failed under the new order, so no expectation changed. Two shared generators were widened to draw the two-yearly cycle as well (with a two-year term): the domain's `leaseArbitrary` (`packages/domain/src/billing/testing/scenarios.ts`) and the differential test's (`packages/server/test/billing-properties.int.test.ts`, used by AC-01, BC-07, BC-11 and AR-01). AR-01's database test gained one assertion: no month-by-month break.
+- **Step 1, settlement accounts (ADR-008; decisions 2 and 6):**
+    - bank accounts only; the number encrypted (field cipher), with a blind index and a mask; reveal needs `settlement_account.reveal`, a reason, and is audited;
+    - adding and retiring go through the approvals engine (`settlement_account.change`, `settlement_account.retire`), owners and agency admins approve, and the initiator never can; usable 24 hours after approval (`cooling_off`), then a subaccount with each provider that settles directly;
+    - the owner is told by SMS and email at each step (purpose `settlement_alert`, sent without channel consent: OQ-55);
+    - management agreements per owner in an agency, effective-dated, with no default; the destination is resolved lease → property → owner → agreement → active account → subaccount, and the reason a link cannot go is shown to staff.
+- **Step 2, providers:**
+    - **Paystack** (`packages/integrations/src/payments/paystack.ts`) on fixtures built from Paystack's documentation, not recorded from a live account. **Fixture assumptions, to confirm in writing (OQ-01):** the Ghana MoMo provider codes `mtn`, `vod` and `atl` come only from third-party sources; the charge endpoint taking `subaccount` and `bearer`; settlements naming their subaccount with deductions; account-name checks failing with 422 for Ghanaian banks.
+    - **Live keys:** the adapter, and so the API, refuses an `sk_live_` key unless `LIVE_RENT_COLLECTION=enabled`; the startup log names `LIVE_RENT_COLLECTION_ENABLED_BY`, never the key. The sandbox smoke test runs only with `PAYSTACK_TEST_SECRET_KEY`.
+    - **The registry and failover:** each provider says whether it settles directly; one that does not is never tried. The company's order (`paymentProviderOrder`) or the deployment's. A second in-memory fake proves failover. `apps/fake-providers` speaks Paystack's shapes: MoMo charges, checkout, verify, lists, settlements, refunds, subaccounts, chargebacks and signed webhooks.
+- **Step 3, pay links and the pay page API:** one link per invoice (`/p/{token}`), expiring when the invoice is settled or after 60 days; the page shows the lease's amount due now, pre-filled, and accepts GH₵1 up to the rent left in the term (decision 7). A double tap finds the same intent (`submissionId`). Error codes carry the families the page matches (`AMOUNT_TOO_SMALL`, `AMOUNT_TOO_LARGE`, `MOMO_PHONE`, `RATE_LIMITED`, `LINK_*_NOT_USABLE`, `LINK_SETTLED`, `PAYMENTS_UNAVAILABLE`). Limits: 120 opens per link an hour and per address in 10 minutes, 240 status checks per link an hour, 10 starts per link and 60 per address an hour. Staff send links from an invoice; tenants get theirs from the app (`/me/leases/{id}/pay-link`).
+- **Step 4, webhooks:** the raw request is stored in `webhook_inbox`, the signature checked, 200 or 401 returned. A bad signature is stored as rejected, raises a security alert and never takes an event id from a valid event. Processing calls the provider's verify endpoint and compares amount, currency, status and reference exactly; nothing is ever posted from the body. `payments.verify-pending` checks intents pending over 5 minutes.
+- **Step 5, matching and the queue:** automatic matching only on the intent's reference or an exact lease reference (BC-03); anything else is P23 suspense with ranked suggestions (amount, phone index, date, history). A person confirms each match, across books where the money settled into the agency's account. P31 refunds of unmatched money need a second person and go to the provider through a job.
+- **Step 6, receipts:** on `payment.posted` the receipt goes on the tenant's consented channels with a 30-day receipt link (`/r/{token}`, PDF downloads of 5 minutes); the delivery records channel, time sent and the latency from confirmation, with an alert past 60 seconds.
+- **Step 7, reminders:** the ladder from company settings (−7, 0, +3, +7, +14 days), each step once per invoice, the latest due step only (earlier missed steps are recorded as skipped, so a tenant never gets a burst), stopping when nothing is left to pay; each carries the pay link, the first one the invoice.
+- **Step 8, reconciliation and settlement:** daily transaction reconciliation posts missing payments through the normal path and flags the unexplained; settlement reconciliation posts P22 per settlement and book, each 1050 credit on its payment, with fees shared by gross per book; a difference raises an exception. Chargebacks post P21(b) from current allocations with a credit receipt and an alert to everyone who sees payments; the next settlement's deductions clear them.
+- **Step 10, the seed:** active settlement accounts and agreements for both agency owners (one to the owner's account, one to the agency's client account) and the landlord; provider payments through the fake, two without intent metadata (queue suggestions); one reconciliation exception (a verified amount that differs); one settlement with its P22 entries; SMS consent for Kofi Arrears-45; a two-yearly lease for the demo tenant. **Auto-match rate on the seed:** provider payments 3 of 5 (60%); direct transfers recorded against a lease 4 of 5 (80%), counted separately (prd-issues 35). The rate is low by design: the seed puts two payments without metadata in the queue to exercise it.
+- **Design details settled while building** (none changes a decision):
+    1. **The webhook inbox is its own queue.** `webhook_inbox` is global, so the API stores the row alone and a relay in the worker claims rows and enqueues `payments.process-webhook` in one transaction (LISTEN and a 1-second poll), rather than writing a company outbox event as section 8's diagram shows.
+    2. **The receipt job takes its event's name** (`payment.posted`), as the outbox relay names queues, not `payments.issue-receipt`. The settlement-account job is `settlement_account.approved`, and refunds run as `payments.refund-unmatched`.
+    3. **Chargebacks need no approval:** the provider has already taken the money back; a person cannot refuse it.
+    4. **Staff alerts go to whoever the policy allows,** not to a list of roles: chargebacks to those with `payments.view`, settlement-account requests to those with `settlement_account.change`. The landlord contact on the pay and receipt pages is the first person who may change settlement accounts.
+    5. **A verified amount that differs** from the intent posts the money actually received, allocates it normally and raises a reconciliation exception.
+- **Not in this step:** the tenant app (step 9), the CI size budgets and the review subagent (step 10) belong to the screens and the report. The fake-providers Docker image must be rebuilt (`docker compose up -d --build fake-providers`) before the e2e tests use the new endpoints.
+
 ## 6. Tests
 
 ★ marks the tests the playbook requires for M4.
@@ -258,13 +291,16 @@
 
 ## 7. New dependencies
 
-None expected: the Paystack adapter uses the existing HTTP client in `packages/integrations`, and the app cache uses Expo's AsyncStorage, which is part of the SDK.
+The Paystack adapter uses the existing HTTP client in `packages/integrations`.
+
+- `@react-native-async-storage/async-storage` 2.2.0 in `apps/tenant`: the offline cache (4.10). The plan assumed it was part of the SDK; it is a separate package, the version Expo SDK 58 bundles, maintained under the React Native community and the standard choice for Expo apps.
+- `@rent/domain` (a workspace package, not a new dependency) in `apps/links`: the pay page parses and formats amounts through `packages/domain/money`, as `CLAUDE.md` section 4 requires.
 
 ## 8. Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Paystack behaves differently from its documentation for Ghana MoMo | Failed or stuck charges | Fixtures from the documentation, the sandbox smoke test, verify-pending and reconciliation |
+| Paystack behaves differently from its documentation for Ghana MoMo | Failed or stuck charges | Fixtures from the documentation, the sandbox smoke test, verify-pending and reconciliation. The MoMo provider codes (`mtn`, `vod`, `atl`) come only from third-party sources and are fixture assumptions until Paystack confirms them (OQ-01). |
 | A redirected settlement account | Rent stolen | Two people, 24 hours, owner alerts, name check (ADR-008) |
 | A lost webhook | A payment missing | Verify-pending every 5 minutes and daily reconciliation |
 | Licensing (OQ-03) | Cannot go live | Live keys refused without the explicit switch |

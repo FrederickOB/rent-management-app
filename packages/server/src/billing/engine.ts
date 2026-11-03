@@ -135,8 +135,16 @@ export interface MoneyIn {
   readonly cashAccount: CashAccount;
   readonly collectorPersonId?: string | null;
   readonly provider?: string | null;
-  readonly sourceType: 'cash_record' | 'direct_receipt' | 'provider_test';
+  readonly sourceType:
+    'cash_record' | 'direct_receipt' | 'provider_test' | 'payment_intent' | 'provider_charge';
   readonly sourceId: string;
+  /** M4b: a provider payment's reference with the provider, for reconciliation. */
+  readonly providerReference?: string | null;
+  /** M4b: the settlement account the money settles to (ADR-008). */
+  readonly settlementAccountId?: string | null;
+  /** M4b: the paying MoMo number as a keyed hash and masked; never in the clear. */
+  readonly payerPhoneIndex?: string | null;
+  readonly payerPhoneMasked?: string | null;
   readonly payerName?: string | null;
   readonly senderReference?: string | null;
   readonly chequeNumber?: string | null;
@@ -838,6 +846,7 @@ export class BillingEngine {
       account: input.cashAccount,
       collectorId: input.collectorPersonId ?? null,
       provider: input.provider ?? null,
+      settlementAccountId: input.settlementAccountId ?? null,
     };
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,
@@ -881,6 +890,7 @@ export class BillingEngine {
       sourceId: input.sourceId,
       entryId: posted!.entryId,
       recordedBy: input.recordedBy ?? null,
+      ...this.providerColumns(input),
     });
     const [record] = await paymentsByIds(tx, [paymentId]);
     state.payments.push(record!);
@@ -945,7 +955,12 @@ export class BillingEngine {
       key: `P23:${paymentId}`,
       valueDate: input.receivedOn,
       lines: unmatchedArrivalLines({
-        cash: { bookId: input.bookId, account: input.cashAccount },
+        cash: {
+          bookId: input.bookId,
+          account: input.cashAccount,
+          provider: input.provider ?? null,
+          settlementAccountId: input.settlementAccountId ?? null,
+        },
         paymentId,
         amountMinor: input.amountMinor,
       }),
@@ -962,6 +977,8 @@ export class BillingEngine {
       ownerId: input.ownerId,
       bookId: input.bookId,
       cashAccount: input.cashAccount,
+      provider: input.provider ?? null,
+      payerName: input.payerName ?? null,
       senderReference: input.senderReference ?? null,
       note: input.note ?? null,
       proofDocumentId: input.proofDocumentId ?? null,
@@ -969,8 +986,66 @@ export class BillingEngine {
       sourceId: input.sourceId,
       entryId: posted!.entryId,
       recordedBy: input.recordedBy ?? null,
+      ...this.providerColumns(input),
     });
     return paymentId;
+  }
+
+  /** The M4b columns of a provider payment (empty for every other kind of money). */
+  private providerColumns(
+    input: Pick<
+      MoneyIn,
+      'providerReference' | 'settlementAccountId' | 'payerPhoneIndex' | 'payerPhoneMasked'
+    >,
+  ) {
+    return {
+      providerReference: input.providerReference ?? null,
+      settlementAccountId: input.settlementAccountId ?? null,
+      payerPhoneIndex: input.payerPhoneIndex ?? null,
+      payerPhoneMasked: input.payerPhoneMasked ?? null,
+    };
+  }
+
+  /**
+   * Where unmatched provider money sits now in the book that received it (P23 across books): with
+   * the provider (1050) until P22 settles it, then its net in the account it was paid into and
+   * its fee in 5200, as P22 posted them payment by payment (M4b plan 4.5).
+   */
+  private async settledHoldings(
+    tx: Tx,
+    payment: PaymentRecord,
+  ): Promise<
+    | {
+        side: {
+          bookId: string;
+          account: '1010' | '1070' | '5200';
+          provider?: string | null;
+          settlementAccountId?: string | null;
+        };
+        amountMinor: number;
+      }[]
+    | null
+  > {
+    if (payment.row.cashAccount !== '1050') return null;
+    const rows = await tx.execute<{ account_code: string; total: string }>(
+      sql`select l.account_code, sum(l.amount_minor)::bigint as total
+          from journal_line l join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
+          where l.payment_id = ${payment.id} and l.book_id = ${payment.row.bookId} and e.rule = 'P22'
+            and l.account_code in ('1010', '1070', '5200')
+          group by l.account_code`,
+    );
+    if (rows.rows.length === 0) return null;
+    return rows.rows
+      .filter((r) => Number(r.total) > 0)
+      .map((r) => ({
+        side: {
+          bookId: payment.row.bookId,
+          account: r.account_code as '1010' | '1070' | '5200',
+          provider: r.account_code === '5200' ? null : payment.row.provider,
+          settlementAccountId: r.account_code === '5200' ? null : payment.row.settlementAccountId,
+        },
+        amountMinor: Number(r.total),
+      }));
   }
 
   /**
@@ -1010,6 +1085,8 @@ export class BillingEngine {
       lastDay: lastBillableDay(state.lease),
     });
     const matchId = uuidv7();
+    const holdings =
+      payment.row.bookId === book.bookId ? null : await this.settledHoldings(tx, payment);
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,
       rule: 'P23',
@@ -1018,7 +1095,13 @@ export class BillingEngine {
       lines: unmatchedMatchLines({
         suspenseBookId: payment.row.bookId,
         bookId: book.bookId,
-        holding: { bookId: book.bookId, account: payment.row.cashAccount as CashAccount },
+        holding: {
+          bookId: book.bookId,
+          account: payment.row.cashAccount as CashAccount,
+          provider: payment.row.provider,
+          settlementAccountId: payment.row.settlementAccountId,
+        },
+        ...(holdings ? { holdings } : {}),
         paymentId: payment.id,
         lease: dimsOf(state.lease),
         allocations: plan.postings,
@@ -1123,7 +1206,8 @@ export class BillingEngine {
       readonly reason: string;
       readonly note: string;
       readonly moneyNowIn: 'collector' | 'owner_account' | 'agency_account' | 'provider';
-      readonly approvalRequestId: string;
+      /** Every staff correction has one (M4a decision 3); a chargeback has none (M4b). */
+      readonly approvalRequestId: string | null;
       readonly requestedBy: string | null;
       readonly today: string;
     },
@@ -1286,7 +1370,12 @@ export class BillingEngine {
       case 'agency_account':
         return { bookId, account: '1070' };
       case 'provider':
-        return { bookId, account: '1050', provider: payment.row.provider ?? 'test' };
+        return {
+          bookId,
+          account: '1050',
+          provider: payment.row.provider ?? 'test',
+          settlementAccountId: payment.row.settlementAccountId,
+        };
     }
   }
 

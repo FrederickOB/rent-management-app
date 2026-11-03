@@ -229,6 +229,97 @@ export function paymentsContract(
       await refusedWith(h.port.completeCharge(request.reference, { status: 'failed' }), 409);
     });
 
+    it('reports the subaccount, fee and paying phone of a charge (M4b: money with no intent)', async () => {
+      const phone = fakePhone();
+      const request = charge({ channel: 'momo', customer: { email: fakeEmail(), phone } });
+      await h.port.initialiseCharge(request);
+      await h.port.completeCharge(request.reference, { status: 'success', feesMinor: 2_925 });
+      expect(await h.port.verifyTransaction(request.reference)).toMatchObject({
+        status: 'success',
+        amountMinor: 150_000,
+        subaccountCode,
+        feesMinor: 2_925,
+        payerPhone: phone,
+      });
+    });
+
+    it('takes a payment that did not start on our page, signed like any other (BC-12)', async () => {
+      const external = await h.port.payExternal({
+        subaccountCode,
+        amountMinor: 120_000,
+        channel: 'momo',
+        payerPhone: fakePhone(),
+        narration: 'Rent K7QM2XA',
+      });
+      expect(
+        h.port.verifyWebhookSignature(external.webhook.rawBody, external.webhook.headers),
+      ).toBe(true);
+      expect(h.port.parseWebhook(external.webhook.rawBody)).toMatchObject({
+        type: 'charge.success',
+        reference: external.reference,
+      });
+      expect(await h.port.verifyTransaction(external.reference)).toMatchObject({
+        status: 'success',
+        amountMinor: 120_000,
+        subaccountCode,
+        metadata: { narration: 'Rent K7QM2XA' },
+      });
+    });
+
+    it('refunds a paid charge once, which then verifies as reversed (P31)', async () => {
+      const request = charge();
+      await h.port.initialiseCharge(request);
+      await refusedWith(h.port.refund({ reference: request.reference, amountMinor: 150_000 }), 400);
+      await h.port.completeCharge(request.reference, { status: 'success' });
+      const refund = await h.port.refund({ reference: request.reference, amountMinor: 150_000 });
+      expect(refund.refundReference).not.toBe('');
+      expect(['pending', 'processed']).toContain(refund.status);
+      expect((await h.port.verify(request.reference)).status).toBe('reversed');
+    });
+
+    it('charges a payment back: reversed, signed webhook naming the charge, deducted from the next payout (P21b)', async () => {
+      const kept = charge({ amountMinor: 100_000 });
+      const disputed = charge({ amountMinor: 40_000 });
+      for (const request of [kept, disputed]) {
+        await h.port.initialiseCharge(request);
+        await h.port.completeCharge(request.reference, { status: 'success' });
+      }
+      await h.port.settle();
+      const webhook = await h.port.chargeback(disputed.reference);
+      expect(h.port.verifyWebhookSignature(webhook.rawBody, webhook.headers)).toBe(true);
+      expect(h.port.parseWebhook(webhook.rawBody)).toMatchObject({
+        reference: disputed.reference,
+      });
+      expect((await h.port.verify(disputed.reference)).status).toBe('reversed');
+      const later = charge({ amountMinor: 70_000 });
+      await h.port.initialiseCharge(later);
+      await h.port.completeCharge(later.reference, { status: 'success', feesMinor: 1_000 });
+      await h.port.settle();
+      const mine = (await h.port.listSettlements(around(60_000, 60_000))).filter(
+        (s) => s.subaccountCode === subaccountCode && s.references.includes(later.reference),
+      );
+      expect(mine).toHaveLength(1);
+      expect(mine[0]).toMatchObject({
+        grossMinor: 70_000,
+        feesMinor: 1_000,
+        deductionsMinor: 40_000,
+        netMinor: 29_000,
+        deductedReferences: [{ reference: disputed.reference, amountMinor: 40_000 }],
+      });
+    });
+
+    it('lists banks and checks an account’s name where it can (ADR-008)', async () => {
+      const banks = await h.port.listBanks();
+      expect(banks.length).toBeGreaterThan(0);
+      const bank = banks[0]!.code;
+      expect(await h.port.resolveAccount({ bankCode: bank, accountNumber: '0123456789' })).toEqual({
+        accountName: 'TEST ACCOUNT 6789',
+      });
+      expect(
+        await h.port.resolveAccount({ bankCode: bank, accountNumber: '0123450000' }),
+      ).toBeNull();
+    });
+
     it('returns null for webhook bodies it does not understand', () => {
       for (const body of [
         '',

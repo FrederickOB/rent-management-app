@@ -7,6 +7,7 @@ import { meContract } from './me';
 import {
   payLinksContract,
   paymentsQueueContract,
+  receiptLinksContract,
   settlementContract,
   tenantMoneyContract,
 } from './payments';
@@ -60,6 +61,7 @@ export const contract = {
   payments: paymentsContract,
   arrears: arrearsContract,
   payLinks: payLinksContract,
+  receiptLinks: receiptLinksContract,
   settlement: settlementContract,
   paymentsQueue: paymentsQueueContract,
   tenantMoney: tenantMoneyContract,

@@ -208,11 +208,34 @@ export function chargedAccountOf(line: BillingLine): '4000' | '4100' | '4200' | 
   }
 }
 
-const TYPE_RANK: Record<LineKind, number> = {
+/**
+ * Within one due date: the deposit, then the charge periods month by month, then one-off charges
+ * (M4b decision 9). Each month's rent comes before that month's service charge.
+ */
+const GROUP_RANK: Record<LineKind, number> = {
   deposit: 0,
   rent: 1,
-  service_charge: 2,
-  one_off: 3,
+  service_charge: 1,
+  one_off: 2,
+  vat: 0,
+  nhil: 0,
+  getfund: 0,
+};
+const KIND_RANK: Record<LineKind, number> = {
+  deposit: 0,
+  rent: 0,
+  service_charge: 1,
+  one_off: 0,
+  vat: 0,
+  nhil: 0,
+  getfund: 0,
+};
+/** A VAT or levy line's place straight after the line it is charged on. */
+const TAX_RANK: Record<LineKind, number> = {
+  deposit: 0,
+  rent: 0,
+  service_charge: 0,
+  one_off: 0,
   vat: 1,
   nhil: 2,
   getfund: 3,
@@ -225,9 +248,16 @@ function orderKey(line: BillingLine, byId: ReadonlyMap<string, BillingLine>): Or
     const base = byId.get(line.baseLineId);
     if (!base)
       throw new DomainError('billing.base_line_missing', `Line ${line.id} has no base line`);
-    return [...orderKey(base, byId).slice(0, 4), TYPE_RANK[line.kind]];
+    return [...orderKey(base, byId).slice(0, 5), TAX_RANK[line.kind]];
   }
-  return [line.dueDate, TYPE_RANK[line.kind], line.periodStart ?? '', line.sequence, 0];
+  return [
+    line.dueDate,
+    GROUP_RANK[line.kind],
+    line.periodStart ?? '',
+    KIND_RANK[line.kind],
+    line.sequence,
+    0,
+  ];
 }
 
 function compareKeys(a: OrderKey, b: OrderKey): number {
@@ -241,8 +271,10 @@ function compareKeys(a: OrderKey, b: OrderKey): number {
 }
 
 /**
- * Oldest debt first (BC-07; architecture section 6): due date, then type (deposit, rent, service
- * charge, one-off), then period start, with each VAT or levy line straight after its base line.
+ * Oldest debt first (BC-07; architecture section 6): by due date, so across invoices the oldest
+ * goes first. Within one due date (one invoice): the deposit, then month by month, each month's
+ * rent before its service charge (M4b decision 9), then one-off charges, with each VAT or levy
+ * line straight after its base line.
  */
 export function inAllocationOrder(lines: readonly BillingLine[]): BillingLine[] {
   const byId = new Map(lines.map((l) => [l.id, l]));

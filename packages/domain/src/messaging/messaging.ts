@@ -19,15 +19,23 @@ export const MESSAGE_PURPOSES = [
   'signed_copy',
   'id_check_link',
   'staff_notice',
+  // M4b: pay links, the rent reminder ladder, receipts, and settlement-account alerts to owners.
+  'pay_link',
+  'rent_reminder',
+  'receipt',
+  'settlement_alert',
 ] as const;
 export type MessagePurpose = (typeof MESSAGE_PURPOSES)[number];
 
 /**
  * Messages the business starts need consent on the channel (CM-09). Staff notices go to staff by
- * email and need none; one-time codes never pass through messaging at all.
+ * email and need none; one-time codes never pass through messaging at all. A settlement-account
+ * alert (ADR-008) goes to the owner whose rent is being redirected, on the phone and email in the
+ * register: it is a security notice about their own money, not a message about a tenancy, so it
+ * needs no tenancy consent (M4b; listed for the founder in the M4b report).
  */
 export function needsConsent(purpose: MessagePurpose): boolean {
-  return purpose !== 'staff_notice';
+  return purpose !== 'staff_notice' && purpose !== 'settlement_alert';
 }
 
 /**
@@ -82,8 +90,9 @@ export function consentGranted(
 
 /**
  * A message body as it is stored: the token in any secure link is replaced, so the record never
- * holds a live link (CLAUDE.md section 9). Matches `/l/<token>` paths.
+ * holds a live link (CLAUDE.md section 9). Matches `/l/<token>` (signing), `/p/<token>` (pay) and
+ * `/r/<token>` (receipt) paths.
  */
 export function redactLinkTokens(body: string): string {
-  return body.replace(/\/l\/[A-Za-z0-9_-]{16,}/g, '/l/[link]');
+  return body.replace(/\/([lpr])\/[A-Za-z0-9_-]{16,}/g, '/$1/[link]');
 }

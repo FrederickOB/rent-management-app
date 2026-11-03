@@ -24,6 +24,7 @@ import { linesAfterEnd, planCreditNote, planPaymentReversal, planWriteOff } from
 import type { InvoiceLineDraft } from '../invoicing';
 import {
   creditPools,
+  inAllocationOrder,
   isRecurring,
   isTax,
   lineBalance,
@@ -35,6 +36,31 @@ import {
   type PaymentRef,
 } from '../lines';
 import { forwardWalk, walkLines, type ScheduledPeriod, type WalkResult } from '../walk';
+
+/**
+ * M4b decision 9: one invoice is paid month by month. Within each due date, in allocation order
+ * (the deposit, each month's rent then its service charge with their VAT and levies, then one-off
+ * charges), no line holds money while an earlier line is still open. It holds while nothing has
+ * been corrected: a reversal, credit note, write-off or move-out may reopen an earlier month.
+ * Returns the first line that breaks it, or null.
+ */
+export function monthByMonthBreak(
+  lines: readonly BillingLine[],
+  allocations: readonly AllocationRow[],
+): string | null {
+  const byDue = new Map<string, BillingLine[]>();
+  for (const line of lines) byDue.set(line.dueDate, [...(byDue.get(line.dueDate) ?? []), line]);
+  for (const group of byDue.values()) {
+    let open: BillingLine | null = null;
+    for (const line of inAllocationOrder(group)) {
+      const b = lineBalance(line, allocations);
+      if (open !== null && b.settledMinor > 0)
+        return `${line.id} (${line.kind} ${line.periodStart ?? ''}) holds money while ${open.id} (${open.kind} ${open.periodStart ?? ''}) is open`;
+      if (open === null && b.outstandingMinor > 0) open = line;
+    }
+  }
+  return null;
+}
 
 /**
  * An in-memory model of one lease in an owner's book (M4a plan section 5, step 1). It runs the
@@ -429,6 +455,13 @@ export class LeaseLedgerModel {
     return this.allocations
       .filter((a) => a.source === source && (lineId === undefined || a.lineId === lineId))
       .reduce((sum, a) => sum + a.amountMinor, 0);
+  }
+
+  /** Decision 9 on the model's own lines: throws if a later month holds money an earlier one lacks. */
+  checkMonthByMonth(): void {
+    this.refreshAccrued();
+    const broken = monthByMonthBreak(this.lines, this.allocations);
+    if (broken) throw new DomainError('model.invariant', `Not month by month: ${broken}`);
   }
 
   /** Invariants 1 to 4 and 7 (architecture section 5). Throws with the first one broken. */

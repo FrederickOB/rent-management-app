@@ -1,3 +1,5 @@
+import { lineBalance, type AllocationRow, type BillingLine } from '../billing/lines';
+import { remainingAfterWalk, type WalkResult } from '../billing/walk';
 import { DomainError } from '../errors';
 
 /**
@@ -52,3 +54,63 @@ export function syntheticCustomerEmail(tenantId: string, domain: string): string
     throw new DomainError('payment.bad_email_domain', 'The customer email domain is not valid');
   return `tenant-${tenantId.replace(/-/g, '').toLowerCase()}@${domain.toLowerCase()}`;
 }
+
+/**
+ * What the pay page asks for (plan 4.3): the lease's lines due by this invoice's due date or
+ * today, whichever is later, still to pay after the credit the lease holds. Payments go to the
+ * oldest debt first, so that is this invoice and anything older (deviation 3).
+ */
+export function payPageDueMinor(input: {
+  readonly lines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly walk: WalkResult;
+  readonly today: string;
+  readonly invoiceDueDate: string;
+}): number {
+  const until = input.invoiceDueDate > input.today ? input.invoiceDueDate : input.today;
+  return input.lines
+    .filter((l) => l.dueDate <= until)
+    .reduce((sum, l) => sum + remainingAfterWalk(l, input.allocations, input.walk), 0);
+}
+
+/**
+ * The rent and charges still to pay to the end of the term, after the lease's credit (decision
+ * 7): every invoiced line's remainder, and every charge period not invoiced yet (with its VAT).
+ */
+export function remainingTermMinor(input: {
+  readonly lines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly walk: WalkResult;
+}): number {
+  const walked = new Set(input.walk.lines.flatMap((l) => (l.lineId ? [l.lineId] : [])));
+  const outside = input.lines
+    .filter((l) => !walked.has(l.id))
+    .reduce((sum, l) => sum + lineBalance(l, input.allocations).outstandingMinor, 0);
+  return outside + input.walk.lines.reduce((sum, l) => sum + Math.max(0, l.remainingMinor), 0);
+}
+
+/** An invoice still to pay after the lease's credit (BC-09: the ladder stops when it is paid). */
+export function invoiceRemainingMinor(input: {
+  readonly invoiceLines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly walk: WalkResult;
+}): number {
+  return input.invoiceLines.reduce(
+    (sum, l) => sum + remainingAfterWalk(l, input.allocations, input.walk),
+    0,
+  );
+}
+
+/**
+ * Our reference for a charge (plan 4.3): unique everywhere, from the intent's random id, in the
+ * characters Paystack accepts (letters, digits, `-`, `.` and `=`).
+ */
+export function chargeReference(intentId: string): string {
+  if (!/^[0-9a-f-]{36}$/i.test(intentId))
+    throw new DomainError('payment.bad_intent_id', 'An intent id is a UUID');
+  return `pi-${intentId.replace(/-/g, '').toLowerCase()}`;
+}
+
+/** Ghana's MoMo networks as the pay page offers them (plan 4.3). */
+export const MOMO_NETWORKS = ['mtn', 'telecel', 'at'] as const;
+export type MomoNetwork = (typeof MOMO_NETWORKS)[number];

@@ -211,3 +211,51 @@ describe('BC-08 arrears ageing', () => {
     ]);
   });
 });
+
+describe('AR-02 a part payment on an annual invoice with service charge (M4b decision 9)', () => {
+  it('covers whole months, so paid-until moves month by month', () => {
+    const terms = checkLeaseTerms({
+      startDate: '2026-11-01',
+      endDate: '2027-10-31',
+      monthlyRentMinor: 150_000,
+      serviceChargeMonthlyMinor: 20_000,
+      cycle: 'annual',
+      noticeDays: 30,
+      use: 'residential',
+    });
+    const schedule: ScheduleRow[] = rentSchedule(terms).map((p) => ({
+      id: `cp-${p.chargeType}-${p.sequence}`,
+      sequence: p.sequence,
+      chargeType: p.chargeType,
+      periodStart: p.periodStart,
+      periodEnd: p.periodEnd,
+      amountMinor: p.amountMinor,
+      source: 'schedule' as const,
+    }));
+    const model = new LeaseLedgerModel('2026-10-18');
+    model.scheduled = schedule.map((s) => ({ ...s }));
+    const cycles = invoiceCycles({
+      cycle: 'annual',
+      initialAdvanceMonths: null,
+      schedule,
+      billingStartDate: terms.startDate,
+      lastBillableDay: terms.endDate,
+      leadDays: 14,
+    });
+    for (const c of cyclesToIssue(cycles, model.today, new Set()))
+      model.issue(invoiceLinesFor(c, null), c.dueDate, c.cycleStart);
+    model.pay(170_000 * 3 + 100_000);
+    model.checkMonthByMonth();
+    const walk = model.walk();
+    expect(walk.paidUntil).toBe('2027-01-31');
+    expect(walk.partial).toEqual({ monthStart: '2027-02-01', amountMinor: 100_000 });
+    // Each month as it starts is fully covered, service charge included.
+    while (model.today < '2027-01-02') {
+      model.nextDay();
+      model.accrueTo(model.today);
+    }
+    model.checkInvariants();
+    expect(balanceOf(model.journal(), { accountCode: '1100' })).toBe(0);
+    expect(-balanceOf(model.journal(), { accountCode: '4100' })).toBe(20_000 * 3);
+  });
+});

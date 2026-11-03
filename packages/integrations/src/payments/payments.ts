@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { hmacHex, signatureMatches } from '../hmac';
-import { requestJson } from '../http';
+import { ProviderError, requestJson } from '../http';
 import {
   conflict,
   invalidRequest,
@@ -18,7 +18,11 @@ import {
  * directly and never into a platform balance.
  */
 export type PaymentChannel = 'momo' | 'card' | 'bank';
-export type ChargeStatus = 'success' | 'failed' | 'pending' | 'abandoned';
+/** `reversed`: refunded or charged back after it succeeded (M4b). */
+export type ChargeStatus = 'success' | 'failed' | 'pending' | 'abandoned' | 'reversed';
+/** Ghana's MoMo networks, by our names; each adapter maps them to its provider's codes. */
+export type MomoNetwork = 'mtn' | 'telecel' | 'at';
+export const MOMO_NETWORK_NAMES: readonly MomoNetwork[] = ['mtn', 'telecel', 'at'];
 
 export interface ChargeRequest {
   /** Our reference, unique per charge: letters, digits, `-`, `.` and `=` (Paystack's rule, OQ-05). */
@@ -31,6 +35,12 @@ export interface ChargeRequest {
   readonly customer: { readonly email: string; readonly phone?: string };
   readonly subaccountCode: string;
   readonly metadata: Readonly<Record<string, string>>;
+  /** A MoMo charge: the network the phone is on (M4b plan 4.3). */
+  readonly momoNetwork?: MomoNetwork;
+  /** Shown on the provider's checkout (decision 5): the tenant's name, never their phone. */
+  readonly customerName?: string;
+  /** Where the provider's checkout returns the payer, for a card charge. */
+  readonly callbackUrl?: string;
 }
 
 export interface ChargeInitialised {
@@ -39,6 +49,8 @@ export interface ChargeInitialised {
   /** Where to send the payer, when the provider collects payment details on its own page. */
   readonly authorizationUrl?: string;
   readonly status: ChargeStatus;
+  /** What the provider asks the payer to do, such as "Approve the payment on your phone". */
+  readonly displayText?: string;
 }
 
 /**
@@ -59,6 +71,10 @@ export interface VerifiedCharge {
 export interface ProviderTransaction extends VerifiedCharge {
   readonly subaccountCode: string;
   readonly createdAt: string;
+  /** The provider's fee on this charge, when it reports one. */
+  readonly feesMinor?: number;
+  /** The paying phone (E.164), when the provider reports one. Never logged. */
+  readonly payerPhone?: string;
 }
 
 export interface ProviderSettlement {
@@ -68,11 +84,35 @@ export interface ProviderSettlement {
   readonly currency: string;
   readonly grossMinor: number;
   readonly feesMinor: number;
-  /** Gross less fees: what reached the subaccount's bank account. */
+  /** Chargebacks and refunds taken out of this payout (OQ-41). */
+  readonly deductionsMinor: number;
+  /** Gross less fees and deductions: what reached the subaccount's bank account. */
   readonly netMinor: number;
   readonly settledAt: string;
   /** References of the charges in this settlement. */
   readonly references: readonly string[];
+  /** The charges each deduction was for, where the provider says; may be fewer than the total. */
+  readonly deductedReferences: readonly {
+    readonly reference: string;
+    readonly amountMinor: number;
+  }[];
+}
+
+export interface RefundRequest {
+  /** The charge's reference. */
+  readonly reference: string;
+  readonly amountMinor: number;
+}
+
+export interface RefundResult {
+  readonly refundReference: string;
+  readonly status: 'pending' | 'processed' | 'failed';
+}
+
+/** A bank the provider settles to (ADR-008). */
+export interface Bank {
+  readonly code: string;
+  readonly name: string;
 }
 
 /** A half-open range of instants, ISO 8601 with an offset: `from` inclusive, `to` exclusive. */
@@ -103,11 +143,21 @@ export interface PaymentsPort {
   initialiseCharge(request: ChargeRequest): Promise<ChargeInitialised>;
   /** A non-retryable 404 when the provider does not know the reference. */
   verify(reference: string): Promise<VerifiedCharge>;
+  /** As verify, with the subaccount, the fee and the paying phone (M4b: money with no intent). */
+  verifyTransaction(reference: string): Promise<ProviderTransaction>;
   /** Charges created in the range. */
   listTransactions(range: InstantRange): Promise<ProviderTransaction[]>;
   /** Settlements paid out in the range. */
   listSettlements(range: InstantRange): Promise<ProviderSettlement[]>;
   createSubaccount(request: SubaccountRequest): Promise<{ subaccountCode: string }>;
+  /** Refunds a charge to its payer (P31). */
+  refund(request: RefundRequest): Promise<RefundResult>;
+  /** The account's name at the bank, where the provider can check it; null where it cannot. */
+  resolveAccount(check: {
+    readonly bankCode: string;
+    readonly accountNumber: string;
+  }): Promise<{ readonly accountName: string } | null>;
+  listBanks(): Promise<Bank[]>;
   /** HMAC-SHA512 of the raw body with the secret key, as Paystack signs webhooks. */
   verifyWebhookSignature(rawBody: Buffer | string, headers: WebhookHeaders): boolean;
   parseWebhook(rawBody: Buffer | string): PaymentWebhookEvent | null;
@@ -127,6 +177,17 @@ export interface PaymentWebhookRequest {
   readonly headers: Readonly<Record<string, string>>;
 }
 
+/** A payment that reaches a subaccount without our pay page (M4b: the unmatched queue). */
+export interface ExternalPayment {
+  readonly subaccountCode: string;
+  readonly amountMinor: number;
+  readonly channel: PaymentChannel;
+  readonly payerPhone?: string;
+  /** What the payer typed, such as a lease payment reference. */
+  readonly narration?: string;
+  readonly feesMinor?: number;
+}
+
 /** Test controls both fakes offer; not part of the port. */
 export interface PaymentsTestControls {
   /**
@@ -136,6 +197,15 @@ export interface PaymentsTestControls {
   completeCharge(reference: string, outcome: ChargeOutcome): Promise<PaymentWebhookRequest | null>;
   /** Pays out every successful charge not yet settled, one settlement per subaccount. */
   settle(): Promise<ProviderSettlement[]>;
+  /**
+   * The payer's bank charges a successful payment back: it becomes `reversed`, the next settlement
+   * to its subaccount deducts it, and a signed `charge.dispute.resolve` webhook is returned.
+   */
+  chargeback(reference: string): Promise<PaymentWebhookRequest>;
+  /** A successful payment to a subaccount that did not come from our pay page, with its webhook. */
+  payExternal(
+    payment: ExternalPayment,
+  ): Promise<{ readonly reference: string; readonly webhook: PaymentWebhookRequest }>;
 }
 
 export const PAYSTACK_SIGNATURE_HEADER = 'x-paystack-signature';
@@ -161,6 +231,9 @@ export function checkChargeRequest(provider: string, request: ChargeRequest): vo
     throw invalidRequest(provider, 'customer phone must be an E.164 number');
   }
   if (request.subaccountCode.length === 0) throw invalidRequest(provider, 'subaccount required');
+  if (request.momoNetwork !== undefined && !MOMO_NETWORK_NAMES.includes(request.momoNetwork)) {
+    throw invalidRequest(provider, 'unknown MoMo network');
+  }
   const values = Object.values(request.metadata);
   if (values.length > 50 || values.some((v) => typeof v !== 'string' || v.length > 500)) {
     throw invalidRequest(provider, 'metadata must be at most 50 strings of up to 500 characters');
@@ -183,15 +256,27 @@ export function verifyPaystackSignature(
   return signature !== undefined && signatureMatches('sha512', secretKey, rawBody, signature);
 }
 
+const id = z.union([z.number().int(), z.string().min(1)]);
 const webhookSchema = z.object({
   event: z.string().min(1),
   data: z.object({
-    id: z.union([z.number().int(), z.string().min(1)]),
-    reference: z.string().min(1),
+    id: id.optional(),
+    reference: z.string().min(1).optional(),
+    /** Refund events name the charge this way. */
+    transaction_reference: z.string().min(1).optional(),
+    refund_reference: z.string().min(1).optional(),
+    /** Dispute events carry the charge they are about. */
+    transaction: z
+      .object({ reference: z.string().min(1) })
+      .partial()
+      .optional(),
   }),
 });
 
-/** Paystack events carry no event id; the event name with the object's id identifies one. */
+/**
+ * Paystack events carry no event id; the event name with the object's id identifies one. Charge
+ * events name the charge's reference; refund and dispute events name the charge they are about.
+ */
 export function parsePaystackWebhook(rawBody: Buffer | string): PaymentWebhookEvent | null {
   let body: unknown;
   try {
@@ -202,7 +287,10 @@ export function parsePaystackWebhook(rawBody: Buffer | string): PaymentWebhookEv
   const parsed = webhookSchema.safeParse(body);
   if (!parsed.success) return null;
   const { event, data } = parsed.data;
-  return { eventId: `${event}:${data.id}`, type: event, reference: data.reference };
+  const reference = data.reference ?? data.transaction_reference ?? data.transaction?.reference;
+  const objectId = data.id ?? data.refund_reference;
+  if (reference === undefined || objectId === undefined) return null;
+  return { eventId: `${event}:${objectId}`, type: event, reference };
 }
 
 const instant = z.iso.datetime({ offset: true });
@@ -238,19 +326,40 @@ interface MemoryCharge {
   feesMinor: number;
   paidAt?: string;
   settled: boolean;
+  /** Charged back after it was paid: deducted from the next settlement once. */
+  chargedBack?: { readonly amountMinor: number; deducted: boolean };
 }
 
-/** Keeps charges in memory, for unit and integration tests. */
+/** Banks the fakes settle to: fictional codes, never a real institution's. */
+export const FAKE_BANKS: readonly Bank[] = [
+  { code: 'FAKEBANK1', name: 'Test Bank One' },
+  { code: 'FAKEBANK2', name: 'Test Bank Two' },
+];
+
+/**
+ * The name the fakes return for an account check: fictional, from the last four digits, so a
+ * test can tell a name came from the provider. An account number ending 0000 cannot be checked.
+ */
+export const fakeAccountName = (accountNumber: string): string | null =>
+  accountNumber.endsWith('0000') ? null : `TEST ACCOUNT ${accountNumber.slice(-4)}`;
+
+/** Keeps charges in memory, for unit and integration tests. A second instance stands in for failover. */
 export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
-  readonly provider = 'memory';
   private readonly subaccounts = new Map<string, SubaccountRequest>();
   private readonly charges = new Map<string, MemoryCharge>();
   private readonly settlements: ProviderSettlement[] = [];
+  private readonly refunds = new Map<string, RefundResult>();
   private counter = 0;
+  /** Set to make initialiseCharge fail as a provider outage would (BC-02 failover tests). */
+  failCharges = false;
 
-  constructor(private readonly secretKey = 'sk_test_in_memory') {}
+  constructor(
+    private readonly secretKey = 'sk_test_in_memory',
+    readonly provider = 'memory',
+  ) {}
 
   async initialiseCharge(request: ChargeRequest): Promise<ChargeInitialised> {
+    if (this.failCharges) throw new ProviderError(this.provider, 'HTTP 503', true, 503);
     checkChargeRequest(this.provider, request);
     if (!this.subaccounts.has(request.subaccountCode)) {
       throw invalidRequest(this.provider, 'unknown subaccount');
@@ -272,7 +381,9 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
       provider: this.provider,
       providerReference: request.reference,
       status: 'pending',
-      ...(prompt ? {} : { authorizationUrl: `https://checkout.fake.invalid/${id}` }),
+      ...(prompt
+        ? { displayText: 'Approve the payment on your phone' }
+        : { authorizationUrl: `https://checkout.fake.invalid/${id}` }),
     };
   }
 
@@ -282,29 +393,69 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
     return this.view(charge);
   }
 
+  async verifyTransaction(reference: string): Promise<ProviderTransaction> {
+    const charge = this.charges.get(reference);
+    if (!charge) throw notFound(this.provider, 'transaction');
+    return this.transaction(charge);
+  }
+
   async listTransactions(range: InstantRange): Promise<ProviderTransaction[]> {
     const window = rangeMillis(this.provider, range);
     return [...this.charges.values()]
       .filter((charge) => inRange(charge.createdAt, window))
-      .map((charge) => ({
-        ...this.view(charge),
-        subaccountCode: charge.request.subaccountCode,
-        createdAt: charge.createdAt,
-      }));
+      .map((charge) => this.transaction(charge));
   }
 
   async listSettlements(range: InstantRange): Promise<ProviderSettlement[]> {
     const window = rangeMillis(this.provider, range);
     return this.settlements
       .filter((s) => inRange(s.settledAt, window))
-      .map((s) => ({ ...s, references: [...s.references] }));
+      .map((s) => ({
+        ...s,
+        references: [...s.references],
+        deductedReferences: [...s.deductedReferences],
+      }));
   }
 
   async createSubaccount(request: SubaccountRequest): Promise<{ subaccountCode: string }> {
     checkSubaccount(this.provider, request);
-    const subaccountCode = `ACCT_mem${++this.counter}`;
+    const subaccountCode = `ACCT_${this.provider.replace(/[^a-z0-9]/gi, '')}${++this.counter}`;
     this.subaccounts.set(subaccountCode, { ...request });
     return { subaccountCode };
+  }
+
+  async refund(request: RefundRequest): Promise<RefundResult> {
+    const charge = this.charges.get(request.reference);
+    if (!charge) throw notFound(this.provider, 'transaction');
+    const existing = this.refunds.get(request.reference);
+    if (existing) return existing;
+    if (charge.status !== 'success') throw invalidRequest(this.provider, 'charge not refundable');
+    if (!isWholePesewas(request.amountMinor) || request.amountMinor > charge.amountMinor)
+      throw invalidRequest(
+        this.provider,
+        'refund amount must be whole pesewas, at most the charge',
+      );
+    charge.status = 'reversed';
+    charge.chargedBack = { amountMinor: request.amountMinor, deducted: false };
+    const result: RefundResult = { refundReference: `rf-${++this.counter}`, status: 'processed' };
+    this.refunds.set(request.reference, result);
+    return result;
+  }
+
+  async resolveAccount(check: {
+    readonly bankCode: string;
+    readonly accountNumber: string;
+  }): Promise<{ readonly accountName: string } | null> {
+    if (!FAKE_BANKS.some((b) => b.code === check.bankCode))
+      throw invalidRequest(this.provider, 'unknown bank');
+    if (!/^\d{6,20}$/.test(check.accountNumber))
+      throw invalidRequest(this.provider, 'account number must be 6 to 20 digits');
+    const accountName = fakeAccountName(check.accountNumber);
+    return accountName ? { accountName } : null;
+  }
+
+  async listBanks(): Promise<Bank[]> {
+    return FAKE_BANKS.map((b) => ({ ...b }));
   }
 
   verifyWebhookSignature(rawBody: Buffer | string, headers: WebhookHeaders): boolean {
@@ -335,40 +486,118 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
     charge.amountMinor = amountMinor;
     charge.feesMinor = feesMinor;
     charge.paidAt = new Date().toISOString();
-    const rawBody = JSON.stringify({ event: 'charge.success', data: this.paystackView(charge) });
+    return this.signed({ event: 'charge.success', data: this.paystackView(charge) });
+  }
+
+  async chargeback(reference: string): Promise<PaymentWebhookRequest> {
+    const charge = this.charges.get(reference);
+    if (!charge) throw notFound(this.provider, 'transaction');
+    if (charge.status !== 'success')
+      throw conflict(this.provider, 'only a paid charge is disputed');
+    charge.status = 'reversed';
+    charge.chargedBack = { amountMinor: charge.amountMinor, deducted: false };
+    return this.signed({
+      event: 'charge.dispute.resolve',
+      data: {
+        id: ++this.counter,
+        status: 'resolved',
+        resolution: 'declined',
+        refund_amount: charge.amountMinor,
+        currency: 'GHS',
+        transaction: { id: charge.id, reference: charge.request.reference },
+      },
+    });
+  }
+
+  async payExternal(
+    payment: ExternalPayment,
+  ): Promise<{ readonly reference: string; readonly webhook: PaymentWebhookRequest }> {
+    if (!this.subaccounts.has(payment.subaccountCode))
+      throw invalidRequest(this.provider, 'unknown subaccount');
+    const reference = `ext-${++this.counter}-${Date.now().toString(36)}`;
+    const id = ++this.counter;
+    const charge: MemoryCharge = {
+      id,
+      request: {
+        reference,
+        amountMinor: payment.amountMinor,
+        currency: 'GHS',
+        channel: payment.channel,
+        customer: {
+          email: `payer-${id}@example.test`,
+          ...(payment.payerPhone ? { phone: payment.payerPhone } : {}),
+        },
+        subaccountCode: payment.subaccountCode,
+        metadata: payment.narration ? { narration: payment.narration } : {},
+      },
+      createdAt: new Date().toISOString(),
+      status: 'success',
+      amountMinor: payment.amountMinor,
+      feesMinor: payment.feesMinor ?? 0,
+      paidAt: new Date().toISOString(),
+      settled: false,
+    };
+    this.charges.set(reference, charge);
     return {
-      rawBody,
-      headers: { [PAYSTACK_SIGNATURE_HEADER]: hmacHex('sha512', this.secretKey, rawBody) },
+      reference,
+      webhook: this.signed({ event: 'charge.success', data: this.paystackView(charge) }),
     };
   }
 
   async settle(): Promise<ProviderSettlement[]> {
-    const due = new Map<string, MemoryCharge[]>();
+    const due = new Map<string, { paid: MemoryCharge[]; back: MemoryCharge[] }>();
+    const group = (code: string) => {
+      const found = due.get(code) ?? { paid: [], back: [] };
+      due.set(code, found);
+      return found;
+    };
     for (const charge of this.charges.values()) {
-      if (charge.status !== 'success' || charge.settled) continue;
-      const list = due.get(charge.request.subaccountCode) ?? [];
-      list.push(charge);
-      due.set(charge.request.subaccountCode, list);
+      const code = charge.request.subaccountCode;
+      if (charge.chargedBack && !charge.chargedBack.deducted && charge.settled)
+        group(code).back.push(charge);
+      if (charge.settled) continue;
+      if (charge.status === 'success') group(code).paid.push(charge);
+      // Refunded or charged back before it was paid out: settled and deducted together.
+      else if (charge.status === 'reversed' && charge.chargedBack) {
+        group(code).paid.push(charge);
+        group(code).back.push(charge);
+      }
     }
     const settledAt = new Date().toISOString();
-    const created = [...due].map(([subaccountCode, charges]): ProviderSettlement => {
-      const grossMinor = charges.reduce((sum, c) => sum + c.amountMinor, 0);
-      const feesMinor = charges.reduce((sum, c) => sum + c.feesMinor, 0);
-      for (const c of charges) c.settled = true;
+    const created = [...due].map(([subaccountCode, { paid, back }]): ProviderSettlement => {
+      const grossMinor = paid.reduce((sum, c) => sum + c.amountMinor, 0);
+      const feesMinor = paid.reduce((sum, c) => sum + c.feesMinor, 0);
+      const deductedReferences = back.map((c) => ({
+        reference: c.request.reference,
+        amountMinor: c.chargedBack!.amountMinor,
+      }));
+      const deductionsMinor = deductedReferences.reduce((sum, d) => sum + d.amountMinor, 0);
+      for (const c of paid) c.settled = true;
+      for (const c of back) c.chargedBack!.deducted = true;
       return {
-        settlementId: `mem-settlement-${++this.counter}`,
+        settlementId: `${this.provider}-settlement-${++this.counter}`,
         subaccountCode,
         status: 'success',
         currency: 'GHS',
         grossMinor,
         feesMinor,
-        netMinor: grossMinor - feesMinor,
+        deductionsMinor,
+        netMinor: grossMinor - feesMinor - deductionsMinor,
         settledAt,
-        references: charges.map((c) => c.request.reference),
+        references: paid.map((c) => c.request.reference),
+        deductedReferences,
       };
     });
     this.settlements.push(...created);
     return created;
+  }
+
+  private signed(body: unknown): PaymentWebhookRequest {
+    const rawBody = JSON.stringify(body);
+    return {
+      rawBody,
+      headers: { [PAYSTACK_SIGNATURE_HEADER]: hmacHex('sha512', this.secretKey, rawBody) },
+    };
   }
 
   private view(charge: MemoryCharge): VerifiedCharge {
@@ -380,6 +609,16 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
       ...(charge.paidAt === undefined ? {} : { paidAt: charge.paidAt }),
       channel: charge.request.channel,
       metadata: { ...charge.request.metadata },
+    };
+  }
+
+  private transaction(charge: MemoryCharge): ProviderTransaction {
+    return {
+      ...this.view(charge),
+      subaccountCode: charge.request.subaccountCode,
+      createdAt: charge.createdAt,
+      feesMinor: charge.feesMinor,
+      ...(charge.request.customer.phone ? { payerPhone: charge.request.customer.phone } : {}),
     };
   }
 
@@ -416,58 +655,100 @@ const paystackStatus = z.enum([
   'success',
   'failed',
   'abandoned',
+  'reversed',
   'pending',
   'ongoing',
   'processing',
   'queued',
+  'send_otp',
+  'pay_offline',
 ]);
 const paystackChannel = z.enum(['mobile_money', 'card', 'bank', 'bank_transfer']);
-const transaction = z.object({
+export const paystackTransaction = z.object({
+  id: z.union([z.number().int(), z.string().min(1)]).optional(),
   status: paystackStatus,
   reference: z.string().min(1),
   amount: minor,
   currency: z.string().min(1),
   channel: paystackChannel,
   paid_at: z.string().nullable().optional(),
-  created_at: z.string().min(1),
-  metadata: z.record(z.string(), z.string()).nullable().optional(),
-  subaccount: z.object({ subaccount_code: z.string().min(1) }),
+  created_at: z.string().min(1).optional(),
+  createdAt: z.string().min(1).optional(),
+  fees: minor.nullable().optional(),
+  metadata: z
+    .union([z.record(z.string(), z.unknown()), z.string(), z.number()])
+    .nullable()
+    .optional(),
+  customer: z.object({ phone: z.string().nullable().optional() }).partial().nullable().optional(),
+  subaccount: z
+    .union([z.object({ subaccount_code: z.string().min(1) }).partial(), z.object({})])
+    .nullable()
+    .optional(),
 });
-const envelope = <T extends z.ZodType>(data: T) => z.object({ status: z.literal(true), data });
-const initializeResponse = envelope(
-  z.object({ reference: z.string().min(1), authorization_url: z.url().optional() }),
+export const paystackEnvelope = <T extends z.ZodType>(data: T) =>
+  z.object({ status: z.literal(true), data });
+const initializeResponse = paystackEnvelope(
+  z.object({
+    reference: z.string().min(1),
+    authorization_url: z.url().optional(),
+    status: z.string().optional(),
+    display_text: z.string().optional(),
+  }),
 );
-const settlement = z.object({
+export const paystackSettlement = z.object({
   id: z.union([z.number().int(), z.string().min(1)]),
-  status: z.enum(['success', 'pending', 'processing', 'failed']),
+  status: z.enum(['success', 'pending', 'processing', 'processed', 'failed']),
   currency: z.string().min(1),
   total_amount: minor,
   total_fees: minor,
   effective_amount: minor,
+  deductions: minor.nullable().optional(),
   settlement_date: z.string().min(1),
-  subaccount: z.object({ subaccount_code: z.string().min(1) }),
+  subaccount: z
+    .object({ subaccount_code: z.string().min(1) })
+    .partial()
+    .nullable()
+    .optional(),
 });
 
-function toSettlement(
-  s: z.infer<typeof settlement>,
+export function toSettlement(
+  s: z.infer<typeof paystackSettlement>,
   references: readonly string[],
+  deductedReferences: readonly { reference: string; amountMinor: number }[] = [],
 ): ProviderSettlement {
+  // Gross less fees less net is what the provider kept back: chargebacks and refunds (OQ-41).
+  const deductions =
+    s.deductions ?? Math.max(0, s.total_amount - s.total_fees - s.effective_amount);
   return {
     settlementId: String(s.id),
-    subaccountCode: s.subaccount.subaccount_code,
-    status: s.status === 'processing' ? 'pending' : s.status,
+    subaccountCode: s.subaccount?.subaccount_code ?? '',
+    status: s.status === 'processing' ? 'pending' : s.status === 'processed' ? 'success' : s.status,
     currency: s.currency,
     grossMinor: s.total_amount,
     feesMinor: s.total_fees,
+    deductionsMinor: deductions,
     netMinor: s.effective_amount,
     settledAt: s.settlement_date,
     references: [...references],
+    deductedReferences: [...deductedReferences],
   };
 }
 
-function toCharge(data: z.infer<typeof transaction>): VerifiedCharge {
+const metadataOf = (
+  value: z.infer<typeof paystackTransaction>['metadata'],
+): Readonly<Record<string, string>> => {
+  if (!value || typeof value !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const [key, v] of Object.entries(value)) if (typeof v === 'string') out[key] = v;
+  return out;
+};
+
+export function toCharge(data: z.infer<typeof paystackTransaction>): VerifiedCharge {
   const status: ChargeStatus =
-    data.status === 'success' || data.status === 'failed' || data.status === 'abandoned'
+    data.status === 'success' ||
+    data.status === 'failed' ||
+    data.status === 'abandoned' ||
+    data.status === 'reversed'
       ? data.status
       : 'pending';
   const channel: PaymentChannel =
@@ -479,9 +760,26 @@ function toCharge(data: z.infer<typeof transaction>): VerifiedCharge {
     reference: data.reference,
     ...(data.paid_at ? { paidAt: data.paid_at } : {}),
     channel,
-    metadata: data.metadata ?? {},
+    metadata: metadataOf(data.metadata),
   };
 }
+
+export function toTransaction(data: z.infer<typeof paystackTransaction>): ProviderTransaction {
+  const phone = data.customer?.phone ?? undefined;
+  return {
+    ...toCharge(data),
+    subaccountCode:
+      data.subaccount && 'subaccount_code' in data.subaccount
+        ? (data.subaccount.subaccount_code ?? '')
+        : '',
+    createdAt: data.created_at ?? data.createdAt ?? '',
+    ...(data.fees === null || data.fees === undefined ? {} : { feesMinor: data.fees }),
+    ...(phone && isE164(phone) ? { payerPhone: phone } : {}),
+  };
+}
+
+/** Our network names as the fake provider takes them (Paystack's codes, OQ-01 fixture assumption). */
+const FAKE_NETWORK_CODES: Record<MomoNetwork, string> = { mtn: 'mtn', telecel: 'vod', at: 'atl' };
 
 /** Talks to `apps/fake-providers` over HTTP, with request shapes like Paystack's. */
 export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls {
@@ -493,16 +791,33 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
 
   async initialiseCharge(request: ChargeRequest): Promise<ChargeInitialised> {
     const phone = request.channel === 'momo' ? request.customer.phone : undefined;
-    const response = await this.call(initializeResponse, '/transaction/initialize', {
-      reference: request.reference,
-      amount: request.amountMinor,
-      currency: request.currency,
-      email: request.customer.email,
-      channels: [PAYSTACK_CHANNEL[request.channel]],
-      subaccount: request.subaccountCode,
-      metadata: request.metadata,
-      ...(phone === undefined ? {} : { mobile_money: { phone } }),
-    });
+    // MoMo goes through Paystack's charge API, straight to the phone; cards through checkout.
+    const response =
+      phone === undefined
+        ? await this.call(initializeResponse, '/transaction/initialize', {
+            reference: request.reference,
+            amount: request.amountMinor,
+            currency: request.currency,
+            email: request.customer.email,
+            channels: [PAYSTACK_CHANNEL[request.channel]],
+            subaccount: request.subaccountCode,
+            bearer: 'subaccount',
+            metadata: request.metadata,
+            ...(request.callbackUrl ? { callback_url: request.callbackUrl } : {}),
+          })
+        : await this.call(initializeResponse, '/charge', {
+            reference: request.reference,
+            amount: request.amountMinor,
+            currency: request.currency,
+            email: request.customer.email,
+            subaccount: request.subaccountCode,
+            bearer: 'subaccount',
+            metadata: request.metadata,
+            mobile_money: {
+              phone,
+              ...(request.momoNetwork ? { provider: FAKE_NETWORK_CODES[request.momoNetwork] } : {}),
+            },
+          });
     return {
       provider: this.provider,
       providerReference: response.data.reference,
@@ -510,45 +825,59 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
       ...(response.data.authorization_url === undefined
         ? {}
         : { authorizationUrl: response.data.authorization_url }),
+      ...(response.data.display_text === undefined
+        ? {}
+        : { displayText: response.data.display_text }),
     };
   }
 
   async verify(reference: string): Promise<VerifiedCharge> {
+    return toCharge(await this.fetchTransaction(reference));
+  }
+
+  async verifyTransaction(reference: string): Promise<ProviderTransaction> {
+    return toTransaction(await this.fetchTransaction(reference));
+  }
+
+  private async fetchTransaction(reference: string) {
     const response = await this.call(
-      envelope(transaction),
+      paystackEnvelope(paystackTransaction),
       `/transaction/verify/${encodeURIComponent(reference)}`,
     );
-    return toCharge(response.data);
+    return response.data;
   }
 
   async listTransactions(range: InstantRange): Promise<ProviderTransaction[]> {
     const response = await this.call(
-      envelope(z.array(transaction)),
+      paystackEnvelope(z.array(paystackTransaction)),
       `/transaction?${new URLSearchParams({ ...range })}`,
     );
-    return response.data.map((t) => ({
-      ...toCharge(t),
-      subaccountCode: t.subaccount.subaccount_code,
-      createdAt: t.created_at,
-    }));
+    return response.data.map(toTransaction);
   }
 
   /** As with Paystack, a settlement's charges come from a second call. */
   async listSettlements(range: InstantRange): Promise<ProviderSettlement[]> {
     const response = await this.call(
-      envelope(z.array(settlement)),
+      paystackEnvelope(
+        z.array(
+          paystackSettlement.extend({
+            deducted: z.array(z.object({ reference: z.string(), amount: minor })).optional(),
+          }),
+        ),
+      ),
       `/settlement?${new URLSearchParams({ ...range })}`,
     );
     const result: ProviderSettlement[] = [];
     for (const s of response.data) {
       const charges = await this.call(
-        envelope(z.array(transaction)),
+        paystackEnvelope(z.array(paystackTransaction)),
         `/settlement/${encodeURIComponent(String(s.id))}/transactions`,
       );
       result.push(
         toSettlement(
           s,
           charges.data.map((t) => t.reference),
+          (s.deducted ?? []).map((d) => ({ reference: d.reference, amountMinor: d.amount })),
         ),
       );
     }
@@ -557,15 +886,63 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
 
   async createSubaccount(request: SubaccountRequest): Promise<{ subaccountCode: string }> {
     const response = await this.call(
-      envelope(z.object({ subaccount_code: z.string().min(1) })),
+      paystackEnvelope(z.object({ subaccount_code: z.string().min(1) })),
       '/subaccount',
       {
         business_name: request.businessName,
         settlement_bank: request.settlementBank,
         account_number: request.accountNumber,
+        percentage_charge: 0,
       },
     );
     return { subaccountCode: response.data.subaccount_code };
+  }
+
+  async refund(request: RefundRequest): Promise<RefundResult> {
+    const response = await this.call(
+      paystackEnvelope(
+        z.object({
+          id: z.union([z.number().int(), z.string().min(1)]),
+          status: z.enum(['pending', 'processing', 'processed', 'failed']),
+        }),
+      ),
+      '/refund',
+      { transaction: request.reference, amount: request.amountMinor },
+    );
+    return {
+      refundReference: String(response.data.id),
+      status:
+        response.data.status === 'processing'
+          ? 'pending'
+          : response.data.status === 'processed'
+            ? 'processed'
+            : response.data.status,
+    };
+  }
+
+  async resolveAccount(check: {
+    readonly bankCode: string;
+    readonly accountNumber: string;
+  }): Promise<{ readonly accountName: string } | null> {
+    try {
+      const response = await this.call(
+        paystackEnvelope(z.object({ account_name: z.string().min(1) })),
+        `/bank/resolve?${new URLSearchParams({ account_number: check.accountNumber, bank_code: check.bankCode })}`,
+      );
+      return { accountName: response.data.account_name };
+    } catch (error) {
+      // The provider cannot check this account: the name is not confirmed, not refused.
+      if (error instanceof ProviderError && error.status === 422) return null;
+      throw error;
+    }
+  }
+
+  async listBanks(): Promise<Bank[]> {
+    const response = await this.call(
+      paystackEnvelope(z.array(z.object({ code: z.string().min(1), name: z.string().min(1) }))),
+      '/bank?country=ghana&currency=GHS',
+    );
+    return response.data.map((b) => ({ code: b.code, name: b.name }));
   }
 
   verifyWebhookSignature(rawBody: Buffer | string, headers: WebhookHeaders): boolean {
@@ -599,16 +976,69 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
     );
   }
 
+  async chargeback(reference: string): Promise<PaymentWebhookRequest> {
+    const response = z
+      .object({ webhook: z.object({ rawBody: z.string(), signature: z.string() }) })
+      .safeParse(
+        await requestJson<unknown>(
+          this.provider,
+          `${this.baseUrl}/payments/_test/chargebacks/${encodeURIComponent(reference)}`,
+          { body: {} },
+        ),
+      );
+    if (!response.success) throw unexpectedResponse(this.provider);
+    return {
+      rawBody: response.data.webhook.rawBody,
+      headers: { [PAYSTACK_SIGNATURE_HEADER]: response.data.webhook.signature },
+    };
+  }
+
+  async payExternal(
+    payment: ExternalPayment,
+  ): Promise<{ readonly reference: string; readonly webhook: PaymentWebhookRequest }> {
+    const response = z
+      .object({
+        reference: z.string(),
+        webhook: z.object({ rawBody: z.string(), signature: z.string() }),
+      })
+      .safeParse(
+        await requestJson<unknown>(this.provider, `${this.baseUrl}/payments/_test/external`, {
+          body: payment,
+        }),
+      );
+    if (!response.success) throw unexpectedResponse(this.provider);
+    return {
+      reference: response.data.reference,
+      webhook: {
+        rawBody: response.data.webhook.rawBody,
+        headers: { [PAYSTACK_SIGNATURE_HEADER]: response.data.webhook.signature },
+      },
+    };
+  }
+
   async settle(): Promise<ProviderSettlement[]> {
     const response = z
-      .object({ settlements: z.array(settlement.extend({ references: z.array(z.string()) })) })
+      .object({
+        settlements: z.array(
+          paystackSettlement.extend({
+            references: z.array(z.string()),
+            deducted: z.array(z.object({ reference: z.string(), amount: minor })).optional(),
+          }),
+        ),
+      })
       .safeParse(
         await requestJson<unknown>(this.provider, `${this.baseUrl}/payments/_test/settle`, {
           body: {},
         }),
       );
     if (!response.success) throw unexpectedResponse(this.provider);
-    return response.data.settlements.map((s) => toSettlement(s, s.references));
+    return response.data.settlements.map((s) =>
+      toSettlement(
+        s,
+        s.references,
+        (s.deducted ?? []).map((d) => ({ reference: d.reference, amountMinor: d.amount })),
+      ),
+    );
   }
 
   private async call<T extends z.ZodType>(
