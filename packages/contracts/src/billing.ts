@@ -33,6 +33,22 @@ export const CASH_RECORD_STATUSES = [
 /** Where money sits: the owner's own account, or the agency's client account. */
 export const RECEIVING_ACCOUNTS = ['owner_account', 'agency_account'] as const;
 export const REVERSAL_REASONS = ['bounced_cheque', 'wrong_entry', 'wrong_lease', 'other'] as const;
+/** M4b: a reversal's reason as recorded, including those the provider causes (no request). */
+export const RECORDED_REVERSAL_REASONS = [
+  ...REVERSAL_REASONS,
+  'chargeback',
+  'provider_refund',
+] as const;
+/** M4b: why a pay link cannot be sent for a lease now (BC-04; plan 4.2). */
+export const PAY_LINK_PROBLEMS = [
+  'no_agreement',
+  'no_active_account',
+  'no_subaccount',
+  'joint_owners',
+  'not_billed',
+  'nothing_due',
+  'no_consent',
+] as const;
 /** Where a reversed payment's money is taken back from (P21b): see the payment's options. */
 export const MONEY_LOCATIONS = [
   'collector',
@@ -139,6 +155,17 @@ export const invoiceDetailSchema = invoiceRowSchema.extend({
   /** Why it was cancelled, for a system credit note (a lease that ended early). */
   notes: z.array(z.string()),
   warnings: z.array(z.string()),
+  /** M4b (BC-09): each reminder ladder step recorded for this invoice, sent or skipped as missed. */
+  reminders: z
+    .array(
+      z.object({
+        offsetDays: z.number().int(),
+        status: z.enum(['sent', 'skipped']),
+        stepDate: isoDate,
+        createdAt: iso,
+      }),
+    )
+    .optional(),
 });
 export type InvoiceDetail = z.infer<typeof invoiceDetailSchema>;
 
@@ -175,6 +202,20 @@ export const leaseBillingSchema = z.object({
     }),
   ),
   currency: z.literal('GHS'),
+  /**
+   * M4b (BC-04): whether a pay link can be sent for the lease now, and if not, why: where the
+   * owner's rent goes is not set, no usable settlement account, nothing due, no consented channel.
+   */
+  payLink: z
+    .object({
+      available: z.boolean(),
+      reason: z.enum(PAY_LINK_PROBLEMS).nullable(),
+      /** The reason in plain words. */
+      text: z.string().nullable(),
+      /** The oldest invoice with something to pay, the one a link would be sent for. */
+      invoiceId: uuid.nullable(),
+    })
+    .optional(),
 });
 export type LeaseBilling = z.infer<typeof leaseBillingSchema>;
 
@@ -215,6 +256,19 @@ export const receiptSchema = z.object({
   documentId: uuid.nullable(),
   tenantName: z.string().nullable(),
   unitCode: z.string().nullable(),
+  /**
+   * M4b (BC-06): the receipt on its way to the tenant: queued, sent, not sent (no consent or no
+   * address) or failed; the channel and the time from the payment's confirmation to the send.
+   */
+  delivery: z
+    .object({
+      status: z.enum(['queued', 'sent', 'not_sent', 'failed']),
+      channel: z.enum(['sms', 'email']).nullable(),
+      sentAt: iso.nullable(),
+      latencyMs: z.number().int().nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export const paymentDetailSchema = paymentRowSchema.extend({
@@ -229,6 +283,23 @@ export const paymentDetailSchema = paymentRowSchema.extend({
   /** Where the money can be taken back from if it is reversed (P21b). */
   reversalOptions: z.array(z.enum(MONEY_LOCATIONS)),
   openApprovalId: uuid.nullable(),
+  /**
+   * M4b: where a provider payment settles, the owner's account or the agency's, as the unmatched
+   * queue's `settlesInto` says; null for other money. Lets the match picker narrow to the owner.
+   */
+  settlesInto: z.enum(RECEIVING_ACCOUNTS).nullable().optional(),
+  /** M4b: the reversal, once reversed: by a person (with approval) or by the provider (chargeback). */
+  reversal: z
+    .object({
+      reason: z.enum(RECORDED_REVERSAL_REASONS),
+      note: z.string(),
+      moneyNowIn: z.enum(MONEY_LOCATIONS),
+      valueDate: isoDate,
+      approvalId: uuid.nullable(),
+      createdAt: iso,
+    })
+    .nullable()
+    .optional(),
 });
 export type PaymentDetail = z.infer<typeof paymentDetailSchema>;
 
@@ -273,13 +344,32 @@ export const unmatchedReceiptSchema = z.object({
   paymentId: uuid,
   amountMinor: minor,
   receivedOn: isoDate,
-  receivedInto: z.enum(RECEIVING_ACCOUNTS),
+  /** M4b adds `provider`: money a payment provider holds until it settles (P23). */
+  receivedInto: z.enum([...RECEIVING_ACCOUNTS, 'provider']),
   ownerId: uuid.nullable(),
   ownerName: z.string().nullable(),
   senderReference: z.string().nullable(),
   note: z.string().nullable(),
   proofDocumentId: uuid.nullable(),
   createdAt: iso,
+  // M4b (BC-12), optional so clients written before M4b keep their types.
+  method: z.enum(PAYMENT_METHODS).optional(),
+  provider: z.string().nullable().optional(),
+  providerReference: z.string().nullable().optional(),
+  /** Where provider money settles: the owner's account or the agency's. */
+  settlesInto: z.enum(RECEIVING_ACCOUNTS).nullable().optional(),
+  payerName: z.string().nullable().optional(),
+  /** The paying phone, masked; never the full number. */
+  payerPhoneMasked: z.string().nullable().optional(),
+  /** A refund to the payer already asked for (P31). */
+  openRefund: z
+    .object({
+      refundId: uuid,
+      approvalId: uuid,
+      status: z.enum(['awaiting_approval', 'approved']),
+    })
+    .nullable()
+    .optional(),
 });
 
 export const arrearsRowSchema = z.object({

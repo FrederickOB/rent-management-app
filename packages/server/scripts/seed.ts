@@ -1,7 +1,10 @@
 /**
  * Accra demo dataset (CLAUDE.md section 14). M1 seeded companies and users; M2 adds owners,
  * properties, units, meters and each person's scope; M3 adds tenants and their leases, recorded
- * as signed on paper (decision 7), and one lease out for e-signing; M4a adds their money. Every
+ * as signed on paper (decision 7), and one lease out for e-signing; M4a adds their money; M4b adds
+ * settlement accounts and agreements, provider payments through the fake provider (some through
+ * the pay page, some with no intent), a settlement with its P22 entries, and one reconciliation
+ * exception, and reports the auto-match rate (M4b done criterion 3). Every
  * person is fictional and flagged as a test contact, and only fake providers are configured
  * locally, so nothing is ever sent.
  *
@@ -57,6 +60,20 @@ import {
   SubledgerCheckService,
 } from '../src/billing';
 import { LedgerModule } from '../src/ledger';
+import {
+  PayLinksService,
+  PaymentsModule,
+  PayPageService,
+  ReconciliationService,
+  SettlementAccountsService,
+  WebhooksService,
+} from '../src/payments';
+import { chargeReference } from '@rent/domain/payments';
+import type { PaymentProviders } from '../src/core/payment-providers';
+import { PAYMENT_PROVIDERS } from '../src/core/tokens';
+import type { Clock } from '../src/core/clock';
+import type { PaymentsPort, PaymentsTestControls, PaymentWebhookRequest } from '@rent/integrations';
+import { generate } from 'otplib';
 
 const config = loadConfig();
 const host = new URL(config.DATABASE_URL).hostname;
@@ -190,14 +207,26 @@ const PEOPLE: DemoPerson[] = [
   { name: 'Ama Tenant (demo)', phone: '+233200000021', staff: false, memberships: [] },
 ];
 
+/**
+ * The seed's clock: the system clock, which M4b moves back while it records settlement accounts,
+ * so they are approved and past their 24 hours by the time the seed ends (ADR-008).
+ */
+const seedClock: Clock & { offsetMs: number } = {
+  offsetMs: 0,
+  now() {
+    return new Date(Date.now() + this.offsetMs);
+  },
+};
+
 @Module({
   imports: [
-    CoreModule.forRoot({ config, applicationName: 'rent-seed' }),
+    CoreModule.forRoot({ config, clock: seedClock, applicationName: 'rent-seed' }),
     IdentityModule,
     PortfolioModule,
     TenancyModule,
     LedgerModule,
     BillingModule,
+    PaymentsModule,
   ],
 })
 class SeedModule {}
@@ -654,7 +683,7 @@ interface DemoTenancy {
   /** Ends this many days from today instead of after `months`. */
   readonly endsInDays?: number;
   readonly monthlyRentMinor: number;
-  readonly cycle: 'monthly' | 'quarterly' | 'six_monthly' | 'annual';
+  readonly cycle: 'monthly' | 'quarterly' | 'six_monthly' | 'annual' | 'two_yearly';
   readonly initialAdvanceMonths?: number;
   readonly depositMinor?: number;
   readonly serviceChargeMonthlyMinor?: number;
@@ -862,6 +891,63 @@ const TENANCIES: DemoTenancy[] = [
     monthlyRentMinor: 220_000,
     cycle: 'monthly',
     depositMinor: 440_000,
+    billFromStart: true,
+  },
+  // M4b: the demo tenant's second flat from the agency, on the two-yearly cycle (decision 9),
+  // paid two years ahead through the pay page; a MoMo payer; and an office tenant whose payment
+  // arrived with no reference, for the unmatched queue's suggestions.
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'the demo tenant’s second flat, billed every two years and paid by card through the pay page',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Ama Tenant (demo)',
+      phone: '+233200000021',
+      occupation: 'Accountant',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ELG-B1-06',
+    startedMonthsAgo: 0,
+    months: 24,
+    monthlyRentMinor: 160_000,
+    cycle: 'two_yearly',
+    billFromStart: true,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a monthly payer who pays by MoMo through the pay page',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Abena MoMo (demo)',
+      phone: '+233200000041',
+      occupation: 'Trader',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ELG-B1-07',
+    startedMonthsAgo: 1,
+    months: 12,
+    monthlyRentMinor: 120_000,
+    cycle: 'monthly',
+    billFromStart: true,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.two@demo.invalid',
+    what: 'an office tenant whose MoMo payment arrived with no reference (the unmatched queue)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Kwesi Queue (demo)',
+      phone: '+233200000042',
+      occupation: 'Consultant',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-OSU-F1-01',
+    startedMonthsAgo: 0,
+    months: 12,
+    monthlyRentMinor: 90_000,
+    cycle: 'monthly',
     billFromStart: true,
   },
   {
@@ -1431,6 +1517,354 @@ async function ensureMoney(
   return { payments, problems };
 }
 
+// Provider payments (M4b plan 4.13): settlement accounts and agreements, then payments through
+// the fake provider, then a settlement and P22. Account numbers are fictional.
+const DEMO_ACCOUNTS: {
+  readonly companyId: string;
+  readonly requester: string;
+  readonly approver: string | null;
+  readonly holder: 'owner' | 'agency';
+  readonly ownerReference: string | null;
+  readonly accountNumber: string;
+  readonly accountName: string;
+}[] = [
+  {
+    companyId: AGENCY,
+    requester: 'agency.admin@demo.invalid',
+    approver: null,
+    holder: 'owner',
+    ownerReference: 'OWN-01',
+    accountNumber: '0010000000101',
+    accountName: 'Owner A (demo)',
+  },
+  {
+    companyId: AGENCY,
+    requester: 'agency.admin@demo.invalid',
+    approver: null,
+    holder: 'owner',
+    ownerReference: 'OWN-02',
+    accountNumber: '0010000000202',
+    accountName: 'Owner B (demo)',
+  },
+  {
+    companyId: AGENCY,
+    requester: 'agency.admin@demo.invalid',
+    approver: null,
+    holder: 'agency',
+    ownerReference: null,
+    accountNumber: '0010000000303',
+    accountName: 'Agency client account (demo)',
+  },
+  {
+    companyId: LANDLORD,
+    requester: 'landlord@demo.invalid',
+    approver: 'approver@demo.invalid',
+    holder: 'owner',
+    ownerReference: null,
+    accountNumber: '0010000000404',
+    accountName: 'Kwabena Landlord (demo)',
+  },
+];
+
+/** The demo TOTP code now: the agency's sole admin confirms her own requests after cooling off (OQ-29). */
+const demoTotp = async (): Promise<string> =>
+  (await generate({ secret: base32(DEMO_TOTP_SECRET) })) as unknown as string;
+
+async function ensureSettlementAccounts(
+  database: Database,
+  services: { accounts: SettlementAccountsService; approvals: ApprovalsService },
+): Promise<number> {
+  const owners = async (companyId: string) =>
+    withCompany(database, { companyId, actorKind: 'system' }, (tx) =>
+      tx.select({ id: schema.owner.id, reference: schema.owner.reference }).from(schema.owner),
+    );
+  const pending: {
+    companyId: string;
+    accountId: string;
+    approvalId: string;
+    approver: string | null;
+    requester: string;
+  }[] = [];
+  // Requested 49 hours ago and confirmed 25 hours ago, on the seed's clock, so each is past its
+  // 24 hours now: the database itself refuses to activate one sooner.
+  seedClock.offsetMs = -49 * 3_600_000;
+  try {
+    for (const demo of DEMO_ACCOUNTS) {
+      const exists = await withCompany(
+        database,
+        { companyId: demo.companyId, actorKind: 'system' },
+        (tx) =>
+          tx.execute<{ n: number }>(
+            sql`select count(*)::int as n from settlement_account where account_name = ${demo.accountName}`,
+          ),
+      );
+      if (exists.rows[0]!.n > 0) continue;
+      const list = await owners(demo.companyId);
+      const ownerId =
+        demo.holder !== 'agency'
+          ? (demo.ownerReference ? list.find((o) => o.reference === demo.ownerReference) : list[0])
+              ?.id
+          : null;
+      const requester = await actorFor(database, demo.companyId, demo.requester);
+      const { accountId, approvalId } = await services.accounts.request(requester, {
+        holder: demo.holder,
+        ownerId: ownerId ?? null,
+        bankCode: 'FAKEBANK1',
+        accountNumber: demo.accountNumber,
+        accountName: demo.accountName,
+      });
+      pending.push({
+        companyId: demo.companyId,
+        accountId,
+        approvalId,
+        approver: demo.approver,
+        requester: demo.requester,
+      });
+    }
+    seedClock.offsetMs = -25 * 3_600_000;
+    for (const p of pending) {
+      const mode = (
+        await withCompany(database, { companyId: p.companyId, actorKind: 'system' }, (tx) =>
+          tx.execute<{ mode: string }>(
+            sql`select mode from approval_request where id = ${p.approvalId}`,
+          ),
+        )
+      ).rows[0]?.mode;
+      if (mode === 'single_user')
+        // Nobody else in the agency may decide a company-level request: its admin confirms her own
+        // after the cooling-off, with her authenticator code (OQ-29).
+        await services.approvals.decide(
+          await actorFor(database, p.companyId, p.requester),
+          p.approvalId,
+          {
+            decision: 'self_confirm',
+            code: await demoTotp(),
+          },
+        );
+      else
+        await services.approvals.decide(
+          await actorFor(database, p.companyId, p.approver ?? 'owner.accra@demo.invalid'),
+          p.approvalId,
+          { decision: 'approve' },
+        );
+    }
+  } finally {
+    seedClock.offsetMs = 0;
+  }
+  for (const p of pending) await services.accounts.ready(p.companyId, p.accountId);
+  // Where each agency owner's rent goes (decision 6): owner A's own account, owner B's through
+  // the agency's client account. Each is a request a second person approves, in force 24 hours
+  // after approval (M4b review item 1): asked 74 hours ago on the seed's clock and confirmed by
+  // the agency's sole admin after her cooling-off 49 hours ago (OQ-29), so in force today.
+  const admin = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
+  const agreements = await services.accounts.agreements(admin);
+  const asked: string[] = [];
+  seedClock.offsetMs = -74 * 3_600_000;
+  try {
+    const askedOn = toIsoDate(businessDateOf(instantFrom(seedClock.now()), 'Africa/Accra'));
+    for (const owner of await owners(AGENCY)) {
+      const current = agreements.find((a) => a.ownerId === owner.id);
+      if (current?.destination || current?.openRequest) continue;
+      const view = await services.accounts.setAgreement(admin, owner.id, {
+        destination: owner.reference === 'OWN-01' ? 'owner_account' : 'agency_client_account',
+        effectiveFrom: askedOn,
+      });
+      if (view.openRequest) asked.push(view.openRequest.approvalId);
+    }
+    seedClock.offsetMs = -49 * 3_600_000;
+    for (const approvalId of asked)
+      await services.approvals.decide(admin, approvalId, {
+        decision: 'self_confirm',
+        code: await demoTotp(),
+      });
+  } finally {
+    seedClock.offsetMs = 0;
+  }
+  return pending.length;
+}
+
+type FakePort = PaymentsPort & PaymentsTestControls;
+
+/**
+ * Provider payments through the fake provider (M4b plan 4.13), once: two through the pay page
+ * (with intent metadata), one that names a lease's payment reference, two with neither (the
+ * unmatched queue, one from the tenant's own phone), one paid short of what was asked (a
+ * reconciliation exception), then a settlement with its P22 entries. Returns the auto-match rate.
+ */
+async function ensureProviderPayments(
+  database: Database,
+  services: {
+    providers: PaymentProviders;
+    links: PayLinksService;
+    page: PayPageService;
+    webhooks: WebhooksService;
+    reconciliation: ReconciliationService;
+    read: BillingReadService;
+  },
+): Promise<{
+  created: boolean;
+  provider: { auto: number; total: number };
+  transfers: { withLease: number; total: number };
+}> {
+  const port = services.providers.get('paystack') as FakePort;
+  const sys = { companyId: AGENCY, actorKind: 'system' as const };
+  const already = await withCompany(database, sys, (tx) =>
+    tx.execute<{ n: number }>(sql`select count(*)::int as n from payment_intent`),
+  );
+  const created = already.rows[0]!.n === 0;
+  const leaseOf = async (unitCode: string) =>
+    (
+      await withCompany(database, sys, (tx) =>
+        tx.execute<{ id: string }>(
+          sql`select l.id from lease l join unit u on u.id = l.unit_id where u.code = ${unitCode}
+              and l.status in ('signed', 'active', 'ending', 'holding_over') order by l.start_date desc limit 1`,
+        ),
+      )
+    ).rows[0]?.id;
+  const deliver = async (webhook: PaymentWebhookRequest | null) => {
+    if (!webhook) return;
+    await services.webhooks.intake('paystack', Buffer.from(webhook.rawBody), webhook.headers);
+    const claimed = await withSystem(database, {}, (tx) =>
+      tx.execute<{ id: string }>(sql`select id from app.claim_webhook_inbox(100)`),
+    );
+    for (const row of claimed.rows) await services.webhooks.process(row.id);
+  };
+  /** Pays a lease's oldest open invoice through the pay page; `paid` defaults to what was asked. */
+  const throughPage = async (
+    unitCode: string,
+    method: 'momo' | 'card',
+    amount: (due: number, max: number) => number,
+    paid?: (asked: number) => number,
+  ) => {
+    const leaseId = await leaseOf(unitCode);
+    if (!leaseId) return;
+    const invoices = await withCompany(database, sys, (tx) =>
+      tx.execute<{ id: string }>(
+        sql`select id from invoice where lease_id = ${leaseId} order by due_date, number`,
+      ),
+    );
+    for (const { id } of invoices.rows) {
+      const url = await withCompany(database, sys, async (tx) => {
+        const invoice = await services.links.invoice(tx, id);
+        if (await services.links.unavailableReason(tx, AGENCY, invoice)) return null;
+        return (await services.links.mint(tx, invoice)).url;
+      });
+      if (!url) continue;
+      const token = url.split('/p/')[1]!;
+      const page = await services.page.open(token, { ip: '127.0.0.1', userAgent: 'seed' });
+      const asked = amount(page.dueNowMinor, page.amounts.maxMinor);
+      const intent = await services.page.start(
+        token,
+        { ip: '127.0.0.1', userAgent: 'seed' },
+        {
+          amountMinor: asked,
+          method,
+          ...(method === 'momo'
+            ? { momo: { phone: '024 000 0041', network: 'mtn' as const } }
+            : {}),
+          submissionId: `seed-${unitCode}-${id}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64),
+        },
+      );
+      await deliver(
+        await port.completeCharge(chargeReference(intent.intentId), {
+          status: 'success',
+          feesMinor: Math.floor(asked / 50),
+          ...(paid ? { amountMinor: paid(asked) } : {}),
+        }),
+      );
+      return;
+    }
+  };
+  const subaccount = async (accountName: string) =>
+    (
+      await withCompany(database, sys, (tx) =>
+        tx.execute<{ code: string }>(
+          sql`select s.subaccount_code as code from provider_subaccount s join settlement_account a on a.id = s.settlement_account_id
+              where a.account_name = ${accountName} and s.provider = 'paystack'`,
+        ),
+      )
+    ).rows[0]?.code;
+  if (created) {
+    // Through the pay page: Abena by MoMo, her first month, but GH₵200 short of what the page
+    // asked (posted as received and flagged for a person: the reconciliation exception); Ama two
+    // years ahead by card.
+    await throughPage(
+      'ACC-ELG-B1-07',
+      'momo',
+      (due) => Math.min(due, 120_000),
+      (asked) => asked - 20_000,
+    );
+    await throughPage('ACC-ELG-B1-06', 'card', (_due, max) => max);
+    const ownerAccount = await subaccount('Owner A (demo)');
+    const agencyAccount = await subaccount('Agency client account (demo)');
+    const abena = await leaseOf('ACC-ELG-B1-07');
+    const admin = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
+    if (ownerAccount && abena) {
+      // The next month by MoMo straight to the owner's subaccount, naming her payment reference.
+      const reference = (await services.read.leaseBilling(admin, abena)).paymentReference;
+      await deliver(
+        (
+          await port.payExternal({
+            subaccountCode: ownerAccount,
+            amountMinor: 120_000,
+            channel: 'momo',
+            payerPhone: '+233200000041',
+            narration: `Rent ${reference ?? ''}`,
+            feesMinor: 2_400,
+          })
+        ).webhook,
+      );
+      // Money from a phone nobody knows, into owner A's account: it waits for a person.
+      await deliver(
+        (
+          await port.payExternal({
+            subaccountCode: ownerAccount,
+            amountMinor: 75_000,
+            channel: 'momo',
+            payerPhone: '+233200000099',
+            feesMinor: 1_500,
+          })
+        ).webhook,
+      );
+    }
+    const kwesi = await leaseOf('ACC-OSU-F1-01');
+    if (agencyAccount && kwesi) {
+      // Kwesi's month, from his own phone with no reference, into the agency's client account.
+      const due = (await services.read.leaseBilling(admin, kwesi)).dueNowMinor;
+      await deliver(
+        (
+          await port.payExternal({
+            subaccountCode: agencyAccount,
+            amountMinor: due > 0 ? due : 90_000,
+            channel: 'momo',
+            payerPhone: '+233200000042',
+          })
+        ).webhook,
+      );
+    }
+    // The provider pays out, and P22 posts per book.
+    for (const settlement of await port.settle())
+      await services.reconciliation.settlement('paystack', settlement);
+  }
+  const counts = await withCompany(database, sys, (tx) =>
+    tx.execute<{ kind: string; auto: number; total: number }>(
+      sql`select 'provider' as kind,
+            count(*) filter (where p.source_type = 'payment_intent' or p.lease_id is not null)::int as auto,
+            count(*)::int as total
+          from payment p where p.source_type in ('payment_intent', 'provider_charge')
+          union all
+          select 'transfer', count(*) filter (where d.lease_id is not null)::int, count(*)::int
+          from direct_receipt d`,
+    ),
+  );
+  const row = (kind: string) => counts.rows.find((r) => r.kind === kind) ?? { auto: 0, total: 0 };
+  return {
+    created,
+    provider: { auto: row('provider').auto, total: row('provider').total },
+    transfers: { withLease: row('transfer').auto, total: row('transfer').total },
+  };
+}
+
 /** RFC 4648 base32 without padding, for the otpauth URI people add to an authenticator app. */
 function base32(text: string): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -1478,6 +1912,21 @@ try {
     storage,
     cfg,
   });
+  const accountsSeeded = await ensureSettlementAccounts(database, {
+    accounts: app.get(SettlementAccountsService),
+    approvals: app.get(ApprovalsService),
+  });
+  const provider = await ensureProviderPayments(database, {
+    providers: app.get<PaymentProviders>(PAYMENT_PROVIDERS),
+    links: app.get(PayLinksService),
+    page: app.get(PayPageService),
+    webhooks: app.get(WebhooksService),
+    reconciliation: app.get(ReconciliationService),
+    read: app.get(BillingReadService),
+  });
+  let checkProblems = 0;
+  for (const companyId of [AGENCY, LANDLORD])
+    checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
   console.log(`Seeded ${COMPANIES.length} companies and ${PEOPLE.length} people.`);
   console.log(
     `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST).`,
@@ -1492,6 +1941,14 @@ try {
   );
   console.log(
     `Money: ${money.payments} new payments; the sub-ledger check found ${money.problems} mismatches.`,
+  );
+  console.log(
+    `Payments: ${accountsSeeded} new settlement accounts; provider payments ${provider.created ? 'created' : 'already there'}; the sub-ledger check after them found ${checkProblems} mismatches.`,
+  );
+  const rate = (a: number, t: number) =>
+    t === 0 ? 'none yet' : `${a} of ${t} (${Math.floor((a * 1000) / t) / 10}%)`;
+  console.log(
+    `Auto-match rate (M4b done criterion 3): provider payments ${rate(provider.provider.auto, provider.provider.total)}; direct transfers recorded against a lease ${rate(provider.transfers.withLease, provider.transfers.total)}, counted separately.`,
   );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(

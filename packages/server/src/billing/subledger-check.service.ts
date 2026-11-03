@@ -37,7 +37,8 @@ export interface SubledgerResult {
  * - invariant 4: 2100 per lease equals deposits received less what left, plus carry-overs;
  * - invariant 7: no payment is allocated beyond itself, and a reversed one allocates nothing;
  * - 1060 per collector and book equals approved cash less what was banked or reversed from hand;
- * - 2090 per payment equals the unmatched money still waiting;
+ * - 2090 per payment equals the unmatched money still waiting (not matched, reversed or
+ *   refunded to its payer, P31);
  * - and, again, invariant 1: every entry balances in each book.
  * Any mismatch raises an alert naming the line, lease or payment.
  */
@@ -173,6 +174,14 @@ export class SubledgerCheckService {
     const payments = await paymentsByIds(tx, paymentIds);
     const allocations = await loadAllocations(tx, { leaseIds: [], paymentIds });
     const suspense = await this.sums(tx, '2090', 'payment_id');
+    // Unmatched money refunded to its payer (P31, M4b) has left suspense.
+    const refunded = new Set(
+      (
+        await tx.execute<{ payment_id: string }>(
+          sql`select payment_id from unmatched_refund where status = 'refunded'`,
+        )
+      ).rows.map((r) => r.payment_id),
+    );
     for (const p of payments) {
       const allocated = allocations
         .filter((a) => a.source === 'payment' && a.paymentId === p.id)
@@ -193,7 +202,8 @@ export class SubledgerCheckService {
           actualMinor: allocated + credit,
         });
       }
-      const waiting = !p.leaseId && p.reversedAccountingDate === null ? p.amountMinor : 0;
+      const waiting =
+        !p.leaseId && p.reversedAccountingDate === null && !refunded.has(p.id) ? p.amountMinor : 0;
       add({
         check: 'suspense',
         subject: p.id,

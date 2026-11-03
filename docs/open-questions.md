@@ -1,6 +1,6 @@
 # Open questions
 
-54 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+55 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -82,6 +82,7 @@
 | OQ-37 | Rates per tier and billing band? (PRD section 21) | Founder, from pricing research | M10 | Placeholder rates, editable in the admin console. | |
 | OQ-38 | How long is the free trial or guided onboarding period? (PB-08) | Founder | M10 | 30 days, configurable. | Decided 2026-10-28: as recommended. |
 | OQ-54 | Consent (CM-09) is recorded per channel, not per phone number or email. When staff change a tenant's or contact's phone or email, should the consent on record carry over to the new one, or must it be recorded again? (M3 review) | Founder, with counsel if needed | M6 (WhatsApp and broadcasts) | Ask again: a changed phone or email starts with no consent on that channel, and staff record the person's agreement for the new one. Until then, the edit forms say that consent stays with the new value and ask staff to check (M3). | |
+| OQ-55 | ADR-008 sends the owner an SMS and email alert when a settlement account is added, changed or retired. CM-09 sends a business-initiated message only on a channel with consent recorded. Is this security alert exempt, like a one-time code the person asked for? (M4b) | Founder, with counsel if needed | M4b report | Exempt: the alert goes to the phone and email on record whatever consent says, carries no marketing and no link, and is recorded as a message like any other. Built this way (`settlement_alert` purpose). | |
 
 ## Research findings, 28 Oct 2026
 
@@ -96,6 +97,15 @@ Claude researched these from the pages linked. They are background for your lawy
     - **Reconciliation:** the settlements API lists settlements and their transactions per subaccount.
     - **MoMo charges:** MTN, Telecel and AT. The payer has 180 seconds to approve, and every payment needs a fresh approval: there is no MoMo autopay.
     - Sources: [split payments](https://docs-v2.production.paystack.co/docs/payments/split-payments), [subaccounts](https://docs-v2.production.paystack.co/docs/api/subaccount), [settlements](https://docs-v2.production.paystack.co/docs/api/settlement), [charge](https://docs-v2.production.paystack.co/docs/api/charge), [payout schedule](https://support.paystack.com/en/articles/2123586), [subaccount verification](https://support.paystack.com/hc/en-us/articles/360009973199).
+    - **Assumed by the M4b adapter, to confirm with Paystack in writing** (`packages/integrations/src/payments/paystack.ts`; its tests run on fixtures built from the documentation, not recorded from a live account):
+        - Ghana's MoMo provider codes are `mtn`, `vod` (Telecel) and `atl` (AT). These come from third-party sources only, not from Paystack's own documentation.
+        - The charge endpoint takes `subaccount` and `bearer` as transaction initialisation does, so a MoMo charge settles to the subaccount and the subaccount bears the fee.
+        - A settlement names its subaccount, and its `deductions` field carries the chargebacks and refunds taken out of the payout.
+        - Account-name checks (`/bank/resolve`) may not work for Ghanaian banks; a 422 is read as "cannot check", and the approver sees that the name was not confirmed.
+        - **Settlement deductions (M4b review):** Paystack documents `deductions` on a settlement, and `settlement`, `deducted_amount`, `fully_deducted` and `dispute` on each refund. We read a settlement's deductions from the refunds that name it. We assume a dispute the payer won is deducted the same way, as a refund with `dispute` set, because Paystack does not document how chargebacks appear in settlements.
+        - **Disputes:** a dispute takes money only once resolved `merchant-accepted` with a refund amount; one resolved `declined` (the merchant won) took nothing.
+        - **Refund and dispute lists** take the charge's transaction id in their `transaction` filter, and list the transaction itself or its id.
+        - **MoMo next steps:** a charge answered `pay_offline` waits for approval on the phone, which we support. Any other next step (`send_otp`, `send_pin`, `send_birthday`, `send_phone`, `open_url`) fails the payment with "this network needs a step we don't support yet". Which Ghanaian networks ask for an OTP needs confirming before launch.
 - **OQ-02 Second provider:**
     - **Flutterwave** documents splits to Ghanaian bank accounts; MoMo destinations are not documented.
     - **Hubtel**'s checkout has no split field, so it would collect into a platform balance, which D1 rules out.

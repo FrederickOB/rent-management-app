@@ -4,6 +4,7 @@ export * from './whatsapp/whatsapp';
 export * from './email/email';
 export * from './push/push';
 export * from './payments/payments';
+export * from './payments/paystack';
 export * from './identity-verification/identity-verification';
 export * from './address-lookup/address-lookup';
 export * from './alert/alert';

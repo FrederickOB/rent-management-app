@@ -323,10 +323,20 @@ export const payment = pgTable(
     sourceId: uuid().notNull(),
     entryId: uuid().notNull(),
     recordedBy: uuid().references(() => person.id),
+    /** M4b: a provider payment's reference with the provider (the intent's, or the provider's own). */
+    providerReference: text(),
+    /** M4b: the account it settles to (ADR-008), for P22 and the unmatched queue. */
+    settlementAccountId: uuid(),
+    /** M4b: the paying MoMo number, as a keyed hash (for queue suggestions) and masked. */
+    payerPhoneIndex: text(),
+    payerPhoneMasked: text(),
     createdAt: tsNow(),
   },
   (t) => [
     unique('payment_company_id_id_key').on(t.companyId, t.id),
+    uniqueIndex('payment_provider_reference_key')
+      .on(t.provider, t.providerReference)
+      .where(sql`${t.providerReference} is not null`),
     unique('payment_source_key').on(t.companyId, t.sourceType, t.sourceId),
     foreignKey({
       name: 'payment_lease_fk',
@@ -378,7 +388,7 @@ export const payment = pgTable(
     ),
     check(
       'payment_source_type_check',
-      sql`${t.sourceType} in ('cash_record', 'direct_receipt', 'provider_test')`,
+      sql`${t.sourceType} in ('cash_record', 'direct_receipt', 'provider_test', 'payment_intent', 'provider_charge')`,
     ),
     check('payment_dates_check', sql`${t.accountingDate} >= ${t.receivedOn}`),
   ],
@@ -441,7 +451,8 @@ export const paymentReversal = pgTable(
     reason: text().notNull(),
     note: text().notNull(),
     moneyNowIn: text().notNull(),
-    approvalRequestId: uuid().notNull(),
+    /** Every staff correction has one (M4a decision 3); a chargeback or provider refund has none. */
+    approvalRequestId: uuid(),
     entryId: uuid().notNull(),
     valueDate: day().notNull(),
     accountingDate: day().notNull(),
@@ -473,7 +484,11 @@ export const paymentReversal = pgTable(
     }),
     check(
       'payment_reversal_reason_check',
-      sql`${t.reason} in ('bounced_cheque', 'wrong_entry', 'wrong_lease', 'other')`,
+      sql`${t.reason} in ('bounced_cheque', 'wrong_entry', 'wrong_lease', 'other', 'chargeback', 'provider_refund')`,
+    ),
+    check(
+      'payment_reversal_approval_check',
+      sql`(${t.approvalRequestId} is null) = (${t.reason} in ('chargeback', 'provider_refund'))`,
     ),
     check(
       'payment_reversal_location_check',

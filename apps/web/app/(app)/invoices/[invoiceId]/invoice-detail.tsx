@@ -8,8 +8,9 @@ import { InvoiceStatusBadge } from '@/components/billing-badges';
 import { textLink } from '@/components/link-styles';
 import { Empty } from '@/components/load-state';
 import { PageHeader } from '@/components/page-header';
+import { SendPayLink } from '@/components/send-pay-link';
 import { Alert } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
+import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { TextAreaField, TextField } from '@/components/ui/field';
@@ -23,6 +24,7 @@ import {
   rateLabel,
 } from '@/lib/billing-format';
 import { openFetchedLink } from '@/lib/browser-files';
+import { payLinkOffered } from '@/lib/collection';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
 import { isKeyReused, moneyProblem, sendOnce, useKeepers } from '@/lib/idempotency';
@@ -37,7 +39,14 @@ import {
   vatWarning,
   type CorrectionKind,
 } from '@/lib/invoice-view';
+import { formatTime } from '@/lib/format';
 import { waitingNote } from '@/lib/money-requests';
+import {
+  REMINDER_STATE_LABELS,
+  reminderRows,
+  reminderWhen,
+  type ReminderState,
+} from '@/lib/receipt-delivery';
 import { correctionForm, CORRECTION_REASON_MIN } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
 
@@ -46,6 +55,8 @@ export interface InvoicePermissions {
   readonly correct: boolean;
   readonly seeApprovals: boolean;
   readonly seeLease: boolean;
+  /** billing.manage: send the tenant a pay link (BC-04); the API checks consent and destination. */
+  readonly sendPayLink: boolean;
 }
 
 const KIND_WORDS: Record<
@@ -214,6 +225,15 @@ export function InvoiceDetailView({
               Open the lease
             </Link>
           ) : null}
+          {can.sendPayLink && payLinkOffered(invoice) ? (
+            <div className="space-y-1 border-t border-slate-200 pt-4">
+              <p className="text-sm text-slate-700">
+                The tenant gets a link to pay by mobile money or card, by SMS or email where they
+                have agreed to messages. The page shows everything due on the lease, oldest first.
+              </p>
+              <SendPayLink invoiceId={invoice.id} detail={`for invoice ${invoice.number}`} />
+            </div>
+          ) : null}
         </CardBody>
       </Card>
 
@@ -280,6 +300,10 @@ export function InvoiceDetailView({
         </CardBody>
       </Card>
 
+      {invoice.reminders && invoice.status !== 'voided' ? (
+        <InvoiceReminders invoice={invoice} reminders={invoice.reminders} />
+      ) : null}
+
       <Card data-testid="invoice-allocations">
         <CardHeader
           title="What paid it"
@@ -333,6 +357,71 @@ export function InvoiceDetailView({
         </CardBody>
       </Card>
     </>
+  );
+}
+
+const REMINDER_TONES: Record<ReminderState, BadgeTone> = {
+  sent: 'green',
+  skipped: 'amber',
+  upcoming: 'blue',
+  stopped: 'dark',
+};
+
+/**
+ * The invoice's rent reminders (BC-09; plan 4.7): each step of the company's ladder, sent or
+ * skipped as the API recorded it, or still to come. Each goes once, at 08:00 in the company's
+ * time zone, with the pay link, only on channels the tenant agreed to; the first carries the
+ * invoice itself. They stop once nothing is left to pay.
+ */
+function InvoiceReminders({
+  invoice,
+  reminders,
+}: {
+  readonly invoice: InvoiceDetail;
+  readonly reminders: NonNullable<InvoiceDetail['reminders']>;
+}) {
+  const { company, timeZone } = useApp();
+  const settled =
+    invoice.outstandingMinor <= 0 || invoice.status === 'paid' || invoice.status === 'written_off';
+  const rows = reminderRows({
+    dueDate: invoice.dueDate,
+    // Without the company's settings, only what was recorded is shown.
+    offsetsDays: company?.settings.rentReminderOffsetsDays ?? [],
+    steps: reminders,
+    settled,
+  });
+  return (
+    <Card data-testid="invoice-reminders">
+      <CardHeader
+        title="Reminders"
+        description="Each step of the company’s reminder ladder goes once, with the pay link, on channels the tenant agreed to. They stop as soon as the invoice is paid."
+      />
+      <CardBody>
+        {rows.length === 0 ? (
+          <Empty>No reminders are set for this company.</Empty>
+        ) : (
+          <ul className="divide-y divide-slate-100">
+            {rows.map((row) => (
+              <li
+                key={row.offsetDays}
+                data-testid="invoice-reminder"
+                className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm"
+              >
+                <span>
+                  {reminderWhen(row)}
+                  {row.recordedAt ? (
+                    <span className="block text-xs text-slate-600">
+                      Recorded {formatTime(row.recordedAt, timeZone)}
+                    </span>
+                  ) : null}
+                </span>
+                <Badge tone={REMINDER_TONES[row.state]}>{REMINDER_STATE_LABELS[row.state]}</Badge>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 

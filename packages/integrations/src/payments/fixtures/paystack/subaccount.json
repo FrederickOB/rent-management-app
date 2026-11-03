@@ -1,0 +1,25 @@
+{
+  "status": true,
+  "message": "Subaccount created",
+  "data": {
+    "integration": 100001,
+    "domain": "test",
+    "subaccount_code": "ACCT_fake0002",
+    "business_name": "Test Landlord Ltd",
+    "description": null,
+    "primary_contact_name": null,
+    "primary_contact_email": null,
+    "primary_contact_phone": null,
+    "metadata": null,
+    "percentage_charge": 0,
+    "is_verified": false,
+    "settlement_bank": "Test Bank One",
+    "account_number": "0123456789",
+    "settlement_schedule": "AUTO",
+    "active": true,
+    "migrate": false,
+    "id": 77002,
+    "createdAt": "2026-11-03T08:00:00.000Z",
+    "updatedAt": "2026-11-03T08:00:00.000Z"
+  }
+}

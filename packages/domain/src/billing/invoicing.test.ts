@@ -270,3 +270,33 @@ describe('CT-04 VAT on commercial invoices', () => {
     ).toHaveLength(11);
   });
 });
+
+describe('BC-01 a two-yearly cycle (M4b decision 9)', () => {
+  it('bundles 24 periods in one invoice, due on the first day, with the service charge of each month', () => {
+    const cycles = cyclesFor({
+      ...base,
+      endDate: '2028-10-31',
+      cycle: 'two_yearly',
+      serviceChargeMonthlyMinor: 20_000,
+    });
+    expect(cycles).toHaveLength(1);
+    const [cycle] = cycles;
+    expect(cycle).toMatchObject({
+      dueDate: '2026-11-01',
+      issueDate: '2026-10-18',
+      periodFrom: '2026-11-01',
+      periodTo: '2028-10-31',
+    });
+    expect(cycle?.rows.filter((r) => r.chargeType === 'rent')).toHaveLength(24);
+    expect(cycle?.rows.filter((r) => r.chargeType === 'service_charge')).toHaveLength(24);
+    expect(draftTotal(invoiceLinesFor(cycle!, null))).toBe(170_000 * 24);
+  });
+
+  it('a longer lease gets one invoice every two years, and a short final cycle', () => {
+    const cycles = cyclesFor({ ...base, endDate: '2029-10-31', cycle: 'two_yearly' });
+    expect(cycles.map((c) => [c.dueDate, c.rows.length])).toEqual([
+      ['2026-11-01', 24],
+      ['2028-11-01', 12],
+    ]);
+  });
+});

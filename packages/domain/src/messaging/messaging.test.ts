@@ -51,3 +51,21 @@ describe('CM-09 consent groundwork', () => {
     expect(redactLinkTokens('No link here')).toBe('No link here');
   });
 });
+
+describe('BC-04 and BC-06 pay and receipt links are never stored live', () => {
+  it('redacts the token of a pay link and a receipt link as it does a signing link', () => {
+    const token = 'Zq3s9X_aB-7cD2eF4gH6iJ8kL0mN1oP3qR5sT7uV9wY';
+    expect(redactLinkTokens(`Pay: https://links.example/p/${token}`)).toBe(
+      'Pay: https://links.example/p/[link]',
+    );
+    expect(redactLinkTokens(`Receipt: https://links.example/r/${token}`)).toBe(
+      'Receipt: https://links.example/r/[link]',
+    );
+  });
+
+  it('needs consent for pay links, reminders and receipts; a settlement alert to an owner does not', () => {
+    for (const purpose of ['pay_link', 'rent_reminder', 'receipt'] as const)
+      expect(needsConsent(purpose)).toBe(true);
+    expect(needsConsent('settlement_alert')).toBe(false);
+  });
+});

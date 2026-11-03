@@ -11,6 +11,7 @@ import { EsignModule } from '@rent/server/esign';
 import { IdentityModule } from '@rent/server/identity';
 import { LedgerModule } from '@rent/server/ledger';
 import { MessagingModule } from '@rent/server/messaging';
+import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
 import { PortfolioModule } from '@rent/server/portfolio';
 import { RulesModule } from '@rent/server/rules';
@@ -24,6 +25,9 @@ import { HealthController } from './health/health.controller';
 import { LinksController } from './links/links.controller';
 import { OpenApiController } from './health/openapi.controller';
 import { MeController } from './me/me.controller';
+import { PayLinksController } from './payments/pay-links.controller';
+import { PaymentsController } from './payments/payments.controller';
+import { WebhooksController } from './payments/webhooks.controller';
 import { RegisterController } from './register/register.controller';
 import {
   SigningRequestsController,
@@ -51,6 +55,7 @@ export class AppModule {
         MessagingModule,
         LedgerModule,
         BillingModule,
+        PaymentsModule,
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -75,6 +80,9 @@ export class AppModule {
         SigningRequestsController,
         LinksController,
         BillingController,
+        PaymentsController,
+        PayLinksController,
+        WebhooksController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

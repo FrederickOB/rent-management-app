@@ -15,15 +15,28 @@ import {
   DATABASE,
   loadConfig,
   NestLogger,
+  PAYMENT_PROVIDERS,
   STORAGE_PORT,
   type AppConfig,
   type Clock,
+  type PaymentProviders,
 } from '@rent/server/core';
 import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
 import { LedgerModule } from '@rent/server/ledger';
 import { MessagingModule, MessagingService } from '@rent/server/messaging';
+import {
+  PaymentsModule,
+  ProviderPaymentsService,
+  QueueService,
+  ReceiptsService,
+  ReconciliationService,
+  RemindersService,
+  SettlementAccountsService,
+  WebhookInboxRelay,
+  WebhooksService,
+} from '@rent/server/payments';
 import {
   PortfolioModule,
   PropertyFilesService,
@@ -39,6 +52,7 @@ import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
+import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
@@ -57,6 +71,7 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     MessagingModule,
     LedgerModule,
     BillingModule,
+    PaymentsModule,
   ],
 })
 class WorkerModule {}
@@ -110,6 +125,17 @@ const definitions = [
     invoicing: app.get(InvoicingService),
     subledger: app.get(SubledgerCheckService),
   }),
+  ...paymentsJobs({
+    ...deps,
+    providers: app.get<PaymentProviders>(PAYMENT_PROVIDERS),
+    webhooks: app.get(WebhooksService),
+    providerPayments: app.get(ProviderPaymentsService),
+    receipts: app.get(ReceiptsService),
+    reminders: app.get(RemindersService),
+    reconciliation: app.get(ReconciliationService),
+    accounts: app.get(SettlementAccountsService),
+    queue: app.get(QueueService),
+  }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -125,14 +151,19 @@ const relay = new OutboxRelay(
     ...TENANCY_EVENT_TYPES,
     ...ESIGN_EVENT_TYPES,
     ...BILLING_EVENT_TYPES,
+    ...PAYMENTS_EVENT_TYPES,
   ]),
 );
 await relay.start();
+// Provider webhooks stored by the API, queued for processing as they arrive (M4b plan 4.4).
+const inbox = new WebhookInboxRelay(database, jobs, logger);
+await inbox.start();
 logger.info({ jobs: definitions.map((d) => d.name) }, 'worker started');
 
 async function shutdown(signal: string) {
   logger.info({ signal }, 'worker stopping');
   await relay.stop();
+  await inbox.stop();
   await jobs.stop();
   await closeRenderer();
   await app.close();

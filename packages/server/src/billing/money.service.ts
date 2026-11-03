@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
+import { and, eq, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
 import { bankingLines, compactLines, type JournalLineDraft } from '@rent/domain/ledger';
 import {
   creditableMinor,
@@ -604,6 +604,17 @@ export class MoneyService {
       if (!payment) throw notFound('Payment');
       if (payment.reversedAccountingDate)
         throw conflict('payment_reversed', 'This payment was already reversed');
+      // Money refunded to its payer (P31), or on its way back, is never also reversed (review F2;
+      // the database refuses it too, RA055).
+      const refunds = await tx.execute<{ n: number }>(
+        sql`select count(*)::int as n from unmatched_refund where payment_id = ${paymentId}
+            and status in ('awaiting_approval', 'approved', 'sent', 'refunded')`,
+      );
+      if ((refunds.rows[0]?.n ?? 0) > 0)
+        throw conflict(
+          'payment_refunded',
+          'This money is being or has been refunded to its payer, so it cannot also be reversed',
+        );
       const options_ = payment.leaseId
         ? await this.engine.reversalOptions(tx, payment, staff.companyKind)
         : [payment.row.cashAccount === '1070' ? 'agency_account' : 'owner_account'];

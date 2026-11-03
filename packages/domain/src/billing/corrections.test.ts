@@ -87,14 +87,25 @@ describe('P21 payment reversal from current allocations', () => {
       l.id,
       lineBalance(l, model.allocations).outstandingMinor,
     ]);
+    const mark = model.allocations.length;
     model.reverse(first.id);
     model.checkInvariants();
+    const added = model.allocations.slice(mark);
     for (const [id, outstandingBefore] of before) {
       const line = model.lines.find((l) => l.id === id);
       if (!line) throw new Error('line');
       const restored = lineBalance(line, model.allocations).outstandingMinor;
       const share = drawn.filter((a) => a.lineId === id).reduce((s, a) => s + a.amountMinor, 0);
-      expect(restored).toBe((outstandingBefore as number) + share);
+      // P21 restores exactly: the reversal's own rows take back the payment's share of the line.
+      const reversedRows = added
+        .filter((a) => a.lineId === id && a.paymentId === first.id)
+        .reduce((s, a) => s + a.amountMinor, 0);
+      expect(reversedRows).toBe(0 - share);
+      // Then the later payment's credit pays what the reversal reopened (M4b review F4).
+      const redrawn = added
+        .filter((a) => a.lineId === id && a.paymentId !== first.id)
+        .reduce((s, a) => s + a.amountMinor, 0);
+      expect(restored).toBe((outstandingBefore as number) + share - redrawn);
     }
     // The deposit it paid left deposits held; the later payment is untouched.
     expect(balanceOf(model.journal(), { accountCode: '2100' })).toBe(0);

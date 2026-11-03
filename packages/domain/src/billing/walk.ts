@@ -219,7 +219,7 @@ export function forwardWalk(
 }
 
 /** What a line still needs after the walk; recurring lines may be covered by credit to come. */
-function remainingAfterWalk(
+export function remainingAfterWalk(
   line: BillingLine,
   allocations: readonly AllocationRow[],
   walk: WalkResult,

@@ -35,7 +35,7 @@ const COLUMNS: Column[] = [
 
 /**
  * The matrices in docs/plans/M1.md section 4.6, docs/plans/M2.md section 4.4,
- * docs/plans/M3.md section 4.14 and docs/plans/M4a.md section 4.17. 1 = allowed. Approval decisions are tested separately; scope is
+ * docs/plans/M3.md section 4.14, docs/plans/M4a.md section 4.17 and docs/plans/M4b.md section 4.11. 1 = allowed. Approval decisions are tested separately; scope is
  * tested below.
  */
 const MATRIX: Partial<Record<PolicyAction, string>> = {
@@ -46,6 +46,11 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   'cash.bank': '10111100',
   'cash.bank_others': '10101000',
   'cash.view_own': '10111100',
+  'payments.view': '10111000',
+  'payments.match': '10111000',
+  'settlement_account.change': '10100000',
+  'payment.refund_unmatched': '10101000',
+  'settlement_account.reveal': '10100000',
   'tenant.view': '11111110',
   'tenant.view_details': '11111010',
   'tenant.manage': '10110000',

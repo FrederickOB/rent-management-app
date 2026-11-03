@@ -10,12 +10,14 @@ import { UnmatchedView } from './unmatched-view';
 export const metadata: Metadata = { title: 'Unmatched receipts' };
 
 /**
- * Money received before anyone knew its lease (P23): it waits in suspense in the book of whoever
- * received it until a person matches it to a lease. M4b adds provider payments and suggestions.
+ * The unmatched queue (BC-12, P23, P31; M4b plan 4.5): money that matched no pay link and no
+ * exact payment reference, and transfers recorded without a lease. It waits in suspense in the
+ * book of whoever received it. The API suggests leases, ranked; a person confirms each match,
+ * or asks to refund money that belongs to no one, which a second person approves.
  */
 export default async function UnmatchedPage() {
   const me = await getMe();
-  if (!me || !allowed(me, 'billing.view')) {
+  if (!me || !(allowed(me, 'billing.view') || allowed(me, 'payments.view'))) {
     return (
       <>
         <PageHeader title="Unmatched receipts" />
@@ -28,7 +30,7 @@ export default async function UnmatchedPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageHeader
           title="Unmatched receipts"
-          description="Transfers recorded before anyone knew which lease they pay for. Matching one pays that lease’s oldest debt first."
+          description="Money that arrived without a pay link or a payment reference we could read, and transfers recorded before anyone knew the lease. Suggestions are ranked by the amount, the payer’s phone, the date and earlier payments; a person confirms each match."
         />
         {allowed(me, 'payment.record_transfer') ? (
           <Link href="/payments/transfer" className={secondaryLink}>
@@ -36,7 +38,13 @@ export default async function UnmatchedPage() {
           </Link>
         ) : null}
       </div>
-      <UnmatchedView canMatch={allowed(me, 'billing.manage')} />
+      <UnmatchedView
+        can={{
+          match: allowed(me, 'payments.match'),
+          refund: allowed(me, 'payment.refund_unmatched'),
+          seeApprovals: allowed(me, 'approval.view'),
+        }}
+      />
     </>
   );
 }

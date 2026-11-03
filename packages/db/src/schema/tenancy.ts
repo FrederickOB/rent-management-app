@@ -452,7 +452,7 @@ export const lease = pgTable(
     check('lease_use_check', sql`${t.use} in ('residential', 'commercial')`),
     check(
       'lease_cycle_check',
-      sql`${t.rentCycle} in ('monthly', 'quarterly', 'six_monthly', 'annual')`,
+      sql`${t.rentCycle} in ('monthly', 'quarterly', 'six_monthly', 'annual', 'two_yearly')`,
     ),
     check('lease_dates_check', sql`${t.endDate} > ${t.startDate}`),
     check('lease_rent_check', sql`${t.monthlyRentMinor} > 0`),

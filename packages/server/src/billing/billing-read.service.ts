@@ -24,6 +24,7 @@ import {
   isTax,
   lineBalance,
   moneySummary,
+  remainingAfterWalk,
   walkLines,
   writeOffableMinor,
   type AgeBucket,
@@ -40,6 +41,8 @@ import { PolicyService, staffContext } from '../policy/policy.service';
 import { leaseLabels } from '../tenancy/billing-facts';
 import { BillingEngine, dedupe, lastBillableDay, lineLabel, type LeaseState } from './engine';
 import { MONEY_APPROVERS } from './money.service';
+import { destinationForOwner } from '../companies/settlement-destinations';
+import { DESTINATION_PROBLEM_TEXT } from '@rent/domain/payments';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { bookOwners, linesOf } from '../ledger/ledger.queries';
 import {
@@ -136,6 +139,13 @@ export interface InvoiceDetailView extends InvoiceRowView {
   readonly documentId: string | null;
   readonly notes: string[];
   readonly warnings: string[];
+  /** M4b (BC-09): the reminder ladder's steps recorded for this invoice. */
+  readonly reminders: readonly {
+    readonly offsetDays: number;
+    readonly status: 'sent' | 'skipped';
+    readonly stepDate: string;
+    readonly createdAt: Date;
+  }[];
 }
 
 export interface LeaseBillingView {
@@ -157,6 +167,21 @@ export interface LeaseBillingView {
    */
   readonly chargedAfterEnd: readonly ChargedAfterEndView[];
   readonly currency: 'GHS';
+  /** M4b (BC-04): whether a pay link can be sent now, and why not. */
+  readonly payLink: {
+    readonly available: boolean;
+    readonly reason:
+      | 'no_agreement'
+      | 'no_active_account'
+      | 'no_subaccount'
+      | 'joint_owners'
+      | 'not_billed'
+      | 'nothing_due'
+      | 'no_consent'
+      | null;
+    readonly text: string | null;
+    readonly invoiceId: string | null;
+  };
 }
 
 export interface ChargedAfterEndView {
@@ -213,6 +238,13 @@ export interface ReceiptView {
   readonly documentId: string | null;
   readonly tenantName: string | null;
   readonly unitCode: string | null;
+  /** M4b (BC-06): the receipt on its way to the tenant. */
+  readonly delivery: {
+    readonly status: 'queued' | 'sent' | 'not_sent' | 'failed';
+    readonly channel: 'sms' | 'email' | null;
+    readonly sentAt: Date | null;
+    readonly latencyMs: number | null;
+  } | null;
 }
 
 export interface PaymentDetailView extends PaymentRowView {
@@ -225,6 +257,21 @@ export interface PaymentDetailView extends PaymentRowView {
   readonly proofDocumentId: string | null;
   readonly reversalOptions: ('collector' | 'owner_account' | 'agency_account' | 'provider')[];
   readonly openApprovalId: string | null;
+  /**
+   * M4b: where a provider payment settles, the owner's account or the agency's (as the unmatched
+   * queue says), so a match can be narrowed to that owner. Null for other money.
+   */
+  readonly settlesInto: 'owner_account' | 'agency_account' | null;
+  /** M4b: the reversal, once reversed, by a person or by the provider (a chargeback). */
+  readonly reversal: {
+    readonly reason:
+      'bounced_cheque' | 'wrong_entry' | 'wrong_lease' | 'other' | 'chargeback' | 'provider_refund';
+    readonly note: string;
+    readonly moneyNowIn: 'collector' | 'owner_account' | 'agency_account' | 'provider';
+    readonly valueDate: string;
+    readonly approvalId: string | null;
+    readonly createdAt: Date;
+  } | null;
 }
 
 export interface CashRecordView {
@@ -264,13 +311,25 @@ export interface UnmatchedView {
   readonly paymentId: string;
   readonly amountMinor: number;
   readonly receivedOn: string;
-  readonly receivedInto: 'owner_account' | 'agency_account';
+  readonly receivedInto: 'owner_account' | 'agency_account' | 'provider';
   readonly ownerId: string | null;
   readonly ownerName: string | null;
   readonly senderReference: string | null;
   readonly note: string | null;
   readonly proofDocumentId: string | null;
   readonly createdAt: Date;
+  // M4b (BC-12): provider money in the queue.
+  readonly method: 'cash' | 'cheque' | 'bank_transfer' | 'momo' | 'card' | 'test';
+  readonly provider: string | null;
+  readonly providerReference: string | null;
+  readonly settlesInto: 'owner_account' | 'agency_account' | null;
+  readonly payerName: string | null;
+  readonly payerPhoneMasked: string | null;
+  readonly openRefund: {
+    readonly refundId: string;
+    readonly approvalId: string;
+    readonly status: 'awaiting_approval' | 'approved';
+  } | null;
 }
 
 export interface ArrearsView {
@@ -395,10 +454,16 @@ export class BillingReadService {
       : [];
     const unverified = new Set(rules.filter((r) => r.status !== 'verified').map((r) => r.id));
     const today = await this.today(tx, staff.companyId);
+    // Credit the lease holds pays periods as they start (P02): what is left to pay after it is
+    // what the walk and ageing count, so an invoice paid ahead is never overdue (M4b review F5).
+    const walks = new Map<string, ReturnType<BillingEngine['walk']>>();
+    for (const leaseId of leaseIds)
+      walks.set(leaseId, this.engine.walk(await this.engine.load(tx, staff.companyId, leaseId)));
     return rows.map((r) => {
       const mine = lines.filter((l) => l.invoiceId === r.id);
       const balances = mine.map((l) => lineBalance(l, allocations));
-      const outstanding = balances.reduce((s, b) => s + b.outstandingMinor, 0);
+      const walk = walks.get(r.leaseId)!;
+      const outstanding = mine.reduce((s, l) => s + remainingAfterWalk(l, allocations, walk), 0);
       return {
         id: r.id,
         number: formatInvoiceNumber(r.number),
@@ -448,6 +513,16 @@ export class BillingReadService {
       const documentId = row.renderRequestId
         ? await this.renderedDocument(tx, row.renderRequestId)
         : null;
+      const reminders = await tx
+        .select({
+          offsetDays: schema.reminderSent.offsetDays,
+          status: schema.reminderSent.status,
+          stepDate: schema.reminderSent.stepDate,
+          createdAt: schema.reminderSent.createdAt,
+        })
+        .from(schema.reminderSent)
+        .where(eq(schema.reminderSent.invoiceId, invoiceId))
+        .orderBy(asc(schema.reminderSent.offsetDays));
       const warnings = [
         ...new Map(
           [...rules.values()]
@@ -468,6 +543,7 @@ export class BillingReadService {
         documentId,
         notes: [...new Set(notes.filter((n) => n.kind === 'system').map((n) => n.reason))],
         warnings,
+        reminders: reminders.map((r) => ({ ...r, status: r.status as 'sent' | 'skipped' })),
       };
     });
   }
@@ -634,7 +710,65 @@ export class BillingReadService {
       creditMinor: summary.creditMinor,
       chargedAfterEnd: this.chargedAfterEndOf(state),
       currency: 'GHS',
+      payLink: await this.payLinkOf(tx, state, signed, today),
     };
+  }
+
+  /**
+   * Whether a pay link can be sent for the lease now (BC-04; plan 4.2), for its oldest invoice
+   * with something left to pay: the owner's rent needs somewhere to settle, and the tenant a
+   * channel with consent.
+   */
+  private async payLinkOf(
+    tx: Tx,
+    state: LeaseState,
+    signed: boolean,
+    today: string,
+  ): Promise<LeaseBillingView['payLink']> {
+    const no = (
+      reason: NonNullable<LeaseBillingView['payLink']['reason']>,
+      text: string,
+      invoiceId: string | null = null,
+    ) => ({
+      available: false,
+      reason,
+      text,
+      invoiceId,
+    });
+    if (!signed) return no('not_billed', 'The lease is not signed, so it is not billed');
+    if (state.book.kind !== 'book')
+      return no('joint_owners', DESTINATION_PROBLEM_TEXT.joint_owners);
+    const walk = this.engine.walk(state);
+    const left = new Map<string, number>();
+    for (const line of state.lines)
+      left.set(
+        line.invoiceId,
+        (left.get(line.invoiceId) ?? 0) + remainingAfterWalk(line, state.allocations, walk),
+      );
+    const open = [...new Map(state.lines.map((l) => [l.invoiceId, l])).values()]
+      .filter((l) => (left.get(l.invoiceId) ?? 0) > 0)
+      .sort((a, b) =>
+        a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.invoiceNumber - b.invoiceNumber,
+      );
+    const invoiceId = open[0]?.invoiceId ?? null;
+    const destination = await destinationForOwner(tx, state.company, state.book.ownerId, today);
+    if (destination.kind === 'problem') return no(destination.problem, destination.text, invoiceId);
+    if (!invoiceId) return no('nothing_due', 'Nothing is left to pay on this lease now');
+    const consent = await tx.execute<{ channel: string; action: string }>(
+      sql`select distinct on (c.channel) c.channel, c.action from consent_event c
+          join tenant t on t.company_id = c.company_id and t.id = c.tenant_id
+          where c.tenant_id = ${state.lease.tenantId} and c.tenant_contact_id is null
+            and c.channel in ('sms', 'email')
+            and ((c.channel = 'sms' and t.phone is not null) or (c.channel = 'email' and t.email is not null))
+          order by c.channel, c.recorded_at desc, c.id desc`,
+    );
+    if (!consent.rows.some((c) => c.action === 'grant'))
+      return no(
+        'no_consent',
+        'The tenant has not agreed to messages by SMS or email; hand them the link in person',
+        invoiceId,
+      );
+    return { available: true, reason: null, text: null, invoiceId };
   }
 
   private chargedAfterEndOf(state: LeaseState): ChargedAfterEndView[] {
@@ -834,17 +968,35 @@ export class BillingReadService {
           ? await this.engine.reversalOptions(tx, payment, staff.companyKind)
           : row!.status === 'unmatched'
             ? [
-                payment.row.cashAccount === '1070'
-                  ? ('agency_account' as const)
-                  : ('owner_account' as const),
+                payment.row.cashAccount === '1050'
+                  ? ('provider' as const)
+                  : payment.row.cashAccount === '1070'
+                    ? ('agency_account' as const)
+                    : ('owner_account' as const),
               ]
             : [];
+      const [reversed] = await tx
+        .select()
+        .from(schema.paymentReversal)
+        .where(eq(schema.paymentReversal.paymentId, paymentId));
       const openId = (await this.approvals.openFor(tx, [paymentId], 'payment.reversal')).get(
         paymentId,
       );
       const open = openId ? { id: openId } : undefined;
+      const [account] = payment.row.settlementAccountId
+        ? await tx
+            .select({ holder: schema.settlementAccount.holder })
+            .from(schema.settlementAccount)
+            .where(eq(schema.settlementAccount.id, payment.row.settlementAccountId))
+        : [];
       return {
         ...row!,
+        // As the unmatched queue says it (settlesInto there).
+        settlesInto: !account
+          ? null
+          : account.holder !== 'agency' || staff.companyKind !== 'agency'
+            ? ('owner_account' as const)
+            : ('agency_account' as const),
         allocations: await this.allocationViews(tx, allocations, lines),
         receipts,
         paidUntilAfter,
@@ -854,6 +1006,18 @@ export class BillingReadService {
         proofDocumentId: payment.row.proofDocumentId,
         reversalOptions,
         openApprovalId: open?.id ?? null,
+        reversal: reversed
+          ? {
+              reason: reversed.reason as NonNullable<PaymentDetailView['reversal']>['reason'],
+              note: reversed.note,
+              moneyNowIn: reversed.moneyNowIn as NonNullable<
+                PaymentDetailView['reversal']
+              >['moneyNowIn'],
+              valueDate: reversed.valueDate,
+              approvalId: reversed.approvalRequestId,
+              createdAt: reversed.createdAt,
+            }
+          : null,
       };
     });
   }
@@ -863,13 +1027,24 @@ export class BillingReadService {
     where: ReturnType<typeof eq> | ReturnType<typeof and>,
   ): Promise<ReceiptView[]> {
     const rows = await tx
-      .select({ receipt: schema.receipt, documentId: schema.documentRenderRequest.documentId })
+      .select({
+        receipt: schema.receipt,
+        documentId: schema.documentRenderRequest.documentId,
+        delivery: schema.receiptDelivery,
+      })
       .from(schema.receipt)
       .leftJoin(
         schema.documentRenderRequest,
         and(
           eq(schema.documentRenderRequest.companyId, schema.receipt.companyId),
           eq(schema.documentRenderRequest.id, schema.receipt.renderRequestId),
+        ),
+      )
+      .leftJoin(
+        schema.receiptDelivery,
+        and(
+          eq(schema.receiptDelivery.companyId, schema.receipt.companyId),
+          eq(schema.receiptDelivery.receiptId, schema.receipt.id),
         ),
       )
       .where(where)
@@ -879,7 +1054,7 @@ export class BillingReadService {
       tx,
       rows.map((r) => r.receipt.leaseId),
     );
-    return rows.map(({ receipt, documentId }) => ({
+    return rows.map(({ receipt, documentId, delivery }) => ({
       id: receipt.id,
       number: formatReceiptNumber(receipt.number),
       kind: receipt.kind as ReceiptView['kind'],
@@ -889,6 +1064,14 @@ export class BillingReadService {
       documentId: documentId ?? null,
       tenantName: labels.get(receipt.leaseId)?.tenantName ?? null,
       unitCode: labels.get(receipt.leaseId)?.unitCode ?? null,
+      delivery: delivery
+        ? {
+            status: delivery.status as NonNullable<ReceiptView['delivery']>['status'],
+            channel: delivery.channel as 'sms' | 'email' | null,
+            sentAt: delivery.sentAt,
+            latencyMs: delivery.latencyMs,
+          }
+        : null,
     }));
   }
 
@@ -1176,10 +1359,13 @@ export class BillingReadService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'billing.view');
     return withCompany(this.database, staffContext(staff), async (tx) => {
+      // Money refunded to its payer (P31) has left the queue.
       const rows = await tx.execute<{ id: string }>(
         sql`select p.id from payment p where p.lease_id is null
             and not exists (select 1 from payment_match m where m.company_id = p.company_id and m.payment_id = p.id)
             and not exists (select 1 from payment_reversal r where r.company_id = p.company_id and r.payment_id = p.id)
+            and not exists (select 1 from unmatched_refund f where f.company_id = p.company_id and f.payment_id = p.id
+                            and f.status = 'refunded')
             order by p.received_on, p.id`,
       );
       const payments = await paymentsByIds(
@@ -1190,18 +1376,72 @@ export class BillingReadService {
         tx,
         payments.flatMap((p) => (p.row.ownerId ? [p.row.ownerId] : [])),
       );
-      return payments.map((p) => ({
-        paymentId: p.id,
-        amountMinor: p.amountMinor,
-        receivedOn: p.row.receivedOn,
-        receivedInto: p.row.cashAccount === '1070' ? 'agency_account' : 'owner_account',
-        ownerId: p.row.ownerId,
-        ownerName: p.row.ownerId ? (owners.get(p.row.ownerId)?.displayName ?? null) : null,
-        senderReference: p.row.senderReference,
-        note: p.row.note,
-        proofDocumentId: p.row.proofDocumentId,
-        createdAt: p.row.createdAt,
-      }));
+      const ids = payments.map((p) => p.id);
+      const refunds = ids.length
+        ? await tx
+            .select({
+              id: schema.unmatchedRefund.id,
+              paymentId: schema.unmatchedRefund.paymentId,
+              approvalId: schema.unmatchedRefund.approvalRequestId,
+              status: schema.unmatchedRefund.status,
+            })
+            .from(schema.unmatchedRefund)
+            .where(
+              and(
+                inArray(schema.unmatchedRefund.paymentId, ids),
+                // `sent`: the provider is still making it; shown as approved (M4b review item 2).
+                inArray(schema.unmatchedRefund.status, ['awaiting_approval', 'approved', 'sent']),
+              ),
+            )
+        : [];
+      const accounts = await tx
+        .select({ id: schema.settlementAccount.id, holder: schema.settlementAccount.holder })
+        .from(schema.settlementAccount);
+      const holderOf = new Map(accounts.map((a) => [a.id, a.holder]));
+      return payments.map((p) => {
+        const refund = refunds.find((r) => r.paymentId === p.id) ?? null;
+        const holder = p.row.settlementAccountId
+          ? holderOf.get(p.row.settlementAccountId)
+          : undefined;
+        return {
+          paymentId: p.id,
+          amountMinor: p.amountMinor,
+          receivedOn: p.row.receivedOn,
+          receivedInto:
+            p.row.cashAccount === '1050'
+              ? ('provider' as const)
+              : p.row.cashAccount === '1070'
+                ? ('agency_account' as const)
+                : ('owner_account' as const),
+          ownerId: p.row.ownerId,
+          ownerName: p.row.ownerId ? (owners.get(p.row.ownerId)?.displayName ?? null) : null,
+          senderReference: p.row.senderReference,
+          note: p.row.note,
+          proofDocumentId: p.row.proofDocumentId,
+          createdAt: p.row.createdAt,
+          method: p.row.method as UnmatchedView['method'],
+          provider: p.row.provider,
+          providerReference: p.row.providerReference,
+          settlesInto:
+            holder === undefined
+              ? null
+              : holder !== 'agency' || staff.companyKind !== 'agency'
+                ? ('owner_account' as const)
+                : ('agency_account' as const),
+          payerName: p.row.payerName,
+          payerPhoneMasked: p.row.payerPhoneMasked,
+          openRefund: refund
+            ? {
+                refundId: refund.id,
+                approvalId: refund.approvalId,
+                status:
+                  refund.status === 'awaiting_approval'
+                    ? ('awaiting_approval' as const)
+                    : ('approved' as const),
+              }
+            : null,
+        };
+      });
     });
   }
 

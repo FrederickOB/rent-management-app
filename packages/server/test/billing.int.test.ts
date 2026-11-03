@@ -682,13 +682,47 @@ describe('P29 renewal carry-over', () => {
       signedOn: plusDays(start, -1),
       billingStartDate: start,
     });
-    // Deposit and eleven months paid; the twelfth month will be owed.
+    // Deposit and all twelve months paid.
     await approvedCash(ctx, s, b, agency.manager, agency.admin, {
       leaseId: old.id,
-      amountMinor: 200_000 + 11 * 100_000,
+      amountMinor: 200_000 + 12 * 100_000,
       receivedOn: today,
     });
-    // A credit note gives back 70,000 of a paid month: credit while the last month is unpaid.
+    // An unpaid one-off charge: the arrears. Credit never pays a one-off charge (as at accrual;
+    // M4b review F4), so it stays owed beside the credit below. No service raises one-offs yet,
+    // so the engine issues it as it issues any invoice.
+    await withCompany(
+      ctx.database,
+      { companyId: agency.companyId, actorKind: 'system' },
+      async (tx) => {
+        const state = await b.engine.load(tx, agency.companyId, old.id);
+        const engine = b.engine as unknown as {
+          issue(tx: unknown, state: unknown, input: Record<string, unknown>): Promise<unknown>;
+        };
+        await engine.issue(tx, state, {
+          kind: 'one_off',
+          drafts: [
+            {
+              kind: 'one_off',
+              chargePeriodId: null,
+              periodStart: null,
+              periodEnd: null,
+              amountMinor: 100_000,
+              rateBps: null,
+              baseIndex: null,
+            },
+          ],
+          dueDate: today,
+          issueDate: today,
+          periodFrom: null,
+          periodTo: null,
+          cycleStart: null,
+          holdingOver: false,
+          vat: null,
+        });
+      },
+    );
+    // A credit note gives back 70,000 of a paid month: credit while the one-off is unpaid.
     const lines = (await invoicesOf(old.id)).flatMap((i) => i.lines);
     const fifth = lines.find((l) => l.periodStart === plusMonths(start, 4))!;
     const requestId = await b.money.requestCreditNote(agency.manager, fifth.id, {
@@ -731,7 +765,7 @@ describe('P29 renewal carry-over', () => {
     expect(await leaseAccount(ctx, agency.companyId, old.id, '2010')).toBe(0);
     expect(await leaseAccount(ctx, agency.companyId, old.id, '2100')).toBe(0);
     expect(-(await leaseAccount(ctx, agency.companyId, renewal.id, '2100'))).toBe(200_000);
-    // The old lease's last month stays owed on its own invoice.
+    // The old lease's one-off charge stays owed on its own invoice.
     expect(await leaseAccount(ctx, agency.companyId, old.id, '1100')).toBe(100_000);
     // The renewal's first month drew the carried credit, from the old payment.
     const renewalCard = await moneyCard(ctx, b, agency.companyId, renewal.id);

@@ -1,0 +1,15 @@
+{
+  "status": true,
+  "message": "Transaction retrieved",
+  "data": {
+    "id": 4099260520,
+    "status": "reversed",
+    "reference": "pi-0192f5a8111172228333444455559999",
+    "amount": 80050,
+    "currency": "GHS",
+    "channel": "card",
+    "paid_at": "2026-11-03T10:01:00.000Z",
+    "created_at": "2026-11-03T10:00:00.000Z",
+    "fees": 1561
+  }
+}

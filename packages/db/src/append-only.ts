@@ -41,6 +41,11 @@ export const APPEND_ONLY_TABLES = [
   'write_off',
   'allocation',
   'property_ownership_correction',
+  // M4b: subaccounts, management agreements, settlements and reminder steps.
+  'provider_subaccount',
+  'management_agreement',
+  'provider_settlement',
+  'reminder_sent',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */
@@ -55,4 +60,6 @@ export const GLOBAL_TABLES = [
   'rate_limit',
   // M4a: the chart of accounts.
   'ledger_account',
+  // M4b: every provider webhook, stored before its company is known (plan 4.4).
+  'webhook_inbox',
 ] as const;

@@ -407,7 +407,7 @@ Receipt numbers come from a per-company counter row locked in the posting transa
     - the ledger: `ledger_account`, `book`, `journal_entry`, `journal_line` and `period_lock`;
     - billing: `payment_reference`, `invoice`, `invoice_line`, `invoice_line_accrual`, `payment`, `payment_match`, `payment_reversal`, `receipt`, `company_counter`, `cash_record`, `direct_receipt`, `cash_banking`, `credit_carry_over`, `credit_note`, `write_off`, `allocation` and `idempotent_request`;
     - the register: `property_ownership_correction` (M2 S5).
-- **Payments:** a payment row exists only once money is confirmed. Cash, cheques and direct transfers wait in their own records until a second person approves them. Provider payments and intents arrive in M4b.
+- **Payments:** a payment row exists only once money is confirmed. Cash, cheques and direct transfers wait in their own records until a second person approves them. Provider payments start as a payment intent (one per charge attempt, from a pay link or the tenant app) and become a payment only once the provider's verify endpoint confirms the amount, currency, status and reference (M4b).
 - **Who writes what:**
     - Books are made by database triggers when an owner or a landlord or agency company is created.
     - Books, the journal, period locks and every billing table are append-only, except the counters and the idempotency keys.
@@ -422,6 +422,32 @@ Receipt numbers come from a per-company counter row locked in the posting transa
     - an owner change once a property has ledger entries;
     - a billing start set other than at signing;
     - an invoice for a lease already billed in another book.
+
+**As built in M4b** (migrations 0018 and 0019; M4b plan, section 5):
+- **Tables:**
+    - settlement: `settlement_account` (bank accounts only, decision 2; the number encrypted with a blind index and a mask), `provider_subaccount` and `management_agreement` (effective-dated, one destination per owner in an agency, decision 6);
+    - provider payments: `payment_intent`, `provider_settlement`, `reconciliation_exception` and `unmatched_refund` (P31);
+    - delivery: `reminder_sent` (one row per invoice and ladder step) and `receipt_delivery` (channel, time sent and latency);
+    - `webhook_inbox`: global, not company-scoped, unique on (provider, event id) among rows with a valid signature; written and read only through system paths;
+    - new columns: `payment.provider_reference`, `settlement_account_id`, `payer_phone_index` and `payer_phone_masked`; `secure_link.invoice_id` and `receipt_id`; `message.owner_id`.
+- **Row Level Security:** every new company table; property scope on intents, reminders and receipt deliveries; an owner's settlement account (and its subaccounts and settlements) only for people with that owner in scope, the agency's own account only for people who see the whole company.
+- **System functions (ADR-002), ids and amounts only:** an intent by its reference, a settlement account by its provider subaccount, payments by provider reference or between two instants, companies with pending intents, and the inbox relay's claim.
+
+  The database refuses (`RA051` to `RA054`):
+    - a settlement account changed other than through its states (`awaiting_approval`, then `rejected` or `cooling_off` for 24 hours, then `active`, then `retired`), or a change of its holder, bank or number;
+    - money matched while a refund of it is live, or a refund of money that belongs to a lease or was reversed;
+    - a payment intent changed other than through its states, or once confirmed;
+    - a pay or receipt link without its tenant.
+
+  **Review fixes** (migrations 0020 and 0021):
+    - `unmatched_refund` gains `sent`: approved, then sent while the provider makes it, then refunded or failed.
+    - `provider_settlement.net_minor` may be below zero, and `charge_references` keeps the charges each settlement paid out.
+    - `payment_intent` records an advance accepted over the limit under `warn` (`advance_over_limit`, the limit and the rule).
+    - `webhook_inbox` keeps the body only for a valid signature. Otherwise it keeps `body_sha256`, `body_bytes`, three headers and a keyed hash of the sender's address.
+    - `management_agreement.approval_request_id` names the request that set it.
+    - The database refuses (`RA055`, `RA056`):
+        - a reversal of money being or already refunded to its payer;
+        - an agreement without a second person's approval.
 
 ### 3.5 Notices, signatures and messaging
 
@@ -569,7 +595,7 @@ Sign convention: debits positive, credits negative. Lines carry dimensions (leas
 | P18 | Rent tax paid to GRA (TX-03) | 2200 | 1010 or 1070 | GRA receipt attached; settles specific rent tax items. |
 | P19 | Withholding tax by a corporate tenant (TX-04) | 1150: amount withheld | 1100: the lines it was withheld on (allocation source: withholding) | Recorded with the payment or when the tenant advises it later; the cash allocates normally (P03). Tax on those lines becomes the amount withheld: P17 accrues it, rent tax already accrued on their cash is reversed, and the tax item is marked "withheld by tenant" so TX-02 alerts do not fire. |
 | P20 | WHT certificate confirmed (TX-04) | owner outside the letting business: 2200<br>letting-business owner: 1160 | 1150 | Manager uploads, a landlord user confirms; the WHT item links to its rent tax items. A certificate that never comes is written off (P24). |
-| P21 | Reversal | (a) correction: each original line, sign flipped<br>(b) payment reversal: 1100 for started lines, 2010 for lines not started and surplus, 2100 for deposit lines | (a) each original line, sign flipped<br>(b) where the money now sits: 1050 if unsettled or to be deducted from a settlement, 1060 if not banked, 1010 or 1070 if banked | (a) only when nothing has consumed the entry since; otherwise (b) or P27. (b) covers chargebacks, bounced cheques and wrong matches. It is built from the current state of the payment's allocations, adds negative allocation rows, and mirrors the payment's P17 and P14 entries. A reversal is never itself reversed. |
+| P21 | Reversal | (a) correction: each original line, sign flipped<br>(b) payment reversal: 1100 for started lines, 2010 for lines not started and surplus, 2100 for deposit lines | (a) each original line, sign flipped<br>(b) where the money now sits: 1050 if unsettled or to be deducted from a settlement, 1060 if not banked, 1010 or 1070 if banked (a provider payment once P22 has paid it out) | (a) only when nothing has consumed the entry since; otherwise (b) or P27. (b) covers chargebacks, bounced cheques and wrong matches. It is built from the current state of the payment's allocations, adds negative allocation rows, and mirrors the payment's P17 and P14 entries. A reversal is never itself reversed. |
 | P22 | Provider settlement | 1010 or 1070: net received<br>5200: fees<br>1050: chargebacks and refunds deducted<br>2300: agent's share, when split at source | 1050: gross of the payments settled | One entry per settlement per book; lines carry the settlement id. Any difference from the provider's report raises a reconciliation exception. |
 | P23 | Unmatched receipt, then matched (BC-12) | on receipt: 1050, or 1010 or 1070 for a direct transfer (P28)<br>on match: 2090 | on receipt: 2090<br>on match: as P03 | Suspense sits in the book of whoever received the money: the owner's book when the account is theirs, otherwise the company book. When a match moves money from the company book to an owner book, the company book credits the asset now holding it (1050, or net cash and 5200 if already settled) and the owner book debits the same, so each book balances. A person confirms every match. |
 | P24 | Write-off (AD-05) | 5900 | 1100 (allocation source: write-off), or 1150 for unrecoverable withholding | Two-person approval. |
@@ -630,9 +656,10 @@ Result: income GH₵10,000; rent tax GH₵1,500, settled by the withholding; fee
 
 **Allocation (BC-07).**
 1. Allocation sources are payments (provider, cash, direct transfer, opening balance), deposits, withholding, credit notes and write-offs. Each row records its source, the line, the amount, a value date and an accounting date. Reversals add negative rows; nothing is updated.
-2. Withholding is pinned to the lines it was withheld on. Everything else is allocated oldest debt first: open lines ordered by due date, then type (deposit, rent, service charge, one-off), then period start. A pay link for a particular invoice does not change the order.
+2. Withholding is pinned to the lines it was withheld on. Everything else is allocated oldest debt first: open lines ordered by due date, so across invoices the oldest goes first. Within one due date (one invoice) the order is the deposit, then the charge periods month by month (each month's rent, then that month's service charge), then one-off charges, with each VAT or levy line straight after the line it is charged on (M4b decision 9). A pay link for a particular invoice does not change the order.
 3. Deposit lines are raised when the lease is signed, so an early deposit always finds its line and never becomes surplus.
 4. Whatever a payment does not allocate stays as that payment's unallocated remainder (surplus) in 2010.
+5. A correction never leaves credit beside reopened debt (M4b review F4). After a reversal or a credit note, spare credit, oldest payment first, pays any accrued rent or service-charge period left owing, by a P02 credit draw dated that day. Deposits and one-off charges are not drawn.
 
 **Accrual (daily, after invoice generation).**
 1. Charge periods are monthly, anchored on the lease start date, whatever the billing cycle; an annual invoice bundles twelve of them.
@@ -911,9 +938,21 @@ sequenceDiagram
 | Webhook never arrives | `payments.verify-pending` checks intents pending over 5 minutes; reconciliation catches the rest the next day. |
 | Provider down when creating the charge | Fail over to the second provider only if it settles directly (D1). Otherwise show "try again shortly" plus the landlord's manual payment instructions, and raise an incident alert. |
 | Receipt send fails | Retried, then the next channel. The receipt stays available in the app and on the link. |
-| Chargeback or provider reversal | P21(b) payment reversal, built from the current state of its allocations; a credit receipt and a manager alert. |
+| Chargeback or provider reversal | P21(b) payment reversal, built from the current state of its allocations, when the money taken back equals the payment (a part is an exception). A credit receipt is issued, and an alert goes to the people who see that property. It needs no approval: the provider has already taken the money back. The money sits in 1050 until the next settlement deducts it (M4b). |
 
-**Daily reconciliation** (02:00 Africa/Accra). List the provider's transactions for the previous day. Each one missing locally goes through the normal processing path. Each local payment the provider does not list is flagged. Then match settlement reports to payments, post P22, and raise any difference as an exception on the manager dashboard.
+**Daily reconciliation** (02:00 Africa/Accra). List the provider's transactions for the previous day. Each one missing locally goes through the normal processing path. Each local payment the provider does not list is flagged. Charges listed as reversed, and the day's refunds and disputes, go through the chargeback path. Then match settlement reports to payments and post P22, and raise any difference as an exception on the manager dashboard. A payment posted after its settlement was reconciled is settled when it appears. Last, provider clearing (1050) per settlement account is compared with what the provider still holds unsettled (invariant 11).
+
+**As built in M4b, after review:**
+- **Money:**
+    - only cedis are posted: a charge in another currency is an exception on every path;
+    - a refund posts P31 only once the provider says it is processed, and a retry always asks the provider first;
+    - a reversal equal to the payment reverses it; a part refund or chargeback is an exception.
+- **Failover:** only a clear "down" (503, 429) moves to the next provider. After a timeout or any other unclear answer, the same provider is asked about the charge first.
+- **Card return page:** the checkout returns the payer to `${LINKS_ORIGIN}/p/return?reference=…`, which carries the charge reference, never a pay-link token.
+- **Webhook intake:**
+    - bodies over 64 KB are refused;
+    - bad-signature requests are rate-limited per address and keep no body;
+    - their alert goes at most once per provider in 15 minutes.
 
 ## 9. Secure links and e-signature
 
@@ -994,12 +1033,14 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `lease.activated` | event (tenancy): a renewal starts, so prepayments and the deposit carry over (P29) | event id; `P29:<new lease>` | 5 | M4a |
 | `lease.ended` | event (tenancy): a system credit note cancels lines for periods after the end | event id; one credit note per line | 5 | M4a |
 | `lease.cancelled` | event (tenancy): a signed lease cancelled before it starts; its lines are credited | event id; one credit note per line | 5 | M4a |
-| `billing.rent-reminders` | daily 08:00 | invoice id + ladder step | 3 | M4b |
-| `payments.process-webhook` | event: inbox row stored | provider + event id | 10, 1 min to 1 h, then dead letter | M4b |
-| `payments.verify-pending` | every 5 min | intent id + 5-minute window | 3 per run | M4b |
-| `payments.issue-receipt` | event: payment posted | payment id | 5; SLA alert at 60 s | M4b |
-| `payments.reconcile-transactions` | daily 02:00 | provider + date | 5 | M4b |
-| `payments.reconcile-settlements` | daily 02:30 | provider + settlement id | 5 | M4b |
+| `billing.rent-reminders` | daily 08:00; fans out one `billing.rent-reminders.company` job per company | invoice id + ladder step (a reminder row per step) | 3 | M4b |
+| `payments.process-webhook` | a stored `webhook_inbox` row, published by the inbox relay in the worker (LISTEN `webhook_inbox`, 1-second poll; claim and enqueue in one transaction) | inbox id; unique (provider, event id) | 10, 1 min to 1 h, then dead letter: the row is marked failed | M4b |
+| `payments.verify-pending` | every 5 min; fans out one `payments.verify-pending.company` job per company with intents pending over 5 minutes | company + 5-minute window; a confirmed intent is final | 3 | M4b |
+| `payment.posted` | event (payments): the receipt delivery, on the tenant's consented channels with a receipt link; the latency from confirmation is recorded per receipt, with an alert past 60 s | receipt id; one delivery per receipt | 5, from 5 s | M4b |
+| `payments.reconcile-transactions` | daily 02:00, each configured provider, the previous day | provider + date; each missing payment through the normal path | 5 | M4b |
+| `payments.reconcile-settlements` | daily 02:30, each configured provider | provider + settlement id; P22 key per settlement and book | 5 | M4b |
+| `settlement_account.approved` | event (payments): an approved settlement account becomes active once its 24 hours have passed (re-queued for then), and gets a subaccount with each provider that settles directly | account id | 5 | M4b |
+| `payments.refund-unmatched` | event (payments): an approved refund of unmatched money (P31) is sent to the provider, after asking it for any refund already made. While the provider is still making it, the job runs again every 10 minutes until the provider or its webhook says processed or failed | refund id | 5 | M4b |
 | `billing.paid-until-prompt` | daily 08:00 | lease id + paid-until date | 3 | M5 |
 | `tax.rent-tax-alerts` | daily 08:00 | tax item id + alert day (21, 28) | 3 | M5 |
 | `messaging.send` | event: message queued | message id | 5 per provider, then next channel | M3 (SMS and email, M3 decision 1); WhatsApp and push in M6 |

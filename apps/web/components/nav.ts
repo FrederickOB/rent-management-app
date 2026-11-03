@@ -76,8 +76,16 @@ const ITEMS: readonly NavItem[] = [
   {
     href: '/payments/unmatched',
     label: 'Unmatched receipts',
-    description: 'Transfers received before anyone knew which lease they pay for.',
-    needs: 'billing.view',
+    description:
+      'Money that arrived without a pay link or a reference we could read: suggestions, matching and refunds.',
+    needs: ['billing.view', 'payments.view'],
+  },
+  // M4b: provider payments (plan sections 4.2, 4.5 and 4.8).
+  {
+    href: '/payments/reconciliation',
+    label: 'Reconciliation',
+    description: 'Differences between the payment provider’s records, settlements and ours.',
+    needs: 'payments.view',
   },
   {
     href: '/arrears',
@@ -103,6 +111,12 @@ const ITEMS: readonly NavItem[] = [
     label: 'Company settings',
     description: 'Name, branding, logo and reminder settings.',
     needs: 'company.view',
+  },
+  {
+    href: '/settings/settlement',
+    label: 'Settlement accounts',
+    description: 'The bank accounts rent settles into, and where each owner’s rent goes.',
+    needs: ['payments.view', 'settlement_account.change'],
   },
   {
     href: '/settings/users',

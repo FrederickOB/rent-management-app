@@ -1,0 +1,17 @@
+{
+  "status": true,
+  "message": "Settlement transactions retrieved",
+  "data": [
+    {
+      "id": 4099260601,
+      "status": "success",
+      "reference": "pi-0192f5a8111172228333444455551111",
+      "amount": 100000,
+      "created_at": "2026-11-04T09:00:00.000Z",
+      "channel": "mobile_money",
+      "currency": "GHS",
+      "fees": 1950
+    }
+  ],
+  "meta": { "total": 2, "perPage": 1, "page": 1, "pageCount": 2 }
+}

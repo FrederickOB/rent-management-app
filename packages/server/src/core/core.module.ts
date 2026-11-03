@@ -33,6 +33,7 @@ import { loadConfig, type AppConfig } from './config';
 import { DbKeyStore } from './crypto/db-key-store';
 import { FieldCipher } from './crypto/field-cipher';
 import { IdempotencyStore } from './idempotency';
+import { PaymentProviders, paymentProvidersFor } from './payment-providers';
 import { createLogger, type AppLogger } from './logging/logger';
 import {
   ADDRESS_LOOKUP_PORT,
@@ -45,6 +46,7 @@ import {
   IDENTITY_VERIFICATION_PORT,
   KMS_PORT,
   LOGGER,
+  PAYMENT_PROVIDERS,
   SMS_PORT,
   STORAGE_PORT,
 } from './tokens';
@@ -62,6 +64,8 @@ export interface CoreOptions {
   readonly addressLookup?: AddressLookupPort | null;
   /** Null switches identity checks off; see identityVerificationFor. */
   readonly identityVerification?: IdentityVerificationPort | null;
+  /** The payment providers (M4b); tests pass in-memory fakes. */
+  readonly payments?: PaymentProviders;
   readonly applicationName?: string;
 }
 
@@ -160,6 +164,10 @@ export class CoreModule {
       },
       { provide: KMS_PORT, useFactory: () => kmsFor(config) },
       {
+        provide: PAYMENT_PROVIDERS,
+        useFactory: () => options.payments ?? paymentProvidersFor(config),
+      },
+      {
         provide: IdempotencyStore,
         inject: [DATABASE],
         useFactory: (database: Database) => new IdempotencyStore(database),
@@ -208,6 +216,7 @@ export class CoreModule {
         KMS_PORT,
         FIELD_CIPHER,
         ALERT_PORT,
+        PAYMENT_PROVIDERS,
         IdempotencyStore,
       ],
     };

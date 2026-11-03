@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useApp } from '@/components/app-context';
 import { Empty, Loading } from '@/components/load-state';
+import { ReceiptDelivery } from '@/components/receipt-delivery';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody } from '@/components/ui/card';
@@ -93,6 +94,7 @@ export function ReceiptsView() {
                   <Th>Issued</Th>
                   <Th>Tenant and unit</Th>
                   <Th className="text-right">Amount</Th>
+                  <Th>To the tenant</Th>
                   <Th>PDF</Th>
                 </tr>
               </thead>
@@ -116,6 +118,10 @@ export function ReceiptsView() {
                       ) : null}
                     </Td>
                     <Td className="text-right tabular-nums">{formatMinor(row.amountMinor)}</Td>
+                    <Td>
+                      {/* BC-06: whether it reached the tenant, and how fast. */}
+                      <ReceiptDelivery delivery={row.delivery} compact />
+                    </Td>
                     <Td>
                       <Button size="sm" variant="secondary" onClick={() => void open(row.id)}>
                         Open {row.number}

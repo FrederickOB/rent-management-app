@@ -1,0 +1,9 @@
+{
+  "status": true,
+  "message": "Charge attempted",
+  "data": {
+    "reference": "pi-0192f5a8111172228333444455557777",
+    "status": "send_otp",
+    "display_text": "Please enter the OTP sent to your phone"
+  }
+}

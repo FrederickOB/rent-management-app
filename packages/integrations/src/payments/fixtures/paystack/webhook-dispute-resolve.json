@@ -1,0 +1,12 @@
+{
+  "event": "charge.dispute.resolve",
+  "data": {
+    "id": 358950,
+    "refund_amount": 150000,
+    "currency": "GHS",
+    "status": "resolved",
+    "resolution": "declined",
+    "domain": "test",
+    "transaction": { "id": 4099260516, "reference": "pi-0192f5a8111172228333444455557777" }
+  }
+}

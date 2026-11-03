@@ -194,7 +194,7 @@ export interface PaperLease {
   readonly startDate: string;
   readonly months: number;
   readonly monthlyRentMinor: number;
-  readonly cycle: 'monthly' | 'quarterly' | 'six_monthly' | 'annual';
+  readonly cycle: 'monthly' | 'quarterly' | 'six_monthly' | 'annual' | 'two_yearly';
   readonly depositMinor?: number;
   readonly serviceChargeMonthlyMinor?: number;
   readonly steps?: readonly { readonly effectiveFrom: string; readonly monthlyRentMinor: number }[];

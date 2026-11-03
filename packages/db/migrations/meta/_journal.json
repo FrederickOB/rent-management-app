@@ -127,6 +127,41 @@
       "when": 1793389938297,
       "tag": "0017_carry_deposit_payment",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793699362142,
+      "tag": "0018_payments",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793699382133,
+      "tag": "0019_payments_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793707123320,
+      "tag": "0020_payments_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793707124040,
+      "tag": "0021_payments_review_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793711935229,
+      "tag": "0022_tenant_receipt_documents",
+      "breakpoints": true
     }
   ]
 }

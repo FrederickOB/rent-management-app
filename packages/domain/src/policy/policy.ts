@@ -73,6 +73,13 @@ export const POLICY_ACTIONS = [
   'cash.bank',
   'cash.bank_others',
   'cash.view_own',
+  // M4b: provider payments (plan section 4.11).
+  'payments.view',
+  'payments.match',
+  'settlement_account.change',
+  'payment.refund_unmatched',
+  // M4b: an account number shown in full, with a reason, audited (CLAUDE.md section 10).
+  'settlement_account.reveal',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -280,6 +287,14 @@ const STAFF_MATRIX: Record<
     'accountant',
     'caretaker',
   ],
+  // M4b (plan section 4.11). As with billing.manage, a self-managing landlord is in every row:
+  // they are their own company's admin.
+  'payments.view': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'payments.match': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  // Redirecting rent is the likeliest fraud (ADR-008): a request, then a second person and 24 hours.
+  'settlement_account.change': ['owner:own_company', 'agency_admin'],
+  'payment.refund_unmatched': ['owner:own_company', 'agency_admin', 'accountant'],
+  'settlement_account.reveal': ['owner:own_company', 'agency_admin'],
 };
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {

@@ -55,6 +55,7 @@ export default async function LeasePage({
           view: allowed(me, 'billing.view'),
           recordCash: allowed(me, 'payment.record'),
           recordTransfer: allowed(me, 'payment.record_transfer'),
+          sendPayLink: allowed(me, 'billing.manage'),
         },
       }}
     />

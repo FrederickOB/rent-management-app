@@ -39,6 +39,7 @@ export default async function PaymentPage({ params }: { readonly params: Params 
       initial={loaded.data}
       can={{
         manage: allowed(me, 'billing.manage'),
+        match: allowed(me, 'payments.match'),
         seeApprovals: allowed(me, 'approval.view'),
         seeLease: allowed(me, 'lease.view'),
       }}

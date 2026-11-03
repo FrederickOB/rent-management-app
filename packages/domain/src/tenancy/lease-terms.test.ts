@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { advanceOutcome, checkAdvance, monthsDemandedInAdvance } from './advance';
-import { checkLeaseTerms, type LeaseTermsInput } from './lease-terms';
+import {
+  checkLeaseTerms,
+  CYCLE_MONTHS,
+  RENT_CYCLE_LABELS,
+  type LeaseTermsInput,
+} from './lease-terms';
 import { checkLeaseTransition, occupancyFor } from './lease-states';
 
 const base: LeaseTermsInput = {
@@ -120,5 +125,45 @@ describe('PB-09 lease states and occupancy', () => {
     expect(occupancyFor(['signed', 'active'])).toBe('occupied');
     expect(occupancyFor(['holding_over'])).toBe('occupied');
     expect(occupancyFor(['cancelled', 'terminated', 'draft'])).toBe('vacant');
+  });
+});
+
+describe('TL-06 a two-yearly rent cycle (M4b decision 9)', () => {
+  it('is 24 months, labelled every two years, and needs a term of two years or more', () => {
+    expect(CYCLE_MONTHS.two_yearly).toBe(24);
+    expect(RENT_CYCLE_LABELS.two_yearly).toBe('Every two years');
+    expect(checkLeaseTerms({ ...base, endDate: '2028-10-31', cycle: 'two_yearly' })).toMatchObject({
+      cycle: 'two_yearly',
+      periodCount: 24,
+    });
+    expect(() => checkLeaseTerms({ ...base, cycle: 'two_yearly' })).toThrow(
+      /longer than the lease/,
+    );
+    expect(() =>
+      checkLeaseTerms({
+        ...base,
+        endDate: '2028-10-31',
+        cycle: 'two_yearly',
+        initialAdvanceMonths: 12,
+      }),
+    ).toThrow(/advance/);
+  });
+});
+
+describe('AR-05 a two-yearly cycle is 24 months paid ahead (M4b decision 9)', () => {
+  const rules = { monthlyOrShorter: 1, overSixMonths: 6 };
+  const twoYearly = checkLeaseTerms({ ...base, endDate: '2028-10-31', cycle: 'two_yearly' });
+
+  it('demands 24 months, so warn flags it and block refuses it; off records it', () => {
+    const check = checkAdvance(twoYearly, rules);
+    expect(check).toEqual({
+      monthsDemanded: 24,
+      rule: 'over_six_months',
+      limitMonths: 6,
+      exceedsLimit: true,
+    });
+    expect(advanceOutcome(check, 'off')).toEqual({ flag: false, refuse: false });
+    expect(advanceOutcome(check, 'warn')).toEqual({ flag: true, refuse: false });
+    expect(advanceOutcome(check, 'block')).toEqual({ flag: true, refuse: true });
   });
 });
