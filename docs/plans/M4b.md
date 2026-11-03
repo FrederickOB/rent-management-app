@@ -1,6 +1,6 @@
 # M4b: Provider payments and receipts
 
-- **Status:** approved by the founder on 2026-10-30 with every recommendation in section 2. It is built after M4a, and builds on M4a's ledger (`docs/plans/M4a.md`).
+- **Status:** approved by the founder on 2026-10-30 with every recommendation in section 2; decision 9 added on 2026-11-03 from the founder's answer. It is built after M4a, and builds on M4a's ledger (`docs/plans/M4a.md`).
 - **Inputs:**
     - `BUILD_PLAYBOOK.md` (the M4 prompt, second half) and `docs/plans/roadmap.md` (the M4b row and prompt amendment);
     - `CLAUDE.md` sections 4, 8, 9 and 10;
@@ -39,6 +39,7 @@
 | 6 | Where an agency-managed owner's rent goes (ADR-008) | Settlement is resolved from lease → unit → property → owner → management agreement. No management agreement exists yet. | **A minimal management agreement per owner** in an agency, effective-dated:<br>• rent goes to the owner's account or to the agency's client account;<br>• the agency chooses for each owner, and there is no default: links cannot be sent for that owner's leases until it is set.<br>**A landlord company** always uses its own account.<br>Fee terms arrive with AC-02 (M9). | none |
 | 7 | What the pay link lets a tenant pay (BC-04) | BC-04: "shows amount due and lets the tenant pay part". It does not say whether a tenant may pay ahead. | **Pre-filled** with the amount due now.<br>**Accepted:** any amount from GH₵1 up to the rent remaining to the end of the term. More than is due becomes credit (P05), recorded as months paid ahead (AR-05 under the company's setting). | none |
 | 8 | Store builds (M1 deferred them to M4b) | They need the Apple and Google developer accounts, after a D-U-N-S number (OQ-25). | **EAS profiles for internal testing,** submitted only once the accounts exist. If they do not exist yet, the report says so and nothing is blocked. | none |
+| 9 | How a payment pays a multi-month invoice (M4a open item 1; decided 2026-11-03) | **M4a:** within one invoice, every rent line is paid before any service charge. A part payment on an annual invoice with service charge then covers rent for every month and service charge for none, and paid-until shows no whole month.<br>**The founder:** "rent in Ghana is paid monthly, bi-annually, annually and two years in advance; handle it as such." | **Month by month within an invoice:** each month's rent, then that month's service charge, with VAT and levies straight after their line, before the next month. Across invoices, the oldest due date still goes first (BC-07).<br>**Rent cycles:** monthly, six-monthly ("bi-annually", twice a year), annual, and a new **two-yearly** cycle (24 months), on the lease form, the lease document, the tenant app and the API. Quarterly stays for leases that use it.<br>**Advance checks:** a two-yearly cycle is 24 months paid ahead, so `warn` flags it and `block` refuses it under `advance_rent_policy` (AR-05); `off`, the default, records it. | `packages/domain` (allocation order, lease terms); `packages/contracts`; lease form, document template and tenant app labels |
 
 ## 3. Scope by requirement ID
 
@@ -218,6 +219,7 @@
 
 ## 5. Build order
 
+0. Decision 9: month-by-month allocation within an invoice, and the two-yearly rent cycle. The domain's property tests, the reference model and the differential test change with it; existing allocation tests whose expected order changes are listed in the report.
 1. Settlement accounts and management agreements, with their approvals.
 2. Paystack adapter on fixtures; the second fake; the registry.
 3. Payment intents, pay links and the pay page.
