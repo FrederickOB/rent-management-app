@@ -967,7 +967,8 @@ export const allocation = pgTable(
     ),
     check(
       'allocation_record_check',
-      sql`${t.recordType} in ('payment', 'match', 'accrual', 'reversal', 'credit_note', 'write_off')`,
+      // M5: withholding pinned to its lines (P19) and credit applied at an early end (P13).
+      sql`${t.recordType} in ('payment', 'match', 'accrual', 'reversal', 'credit_note', 'write_off', 'withholding', 'termination')`,
     ),
     check('allocation_dates_check', sql`${t.accountingDate} >= ${t.valueDate}`),
   ],
@@ -1000,5 +1001,215 @@ export const idempotentRequest = pgTable(
       'idempotent_request_done_check',
       sql`(${t.response} is null) = (${t.completedAt} is null)`,
     ),
+  ],
+);
+
+/**
+ * Months paid ahead, recorded on every payment by the forward walk (AR-05; M5 plan 5.5): the
+ * advance rule for the lease's term as of the value date (Act 220 s.25(5), unverified), the
+ * company's `advance_rent_policy`, and whether the payment went over. Under `warn` or `block` an
+ * over-limit payment is flagged for the lease page and the compliance report; under `off` it is
+ * recorded only (OQ-28). Nothing here calls an advance compliant.
+ */
+export const paymentAdvance = pgTable(
+  'payment_advance',
+  {
+    id: id(),
+    companyId: companyId(),
+    paymentId: uuid().notNull(),
+    ...leaseRef(),
+    valueDate: day().notNull(),
+    monthsAhead: integer().notNull(),
+    policy: text().notNull(),
+    ruleKey: text(),
+    ruleId: uuid().references(() => rule.id),
+    limitMonths: integer(),
+    overLimit: boolean().notNull(),
+    flagged: boolean().notNull(),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('payment_advance_company_id_id_key').on(t.companyId, t.id),
+    unique('payment_advance_payment_key').on(t.companyId, t.paymentId),
+    foreignKey({
+      name: 'payment_advance_payment_fk',
+      columns: [t.companyId, t.paymentId],
+      foreignColumns: [payment.companyId, payment.id],
+    }),
+    foreignKey({
+      name: 'payment_advance_lease_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.leaseId],
+      foreignColumns: [lease.companyId, lease.propertyId, lease.tenantId, lease.id],
+    }),
+    index('payment_advance_lease_idx').on(t.companyId, t.leaseId),
+    check('payment_advance_months_check', sql`${t.monthsAhead} >= 0`),
+    check('payment_advance_policy_check', sql`${t.policy} in ('off', 'warn', 'block')`),
+    check(
+      'payment_advance_flag_check',
+      sql`(not ${t.flagged} or (${t.overLimit} and ${t.policy} <> 'off'))
+          and (not ${t.overLimit} or ${t.limitMonths} is not null)`,
+    ),
+  ],
+);
+
+/** AR-06: a lease prompted for renewal when its paid-until was 90 days away, once per date. */
+export const paidUntilPrompt = pgTable(
+  'paid_until_prompt',
+  {
+    id: id(),
+    companyId: companyId(),
+    ...leaseRef(),
+    paidUntil: day().notNull(),
+    promptedOn: day().notNull(),
+    staffMessages: integer().notNull(),
+    tenantMessageId: uuid(),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('paid_until_prompt_company_id_id_key').on(t.companyId, t.id),
+    unique('paid_until_prompt_once').on(t.companyId, t.leaseId, t.paidUntil),
+    foreignKey({
+      name: 'paid_until_prompt_lease_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.leaseId],
+      foreignColumns: [lease.companyId, lease.propertyId, lease.tenantId, lease.id],
+    }),
+    check('paid_until_prompt_staff_check', sql`${t.staffMessages} >= 0`),
+  ],
+);
+
+/**
+ * An early termination's settlement (AR-04, P13; M5 plan 5.4, decision 6), raised as `lease.refund`
+ * with two-person approval: agreed termination charges (P01), the unused days of the last month
+ * credited where the break clause allows (P27), the lease's credit applied to open lines oldest
+ * first (P13 apply), then a positive remainder, less deductions, refunded (P13: approved, then
+ * paid outside the platform with a reference and proof, D1). Charges and deductions are kept as
+ * asked; the figures as the request showed them.
+ */
+export const earlyTermination = pgTable(
+  'early_termination',
+  {
+    id: id(),
+    companyId: companyId(),
+    ...leaseRef(),
+    unitId: uuid().notNull(),
+    ownerId: uuid().notNull(),
+    bookId: uuid().notNull(),
+    lastDay: day().notNull(),
+    charges: jsonb().notNull(),
+    deductions: jsonb().notNull(),
+    unusedDaysCreditMinor: minor().notNull(),
+    appliedMinor: minor().notNull(),
+    refundMinor: minor().notNull(),
+    /** The settlement step by step as the request showed it (what the approver decided on). */
+    figures: jsonb()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    note: text(),
+    approvalRequestId: uuid().notNull(),
+    status: text().notNull().default('awaiting_approval'),
+    settledOn: day(),
+    refundEntryId: uuid(),
+    refundAccountingDate: day(),
+    paidOn: day(),
+    paidFrom: text(),
+    paidReference: text(),
+    proofDocumentId: uuid(),
+    paidEntryId: uuid(),
+    paidAccountingDate: day(),
+    paidBy: uuid().references(() => person.id),
+    requestedBy: uuid().references(() => person.id),
+    createdAt: tsNow(),
+    updatedAt: tsNow(),
+  },
+  (t) => [
+    unique('early_termination_company_id_id_key').on(t.companyId, t.id),
+    unique('early_termination_lease_key').on(t.companyId, t.leaseId, t.id),
+    uniqueIndex('early_termination_one_live')
+      .on(t.companyId, t.leaseId)
+      .where(sql`${t.status} in ('awaiting_approval', 'settled', 'refund_paid')`),
+    foreignKey({
+      name: 'early_termination_lease_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.leaseId],
+      foreignColumns: [lease.companyId, lease.propertyId, lease.tenantId, lease.id],
+    }),
+    foreignKey({
+      name: 'early_termination_owner_fk',
+      columns: [t.companyId, t.ownerId],
+      foreignColumns: [owner.companyId, owner.id],
+    }),
+    foreignKey({
+      name: 'early_termination_book_fk',
+      columns: [t.companyId, t.bookId],
+      foreignColumns: [book.companyId, book.id],
+    }),
+    foreignKey({
+      name: 'early_termination_approval_fk',
+      columns: [t.companyId, t.approvalRequestId],
+      foreignColumns: [approvalRequest.companyId, approvalRequest.id],
+    }),
+    foreignKey({
+      name: 'early_termination_proof_fk',
+      columns: [t.companyId, t.proofDocumentId],
+      foreignColumns: [document.companyId, document.id],
+    }),
+    foreignKey({
+      name: 'early_termination_refund_entry_fk',
+      columns: [t.companyId, t.refundEntryId],
+      foreignColumns: [journalEntry.companyId, journalEntry.id],
+    }),
+    foreignKey({
+      name: 'early_termination_paid_entry_fk',
+      columns: [t.companyId, t.paidEntryId],
+      foreignColumns: [journalEntry.companyId, journalEntry.id],
+    }),
+    check(
+      'early_termination_status_check',
+      sql`${t.status} in ('awaiting_approval', 'settled', 'refund_paid', 'rejected')`,
+    ),
+    check(
+      'early_termination_amounts_check',
+      sql`${t.unusedDaysCreditMinor} >= 0 and ${t.appliedMinor} >= 0 and ${t.refundMinor} >= 0`,
+    ),
+    check(
+      'early_termination_paid_check',
+      sql`(${t.status} = 'refund_paid') = (${t.paidEntryId} is not null)
+          and (${t.paidEntryId} is null or (${t.paidOn} is not null and ${t.paidFrom} in ('owner_account', 'agency_account')
+               and ${t.paidReference} is not null and ${t.proofDocumentId} is not null))`,
+    ),
+  ],
+);
+
+/** The refund's draw on each payment's credit (P13 approved: Dr 2010 per payment, Cr 2400). */
+export const earlyTerminationRefundPart = pgTable(
+  'early_termination_refund_part',
+  {
+    id: id(),
+    companyId: companyId(),
+    terminationId: uuid().notNull(),
+    ...leaseRef(),
+    paymentId: uuid().notNull(),
+    amountMinor: minor().notNull(),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('early_termination_refund_part_company_id_id_key').on(t.companyId, t.id),
+    unique('early_termination_refund_part_key').on(t.companyId, t.terminationId, t.paymentId),
+    foreignKey({
+      name: 'early_termination_refund_part_termination_fk',
+      columns: [t.companyId, t.leaseId, t.terminationId],
+      foreignColumns: [earlyTermination.companyId, earlyTermination.leaseId, earlyTermination.id],
+    }),
+    foreignKey({
+      name: 'early_termination_refund_part_lease_fk',
+      columns: [t.companyId, t.propertyId, t.tenantId, t.leaseId],
+      foreignColumns: [lease.companyId, lease.propertyId, lease.tenantId, lease.id],
+    }),
+    foreignKey({
+      name: 'early_termination_refund_part_payment_fk',
+      columns: [t.companyId, t.paymentId],
+      foreignColumns: [payment.companyId, payment.id],
+    }),
+    index('early_termination_refund_part_payment_idx').on(t.companyId, t.paymentId),
+    check('early_termination_refund_part_amount_check', sql`${t.amountMinor} > 0`),
   ],
 );

@@ -1,0 +1,1 @@
+ALTER TABLE "early_termination" ADD COLUMN "figures" jsonb DEFAULT '{}'::jsonb NOT NULL;

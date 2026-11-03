@@ -63,6 +63,21 @@ export const MODULE_MAP = {
     'portfolio',
     'identity',
   ],
+  // M5 (plan section 5): tax in layer 6, above billing; it registers its hooks with billing's
+  // engine, and queues its messages through core.
+  tax: [
+    'billing',
+    'tenancy',
+    'ledger',
+    'approvals',
+    'documents',
+    'rules',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+  ],
 };
 
 const DB_DRIVERS = [

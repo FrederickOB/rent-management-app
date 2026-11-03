@@ -3,6 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, schema, sql, type Tx } from '@rent/db';
 import { templates, type InvoiceDocumentData, type ReceiptDocumentData } from '@rent/documents';
 import {
+  applyCreditToOpenLines,
   creditPools,
   cyclesForAdvance,
   expectedTaxMinor,
@@ -19,6 +20,8 @@ import {
   LINE_KIND_LABELS,
   lineBalance,
   linesToAccrue,
+  maxPaymentWithinCap,
+  monthsPaidAhead,
   paymentCredit,
   paymentShares,
   planAccrual,
@@ -42,23 +45,30 @@ import {
 } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
+import { format, money } from '@rent/domain/money';
+import { verificationWarning } from '@rent/domain/rules';
 import {
   accrualLines,
   carryOverLines,
   compactLines,
+  creditApplicationLines,
   creditDrawLines,
   creditNoteLines,
   lateDrawLines,
   oneOffChargeLines,
   paymentReversalLines,
   receiptLines,
+  refundApprovedLines,
+  refundPaidLines,
   unmatchedArrivalLines,
   unmatchedMatchLines,
   vatChargeLines,
+  withholdingLines,
   writeOffLines,
   type CashAccount,
   type CashSide,
   type JournalLineDraft,
+  type PaymentAmount,
   type PostingRule,
 } from '@rent/domain/ledger';
 import { billingSettingsOf, parseCompanySettings } from '@rent/domain/settings';
@@ -66,7 +76,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { companyRecord, type CompanyRecord } from '../companies/companies.service';
 import { ownerFacts } from '../companies/owners.service';
 import type { Clock } from '../core/clock';
-import { conflict, invalid } from '../core/errors';
+import { AppError, conflict, invalid } from '../core/errors';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
@@ -127,6 +137,53 @@ export interface VatSetting {
   readonly serviceRule: ResolvedRule;
 }
 
+/**
+ * What the tax module (layer 6) does in the posting transaction of a receipt, a payment reversal
+ * and a carry-over (M5 plan 5.1; TX-01, P17, P21): billing sits below tax and never imports it
+ * (architecture section 2), so tax registers these when it starts. Each runs after the event's
+ * own postings, on the lease state as they left it.
+ */
+export interface TaxHooks {
+  afterReceipt(
+    tx: Tx,
+    state: LeaseState,
+    receipt: {
+      readonly payment: PaymentRecord;
+      readonly receiptId: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<void>;
+  afterReversal(
+    tx: Tx,
+    states: readonly LeaseState[],
+    payment: PaymentRecord,
+    reversal: {
+      readonly reversalId: string;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<void>;
+  /** Credit carried to a renewal (P29): applied to its rent, it is taxed now (plan 5.1). */
+  afterCarryOver(
+    tx: Tx,
+    to: LeaseState,
+    carried: {
+      readonly key: string;
+      readonly valueDate: string;
+      readonly credits: readonly PaymentAmount[];
+    },
+  ): Promise<void>;
+}
+
+/** The advance rule for a term (AR-05; Act 220 s.25(5), unverified; OQ-51 for 2 to 6 months). */
+export function advanceRuleKeyFor(periodCount: number): string | null {
+  return periodCount <= 1
+    ? 'advance_rent.max_months.monthly_or_shorter'
+    : periodCount > 6
+      ? 'advance_rent.max_months.over_six_months'
+      : null;
+}
+
 /** Money coming in for a lease (P03, P06, P28): where it sits and where it came from. */
 export interface MoneyIn {
   readonly amountMinor: number;
@@ -181,6 +238,8 @@ export function lastBillableDay(lease: BillingLease): string | null {
  */
 @Injectable()
 export class BillingEngine {
+  private taxHooks: TaxHooks | null = null;
+
   constructor(
     @Inject(PostingService) private readonly posting: PostingService,
     @Inject(DocumentsService) private readonly documents: DocumentsService,
@@ -190,6 +249,15 @@ export class BillingEngine {
 
   today(state: { readonly company: CompanyRecord }): string {
     return isoNow(this.clock, state.company.timeZone);
+  }
+
+  /** The tax module registers its hooks once (M5); without them no rent tax is assessed. */
+  useTaxHooks(hooks: TaxHooks): void {
+    this.taxHooks = hooks;
+  }
+
+  get taxHooksRegistered(): boolean {
+    return this.taxHooks !== null;
   }
 
   // Loading -------------------------------------------------------------------------------------
@@ -373,6 +441,8 @@ export class BillingEngine {
       readonly causedBy?: string | null;
       /** When its one-off and tax lines are charged (P01, P32); the issue date by default. */
       readonly taxPoint?: string;
+      /** What the PDF calls each line (agreed termination charges, M5); the kind's label by default. */
+      readonly labels?: readonly string[];
     },
   ) {
     const { company, lease } = state;
@@ -415,8 +485,8 @@ export class BillingEngine {
       billedTo: { name: lease.tenantName, tin: lease.tenantTinMasked },
       billedFrom: { name: owner.name, tin: owner.tinMasked },
       unit: { code: lease.unitCode, propertyName: lease.propertyName },
-      lines: rows.map((r) => ({
-        label: LINE_KIND_LABELS[r.kind],
+      lines: rows.map((r, i) => ({
+        label: input.labels?.[i] ?? LINE_KIND_LABELS[r.kind],
         periodStart: r.periodStart,
         periodEnd: r.periodEnd,
         rateBps: r.rateBps,
@@ -693,7 +763,14 @@ export class BillingEngine {
       readonly valueDate: string;
       readonly accountingDate: string;
       readonly recordType:
-        'payment' | 'match' | 'accrual' | 'reversal' | 'credit_note' | 'write_off';
+        | 'payment'
+        | 'match'
+        | 'accrual'
+        | 'reversal'
+        | 'credit_note'
+        | 'write_off'
+        | 'withholding'
+        | 'termination';
       readonly recordId: string;
       readonly entryId: string | null;
     },
@@ -918,6 +995,7 @@ export class BillingEngine {
       creditMinor: plan.surplusMinor,
       reverses: null,
     });
+    await this.afterReceipt(tx, state, record!, receiptId, input.causedBy ?? null);
     await enqueueOutbox(tx, {
       companyId: state.company.id,
       type: PAYMENT_POSTED_EVENT,
@@ -1150,6 +1228,7 @@ export class BillingEngine {
       creditMinor: plan.surplusMinor,
       reverses: null,
     });
+    await this.afterReceipt(tx, state, record!, receiptId, matchedBy);
     await enqueueOutbox(tx, {
       companyId: state.company.id,
       type: PAYMENT_POSTED_EVENT,
@@ -1379,6 +1458,12 @@ export class BillingEngine {
       linesFrom: lines,
     });
     for (const s of states) await this.drawCreditToOpen(tx, s, input.today, input.requestedBy);
+    // The payment's rent tax is mirrored (P21; M5 plan 5.1).
+    await this.taxHooks?.afterReversal(tx, states, payment, {
+      reversalId,
+      valueDate: input.today,
+      causedBy: input.requestedBy,
+    });
     return { reversalId, receiptId };
   }
 
@@ -1702,6 +1787,8 @@ export class BillingEngine {
       ...to.allocations,
       ...(await loadAllocations(tx, { leaseIds: [], paymentIds: reloaded.map((p) => p.id) })),
     ]);
+    if (credits.length > 0)
+      await this.taxHooks?.afterCarryOver(tx, to, { key, valueDate, credits });
     return true;
   }
 
@@ -1821,6 +1908,12 @@ export class BillingEngine {
       accountingDate: posted.accountingDate,
     });
     from.payments = from.payments.filter((p) => p.id !== payment.id);
+    if (this.taxHooks)
+      await this.taxHooks.afterCarryOver(tx, await this.load(tx, from.company.id, renewalId), {
+        key: `P29:${renewalId}:${payment.id}`,
+        valueDate,
+        credits: [{ paymentId: payment.id, amountMinor: credit }],
+      });
   }
 
   /** The deposit a lease holds now (2100 on the lease), from the journal. */
@@ -1936,6 +2029,408 @@ export class BillingEngine {
       renderRequestId,
     });
     return receiptId;
+  }
+
+  // M5: months paid ahead, withholding and early termination ------------------------------------
+
+  /** After a receipt's postings: months paid ahead (AR-05), then the tax module's rent tax (P17). */
+  private async afterReceipt(
+    tx: Tx,
+    state: LeaseState,
+    payment: PaymentRecord,
+    receiptId: string,
+    causedBy: string | null,
+  ): Promise<void> {
+    await this.recordAdvance(tx, state, payment);
+    await this.taxHooks?.afterReceipt(tx, state, { payment, receiptId, causedBy });
+  }
+
+  /**
+   * AR-05 (M5 plan 5.5, decision 4): the months the lease is paid ahead after the payment, by the
+   * forward walk, against the advance rule for its term as of the value date and the company's
+   * `advance_rent_policy`. `off` records only; `warn` and `block` flag a payment over the limit
+   * (money a provider confirmed under `block` arrives anyway, and is flagged for a person).
+   */
+  async recordAdvance(tx: Tx, state: LeaseState, payment: PaymentRecord): Promise<void> {
+    const valueDate = payment.row.receivedOn;
+    const months = monthsPaidAhead(this.walk(state), valueDate);
+    const policy = parseCompanySettings(state.company.settings).advanceRentPolicy;
+    const key = advanceRuleKeyFor(state.lease.terms.periodCount);
+    const rule = key ? await this.ruleOrNull(tx, state.company.countryCode, key, valueDate) : null;
+    const value = (rule?.value as { months?: unknown } | null | undefined)?.months;
+    const limit = typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
+    const over = limit !== null && months > limit;
+    await tx
+      .insert(schema.paymentAdvance)
+      .values({
+        companyId: state.company.id,
+        paymentId: payment.id,
+        propertyId: state.lease.propertyId,
+        tenantId: state.lease.tenantId,
+        leaseId: state.lease.id,
+        valueDate,
+        monthsAhead: months,
+        policy,
+        ruleKey: rule ? key : null,
+        ruleId: rule?.ruleId ?? null,
+        limitMonths: limit,
+        overLimit: over,
+        flagged: over && policy !== 'off',
+      })
+      .onConflictDoNothing();
+  }
+
+  /**
+   * The advance rule for the lease's term as of a date, with the company's policy (AR-05): null
+   * rule and limit where none applies (terms of two to six months, OQ-51).
+   */
+  async advanceLimit(
+    tx: Tx,
+    state: LeaseState,
+    date: string,
+  ): Promise<{
+    readonly policy: 'off' | 'warn' | 'block';
+    readonly ruleKey: string | null;
+    readonly rule: ResolvedRule | null;
+    readonly limitMonths: number | null;
+  }> {
+    const policy = parseCompanySettings(state.company.settings).advanceRentPolicy;
+    const key = advanceRuleKeyFor(state.lease.terms.periodCount);
+    const rule = key ? await this.ruleOrNull(tx, state.company.countryCode, key, date) : null;
+    const value = (rule?.value as { months?: unknown } | null | undefined)?.months;
+    const limit = typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
+    return { policy, ruleKey: rule ? key : null, rule, limitMonths: limit };
+  }
+
+  /**
+   * Decision 4 (AR-05): under `block`, cash and transfers are refused when they would pay more
+   * months ahead than the limit; the most they may be is said. `off` and `warn` take any amount
+   * (`warn` flags it once posted). Nothing calls an advance compliant.
+   */
+  async checkAdvanceCap(
+    tx: Tx,
+    state: LeaseState,
+    amountMinor: number,
+    valueDate: string,
+  ): Promise<void> {
+    const limit = await this.advanceLimit(tx, state, valueDate);
+    if (limit.policy !== 'block' || limit.limitMonths === null) return;
+    const walked = new Set(this.walk(state).lines.flatMap((l) => (l.lineId ? [l.lineId] : [])));
+    const otherDue = state.lines
+      .filter((l) => !walked.has(l.id) && l.dueDate <= valueDate)
+      .reduce((s, l) => s + lineBalance(l, state.allocations).outstandingMinor, 0);
+    const max = maxPaymentWithinCap({
+      walk: this.walk(state),
+      valueDate,
+      limitMonths: limit.limitMonths,
+      otherDueMinor: otherDue,
+    });
+    if (amountMinor <= max) return;
+    const warning = limit.rule ? verificationWarning(limit.rule.verificationStatus) : null;
+    throw new AppError(
+      422,
+      'advance_over_limit',
+      `Your company’s setting refuses rent paid more than ${limit.limitMonths} month${limit.limitMonths === 1 ? '' : 's'} ahead for a lease of this length (Act 220 s.25(5)${warning ? `, ${warning}` : ''}). The most this payment may be is ${format(money(max))}.`,
+      { maxMinor: String(max), limitMonths: String(limit.limitMonths) },
+    );
+  }
+
+  /** AR-05 on the lease page: months paid ahead today, the limit, and the payments flagged. */
+  async advanceStatus(tx: Tx, state: LeaseState) {
+    const today = this.today(state);
+    const limit = await this.advanceLimit(tx, state, today);
+    const monthsAhead = monthsPaidAhead(this.walk(state), today);
+    const recorded = await tx
+      .select()
+      .from(schema.paymentAdvance)
+      .where(eq(schema.paymentAdvance.leaseId, state.lease.id))
+      .orderBy(schema.paymentAdvance.valueDate, schema.paymentAdvance.createdAt);
+    const row = (f: (typeof recorded)[number]) => ({
+      paymentId: f.paymentId,
+      valueDate: f.valueDate,
+      monthsAhead: f.monthsAhead,
+      limitMonths: f.limitMonths,
+      ruleId: f.ruleId,
+      policy: f.policy as 'off' | 'warn' | 'block',
+      overLimit: f.overLimit,
+      flagged: f.flagged,
+    });
+    return {
+      policy: limit.policy,
+      monthsAheadNow: monthsAhead,
+      limitMonths: limit.limitMonths,
+      rule: limit.rule
+        ? {
+            ruleId: limit.rule.ruleId,
+            key: limit.rule.key,
+            verificationStatus: limit.rule.verificationStatus,
+          }
+        : null,
+      overLimitNow: limit.limitMonths !== null && monthsAhead > limit.limitMonths,
+      flaggedPayments: recorded.filter((f) => f.flagged).map(row),
+      /** Every payment's months paid ahead, as recorded when it was received (AR-05). */
+      payments: recorded.map(row),
+    };
+  }
+
+  /** A rule in force on a date, or null when the rules table has none (OQ-51). */
+  async ruleOrNull(
+    tx: Tx,
+    country: string,
+    key: string,
+    date: string,
+  ): Promise<ResolvedRule | null> {
+    try {
+      return await this.rules.resolveIn(tx, country, key, parseBusinessDate(date));
+    } catch (error) {
+      if (error instanceof DomainError && error.code === 'rule.missing') return null;
+      throw error;
+    }
+  }
+
+  /**
+   * P19 (TX-04): tax a corporate tenant withheld, pinned to the lines it was withheld on, which
+   * skips the oldest-first order (BC-07): Dr 1150, Cr 1100 per line, with allocation rows of
+   * source `withholding`. Only rent and service-charge months that have started: P19 credits
+   * receivables. The lease is brought up to date first, as every money path does. The tax module
+   * records the withholding itself and its rent tax.
+   */
+  async withhold(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly withholdingId: string;
+      readonly paymentId: string | null;
+      readonly lines: readonly { readonly lineId: string; readonly amountMinor: number }[];
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<PostedEntry> {
+    const book = requireBook(state.book);
+    const today = this.today(state);
+    if (input.valueDate > today)
+      throw invalid('received_in_future', 'The day the tax was withheld cannot be in the future');
+    await this.carryOverIfStarted(tx, state, today);
+    await this.accrue(tx, state, today);
+    for (const l of input.lines) {
+      const line = state.lines.find((x) => x.id === l.lineId);
+      if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
+      if (!isRecurring(line.kind))
+        throw invalid('withholding_line', 'Tax is withheld on rent and service charge only');
+      if (!line.accrued)
+        throw invalid(
+          'withholding_not_started',
+          'Record withholding on a month that has started: its rent is not owed before then',
+        );
+    }
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P19',
+      key: `P19:${input.withholdingId}`,
+      valueDate: input.valueDate,
+      lines: withholdingLines({
+        bookId: book.bookId,
+        lease: dimsOf(state.lease),
+        paymentId: input.paymentId,
+        lines: input.lines.map((l) => ({ invoiceLineId: l.lineId, amountMinor: l.amountMinor })),
+      }),
+      record: { type: 'withholding', id: input.withholdingId },
+      causedBy: input.causedBy,
+    });
+    await this.writeAllocations(
+      tx,
+      state,
+      input.lines.map((l) => ({
+        lineId: l.lineId,
+        source: 'withholding' as const,
+        paymentId: null,
+        amountMinor: l.amountMinor,
+      })),
+      {
+        valueDate: input.valueDate,
+        accountingDate: posted!.accountingDate,
+        recordType: 'withholding',
+        recordId: input.withholdingId,
+        entryId: posted!.entryId,
+      },
+    );
+    return posted!;
+  }
+
+  /** AR-04: agreed termination charges, one invoice of one-off lines (P01), named on the PDF. */
+  async issueCharges(
+    tx: Tx,
+    state: LeaseState,
+    charges: readonly { readonly description: string; readonly amountMinor: number }[],
+    today: string,
+    causedBy: string | null,
+  ): Promise<string[]> {
+    if (charges.length === 0) return [];
+    const issued = await this.issue(tx, state, {
+      kind: 'one_off',
+      drafts: charges.map((c) => ({
+        kind: 'one_off' as const,
+        chargePeriodId: null,
+        periodStart: null,
+        periodEnd: null,
+        amountMinor: c.amountMinor,
+        rateBps: null,
+        baseIndex: null,
+      })),
+      labels: charges.map((c) => c.description.slice(0, 120)),
+      dueDate: today,
+      issueDate: today,
+      periodFrom: null,
+      periodTo: null,
+      cycleStart: null,
+      holdingOver: false,
+      vat: null,
+      causedBy,
+    });
+    return issued.lines.map((l) => l.id);
+  }
+
+  /**
+   * P13 apply (AR-04): the lease's credit pays its open charged lines, oldest debt first, each
+   * draw first in, first out by payment (Dr 2010, Cr 1100). Deposits wait for the move-out (M8).
+   * Returns what was applied to each line.
+   */
+  async applyCreditToOpen(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly terminationId: string;
+      /** Which application of the settlement: the open lines, then the deductions. */
+      readonly key: 'apply' | 'deductions';
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<{ readonly lineId: string; readonly amountMinor: number }[]> {
+    const pools = creditPools(state.payments, state.allocations);
+    const { applications } = applyCreditToOpenLines(state.lines, state.allocations, pools);
+    if (applications.length === 0) return [];
+    const book = requireBook(state.book);
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P13',
+      key: `P13:${input.terminationId}:${input.key}`,
+      valueDate: input.valueDate,
+      lines: creditApplicationLines({
+        bookId: book.bookId,
+        lease: dimsOf(state.lease),
+        applications: applications.map((a) => ({ invoiceLineId: a.lineId, draws: a.draws })),
+      }),
+      record: { type: 'early_termination', id: input.terminationId },
+      causedBy: input.causedBy,
+    });
+    const rows = applications.flatMap((a) =>
+      a.draws.map((d) => ({
+        lineId: a.lineId,
+        source: 'payment' as const,
+        paymentId: d.paymentId,
+        amountMinor: d.amountMinor,
+      })),
+    );
+    await this.writeAllocations(tx, state, rows, {
+      valueDate: input.valueDate,
+      accountingDate: posted!.accountingDate,
+      recordType: 'termination',
+      recordId: input.terminationId,
+      entryId: posted!.entryId,
+    });
+    return applications.map((a) => ({
+      lineId: a.lineId,
+      amountMinor: a.draws.reduce((sum, d) => sum + d.amountMinor, 0),
+    }));
+  }
+
+  /**
+   * P13 refund approved (AR-04, decision 6): the credit left becomes a refund payable, payment by
+   * payment, first in first out (Dr 2010, Cr 2400). Each payment's share is recorded, so its
+   * credit is reduced by what was refunded.
+   */
+  async approveRefund(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly terminationId: string;
+      readonly amountMinor: number;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+      /** False only in a preview, which has no termination row to hang the shares on. */
+      readonly recordParts?: boolean;
+    },
+  ): Promise<PostedEntry> {
+    const pools = creditPools(state.payments, state.allocations);
+    const credits: PaymentAmount[] = [];
+    let need = input.amountMinor;
+    for (const pool of pools) {
+      if (need === 0) break;
+      const take = Math.min(pool.amountMinor, need);
+      credits.push({ paymentId: pool.paymentId, amountMinor: take });
+      need -= take;
+    }
+    if (need > 0 || input.amountMinor <= 0)
+      throw conflict('refund_over_credit', 'The lease no longer holds this much credit to refund');
+    const book = requireBook(state.book);
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P13',
+      key: `P13:${input.terminationId}:refund`,
+      valueDate: input.valueDate,
+      lines: refundApprovedLines({ bookId: book.bookId, lease: dimsOf(state.lease), credits }),
+      record: { type: 'early_termination', id: input.terminationId },
+      causedBy: input.causedBy,
+    });
+    if (input.recordParts === false) return posted!;
+    await tx.insert(schema.earlyTerminationRefundPart).values(
+      credits.map((c) => ({
+        companyId: state.company.id,
+        terminationId: input.terminationId,
+        propertyId: state.lease.propertyId,
+        tenantId: state.lease.tenantId,
+        leaseId: state.lease.id,
+        paymentId: c.paymentId,
+        amountMinor: c.amountMinor,
+      })),
+    );
+    state.payments = (
+      await paymentsByIds(
+        tx,
+        state.payments.map((p) => p.id),
+      )
+    ).filter((p) => p.reversedAccountingDate === null);
+    return posted!;
+  }
+
+  /** P13 refund paid outside the platform (D1), with a reference and proof: Dr 2400, Cr 1010 or 1070. */
+  async payRefund(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly terminationId: string;
+      readonly amountMinor: number;
+      readonly from: '1010' | '1070';
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<PostedEntry> {
+    const book = requireBook(state.book);
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P13',
+      key: `P13:${input.terminationId}:paid`,
+      valueDate: input.valueDate,
+      lines: refundPaidLines({
+        bookId: book.bookId,
+        lease: dimsOf(state.lease),
+        from: input.from,
+        amountMinor: input.amountMinor,
+      }),
+      record: { type: 'early_termination', id: input.terminationId },
+      causedBy: input.causedBy,
+    });
+    return posted!;
   }
 
   // The forward walk (AR-02, AR-03; plan 4.7) -------------------------------------------------------

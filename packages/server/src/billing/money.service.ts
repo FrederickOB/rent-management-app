@@ -9,6 +9,7 @@ import {
 } from '@rent/domain/billing';
 import { DomainError } from '@rent/domain/errors';
 import type { Actor, StaffRole } from '@rent/domain/policy';
+import { parseCompanySettings } from '@rent/domain/settings';
 import { v7 as uuidv7 } from 'uuid';
 import { z } from 'zod';
 import { ApprovalsService, type ApprovalView } from '../approvals/approvals.service';
@@ -289,6 +290,7 @@ export class MoneyService {
       if (!PAYABLE.includes(lease.status))
         throw conflict('lease_not_billable', 'Money can be recorded only for a signed lease');
       await this.checkReceivedOn(tx, staff.companyId, input.receivedOn);
+      await this.checkAdvance(tx, staff.companyId, lease.id, input.amountMinor, input.receivedOn);
       if (!(await activeMemberIds(tx, [collector])).has(collector))
         throw invalid('collector', 'The collector must be an active member of your company');
       const photoDocumentId = await this.documents.recordStagedEvidence(tx, staged, 'cash_photo');
@@ -340,6 +342,24 @@ export class MoneyService {
     return { cashRecordId, approvalId };
   }
 
+  /**
+   * AR-05, decision 4 (M5): under `advance_rent_policy = block` the cash and transfer forms refuse
+   * an amount that would pay more months ahead than the limit for the lease's term.
+   */
+  private async checkAdvance(
+    tx: Tx,
+    companyId: string,
+    leaseId: string,
+    amountMinor: number,
+    receivedOn: string,
+  ): Promise<void> {
+    const company = await companyRecord(tx, companyId);
+    if (parseCompanySettings(company?.settings).advanceRentPolicy !== 'block') return;
+    const state = await this.engine.load(tx, companyId, leaseId);
+    if (state.book.kind !== 'book') return;
+    await this.engine.checkAdvanceCap(tx, state, amountMinor, receivedOn);
+  }
+
   private async checkReceivedOn(tx: Tx, companyId: string, date: string): Promise<void> {
     const company = await companyRecord(tx, companyId);
     if (date > isoNow(this.clock, company!.timeZone))
@@ -384,6 +404,7 @@ export class MoneyService {
         if (input.ownerId && input.ownerId !== book.ownerId)
           throw invalid('owner', 'This lease’s rent is due to another owner');
         ownerId = book.ownerId;
+        await this.checkAdvance(tx, staff.companyId, lease.id, input.amountMinor, input.receivedOn);
       } else if (input.receivedInto === 'owner_account') {
         if (!input.ownerId) throw invalid('owner_required', 'Say whose account it went into');
         if (!(await ownerFacts(tx, [input.ownerId])).has(input.ownerId)) throw notFound('Owner');
@@ -610,7 +631,7 @@ export class MoneyService {
         sql`select count(*)::int as n from unmatched_refund where payment_id = ${paymentId}
             and status in ('awaiting_approval', 'approved', 'sent', 'refunded')`,
       );
-      if ((refunds.rows[0]?.n ?? 0) > 0)
+      if ((refunds.rows[0]?.n ?? 0) > 0 || payment.refundedMinor > 0)
         throw conflict(
           'payment_refunded',
           'This money is being or has been refunded to its payer, so it cannot also be reversed',

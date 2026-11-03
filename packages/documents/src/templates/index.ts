@@ -20,3 +20,4 @@ export {
 export { leaseV1, type LeaseDocumentData } from './lease';
 export { signingCertificateV1, type SigningCertificateData } from './signing-certificate';
 export { systemSampleV1, type SystemSampleData } from './system-sample';
+export { rentTaxReportV1, type RentTaxReportData } from './tax';

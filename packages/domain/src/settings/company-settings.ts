@@ -65,8 +65,18 @@ export const companySettingsSchema = z
       .optional(),
     /** BC-04: the landlord's own payment instructions, shown when online payment is unavailable. */
     manualPaymentInstructions: z.string().trim().max(500).nullable().optional(),
+    // M5 (plan 5.5), optional so stored settings stay valid.
+    /** AR-06: days before paid-until that the renewal prompt goes; 90 when unset. */
+    paidUntilPromptDays: z.number().int().min(7).max(366).optional(),
   })
   .strict();
+
+/** AR-06: the renewal prompt goes when paid-until is this many days away (the PRD's 90). */
+export const DEFAULT_PAID_UNTIL_PROMPT_DAYS = 90;
+
+/** The AR-06 prompt's lead, with its default applied. */
+export const paidUntilPromptDaysOf = (settings: CompanySettings): number =>
+  settings.paidUntilPromptDays ?? DEFAULT_PAID_UNTIL_PROMPT_DAYS;
 
 export type CompanySettings = z.infer<typeof companySettingsSchema>;
 

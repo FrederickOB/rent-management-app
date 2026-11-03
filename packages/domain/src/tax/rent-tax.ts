@@ -143,7 +143,10 @@ export function receiptTax(
   };
 }
 
-/** The periods as the walk covers them, with what live tax items already pin to each. */
+/**
+ * The periods as the walk covers them, with what live tax items already pin to each. The walk's
+ * VAT and levy lines (M4a review 10) are never rent: they are left out, so VAT is never taxed.
+ */
 export function taxPeriodsFromWalk(input: {
   readonly walk: WalkResult;
   /** The charge period behind each walk line (invoice line id or charge period id). */
@@ -151,19 +154,21 @@ export function taxPeriodsFromWalk(input: {
   readonly taxed: ReadonlyMap<string, { readonly baseMinor: number; readonly taxMinor: number }>;
   readonly withheld: ReadonlySet<string>;
 }): TaxPeriod[] {
-  return input.walk.lines.map((line) => {
-    const key = input.periodKeyOf(line.key);
-    const covered = Math.min(line.netMinor, line.settledMinor + line.creditMinor);
-    return {
-      key,
-      kind: line.chargeType,
-      amountMinor: line.netMinor,
-      coveredMinor: covered,
-      taxedBaseMinor: input.taxed.get(key)?.baseMinor ?? 0,
-      taxMinor: input.taxed.get(key)?.taxMinor ?? 0,
-      withheld: input.withheld.has(key),
-    };
-  });
+  return input.walk.lines
+    .filter((line) => !line.tax)
+    .map((line) => {
+      const key = input.periodKeyOf(line.key);
+      const covered = Math.min(line.netMinor, line.settledMinor + line.creditMinor);
+      return {
+        key,
+        kind: line.chargeType,
+        amountMinor: line.netMinor,
+        coveredMinor: covered,
+        taxedBaseMinor: input.taxed.get(key)?.baseMinor ?? 0,
+        taxMinor: input.taxed.get(key)?.taxMinor ?? 0,
+        withheld: input.withheld.has(key),
+      };
+    });
 }
 
 /** TX-02: due a set number of days after the value date, alerted on the alert days. */

@@ -21,6 +21,11 @@ export interface TemplateDefinition<Schema extends z.ZodType> {
   /** Strict, with no defaults or transforms, so the stored data is exactly what was rendered. */
   readonly schema: Schema;
   readonly Component: ComponentType<TemplateProps<z.output<Schema>>>;
+  /**
+   * A report that must regenerate byte for byte (M5, TX-03) names the date its PDF carries as its
+   * creation and modification dates, from its data; other documents carry the time of rendering.
+   */
+  readonly pdfDate?: (data: z.output<Schema>) => string;
 }
 
 /** A template with its types erased, so templates with different data can share a registry. */
@@ -31,6 +36,8 @@ export interface Template {
   readonly schema: z.ZodType;
   /** Validates `data` and returns the element to render. Throws `invalid_data`. */
   element(data: unknown, branding: Branding): ReactElement;
+  /** The fixed date for the PDF's own dates (YYYY-MM-DD), or null to keep the rendering time. */
+  pdfDate(data: unknown): string | null;
 }
 
 const TEMPLATE_KEY = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/;
@@ -38,7 +45,7 @@ const TEMPLATE_KEY = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/;
 export function defineTemplate<Schema extends z.ZodType>(
   definition: TemplateDefinition<Schema>,
 ): Template {
-  const { key, version, title, schema, Component } = definition;
+  const { key, version, title, schema, Component, pdfDate } = definition;
   if (!TEMPLATE_KEY.test(key)) {
     throw new DocumentError('invalid_template', `Template keys look like area.name, not ${key}`);
   }
@@ -60,6 +67,11 @@ export function defineTemplate<Schema extends z.ZodType>(
         );
       }
       return createElement(Component, { data: parsed.data, branding });
+    },
+    pdfDate(data: unknown): string | null {
+      if (!pdfDate) return null;
+      const parsed = schema.safeParse(data);
+      return parsed.success ? pdfDate(parsed.data) : null;
     },
   });
 }

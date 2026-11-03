@@ -51,6 +51,9 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   'settlement_account.change': '10100000',
   'payment.refund_unmatched': '10101000',
   'settlement_account.reveal': '10100000',
+  // M5 (docs/plans/M5.md decisions 3 and 5).
+  'tax.manage': '10101000',
+  'withholding.confirm': '11100000',
   'tenant.view': '11111110',
   'tenant.view_details': '11111010',
   'tenant.manage': '10110000',

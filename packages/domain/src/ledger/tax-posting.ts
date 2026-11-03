@@ -22,7 +22,8 @@ type OwnAccount = Extract<CashAccount, '1010' | '1070'>;
 export function rentTaxLines(input: {
   readonly bookId: string;
   readonly lease: LeaseDimensions;
-  readonly paymentId: string;
+  /** The receipt's payment; null for credit carried to a renewal from several payments (P29). */
+  readonly paymentId: string | null;
   readonly lines: readonly { readonly invoiceLineId: string | null; readonly taxMinor: number }[];
 }): JournalLineDraft[] {
   return compactLines(
@@ -43,21 +44,55 @@ export function rentTaxLines(input: {
   );
 }
 
+/**
+ * P21 for rent tax (M5 plan 5.1, 5.2): tax accrued earlier taken back, per period: a payment
+ * reversed mirrors its receipt's tax, and withholding replaces the tax accrued on the cash of the
+ * lines it was withheld on. Dr 2200, Cr 5300.
+ */
+export function rentTaxReversalLines(input: {
+  readonly bookId: string;
+  readonly lease: LeaseDimensions;
+  readonly paymentId: string | null;
+  readonly lines: readonly { readonly invoiceLineId: string | null; readonly taxMinor: number }[];
+}): JournalLineDraft[] {
+  return compactLines(
+    input.lines.flatMap((l) => {
+      const dims = {
+        bookId: input.bookId,
+        ...input.lease,
+        paymentId: input.paymentId,
+        invoiceLineId: l.invoiceLineId,
+      };
+      if (!Number.isSafeInteger(l.taxMinor) || l.taxMinor < 0)
+        throw new DomainError('ledger.bad_amount', 'Tax taken back is zero or more pesewas');
+      return [
+        { ...dims, accountCode: '2200' as const, amountMinor: l.taxMinor },
+        { ...dims, accountCode: '5300' as const, amountMinor: -l.taxMinor },
+      ];
+    }),
+  );
+}
+
 /** P18: rent tax paid to GRA from the owner's account (1010) or by the agent (1070), per item. */
 export function graPaymentLines(input: {
   readonly bookId: string;
   readonly from: OwnAccount;
-  readonly items: readonly PaymentAmount[];
+  readonly items: readonly (Omit<PaymentAmount, 'paymentId'> & {
+    readonly paymentId: string | null;
+    /** The item's lease, so the payable clears where it was accrued (M5). */
+    readonly lease?: LeaseDimensions;
+  })[];
   readonly propertyId?: string | null;
 }): JournalLineDraft[] {
   const total = input.items.reduce((sum, i) => sum + positive(i.amountMinor, 'A settled item'), 0);
   return compactLines([
     ...input.items.map((i) => ({
       bookId: input.bookId,
+      ...(i.lease ?? {}),
       accountCode: '2200' as const,
       amountMinor: i.amountMinor,
       paymentId: i.paymentId,
-      propertyId: input.propertyId ?? null,
+      propertyId: i.lease?.propertyId ?? input.propertyId ?? null,
     })),
     {
       bookId: input.bookId,
@@ -75,7 +110,8 @@ export function graPaymentLines(input: {
 export function withholdingLines(input: {
   readonly bookId: string;
   readonly lease: LeaseDimensions;
-  readonly paymentId: string;
+  /** The payment the tenant paid net with; null when the tenant advised it on its own. */
+  readonly paymentId: string | null;
   readonly lines: readonly { readonly invoiceLineId: string; readonly amountMinor: number }[];
 }): JournalLineDraft[] {
   return compactLines(
@@ -102,7 +138,7 @@ export function withholdingLines(input: {
 export function certificateLines(input: {
   readonly bookId: string;
   readonly lease: LeaseDimensions;
-  readonly paymentId: string;
+  readonly paymentId: string | null;
   readonly debit: '2200' | '1160';
   readonly amountMinor: number;
 }): JournalLineDraft[] {
@@ -118,7 +154,7 @@ export function certificateLines(input: {
 export function withholdingWriteOffLines(input: {
   readonly bookId: string;
   readonly lease: LeaseDimensions;
-  readonly paymentId: string;
+  readonly paymentId: string | null;
   readonly amountMinor: number;
 }): JournalLineDraft[] {
   const amount = positive(input.amountMinor, 'The write-off');

@@ -8,3 +8,4 @@ export * from './messaging';
 export * from './ledger';
 export * from './billing';
 export * from './payments';
+export * from './tax';

@@ -162,6 +162,27 @@
       "when": 1793711935229,
       "tag": "0022_tenant_receipt_documents",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793719553458,
+      "tag": "0023_tax",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793719625742,
+      "tag": "0024_tax_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793722261784,
+      "tag": "0025_termination_figures",
+      "breakpoints": true
     }
   ]
 }

@@ -44,6 +44,9 @@ export const companySettingsSchema = z.object({
     .min(1)
     .max(5)
     .optional(),
+  // M5 (plan 5.5), optional so clients written before M5 keep their types.
+  /** AR-06: days before paid-until that the renewal prompt goes; GET returns 90 when unset. */
+  paidUntilPromptDays: z.number().int().min(7).max(366).optional(),
 });
 
 export const companyProfileSchema = z.object({

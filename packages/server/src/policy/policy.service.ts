@@ -1,12 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import type { CompanyContext } from '@rent/db';
 import {
+  actsForOwner,
   can,
   scopeOf,
   type Actor,
-  type ApprovalResource,
   type Decision,
   type PolicyAction,
+  type PolicyResource,
   type ScopeIds,
 } from '@rent/domain/policy';
 import { forbidden } from '../core/errors';
@@ -33,12 +34,17 @@ export function staffContext(actor: StaffActor, requestId?: string | null): Comp
  */
 @Injectable()
 export class PolicyService {
-  can(actor: Actor, action: PolicyAction, resource?: ApprovalResource): Decision {
+  can(actor: Actor, action: PolicyAction, resource?: PolicyResource): Decision {
     return can(actor, action, resource);
   }
 
+  /** Whether a person is a user for an owner (M5 decision 3: who confirms a certificate). */
+  actsForOwner(actor: Actor, ownerId: string): boolean {
+    return actsForOwner(actor, ownerId);
+  }
+
   /** Refuses with the policy's message for people when it gives one, else the plain refusal. */
-  assert(actor: Actor, action: PolicyAction, resource?: ApprovalResource): void {
+  assert(actor: Actor, action: PolicyAction, resource?: PolicyResource): void {
     const decision = can(actor, action, resource);
     if (!decision.allowed) throw forbidden(decision.message);
   }

@@ -5,11 +5,13 @@ import { DocumentsModule } from '../documents/documents.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RulesModule } from '../rules/rules.module';
+import { AdvanceService } from './advance.service';
 import { BillingReadService } from './billing-read.service';
 import { BillingEngine } from './engine';
 import { InvoicingService } from './invoicing.service';
 import { MoneyService } from './money.service';
 import { SubledgerCheckService } from './subledger-check.service';
+import { TerminationService } from './termination.service';
 
 const SERVICES = [
   BillingEngine,
@@ -17,6 +19,9 @@ const SERVICES = [
   MoneyService,
   BillingReadService,
   SubledgerCheckService,
+  // M5: early termination (AR-04), and advance rent and the paid-until prompt (AR-05, AR-06).
+  TerminationService,
+  AdvanceService,
 ];
 
 /**
@@ -31,10 +36,17 @@ const SERVICES = [
   exports: SERVICES,
 })
 export class BillingModule implements OnModuleInit {
-  constructor(@Inject(MoneyService) private readonly money: MoneyService) {}
+  constructor(
+    @Inject(MoneyService) private readonly money: MoneyService,
+    @Inject(TerminationService) private readonly termination: TerminationService,
+  ) {}
 
-  /** Cash, transfers, banking and every correction are two-person actions (decision 3). */
+  /**
+   * Cash, transfers, banking and every correction are two-person actions (decision 3), and so is
+   * an early termination's refund (M5 decision 6).
+   */
   onModuleInit(): void {
     this.money.registerApprovals();
+    this.termination.registerApprovals();
   }
 }

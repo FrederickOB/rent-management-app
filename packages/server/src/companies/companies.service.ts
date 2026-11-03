@@ -4,6 +4,7 @@ import type { Actor } from '@rent/domain/policy';
 import {
   brandingSchema,
   mergeCompanySettings,
+  paidUntilPromptDaysOf,
   parseCompanySettings,
   signingReminderHoursOf,
   tenancySettingsOf,
@@ -165,5 +166,7 @@ function settingsInForce(settings: CompanySettings): CompanySettings {
     rentControlReminderDaysBefore: [...tenancy.rentControlReminderDaysBefore],
     stampingReminderDaysBefore: [...tenancy.stampingReminderDaysBefore],
     signingReminderHours: [...signingReminderHoursOf(settings)],
+    // M5 (AR-06): the renewal prompt's lead, 90 days unless the company sets another.
+    paidUntilPromptDays: paidUntilPromptDaysOf(settings),
   };
 }
