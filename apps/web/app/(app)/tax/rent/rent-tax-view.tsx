@@ -7,6 +7,7 @@ import { useApp } from '@/components/app-context';
 import { primaryLink, secondaryLink } from '@/components/link-styles';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
 import { RentTaxTable } from '@/components/rent-tax-table';
+import { RuleList } from '@/components/rule-list';
 import { RulesWarning } from '@/components/rules-warning';
 import { TaxFileButton } from '@/components/tax-file-button';
 import { Alert } from '@/components/ui/alert';
@@ -116,6 +117,7 @@ function DueSection({
           <LoadFailed message={state.problem.message} onRetry={reload} />
         ) : null}
         {state.status === 'ready' ? <RulesWarning rules={rules} /> : null}
+        {state.status === 'ready' ? <RuleList rules={rules} /> : null}
         {state.status === 'ready' && items.length === 0 ? (
           <Empty>Nothing is owed to GRA.</Empty>
         ) : null}
@@ -310,6 +312,7 @@ function ReportBody({
   return (
     <div className="space-y-4">
       <RulesWarning rules={report.items.flatMap((i) => i.rules)} apiWarnings={report.warnings} />
+      <RuleList rules={report.items.flatMap((i) => i.rules)} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium text-slate-900">
           {report.ownerName}, {periodWords({ from: report.from, to: report.to })}

@@ -41,6 +41,18 @@ export interface TerminationFigures {
   readonly unusedDaysCreditMinor: number;
   /** The prepayment applied to open lines, oldest first (P13 apply). */
   readonly appliedMinor: number;
+  /**
+   * What the prepayment paid on each line, oldest first, deductions included: the API's figures,
+   * so the lines add up to `appliedMinor`. Absent from figures read before the API gave them.
+   */
+  readonly appliedLines?: readonly {
+    readonly lineId: string;
+    readonly invoiceNumber: string;
+    readonly label: string;
+    readonly periodStart: string | null;
+    readonly periodEnd: string | null;
+    readonly amountMinor: number;
+  }[];
   /** The prepayment left once open lines are paid: the most deductions and the refund can take. */
   readonly creditLeftMinor: number;
   readonly deductionsMinor: number;
@@ -55,6 +67,13 @@ export interface TerminationStep {
   readonly lines: readonly { readonly label: string; readonly amount: string }[];
   readonly total: string | null;
   readonly note: string | null;
+}
+
+/** `INV-000123 Rent, 1 Nov 2026 to 30 Nov 2026`: the line the prepayment paid. */
+function appliedLabel(line: NonNullable<TerminationFigures['appliedLines']>[number]): string {
+  const period = periodLabel(line.periodStart, line.periodEnd);
+  const label = period && !line.label.includes(period) ? `${line.label}, ${period}` : line.label;
+  return line.invoiceNumber ? `${line.invoiceNumber} ${label}` : label;
 }
 
 const amountLines = (items: readonly AmountLine[]) =>
@@ -93,7 +112,10 @@ export function terminationSteps(
     {
       key: 'applied',
       title: '3. Prepayment applied to open charges, oldest first',
-      lines: [],
+      lines: (figures.appliedLines ?? []).map((line) => ({
+        label: appliedLabel(line),
+        amount: formatMinor(line.amountMinor),
+      })),
       total: formatMinor(figures.appliedMinor),
       note: `${formatMinor(figures.creditBeforeMinor)} was paid ahead. ${formatMinor(figures.creditLeftMinor)} is left once the open charges are paid.`,
     },

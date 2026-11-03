@@ -38,14 +38,12 @@ export default async function PaymentPage({ params }: { readonly params: Params 
   // M5 (TX-04): a company tenant may have withheld tax from this payment.
   const lease =
     loaded.data.leaseId && allowed(me, 'lease.view') ? await loadLease(loaded.data.leaseId) : null;
-  const withholding =
-    lease?.ok && lease.data.access === 'full' && lease.data.tenant.kind === 'company'
-      ? { leaseUse: lease.data.use }
-      : null;
+  const companyTenant =
+    lease?.ok && lease.data.access === 'full' ? lease.data.tenant.kind === 'company' : false;
   return (
     <PaymentDetailView
       initial={loaded.data}
-      withholding={withholding}
+      companyTenant={companyTenant}
       can={{
         manage: allowed(me, 'billing.manage'),
         match: allowed(me, 'payments.match'),

@@ -68,8 +68,15 @@ export function RentTaxTable({
             </Td>
             <Td className="text-right tabular-nums">{formatMinor(item.baseMinor)}</Td>
             <Td className="text-right tabular-nums">{rateLabel(item.rateBps)}</Td>
-            <Td className="text-right tabular-nums" data-testid="rent-tax-amount">
-              {formatMinor(item.taxMinor)}
+            <Td className="text-right">
+              <span className="tabular-nums" data-testid="rent-tax-amount">
+                {formatMinor(item.taxMinor)}
+              </span>
+              {item.warning ? (
+                <p className="text-xs font-medium text-amber-900" data-testid="rent-tax-unverified">
+                  Unverified rule
+                </p>
+              ) : null}
             </Td>
             <Td className="text-right tabular-nums" data-testid="rent-tax-outstanding">
               {isOwed(item.status) ? formatMinor(item.outstandingMinor) : '—'}

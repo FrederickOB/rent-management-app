@@ -21,8 +21,9 @@ export class RenderFailed extends Error {
 }
 
 /**
- * Checks a render until it is ready, waiting between checks, and gives its short-lived link. It
- * gives up after `attempts` checks (about half a minute by default) rather than wait for ever.
+ * Checks a render until it reports `ready`, waiting between checks, and gives its short-lived
+ * link. It gives up after `attempts` checks (about a minute and a half by default, for a worker
+ * with a queue) rather than wait for ever.
  */
 export async function waitForRender(
   check: () => Promise<RenderCheck>,
@@ -32,7 +33,7 @@ export async function waitForRender(
     readonly intervalMs?: number;
   } = {},
 ): Promise<string> {
-  const attempts = options.attempts ?? 30;
+  const attempts = options.attempts ?? 90;
   const wait = options.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const result = await check();

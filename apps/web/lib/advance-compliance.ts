@@ -130,6 +130,29 @@ export interface LeaseAdvance {
     readonly limitMonths: number | null;
     readonly policy: AdvancePolicy;
   }[];
+  /** Every payment's months paid ahead, as recorded when it arrived (absent from older answers). */
+  readonly payments?: readonly PaymentAheadRow[];
+}
+
+/** One payment's months paid ahead, as the API recorded it when the money arrived (AR-05). */
+export interface PaymentAheadRow {
+  readonly paymentId: string;
+  readonly monthsAhead: number;
+  readonly flagged: boolean;
+}
+
+/**
+ * A payment's months ahead for the lease's payments table: recorded under every policy, and
+ * marked over the limit only when the company flags it (`warn` or `block`; never under `off`, D6).
+ */
+export function paymentAheadCell(row: Pick<PaymentAheadRow, 'monthsAhead' | 'flagged'>): {
+  readonly text: string;
+  readonly flagged: boolean;
+} {
+  return {
+    text: row.monthsAhead === 0 ? 'None ahead' : `${months(row.monthsAhead)} ahead`,
+    flagged: row.flagged,
+  };
 }
 
 /**

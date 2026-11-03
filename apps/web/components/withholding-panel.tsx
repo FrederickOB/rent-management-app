@@ -18,8 +18,10 @@ import {
 } from '@/lib/idempotency';
 import { useHoldWhileSending } from '@/lib/in-flight';
 import { waitingNote } from '@/lib/money-requests';
+import { pastDateProblem } from '@/lib/payment-form';
 import { fileAgainMessage, needsFileAgain } from '@/lib/payment-upload';
 import { TAX_LIMITS } from '@/lib/tax-limits';
+import { verificationLabel } from '@/lib/tax-rules';
 import { TAX_FILE_UPLOAD, taxUploadOnce } from '@/lib/tax-upload';
 import { formatMinor } from '@/lib/tenancy-format';
 import { fileProblem, StorageUploadError } from '@/lib/upload';
@@ -28,36 +30,32 @@ import {
   certificateEffect,
   certificateForm,
   certificateRejectForm,
+  differsWarning,
   emptyWithholding,
+  optionLines,
   rateNote,
-  suggestedInput,
-  withholdableLines,
+  suggestionFor,
   withholdingForm,
   withholdingMoves,
-  withholdingRate,
   withholdingWriteOffForm,
   type CertificateDraft,
-  type WithholdableLine,
   type WithholdingDraft,
 } from '@/lib/withholding';
 import { useApp } from './app-context';
 import { FileField } from './file-field';
 import { Empty, Loading, LoadFailed } from './load-state';
+import { RuleList } from './rule-list';
 import { RulesWarning } from './rules-warning';
 import { TaxFileButton } from './tax-file-button';
 import { WithholdingStatusBadge } from './tax-badges';
 import { Alert } from './ui/alert';
 import { Button } from './ui/button';
 import { Card, CardBody, CardHeader } from './ui/card';
-import { TextAreaField, TextField } from './ui/field';
+import { SelectField, TextAreaField, TextField } from './ui/field';
 
 type WithholdingRecord = Awaited<ReturnType<ApiClient['withholding']['list']>>[number];
-
-/** The record form's choices: the lines still owed, and the rate for the lease's use. */
-interface WithholdingOptions {
-  readonly lines: readonly WithholdableLine[];
-  readonly rate: ReturnType<typeof withholdingRate>;
-}
+/** The record form's choices: the started months still owed, the rule's rate, recent payments. */
+type WithholdingOptions = Awaited<ReturnType<ApiClient['withholding']['options']>>;
 
 export interface WithholdingPermissions {
   /** billing.manage: record withholding, upload a certificate, ask for a write-off (P24). */
@@ -74,14 +72,11 @@ export interface WithholdingPermissions {
  */
 export function WithholdingPanel({
   leaseId,
-  leaseUse,
   paymentId = null,
   paymentDate = null,
   can,
 }: {
   readonly leaseId: string;
-  /** The withholding rate is the rule for the lease's use (`withholding_tax.rate.*`). */
-  readonly leaseUse: 'residential' | 'commercial';
   /** On a payment's page: the withholding recorded with it, and new withholding is pinned to it. */
   readonly paymentId?: string | null;
   readonly paymentDate?: string | null;
@@ -107,7 +102,7 @@ export function WithholdingPanel({
     <Card data-testid="withholding">
       <CardHeader
         title="Withholding tax"
-        description="Tax a company tenant withheld from rent and pays to GRA itself. Its certificate settles the owner’s rent tax on those lines once a landlord user confirms it."
+        description="Tax a company tenant withheld from rent and pays to GRA itself. Its certificate settles the owner’s rent tax on those months once a landlord user confirms it. When the tenant pays net, record the withholding before the payment."
         actions={
           can.manage && !recording ? (
             <Button variant="secondary" onClick={() => setRecording(true)}>
@@ -130,7 +125,6 @@ export function WithholdingPanel({
         {recording ? (
           <RecordForm
             leaseId={leaseId}
-            leaseUse={leaseUse}
             paymentId={paymentId}
             paymentDate={paymentDate}
             keeper={recordKeeper}
@@ -232,6 +226,10 @@ function WithholdingItem({
         </Alert>
       ) : null}
       <RulesWarning rules={[record.rule]} live={false} />
+      <RuleList
+        rules={[record.rule]}
+        label={`The rate it is compared with: ${rateLabel(record.rateBps)}`}
+      />
       {record.note ? <p className="text-sm text-slate-700">Note: {record.note}</p> : null}
 
       {certificate ? (
@@ -245,14 +243,21 @@ function WithholdingItem({
           </div>
           <div>
             <dt className="text-slate-600">Uploaded by</dt>
-            <dd>
-              {certificate.uploadedBy === personId ? 'You' : 'Another person in your company'}
+            <dd data-testid="certificate-uploaded-by">
+              {certificate.uploadedBy === personId
+                ? 'You'
+                : (certificate.uploadedByName ?? 'Another person in your company')}
             </dd>
           </div>
           {certificate.status === 'confirmed' && certificate.decidedAt ? (
             <div>
-              <dt className="text-slate-600">Confirmed</dt>
-              <dd>{formatTime(certificate.decidedAt, timeZone)}</dd>
+              <dt className="text-slate-600">Confirmed by</dt>
+              <dd data-testid="certificate-confirmed-by">
+                {certificate.decidedBy === personId
+                  ? 'You'
+                  : (certificate.decidedByName ?? 'A landlord user')}
+                , {formatTime(certificate.decidedAt, timeZone)}
+              </dd>
             </div>
           ) : null}
           <div className="sm:col-span-2">
@@ -584,7 +589,6 @@ function CertificateUpload({
  */
 function RecordForm({
   leaseId,
-  leaseUse,
   paymentId,
   paymentDate,
   keeper,
@@ -592,7 +596,6 @@ function RecordForm({
   onCancel,
 }: {
   readonly leaseId: string;
-  readonly leaseUse: 'residential' | 'commercial';
   readonly paymentId: string | null;
   readonly paymentDate: string | null;
   readonly keeper: IdempotencyKeeper;
@@ -601,38 +604,37 @@ function RecordForm({
 }) {
   const { timeZone } = useApp();
   const today = todayIn(timeZone);
-  // The lines still owed, from the lease's open invoices, and the rate in force today. The rules
-  // table is for platform admins (`rules.view`), so without it the form offers no suggestion; the
-  // API still compares the amount with the rate when it records it.
-  const load = useCallback(async (): Promise<WithholdingOptions> => {
-    const [invoices, rules] = await Promise.all([
-      api().invoices.list({ leaseId, limit: 500 }),
-      api()
-        .rules.list({ asOf: today })
-        .catch(() => []),
-    ]);
-    const open = invoices
-      .filter((invoice) => invoice.outstandingMinor > 0)
-      .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.number.localeCompare(b.number));
-    const details = await Promise.all(
-      open.map((invoice) => api().invoices.get({ invoiceId: invoice.id })),
-    );
-    return { lines: withholdableLines(details), rate: withholdingRate(rules, leaseUse) };
-  }, [leaseId, leaseUse, today]);
-  const { state, reload } = useLoad(load);
   const [draft, setDraft] = useState<WithholdingDraft>(() =>
     emptyWithholding(paymentDate ?? today),
   );
+  // The payment it was paid net with, on the lease page; a payment's own page fixes it.
+  const [netWith, setNetWith] = useState('');
+  // The months still owed and the rule's rate as of the day it was withheld (a valid past day).
+  const asOf = pastDateProblem(draft.valueDate, today, 'it was withheld') ? today : draft.valueDate;
+  const load = useCallback(
+    () => api().withholding.options({ leaseId, valueDate: asOf }),
+    [leaseId, asOf],
+  );
+  const { state, reload } = useLoad(load);
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reused, setReused] = useState(false);
   const options: WithholdingOptions | null = state.status === 'ready' ? state.data : null;
-  const rateBps = options?.rate?.rateBps ?? null;
-  const parsed = withholdingForm(draft, options?.lines ?? [], rateBps, today);
+  const lines = options ? optionLines(options.lines) : [];
+  const rateBps = options?.rate.bps ?? null;
+  const parsed = withholdingForm(draft, lines, rateBps, today);
   const errors = tried ? parsed.errors : {};
   const differs = new Set(parsed.differsFromRate);
+  const warning = rateBps === null ? null : differsWarning(parsed.differsFromRate, lines, rateBps);
+  const chosenPayment = paymentId ?? (netWith || null);
   useHoldWhileSending(pending);
+
+  function chooseNetWith(id: string) {
+    setNetWith(id);
+    const payment = options?.payments.find((p) => p.paymentId === id);
+    if (payment) setDraft((d) => ({ ...d, valueDate: payment.receivedOn }));
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -644,7 +646,7 @@ function RecordForm({
     setPending(true);
     try {
       await sendOnce(keeper, (key) =>
-        keyedApi(key).withholding.record({ leaseId, paymentId, ...input }),
+        keyedApi(key).withholding.record({ leaseId, paymentId: chosenPayment, ...input }),
       );
       await onDone(
         `Recorded ${formatMinor(parsed.totalMinor)} withheld by the tenant. The rent tax on those lines is now the tenant’s to pay GRA; upload the certificate when it comes.`,
@@ -659,6 +661,7 @@ function RecordForm({
   function startAgain() {
     keeper.reset();
     setDraft(emptyWithholding(paymentDate ?? today));
+    setNetWith('');
     setTried(false);
     setError(null);
     setReused(false);
@@ -672,23 +675,30 @@ function RecordForm({
       className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4"
     >
       <p className="text-sm text-slate-700">
-        Enter what the tenant withheld on each line. The rate’s amount is offered; the tenant’s
-        advice or certificate decides.
+        Enter what the tenant withheld on each month. The rule’s rate is offered; the tenant’s
+        advice or certificate decides. When the tenant pays net, record the withholding before the
+        payment, so the payment pays everything else.
       </p>
       {error ? <Alert tone="error">{error}</Alert> : null}
-      {state.status === 'loading' ? <Loading what="the lines" /> : null}
+      {state.status === 'loading' ? <Loading what="the months owed" /> : null}
       {state.status === 'error' ? (
         <LoadFailed message={state.problem.message} onRetry={reload} />
       ) : null}
       {options ? (
-        <RulesWarning rules={options.rate ? [options.rate.rule] : []} live={false} />
+        <p className="text-sm text-slate-700" data-testid="withholding-rate">
+          Rate for this lease: {rateLabel(options.rate.bps)} ({options.rate.key},{' '}
+          {verificationLabel(options.rate).toLowerCase()})
+        </p>
       ) : null}
-      {options && options.lines.length === 0 ? (
-        <Empty>Nothing is owed on the lease, so there is no line to record withholding on.</Empty>
+      {options ? <RulesWarning rules={[options.rate]} live={false} /> : null}
+      {options && lines.length === 0 ? (
+        <Empty>
+          No month that has started is still owed, so there is nothing to record withholding on.
+        </Empty>
       ) : null}
-      {options?.lines.length ? (
-        <ul className="space-y-3" aria-label="Lines withheld on">
-          {options.lines.map((line) => (
+      {lines.length ? (
+        <ul className="space-y-3" aria-label="Months withheld on">
+          {lines.map((line) => (
             <li key={line.id} data-testid="withholding-line" className="space-y-1">
               <div className="flex flex-wrap items-end gap-2">
                 <TextField
@@ -712,7 +722,7 @@ function RecordForm({
                     onClick={() =>
                       setDraft((d) => ({
                         ...d,
-                        amounts: { ...d.amounts, [line.id]: suggestedInput(line, rateBps) },
+                        amounts: { ...d.amounts, [line.id]: suggestionFor(line, rateBps) },
                       }))
                     }
                   >
@@ -731,6 +741,21 @@ function RecordForm({
         <p role="alert" className="text-sm font-medium text-red-700">
           {errors.lines}
         </p>
+      ) : null}
+      {!paymentId && options?.payments.length ? (
+        <SelectField
+          label="Paid net with (optional)"
+          hint="The payment the tenant made after withholding, if it is already recorded."
+          value={netWith}
+          options={[
+            { value: '', label: 'No payment: advised separately' },
+            ...options.payments.map((p) => ({
+              value: p.paymentId,
+              label: `${formatBusinessDate(p.receivedOn)}, ${formatMinor(p.amountMinor)}${p.receiptNumber ? `, ${p.receiptNumber}` : ''}`,
+            })),
+          ]}
+          onChange={(event) => chooseNetWith(event.target.value)}
+        />
       ) : null}
       <div className="grid gap-4 sm:grid-cols-2">
         <TextField
@@ -755,8 +780,13 @@ function RecordForm({
       {parsed.totalMinor > 0 ? (
         <p className="text-sm font-medium">Total withheld: {formatMinor(parsed.totalMinor)}</p>
       ) : null}
+      {warning ? (
+        <Alert tone="warning" live={false}>
+          <span data-testid="withholding-differs">{warning}</span>
+        </Alert>
+      ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" pending={pending} disabled={!options?.lines.length}>
+        <Button type="submit" pending={pending} disabled={!lines.length}>
           Record the withholding
         </Button>
         {reused ? (

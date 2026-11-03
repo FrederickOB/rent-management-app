@@ -260,7 +260,6 @@ export function LeaseDetail({
           {lease.tenant.kind === 'company' ? (
             <WithholdingPanel
               leaseId={lease.id}
-              leaseUse={lease.use}
               can={{
                 manage: can.tax.manage,
                 confirm: can.tax.confirm,

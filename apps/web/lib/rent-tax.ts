@@ -127,6 +127,8 @@ export interface OwedItem extends DueItem {
 /** A receipt's rent tax as the screens show it: what it was worked out on, and where it stands. */
 export interface TaxItemRow extends OwedItem {
   readonly kind?: TaxItemKind;
+  /** A rule the item used is not verified (the API's flag): the row says so (section 7). */
+  readonly warning?: boolean;
   /** The payment taxed; none on tax withheld by the tenant without a payment. */
   readonly paymentId: string | null;
   readonly ownerId: string;

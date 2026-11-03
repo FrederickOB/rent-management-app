@@ -11,9 +11,10 @@ import { SendPayLink } from '@/components/send-pay-link';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
 import { RentTaxStatusBadge } from '@/components/tax-badges';
 import { Alert } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Table, Td, Th } from '@/components/ui/table';
-import { leaseAdvanceLabel, type LeaseAdvance } from '@/lib/advance-compliance';
+import { leaseAdvanceLabel, paymentAheadCell, type LeaseAdvance } from '@/lib/advance-compliance';
 import { api } from '@/lib/api';
 import {
   INVOICE_KIND_LABELS,
@@ -418,13 +419,17 @@ export function LeaseInvoices({ leaseId }: { readonly leaseId: string }) {
  */
 export function LeasePayments({ leaseId }: { readonly leaseId: string }) {
   const load = useCallback(async () => {
-    const [payments, tax] = await Promise.all([
+    const [payments, tax, advance] = await Promise.all([
       api().payments.list({ leaseId, limit: 100 }),
       api()
         .rentTax.items({ leaseId })
         .catch(() => null),
+      // AR-05: every payment's months paid ahead, as recorded when it arrived.
+      api()
+        .advanceRent.lease({ leaseId })
+        .catch(() => null),
     ]);
-    return { payments, tax };
+    return { payments, tax, advance };
   }, [leaseId]);
   const { state, reload } = useLoad(load);
   const rows: readonly PaymentRow[] =
@@ -434,6 +439,12 @@ export function LeasePayments({ leaseId }: { readonly leaseId: string }) {
         )
       : [];
   const taxOf = receiptTax(state.status === 'ready' ? state.data.tax : null);
+  const aheadOf = new Map(
+    (state.status === 'ready' ? (state.data.advance?.payments ?? []) : []).map((row) => [
+      row.paymentId,
+      paymentAheadCell(row),
+    ]),
+  );
   return (
     <Card data-testid="lease-payments">
       <CardHeader
@@ -460,11 +471,13 @@ export function LeasePayments({ leaseId }: { readonly leaseId: string }) {
                   <Th>Receipt</Th>
                   <Th>Status</Th>
                   <Th className="text-right">Rent tax</Th>
+                  <Th>Paid ahead</Th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {rows.slice(0, ROWS).map((row) => {
                   const tax = taxOf.get(row.id);
+                  const ahead = aheadOf.get(row.id);
                   return (
                     <tr key={row.id} data-testid="lease-payment">
                       <Td className="whitespace-nowrap">
@@ -486,6 +499,16 @@ export function LeasePayments({ leaseId }: { readonly leaseId: string }) {
                           <span className="inline-flex flex-col items-end gap-1">
                             <span className="tabular-nums">{formatMinor(tax.taxMinor)}</span>
                             <RentTaxStatusBadge status={tax.status} />
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </Td>
+                      <Td className="whitespace-nowrap" data-testid="lease-payment-ahead">
+                        {ahead ? (
+                          <span className="inline-flex flex-col gap-1">
+                            <span>{ahead.text}</span>
+                            {ahead.flagged ? <Badge tone="amber">Over the limit</Badge> : null}
                           </span>
                         ) : (
                           '—'

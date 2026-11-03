@@ -28,7 +28,6 @@ import {
   mayRequestAgain,
   previewInput,
   refundPaidForm,
-  requestSummary,
   TERMINATION_TAX_NOTE,
   terminationForm,
   terminationNext,
@@ -160,14 +159,14 @@ function CurrentRequest({
   const next = terminationNext(termination.status, termination.refundMinor);
   return (
     <div className="space-y-3" data-testid="termination-request">
-      <dl className="space-y-1 text-sm" data-testid="termination-figures">
-        {requestSummary(termination).map((row, index) => (
-          <div key={`${row.label}-${index}`} className="flex flex-wrap justify-between gap-2">
-            <dt className="text-slate-700">{row.label}</dt>
-            <dd className="font-medium tabular-nums">{row.value}</dd>
-          </div>
-        ))}
-      </dl>
+      {/* Every step as the request showed it, the figures the second person decides on. */}
+      <div data-testid="termination-figures">
+        <TerminationSteps
+          figures={termination}
+          charges={termination.charges}
+          deductions={termination.deductions}
+        />
+      </div>
       {termination.note ? <p className="text-sm text-slate-700">Note: {termination.note}</p> : null}
       {next ? (
         <Alert tone={termination.status === 'rejected' ? 'warning' : 'info'} live={false}>

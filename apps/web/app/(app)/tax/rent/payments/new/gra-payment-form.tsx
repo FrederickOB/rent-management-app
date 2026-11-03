@@ -8,6 +8,7 @@ import { CancelLink } from '@/components/cancel-link';
 import { FileField } from '@/components/file-field';
 import { secondaryLink } from '@/components/link-styles';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
+import { RuleList } from '@/components/rule-list';
 import { RulesWarning } from '@/components/rules-warning';
 import { DueBadge } from '@/components/tax-badges';
 import { Alert } from '@/components/ui/alert';
@@ -286,6 +287,7 @@ export function GraPaymentForm({
             <LoadFailed message={state.problem.message} onRetry={reload} />
           ) : null}
           {state.status === 'ready' ? <RulesWarning rules={state.data.rules} /> : null}
+          {state.status === 'ready' ? <RuleList rules={state.data.rules} /> : null}
           {ownerId && state.status === 'ready' && items.length === 0 ? (
             <Empty>Nothing is owed to GRA for this owner.</Empty>
           ) : null}

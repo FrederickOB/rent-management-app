@@ -72,12 +72,12 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
 /** A payment (plan 4.19): what it paid for, its receipts, and corrections. */
 export function PaymentDetailView({
   initial,
-  withholding = null,
+  companyTenant = false,
   can,
 }: {
   readonly initial: PaymentDetail;
-  /** The lease's tenant is a company, which may withhold tax from rent (TX-04), and its use. */
-  readonly withholding?: { readonly leaseUse: 'residential' | 'commercial' } | null;
+  /** The lease's tenant is a company, which may withhold tax from rent (TX-04). */
+  readonly companyTenant?: boolean;
   readonly can: PaymentPermissions;
 }) {
   const { timeZone } = useApp();
@@ -309,11 +309,10 @@ export function PaymentDetailView({
       </Card>
 
       {/* M5: rent tax on the receipt and months paid ahead (TX-01, AR-05). */}
-      {payment.leaseId ? <PaymentTax paymentId={payment.id} leaseId={payment.leaseId} /> : null}
-      {payment.leaseId && withholding ? (
+      {payment.leaseId ? <PaymentTax paymentId={payment.id} /> : null}
+      {payment.leaseId && companyTenant ? (
         <WithholdingPanel
           leaseId={payment.leaseId}
-          leaseUse={withholding.leaseUse}
           paymentId={payment.id}
           paymentDate={payment.receivedOn}
           can={{

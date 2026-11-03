@@ -4,7 +4,7 @@ import { checkWithholding } from '@rent/domain/tax';
 import { formatBusinessDate } from './business-dates';
 import { amountInput } from './lease-form';
 import { amountMinorOf, CORRECTION_REASON_MIN, pastDateProblem, type Parsed } from './payment-form';
-import { rateLabel } from './billing-format';
+import { lineKindLabel, periodLabel, rateLabel } from './billing-format';
 import { TAX_LIMITS } from './tax-limits';
 import { formatMinor } from './tenancy-format';
 
@@ -60,6 +60,8 @@ export interface WithholdableLine {
   readonly netMinor: number;
   /** Still owed on it: withholding is never more than this. */
   readonly outstandingMinor: number;
+  /** The API's suggestion: the rule's rate on the line's amount, at most what is still owed. */
+  readonly suggestedMinor?: number;
 }
 
 /** The rate on a line's amount, as the tenant would usually withhold it (a suggestion only). */
@@ -358,4 +360,52 @@ export function withholdingRate(
   return rule && typeof bps === 'number' && Number.isSafeInteger(bps) && bps >= 0
     ? { rateBps: bps, rule }
     : null;
+}
+
+// The record form's choices, from `GET /leases/{leaseId}/withholding-options` -------------------
+
+/** A month the tenant can withhold on, as the options endpoint lists it. */
+export interface OptionLine {
+  readonly lineId: string;
+  readonly invoiceNumber: string;
+  readonly kind: 'rent' | 'service_charge';
+  readonly periodStart: string;
+  readonly periodEnd: string;
+  readonly netMinor: number;
+  readonly outstandingMinor: number;
+  readonly suggestedMinor: number;
+}
+
+/** The options' months as the form shows them: `Rent, 1 Nov 2026 to 30 Nov 2026`. */
+export function optionLines(lines: readonly OptionLine[]): WithholdableLine[] {
+  return lines.map((line) => ({
+    id: line.lineId,
+    invoiceNumber: line.invoiceNumber,
+    label: `${lineKindLabel(line.kind)}, ${periodLabel(line.periodStart, line.periodEnd) ?? ''}`,
+    netMinor: line.netMinor,
+    outstandingMinor: line.outstandingMinor,
+    suggestedMinor: line.suggestedMinor,
+  }));
+}
+
+/** The amount the form offers for a line: the API's suggestion, else the rate on its amount. */
+export function suggestionFor(line: WithholdableLine, rateBps: number): string {
+  return line.suggestedMinor === undefined
+    ? suggestedInput(line, rateBps)
+    : amountInput(line.suggestedMinor);
+}
+
+/**
+ * The warning before recording amounts that are not the rule's rate on their lines (TX-04): the
+ * tenant decides what it withholds, so it is recorded, but someone should check it first.
+ */
+export function differsWarning(
+  lineIds: readonly string[],
+  lines: readonly WithholdableLine[],
+  rateBps: number,
+): string | null {
+  const named = lines.filter((line) => lineIds.includes(line.id));
+  if (named.length === 0) return null;
+  const which = named.map((line) => `${line.invoiceNumber} ${line.label}`).join('; ');
+  return `${named.length === 1 ? 'This amount is' : 'These amounts are'} not ${rateLabel(rateBps)} of the line${named.length === 1 ? '' : 's'}: ${which}. Check against the tenant’s advice or certificate before recording; it is recorded as typed.`;
 }

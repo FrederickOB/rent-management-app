@@ -22,14 +22,14 @@ export function TerminationSteps({
           data-testid={`termination-step-${step.key}`}
           className="space-y-1 border-l-2 border-slate-200 pl-3 text-sm"
         >
-          <p className="flex flex-wrap items-baseline justify-between gap-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
             <span className="font-medium text-slate-900">{step.title}</span>
             {step.total ? (
               <span className="font-semibold tabular-nums" data-testid="termination-step-total">
                 {step.total}
               </span>
             ) : null}
-          </p>
+          </div>
           {step.lines.length ? (
             <ul className="space-y-0.5 text-slate-700">
               {step.lines.map((line, index) => (

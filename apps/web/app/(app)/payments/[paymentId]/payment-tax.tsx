@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback } from 'react';
 import { useApp } from '@/components/app-context';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
+import { RuleList } from '@/components/rule-list';
 import { RulesWarning } from '@/components/rules-warning';
 import { DueBadge, RentTaxStatusBadge } from '@/components/tax-badges';
 import { Alert } from '@/components/ui/alert';
@@ -22,44 +23,22 @@ import { useLoad } from '@/lib/use-load';
  * was taxed on, the rate for the lease's use, the tax, its due date and where it stands, with any
  * correction since. Every figure is the API's; the rules it used warn while unverified.
  */
-export function PaymentTax({
-  paymentId,
-  leaseId,
-}: {
-  readonly paymentId: string;
-  readonly leaseId: string;
-}) {
+export function PaymentTax({ paymentId }: { readonly paymentId: string }) {
   const { timeZone } = useApp();
   const today = todayIn(timeZone);
   const load = useCallback(async () => {
     const [items, advance] = await Promise.all([
       api().rentTax.items({ paymentId }),
+      // AR-05: the months this payment paid ahead, as recorded when it arrived.
       api()
-        .advanceRent.lease({ leaseId })
+        .advanceRent.payment({ paymentId })
         .catch(() => null),
     ]);
-    // AR-05: this payment, when it was flagged over the advance limit.
-    const flagged = advance?.flaggedPayments.find((f) => f.paymentId === paymentId) ?? null;
-    return {
-      items,
-      advance:
-        advance && flagged ? { ...flagged, policy: advance.policy, rule: advance.rule } : null,
-    };
-  }, [paymentId, leaseId]);
+    return { items, advance };
+  }, [paymentId]);
   const { state, reload } = useLoad(load);
-  const flagged = state.status === 'ready' ? state.data.advance : null;
-  const advance = flagged
-    ? paymentAdvanceLabel(
-        {
-          monthsAhead: flagged.monthsAhead,
-          policy: flagged.policy,
-          limitMonths: flagged.limitMonths,
-          overLimit: true,
-          flagged: true,
-        },
-        flagged.rule,
-      )
-    : null;
+  const recorded = state.status === 'ready' ? state.data.advance : null;
+  const advance = recorded ? paymentAdvanceLabel(recorded, recorded.rule) : null;
   return (
     <Card data-testid="payment-tax">
       <CardHeader
@@ -116,6 +95,7 @@ export function PaymentTax({
                 </tbody>
               </Table>
             )}
+            <RuleList rules={state.data.items.flatMap((item) => item.rules)} />
             {state.data.items[0] ? (
               <Link
                 href={`/tax/rent?ownerId=${state.data.items[0].ownerId}`}
@@ -134,6 +114,7 @@ export function PaymentTax({
                 {advance.flag}
               </Alert>
             ) : null}
+            {recorded?.rule ? <RuleList rules={[recorded.rule]} label="The limit’s rule" /> : null}
           </div>
         ) : null}
       </CardBody>
