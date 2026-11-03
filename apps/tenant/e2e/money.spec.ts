@@ -226,9 +226,17 @@ test.describe('TL-01 and BC-04 the tenant app’s money screens', () => {
     await expect(groupOf(agencyName).getByTestId('due-now')).toContainText('Nothing due now');
     await context.setOffline(true);
     try {
-      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       const fromAgency = groupOf(agencyName);
-      await expect(fromAgency.getByTestId('money-as-of')).toContainText(TIME_WITH_ZONE);
+      // Coming back to the app reloads Home, one request at a time. A reload already under way
+      // when the connection went (Back from Payments starts some, and on a slow runner they are
+      // still out) finishes with fresh figures, as the browser lets it; so the person may come
+      // back again before the app finds itself offline. Each try is one more return.
+      await expect(async () => {
+        await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+        await expect(fromAgency.getByTestId('money-as-of')).toContainText(TIME_WITH_ZONE, {
+          timeout: 2_000,
+        });
+      }).toPass({ timeout: 30_000 });
       await expect(fromAgency.getByTestId('money-as-of')).toContainText('may be out of date');
       await expect(fromAgency.getByTestId('due-now')).toContainText('Nothing due now');
       await expect(fromAgency.getByTestId('pay')).toHaveCount(0);
@@ -243,8 +251,13 @@ test.describe('TL-01 and BC-04 the tenant app’s money screens', () => {
     } finally {
       await context.setOffline(false);
     }
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await expect(groupOf(agencyName).getByTestId('money-as-of')).toHaveCount(0);
+    // Back online, the same: a return reloads once nothing is still under way.
+    await expect(async () => {
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      await expect(groupOf(agencyName).getByTestId('money-as-of')).toHaveCount(0, {
+        timeout: 2_000,
+      });
+    }).toPass({ timeout: 30_000 });
   });
 });
 
