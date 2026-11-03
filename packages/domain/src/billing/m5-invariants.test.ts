@@ -2,12 +2,8 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { DomainError } from '../errors';
 import { balanceOf, checkEntry } from '../ledger/journal';
-import {
-  creditApplicationLines,
-  refundApprovedLines,
-  withholdingLines,
-} from '../ledger/tax-posting';
-import { creditPools, isRecurring, lineBalance } from './lines';
+import { creditApplicationLines, refundApprovedLines } from '../ledger/tax-posting';
+import { creditPools, isRecurring, lineBalance, paymentShares } from './lines';
 import { applyCreditToOpenLines } from './termination';
 import {
   leaseArbitrary,
@@ -60,31 +56,26 @@ let sequence = 1_000_000;
 /** Payments part refunded at an early end: never also reversed (the service and RA055 refuse). */
 const refunded = new WeakMap<LeaseLedgerModel, Set<string>>();
 
-/** P19 on a charged rent or service-charge line, as `BillingEngine.withhold` writes it. */
+/**
+ * P19 on any rent or service-charge line, started or not, paid or not, through the model's
+ * `withhold`: the engine's own planning and posting functions (M5 decision 8 and review 2;
+ * changed with the founder's approval, 2026-11-03).
+ */
 function withhold(m: LeaseLedgerModel, pick: number, percent: number): void {
+  const withholdable = (lineId: string) => {
+    const line = m.lines.find((l) => l.id === lineId)!;
+    let cash = 0;
+    for (const share of paymentShares(line.id, m.allocations).values()) cash += share;
+    return lineBalance(line, m.allocations).outstandingMinor + cash;
+  };
   const open = m.lines.filter(
-    (l) => isRecurring(l.kind) && l.accrued && lineBalance(l, m.allocations).outstandingMinor > 0,
+    (l) => isRecurring(l.kind) && l.baseLineId === null && withholdable(l.id) > 0,
   );
   const line = open[pick % Math.max(open.length, 1)];
   if (!line) return;
-  const amount = Math.floor((lineBalance(line, m.allocations).outstandingMinor * percent) / 100);
+  const amount = Math.floor((withholdable(line.id) * percent) / 100);
   if (amount <= 0) return;
-  const id = `withholding-${(sequence += 1)}`;
-  const lines = withholdingLines({
-    bookId: m.book,
-    lease: m.lease,
-    paymentId: null,
-    lines: [{ invoiceLineId: line.id, amountMinor: amount }],
-  });
-  checkEntry(lines, () => 'owner');
-  m.entries.push({ rule: 'P19', key: `P19:${id}`, lines, valueDate: m.today });
-  m.allocations.push({
-    lineId: line.id,
-    source: 'withholding',
-    paymentId: null,
-    amountMinor: amount,
-    sequence: (sequence += 1),
-  });
+  m.withhold([{ lineId: line.id, amountMinor: amount }], `withholding-${(sequence += 1)}`);
 }
 
 /**
@@ -218,19 +209,23 @@ describe('AR-01 recognised plus unearned equals the advance received', () => {
           let received = 0;
           let returned = 0;
           let recognised = 0;
+          // M5 decision 8 and review 2: P19 holds withholding on months not started, and returns
+          // cash already on a month to its payment's credit; both move 2010 (founder, 2026-11-03).
+          let withheld = 0;
           for (const entry of m.entries)
             for (const line of entry.lines) {
               if (line.accountCode !== '2010') continue;
               if (entry.rule === 'P03') received += -line.amountMinor;
               else if (entry.rule === 'P21') returned += line.amountMinor;
               else if (entry.rule === 'P02') recognised += line.amountMinor;
+              else if (entry.rule === 'P19') withheld += -line.amountMinor;
               else throw new Error(`2010 moved by ${entry.rule}`);
             }
           const walk = m.walk();
           const unearned =
             walk.unearnedRentMinor + walk.unearnedServiceChargeMinor + walk.creditLeftMinor;
           expect(unearned).toBe(held(balanceOf(m.journal(), { accountCode: '2010' })));
-          expect(recognised + unearned).toBe(received - returned);
+          expect(recognised + unearned).toBe(received - returned + withheld);
           m.checkInvariants();
         },
       ),
@@ -265,9 +260,11 @@ describe('AR-02 paid-until never moves backwards except on a reversal', () => {
           apply(run, op);
           run.model.checkInvariants();
         }
-        // Withholding never passes through prepayments or income: it only settles receivables.
+        // Withholding never passes through income: it settles receivables, or is held in
+        // prepayments for a month not started, with any cash it returns to credit (decision 8).
         for (const entry of run.model.entries.filter((e) => e.rule === 'P19'))
-          for (const line of entry.lines) expect(['1150', '1100']).toContain(line.accountCode);
+          for (const line of entry.lines)
+            expect(['1150', '1100', '2010']).toContain(line.accountCode);
       }),
       runs,
     );

@@ -25,6 +25,7 @@ import {
   planAllocation,
   planReopenedDraws,
   planTaxDraws,
+  withheldOn,
   withholdingDrawsFor,
 } from '../allocation';
 import {
@@ -593,8 +594,10 @@ export class LeaseLedgerModel {
     this.corrections += 1;
     for (const line of linesAfterEnd(this.lines, lastDay)) {
       const b = lineBalance(line, this.allocations);
-      if (b.netMinor - b.writtenOffMinor <= 0) continue;
-      this.creditNote(line.id, b.netMinor - b.writtenOffMinor, `end-${line.id}`);
+      // As the engine's lease end does (M5 decision 9): tax the tenant withheld stays on it.
+      const amount = b.netMinor - b.writtenOffMinor - withheldOn(line.id, this.allocations);
+      if (amount <= 0) continue;
+      this.creditNote(line.id, amount, `end-${line.id}`);
     }
   }
 
