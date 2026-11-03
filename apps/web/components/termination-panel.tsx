@@ -7,6 +7,7 @@ import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { api, keyedApi } from '@/lib/api';
 import { RECEIVING_ACCOUNT_LABELS, type ReceivingAccount } from '@/lib/billing-format';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
+import { creditNoteWithheld } from '@/lib/credit-withheld';
 import { toProblem } from '@/lib/errors';
 import {
   isKeyReused,
@@ -76,11 +77,21 @@ export function TerminationPanel({
   const load = useCallback(async () => {
     // The newest request first, as the API orders them.
     const [latest] = await api().earlyTermination.list({ leaseId });
-    // The settlement with nothing agreed yet: where the form starts, or all a reader sees.
-    const figures = mayRequestAgain(latest?.status ?? null)
-      ? await api().earlyTermination.preview({ leaseId, charges: [], deductions: [] })
-      : null;
-    return { current: latest ?? null, figures };
+    // The settlement with nothing agreed yet: where the form starts, or all a reader sees. Decision
+    // 9: one that would credit back tax the tenant withheld is refused, in the API's own words.
+    const preview = mayRequestAgain(latest?.status ?? null)
+      ? await api()
+          .earlyTermination.preview({ leaseId, charges: [], deductions: [] })
+          .then(
+            (figures) => ({ figures, refused: null }),
+            (failure: unknown) => {
+              const refused = creditNoteWithheld(failure);
+              if (refused === null) throw failure;
+              return { figures: null, refused };
+            },
+          )
+      : { figures: null, refused: null };
+    return { current: latest ?? null, ...preview };
   }, [leaseId]);
   const { state, reload } = useLoad(load);
   const [notice, setNotice] = useState<string | null>(null);
@@ -123,6 +134,11 @@ export function TerminationPanel({
             keeper={paidKeeper}
             onChanged={changed}
           />
+        ) : null}
+        {state.status === 'ready' && state.data.refused ? (
+          <Alert tone="warning">
+            <span data-testid="termination-refused">{state.data.refused}</span>
+          </Alert>
         ) : null}
         {state.status === 'ready' && state.data.figures ? (
           can.manage ? (

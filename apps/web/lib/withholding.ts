@@ -62,6 +62,11 @@ export interface WithholdableLine {
   readonly outstandingMinor: number;
   /** The API's suggestion: the rule's rate on the line's amount, at most what is still owed. */
   readonly suggestedMinor?: number;
+  /**
+   * Decision 8: false for a month not started yet, whose withholding is held as its advance until
+   * the month starts. Absent where the API does not say (a started month).
+   */
+  readonly started?: boolean;
 }
 
 /** The rate on a line's amount, as the tenant would usually withhold it (a suggestion only). */
@@ -371,6 +376,8 @@ export interface OptionLine {
   readonly kind: 'rent' | 'service_charge';
   readonly periodStart: string;
   readonly periodEnd: string;
+  /** Decision 8: false for a month not started yet (the options' `advanceLines`). */
+  readonly started?: boolean;
   readonly netMinor: number;
   readonly outstandingMinor: number;
   readonly suggestedMinor: number;
@@ -385,7 +392,68 @@ export function optionLines(lines: readonly OptionLine[]): WithholdableLine[] {
     netMinor: line.netMinor,
     outstandingMinor: line.outstandingMinor,
     suggestedMinor: line.suggestedMinor,
+    ...(line.started === undefined ? {} : { started: line.started }),
   }));
+}
+
+/**
+ * Every month the form offers (decision 8): those started and still owed, then those not started
+ * yet, whose withholding is held as their advance until each month starts.
+ */
+export function formLines(options: {
+  readonly lines: readonly OptionLine[];
+  readonly advanceLines?: readonly OptionLine[];
+}): WithholdableLine[] {
+  return [
+    ...optionLines(options.lines),
+    ...optionLines(options.advanceLines ?? []).map((line) => ({ ...line, started: false })),
+  ];
+}
+
+/** A month whose withholding is held as its advance until it starts (decision 8). */
+export const HELD_AS_ADVANCE = 'held until the month starts';
+
+// Decision 7 (OQ-29): the sole uploader confirms their own certificate after the cooling-off ----
+
+/** The certificate's request for its uploader to confirm it themselves, as the API sends it. */
+export interface SelfConfirmation {
+  readonly approvalId: string;
+  readonly status: 'pending' | 'cooling_off' | 'approved' | 'rejected' | 'cancelled' | 'expired';
+  readonly coolingOffUntil: string | null;
+}
+
+export type SelfConfirmState =
+  /** No such request, or this person is not the uploader. */
+  | { readonly kind: 'none' }
+  /** Open, and the cooling-off has not passed: confirmable from `until`. */
+  | { readonly kind: 'waiting'; readonly approvalId: string; readonly until: string | null }
+  /** Open, and the cooling-off has passed: confirm with a code from the authenticator app. */
+  | { readonly kind: 'ready'; readonly approvalId: string }
+  /** The request closed without confirming it (rejected, withdrawn or expired). */
+  | { readonly kind: 'closed'; readonly status: SelfConfirmation['status'] };
+
+/**
+ * Where a sole uploader's own confirmation stands at `now` (decision 7). It goes through the
+ * approvals engine (`approvals.decide`, `self_confirm`, with a TOTP code), never through the
+ * certificate's own confirm, which refuses its uploader.
+ */
+export function selfConfirmState(
+  certificate: {
+    readonly uploadedBy: string;
+    readonly selfConfirmation?: SelfConfirmation | null;
+  },
+  personId: string,
+  now: Date,
+): SelfConfirmState {
+  const request = certificate.selfConfirmation;
+  if (!request || certificate.uploadedBy !== personId) return { kind: 'none' };
+  if (request.status === 'approved') return { kind: 'none' };
+  if (request.status !== 'pending' && request.status !== 'cooling_off')
+    return { kind: 'closed', status: request.status };
+  const ready = request.coolingOffUntil !== null && new Date(request.coolingOffUntil) <= now;
+  return ready
+    ? { kind: 'ready', approvalId: request.approvalId }
+    : { kind: 'waiting', approvalId: request.approvalId, until: request.coolingOffUntil };
 }
 
 /** The amount the form offers for a line: the API's suggestion, else the rate on its amount. */

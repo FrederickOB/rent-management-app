@@ -4,6 +4,7 @@ import type { ApiClient } from '@rent/contracts/client';
 import Link from 'next/link';
 import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { api, keyedApi } from '@/lib/api';
+import { APPROVAL_STATUS_LABELS } from '@/lib/approvals';
 import { periodLabel, rateLabel } from '@/lib/billing-format';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
@@ -32,8 +33,10 @@ import {
   certificateRejectForm,
   differsWarning,
   emptyWithholding,
-  optionLines,
+  formLines,
+  HELD_AS_ADVANCE,
   rateNote,
+  selfConfirmState,
   suggestionFor,
   withholdingForm,
   withholdingMoves,
@@ -190,6 +193,9 @@ function WithholdingItem({
   );
   const [open, setOpen] = useState<'upload' | 'reject' | 'write_off' | null>(null);
   const certificate = record.certificate;
+  const self = certificate
+    ? selfConfirmState(certificate, personId, new Date())
+    : ({ kind: 'none' } as const);
   const effect =
     record.status === 'certified' ? certificateEffect(certificate?.debitAccount ?? null) : null;
   return (
@@ -214,6 +220,12 @@ function WithholdingItem({
                 ? `, ${periodLabel(line.periodStart, line.periodEnd)}`
                 : ''}{' '}
               <span className="text-slate-600">(line of {formatMinor(line.lineAmountMinor)})</span>
+              {line.heldAsAdvance ? (
+                <span className="text-slate-700" data-testid="withholding-held">
+                  {' '}
+                  · {HELD_AS_ADVANCE}
+                </span>
+              ) : null}
             </span>
             <span className="tabular-nums">{formatMinor(line.withheldMinor)}</span>
           </li>
@@ -282,9 +294,33 @@ function WithholdingItem({
           A write-off of this withholding is waiting for a second person to approve it.
         </Alert>
       ) : null}
-      {moves.confirmBlocked ? (
+      {self.kind === 'none' && moves.confirmBlocked ? (
         <Alert tone="info" live={false}>
           <span data-testid="confirm-blocked">{moves.confirmBlocked}</span>
+        </Alert>
+      ) : null}
+      {/* Decision 7 (OQ-29): nobody else can confirm it, so its uploader does, after the cooling-off. */}
+      {self.kind === 'waiting' ? (
+        <Alert tone="info" live={false}>
+          <span data-testid="self-confirm-waiting">
+            Nobody else in your company can confirm this certificate, so you confirm it yourself
+            {self.until
+              ? ` after ${formatTime(self.until, timeZone)}`
+              : ' once the waiting time has passed'}
+            , with a code from your authenticator app. A nominated second approver removes the wait.
+          </span>
+        </Alert>
+      ) : null}
+      {self.kind === 'ready' ? (
+        <SelfConfirm approvalId={self.approvalId} onDone={onChanged} />
+      ) : null}
+      {self.kind === 'closed' ? (
+        <Alert tone="warning" live={false}>
+          <span data-testid="self-confirm-closed">
+            Your request to confirm it yourself was closed (
+            {APPROVAL_STATUS_LABELS[self.status].toLowerCase()}). The certificate is still waiting
+            to be confirmed.
+          </span>
         </Alert>
       ) : null}
 
@@ -358,6 +394,67 @@ function WithholdingItem({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * A sole uploader confirms their own certificate after the cooling-off (decision 7, OQ-29), with
+ * a code from their authenticator app, through its approval request (`self_confirm`), never the
+ * certificate's own confirm, which refuses its uploader.
+ */
+function SelfConfirm({
+  approvalId,
+  onDone,
+}: {
+  readonly approvalId: string;
+  readonly onDone: (text: string) => Promise<void>;
+}) {
+  const [code, setCode] = useState('');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    if (!/^\d{6}$/.test(code)) {
+      setError('Enter the 6-digit code from your authenticator app.');
+      return;
+    }
+    setPending(true);
+    try {
+      await api().approvals.decide({ id: approvalId, decision: 'self_confirm', code });
+      await onDone('Confirmed the certificate yourself, after the cooling-off.');
+    } catch (failure) {
+      setError(toProblem(failure).message);
+      setPending(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      noValidate
+      aria-label="Confirm the certificate yourself"
+      className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4"
+    >
+      <p className="text-sm text-slate-700">
+        Nobody else in your company can confirm this certificate, and the cooling-off has passed.
+        Confirm it yourself with a code from your authenticator app.
+      </p>
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      <TextField
+        label="6-digit code"
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        maxLength={6}
+        value={code}
+        onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
+        className="max-w-xs"
+      />
+      <Button type="submit" pending={pending}>
+        Confirm it myself
+      </Button>
+    </form>
   );
 }
 
@@ -517,7 +614,7 @@ function CertificateUpload({
       });
       setStatus(null);
       await onDone(
-        'Uploaded the certificate. A landlord user confirms it; you cannot confirm a certificate you uploaded.',
+        'Uploaded the certificate. A landlord user confirms it; you cannot confirm a certificate you uploaded. Where nobody else can, you confirm it yourself after the cooling-off.',
       );
     } catch (failure) {
       setStatus(null);
@@ -621,7 +718,10 @@ function RecordForm({
   const [error, setError] = useState<string | null>(null);
   const [reused, setReused] = useState(false);
   const options: WithholdingOptions | null = state.status === 'ready' ? state.data : null;
-  const lines = options ? optionLines(options.lines) : [];
+  // Decision 8: months not started yet are offered too; their withholding is held until they start.
+  const lines = options ? formLines(options) : [];
+  const started = lines.filter((line) => line.started !== false);
+  const ahead = lines.filter((line) => line.started === false);
   const rateBps = options?.rate.bps ?? null;
   const parsed = withholdingForm(draft, lines, rateBps, today);
   const errors = tried ? parsed.errors : {};
@@ -629,6 +729,43 @@ function RecordForm({
   const warning = rateBps === null ? null : differsWarning(parsed.differsFromRate, lines, rateBps);
   const chosenPayment = paymentId ?? (netWith || null);
   useHoldWhileSending(pending);
+
+  function lineInput(line: (typeof lines)[number]) {
+    return (
+      <li key={line.id} data-testid="withholding-line" className="space-y-1">
+        <div className="flex flex-wrap items-end gap-2">
+          <TextField
+            label={`${line.invoiceNumber} ${line.label} (still owed ${formatMinor(line.outstandingMinor)})`}
+            inputMode="decimal"
+            autoComplete="off"
+            value={draft.amounts[line.id] ?? ''}
+            error={errors[`line:${line.id}`]}
+            onChange={(event) =>
+              setDraft((d) => ({ ...d, amounts: { ...d.amounts, [line.id]: event.target.value } }))
+            }
+            className="min-w-64 flex-1"
+          />
+          {rateBps !== null ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() =>
+                setDraft((d) => ({
+                  ...d,
+                  amounts: { ...d.amounts, [line.id]: suggestionFor(line, rateBps) },
+                }))
+              }
+            >
+              Use {rateLabel(rateBps)}
+            </Button>
+          ) : null}
+        </div>
+        {differs.has(line.id) && rateBps !== null ? (
+          <p className="text-sm text-amber-900">{rateNote(line, rateBps)}</p>
+        ) : null}
+      </li>
+    );
+  }
 
   function chooseNetWith(id: string) {
     setNetWith(id);
@@ -693,49 +830,25 @@ function RecordForm({
       {options ? <RulesWarning rules={[options.rate]} live={false} /> : null}
       {options && lines.length === 0 ? (
         <Empty>
-          No month that has started is still owed, so there is nothing to record withholding on.
+          No month is still owed on the lease, so there is nothing to record withholding on.
         </Empty>
       ) : null}
-      {lines.length ? (
+      {started.length ? (
         <ul className="space-y-3" aria-label="Months withheld on">
-          {lines.map((line) => (
-            <li key={line.id} data-testid="withholding-line" className="space-y-1">
-              <div className="flex flex-wrap items-end gap-2">
-                <TextField
-                  label={`${line.invoiceNumber} ${line.label} (still owed ${formatMinor(line.outstandingMinor)})`}
-                  inputMode="decimal"
-                  autoComplete="off"
-                  value={draft.amounts[line.id] ?? ''}
-                  error={errors[`line:${line.id}`]}
-                  onChange={(event) =>
-                    setDraft((d) => ({
-                      ...d,
-                      amounts: { ...d.amounts, [line.id]: event.target.value },
-                    }))
-                  }
-                  className="min-w-64 flex-1"
-                />
-                {rateBps !== null ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() =>
-                      setDraft((d) => ({
-                        ...d,
-                        amounts: { ...d.amounts, [line.id]: suggestionFor(line, rateBps) },
-                      }))
-                    }
-                  >
-                    Use {rateLabel(rateBps)}
-                  </Button>
-                ) : null}
-              </div>
-              {differs.has(line.id) && rateBps !== null ? (
-                <p className="text-sm text-amber-900">{rateNote(line, rateBps)}</p>
-              ) : null}
-            </li>
-          ))}
+          {started.map(lineInput)}
         </ul>
+      ) : null}
+      {ahead.length ? (
+        <div className="space-y-2" data-testid="withholding-ahead">
+          <p className="text-sm font-medium text-slate-900">Months not started yet</p>
+          <p className="text-sm text-slate-700">
+            Withholding on these is {HELD_AS_ADVANCE}, as an advance on its rent, and settles it
+            then.
+          </p>
+          <ul className="space-y-3" aria-label="Months not started yet, withheld on">
+            {ahead.map(lineInput)}
+          </ul>
+        </div>
       ) : null}
       {errors.lines ? (
         <p role="alert" className="text-sm font-medium text-red-700">
