@@ -1,6 +1,6 @@
 # M4b: Provider payments and receipts
 
-- **Status:** approved by the founder on 2026-10-30 with every recommendation in section 2; decision 9 added on 2026-11-03 from the founder's answer. It is built after M4a, and builds on M4a's ledger (`docs/plans/M4a.md`).
+- **Status:** approved by the founder on 2026-10-30 with every recommendation in section 2; decision 9 added on 2026-11-03 from the founder's answer. Built on 2026-11-03; progress notes are in section 5 and the report is section 11. It is built after M4a, and builds on M4a's ledger (`docs/plans/M4a.md`).
 - **Inputs:**
     - `BUILD_PLAYBOOK.md` (the M4 prompt, second half) and `docs/plans/roadmap.md` (the M4b row and prompt amendment);
     - `CLAUDE.md` sections 4, 8, 9 and 10;
@@ -400,3 +400,166 @@ The Paystack adapter uses the existing HTTP client in `packages/integrations`.
 - WhatsApp and push delivery of links, receipts and reminders (M6).
 - Bank and MoMo statement import (Phase 2).
 - Store release (once the developer accounts exist, OQ-25).
+
+## 11. Report
+
+Written 2026-11-03, at the end of the build. Verified on this machine and on GitHub.
+
+### Done criteria
+
+| # | Criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | Every BC acceptance criterion in scope as an automated test | Done | ★ `BC-04 and BC-06 the tenant pays by MoMo and gets a receipt within a minute`, at server level and end to end on the pay page: the tenant opens the link, pays by MoMo through the fake provider, the balance updates and the receipt arrives within 60 seconds. The other criteria are in the table below. |
+| 2 | The playbook's M4 tests | Done | The seven ★ tests in section 6, listed under Tests. |
+| 3 | The auto-match rate on the seed | Done | Provider payments: 3 of 5 (60%). The seed puts two payments without metadata in the queue on purpose, to exercise it. Direct transfers recorded against a lease, counted separately: 4 of 5 (80%). |
+| 4 | Size budgets, enforced in CI | Done | **Pay page:** 147,662 bytes on a 5-inch screen over throttled 3G, loaded in 1.45 s (`NFR-PERF links page weight`).<br>**Expo web first load:** 613,082 bytes compressed, as a host serves it (`NFR-PERF size budgets: the Expo web first load`).<br>Both run in CI's end-to-end job. |
+| 5 | CI green, and the playbook's review subagent with no open "must fix" | Done | **Reviews:** the playbook's posting-rules audit and the independent review; every must-fix is fixed (Independent review).<br>**CI:** see Checks. |
+| 6 | Report | Done | This section. |
+
+### Requirement IDs
+
+| ID | Delivered | Main tests |
+| --- | --- | --- |
+| Decision 9 | **How a payment pays an invoice:** month by month within it, each month's rent, then its service charge, VAT and levies after their line.<br>**Two-yearly cycle:** through the domain, contracts, API, lease form, lease document, tenant app and the advance check. | `BC-07 one invoice is paid month by month (M4b decision 9)`; `TL-06 a two-yearly rent cycle`; `BC-01 a two-yearly cycle`; `AR-05 a two-yearly cycle is 24 months paid ahead`; the reference model's month-by-month check in the property and differential tests |
+| BC-02 | **Paystack:** MoMo (MTN, Telecel, AT) and card, through an adapter on fixtures from Paystack's documentation.<br>**Settlement:** to subaccounts, which bear the fee.<br>**Live keys:** refused unless `LIVE_RENT_COLLECTION=enabled`.<br>**Failover:** a registry that never tries a provider unable to settle directly, and never moves on after a lost answer. | ★ `BC-02 a tampered amount or bad signature posts nothing`; ★ `BC-02 a payment confirmed during an outage is picked up by reconciliation`; `BC-02 failover`; `BC-02 failover never follows a lost answer`; `BC-02 a charge in another currency is never posted`; the adapter's contract tests and the optional sandbox test |
+| BC-03 | **Automatic matching** only on the pay link's intent or an exact lease reference; anything else goes to the queue. | `BC-03 automatic matching only on metadata or an exact reference` |
+| BC-04 | **Pay links:** one per invoice send, expiring when the invoice is settled or after 60 days.<br>**The pay page:** pre-filled, part payment up to the rent left in the term, within `advance_rent_policy`, without JavaScript.<br>**Card return:** a page that carries no pay-link token.<br>**From staff screens:** links are sent with the API's reason when one cannot go. | ★ `BC-04 and BC-06 …`; `BC-04 pay page` (e2e); `BC-04 the card return page` (e2e); `BC-04 the card return page carries no pay-link token`; `AR-05 the pay page keeps to the advance rent limit`; `BC-04 sending a pay link from staff screens` |
+| BC-06 | **Receipts on the tenant's channel** on `payment.posted`, with a 30-day receipt link, the latency from confirmation recorded, and an alert past 60 s. Tenants download their own receipts. | ★ `BC-06 receipt numbers have no gaps under concurrent payments`; `BC-06 the receipt link` (e2e); `BC-06 a tenant downloads their own receipt, never a neighbour's`; `BC-06 a receipt's delivery to the tenant` (e2e) |
+| BC-09 | **The reminder ladder:** −7, 0, +3, +7 and +14 days. Each step goes once, with consent, carries the pay link, and stops when the invoice is paid. Missed steps are skipped, never sent in a burst. | `BC-09 the reminder ladder`; `BC-09 the reminder ladder in words` |
+| BC-12 | **The unmatched queue:** ranked suggestions, matching across books, and P31 refunds that need approval, are confirmed by the provider and are never also reversed. | `BC-12 the unmatched queue`; `BC-12 a month of a lease is one month's rent and service charge`; `BC-12 money refunded to its payer is never also reversed`; `BC-12 the unmatched queue` (e2e) |
+| Reconciliation, P22, P21(b) | **Daily reconciliation** of transactions and of reversals.<br>**Settlements:** posted per book, with refund and chargeback deductions; a negative net still posts.<br>**Chargebacks** from current allocations; a part refund or dispute goes to a person.<br>**Invariant 11** on provider clearing. | `P22 settlement`; `P22 settlement deducts P31 refunds`; `P22 a settlement that pays out less than nothing still posts`; `BC-02 settlements read through the Paystack adapter post P22`; `P21 chargeback`; `P21 a part refund or chargeback is left for a person`; `BC-02 reconciliation catches …` |
+| ADR-008 | **Settlement accounts:** encrypted and masked, two-person approval, 24 hours before use, owner alerts, an audited reveal with a reason.<br>**Management agreements:** each owner's rent destination, by approval, effective 24 hours later and never back-dated. | `ADR-008 settlement account changes`; `ADR-008 a management agreement is a settlement change`; `ADR-008 settlement accounts on screen` |
+| BC-07, BC-08 (from the review) | Spare credit pays debt a correction reopens; the invoice list counts credit as ageing does. | `BC-07 credit never sits beside reopened debt`; `BC-08 an invoice covered by credit is never overdue` |
+| Tenant app | **Home:** balance, paid-until and next payment per landlord.<br>**Pay**, plus payments and receipts, and an offline cache with the time it was fetched. | `TL-01 and BC-04 the tenant app's money screens` (Jest and e2e); `TL-12 one landlord never sees another landlord's money` |
+| NFR | Size budgets in CI; RLS and coverage on every new table; webhook flood limits. | `NFR-PERF size budgets`; `NFR-SEC payments isolation`; `NFR-SEC a flood of bad webhooks` |
+
+### Tests
+
+1,835 unit and integration tests pass in 13 packages, against real PostgreSQL with RLS on. One test is skipped: the Paystack sandbox smoke test, which needs `PAYSTACK_TEST_SECRET_KEY`. M4a ended with 1,541.
+
+| Package | Tests |
+| --- | --- |
+| `packages/domain` | 616 |
+| `packages/server` | 308 |
+| `apps/web` | 304 |
+| `packages/integrations` | 227, plus 1 skipped |
+| `apps/tenant` | 78 Jest |
+| `packages/db` | 74 |
+| `packages/documents` | 61 |
+| `apps/api` | 57 |
+| `apps/links` | 37 |
+| `apps/fake-providers` | 32 |
+| `packages/config` | 22 |
+| `apps/worker` | 17 |
+| `packages/contracts` | 2 |
+
+**End-to-end**, on a freshly seeded database: web 59, pay page 29 and tenant app 12, so 100 in all. The playbook's seven ★ tests:
+1. ★ `BC-07 any sequence of invoices and payments keeps the ledger whole`
+2. ★ `BC-02 a tampered amount or bad signature posts nothing`
+3. ★ `BC-02 a payment confirmed during an outage is picked up by reconciliation`
+4. ★ `BC-05 a cash receipt cannot be approved by the person who recorded it`
+5. ★ `BC-06 receipt numbers have no gaps under concurrent payments`
+6. ★ `BC-11 deposit money never appears in rent income`
+7. ★ `BC-04 and BC-06 the tenant pays by MoMo and gets a receipt within a minute` (server and e2e)
+
+### Checks
+
+- **Locally:**
+    - format, lint and typecheck (25 of 25 tasks);
+    - unit and integration tests in each package;
+    - every end-to-end suite on a fresh seed, through a local stack on its own database (`rent_m4b_e2e`, never `rent`).
+- **Full local runs under load:** when agents built at the same time, a few timing-sensitive tests timed out. These were BC-06's 50 concurrent approvals, CM-09's channel fallback and two database setup hooks. All pass when run alone, and CI ran them green.
+- **CI on 72cf852:** all six GitHub Actions jobs pass: format, lint and typecheck; unit; integration; end-to-end on a freshly seeded database, with every app's suite; Expo; and backup and restore.
+
+### Independent review
+
+Two fresh agents that had not seen the build's reasoning reviewed M4b:
+- **The playbook's M4 review:** audited the posting rules and allocation against PRD sections 7 and 12, at 207c740.
+- **The general review:** the playbook's independent review prompt, word for word, over 5f2b391..4c21fda.
+
+Each reproduced its findings with probes on cloned databases. Every fix has a regression test (section 5).
+
+**Posting rules and allocation (PRD sections 7 and 12)**
+
+| # | Finding | Outcome |
+| --- | --- | --- |
+| F1 (must fix) | A P31 refund was never deducted in P22, so the cash account was overstated. | **Fixed.** |
+| F2 (must fix) | A refunded payment could still be reversed: the money left twice. | **Fixed:** refused in the service and the database (`RA055`). |
+| F3 (must fix) | A settled provider payment could only be reversed out of provider clearing. | **Fixed:** it reverses out of the account it settled to. The wrong-lease flow is tested. |
+| F4 | Credit never paid debt that a correction reopened. | **Fixed:** a P02 credit draw after reversals and credit notes. |
+| F5 | The invoice list ignored credit. | **Fixed.** |
+| F6 | A negative-net settlement lost the whole report. | **Fixed.** |
+| F7 | No check of provider clearing against the provider (invariant 11). | **Fixed.** |
+| Notes | Fees on settlements that name unposted payments; the VAT rule date for back-dated advances; M4a's "reverse and record again". | VAT date fixed; the others recorded in section 5. |
+
+**Independent review (requirements, rules, tests, concurrency, unauthenticated surfaces)**
+
+| # | Finding | Outcome |
+| --- | --- | --- |
+| 1 (must fix) | One person could redirect an owner's rent at once, with no approval and no alert. | **Fixed:** agreements go through two-person approval, with owner alerts, effective 24 hours later (`RA056`). |
+| 2 (must fix) | A P31 refund posted whatever the provider answered, and a retry was not safe. | **Fixed.** |
+| 3 (must fix) | Chargeback deductions never cleared with the real Paystack adapter. | **Fixed:** deductions read from refunds; every settlement page read. The dispute assumption is under OQ-01. |
+| 4 (must fix) | No currency check without an intent. | **Fixed** on every verification path. |
+| 5 to 11 | Failover after a lost answer; webhook flood; pay-link token sent to Paystack; one settlement page only; `advance_rent_policy` ignored on the pay page; unfixable exceptions; part refunds reversing whole payments. | **Fixed.** |
+| Tests | Weak TL-12, replay and 24-hour tests; P21, P31 and P22 tests that passed only through the fake. | **Strengthened;** the fakes now behave like Paystack. |
+| Notes | Fake provider in production; webhook body retention; charge status; many links per invoice; chargeback alert scope; slow suggestions; agreement dates. | **Fixed:** fake provider, charge status, alert scope and agreement dates.<br>**Recorded:** retention (an unverified rules row), suggestions and many links (deviation 4). |
+
+**Found by the end-to-end runs, and fixed:**
+- The unmatched queue counted a rent-only lease's month as two months.
+- Tenants could not download their receipts (an RLS gap, migration 0022).
+- The fake provider's message reset wiped its payment data.
+- CI recreated the fake provider after the seed.
+
+**Test changes, for your review.** No test was edited to make it pass. Two kinds of change touched existing tests.
+
+**Changes you approved one by one, on 2026-11-03:**
+- `payments.int.test.ts` and the `rls.int.test.ts` fixture: agreements are set up through approval. No assertion changed.
+- The Paystack settlement test: deductions are read from refunds. `deductedReferences: []` became the one deduction, and the second charge moved to a second page, keeping the fixture's totals.
+- `corrections.test.ts` (P21): asserted on the reversal's own rows, allowing for credit redrawn after it.
+- `billing.int.test.ts` (P29): the arrears are a one-off charge, so the credit still carries over.
+- `apps/fake-providers/src/server.test.ts`: the full reset moved to `DELETE /_reset`, changing the URL and title only.
+- `correction-caps.test.ts` (M4a): the same claims, asserted once per step. It now takes about 1.3 s instead of timing out in CI.
+
+**Changes under your standing rule for M4b tests that had never passed.** What each test checks is unchanged.
+- **Web:** the Receipts nav link is matched exactly.
+- **Pay page:** alert and status locators are scoped to `main`, because Next's route announcer is also an alert. The over-limit test had passed once, on a CI retry, by a race. The card test returns through `/p/return`.
+- **Tenant app:**
+    - Home's next-due expectation is read from the tenant's own billing answer.
+    - The offline check reads only the app's own cache keys.
+    - The receipt download waits for the PDF.
+    - Going offline retries focus.
+
+### Deviations
+
+Beyond section 9, and the design details in section 5:
+1. **Management agreements need approval.** Plan decision 6 set them directly; the review showed that bypassed the two-person rule.
+2. **Sending a pay link** needs `billing.manage`, because the plan named no permission for it. **Matching** uses `payments.match`, which also covers owners in their own company.
+3. **A transfer's refund needs proof** on the screen, though the contract leaves it optional.
+4. **The Expo web budget** is measured compressed (613 KB). Uncompressed, the first load is 2.5 MB.
+5. **The seed takes its demo payments through the fake provider.** CI's backup job therefore starts it, and `pnpm test:e2e` brings services up with `--no-recreate` and runs every suite with `--continue`.
+6. **Re-matching unsettled provider money to another lease** is not built. A staff reversal before settlement leaves provider clearing short, and invariant 11 raises it.
+7. **Store builds (decision 8)** were not made. The Apple and Google developer accounts do not exist yet (OQ-25).
+
+### Open items
+
+1. **OQ-55, for you:** settlement-account and agreement alerts go to the owner without channel consent. The recommendation is to keep them exempt, as security alerts.
+2. **Paystack, in writing (OQ-01):** the fixtures assume:
+    - the MoMo codes (`mtn`, `vod`, `atl`);
+    - `subaccount` and `bearer` on charges;
+    - how settlements show refunds and lost disputes;
+    - Ghanaian account-name checks;
+    - which networks ask for an OTP (Telecel may).
+
+    A Paystack test account, with its keys in the secrets manager, would let the sandbox smoke test run.
+3. **Before live rent:**
+    - counsel's opinion (OQ-03);
+    - the second provider (OQ-02);
+    - the customer email domain for `PAYMENTS_CUSTOMER_EMAIL_DOMAIN` (OQ-06);
+    - the store accounts (OQ-25).
+4. **Performance:** the queue's suggestions and the invoice list load each lease's full state. That is fine for the pilot; they need a summary query before many hundreds of leases. The Expo web first load is 2.5 MB uncompressed (libphonenumber metadata, M1 open item).
+5. **Retention:** `data_retention.other.webhook_bodies` is an unverified rules row with no value (counsel, `CLAUDE.md` section 7).
+6. **Unused helper:** M4a's `ownerAccountOf` (`apps/web/lib/lease-pick.ts`) is no longer used. It is kept with its M4a test; removing it would delete an earlier milestone's test.
+7. **Local databases:**
+    - `rent` stops at migration 0014. `pnpm db:migrate` brings it to 0022, and the seed's figures need a fresh database.
+    - The e2e database `rent_m4b_e2e` is dropped at the end of this milestone.
+8. **CI's fake-provider recreate** was not reproduced locally. `--no-recreate` stops it whatever the cause.
