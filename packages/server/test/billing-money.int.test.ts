@@ -1127,6 +1127,13 @@ describe('BC-03 payment references', () => {
 });
 
 describe('P03 money is classified as of the day it arrived (review 2)', () => {
+  // The rent period running today. It starts today only when a month back and forward lands on
+  // the same day, which month ends (the 31st, after a 30-day month) do not.
+  const currentRent = (lines: Awaited<ReturnType<typeof linesOf>>) =>
+    lines
+      .filter((l) => l.kind === 'rent' && l.periodStart !== null && l.periodStart <= today)
+      .sort((x, y) => (x.periodStart! < y.periodStart! ? -1 : 1))
+      .at(-1)!;
   const owedBefore = (lineId: string, date: string) =>
     journalSum(
       ctx,
@@ -1136,19 +1143,18 @@ describe('P03 money is classified as of the day it arrived (review 2)', () => {
     );
 
   it('holds cash received before a period started as its advance, then draws it at the start', async () => {
-    // A month started today and has accrued; the cash came in yesterday and is approved today.
+    // The current month has started and accrued; the cash came in the day before it started.
     const lease = await owingLease('Received Yesterday');
-    const current = (await linesOf(agency.companyId, lease.id)).find(
-      (l) => l.periodStart === today,
-    )!;
+    const current = currentRent(await linesOf(agency.companyId, lease.id));
+    const start = current.periodStart!;
     expect(current.accrued).toBe(true);
     await approvedCash(ctx, s, b, agency.manager, agency.admin, {
       leaseId: lease.id,
       amountMinor: 200_000,
-      receivedOn: plusDays(today, -1),
+      receivedOn: plusDays(start, -1),
     });
-    // Yesterday nothing was owed on today's month, and the receivable never went negative.
-    expect(await owedBefore(current.id, today)).toBe(0);
+    // The day before, nothing was owed on the month, and the receivable never went negative.
+    expect(await owedBefore(current.id, start)).toBe(0);
     expect(await leaseAccount(ctx, agency.companyId, lease.id, '1100')).toBe(0);
     expect(await leaseAccount(ctx, agency.companyId, lease.id, '2010')).toBe(0);
     const draws = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
@@ -1157,19 +1163,18 @@ describe('P03 money is classified as of the day it arrived (review 2)', () => {
             and idempotency_key like ${`P02:${current.id}:%`}`,
       ),
     );
-    expect(draws.rows).toEqual([{ value_date: today }]);
+    expect(draws.rows).toEqual([{ value_date: start }]);
     expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
   });
 
   it('matches an unmatched transfer as of the day it arrived', async () => {
     const lease = await owingLease('Matched As Arrived');
-    const current = (await linesOf(agency.companyId, lease.id)).find(
-      (l) => l.periodStart === today,
-    )!;
+    const current = currentRent(await linesOf(agency.companyId, lease.id));
+    const start = current.periodStart!;
     await approvedTransfer(ctx, s, b, agency.manager, agency.admin, {
       receivedInto: 'agency_account',
       amountMinor: 200_000,
-      receivedOn: plusDays(today, -1),
+      receivedOn: plusDays(start, -1),
       senderReference: 'ARRIVED YESTERDAY 01',
     });
     const waiting = (await b.read.unmatched(agency.manager)).find(
@@ -1182,8 +1187,8 @@ describe('P03 money is classified as of the day it arrived (review 2)', () => {
         .from(schema.paymentMatch)
         .where(sql`${schema.paymentMatch.leaseId} = ${lease.id}`),
     );
-    expect(match!.valueDate).toBe(plusDays(today, -1));
-    expect(await owedBefore(current.id, today)).toBe(0);
+    expect(match!.valueDate).toBe(plusDays(start, -1));
+    expect(await owedBefore(current.id, start)).toBe(0);
     expect(await leaseAccount(ctx, agency.companyId, lease.id, '1100')).toBe(0);
     expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
   });
