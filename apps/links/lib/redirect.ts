@@ -21,6 +21,24 @@ export function backToPage(
   return seeOther(`/l/${token}${search}${hash}`);
 }
 
+type PlainQuery = Readonly<Record<string, string | number | null | undefined>>;
+
+function withQuery(path: string, query: PlainQuery): Response {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query))
+    if (value !== null && value !== undefined && value !== '') params.set(key, String(value));
+  const search = params.size > 0 ? `?${params.toString()}` : '';
+  return seeOther(`${path}${search}`);
+}
+
+/** Back to a pay link's page (BC-04), with what happened in the query. */
+export const backToPay = (token: string, query: PlainQuery): Response =>
+  withQuery(`/p/${token}`, query);
+
+/** Back to a receipt link's page (BC-06), with what happened in the query. */
+export const backToReceipt = (token: string, query: PlainQuery): Response =>
+  withQuery(`/r/${token}`, query);
+
 export const notFoundResponse = () =>
   new Response('Not found', {
     status: 404,

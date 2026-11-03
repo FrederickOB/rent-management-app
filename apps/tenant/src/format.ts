@@ -99,3 +99,53 @@ export const SIGNER_STATUS_LABELS: Record<SignerStatus, string> = {
 export function leasesAre(count: number): string {
   return count === 1 ? '1 lease is' : `${count} leases are`;
 }
+
+// Money on the tenant's own tenancies (M4b plan 4.10): integer pesewas from the API, words here.
+
+/** `GH₵1,500.00`, or that nothing is due. */
+export function dueNowLabel(dueNowMinor: number): string {
+  return dueNowMinor > 0 ? formatMoney(dueNowMinor) : 'Nothing due now';
+}
+
+/**
+ * `Paid until 14 November 2026`, with any part of the next month already paid. Rent periods run
+ * from the lease's start day (CLAUDE.md section 11), so the partly paid month is named by its
+ * first day.
+ */
+export function paidUntilLabel(
+  paidUntil: string | null,
+  partial: { readonly monthStart: string; readonly amountMinor: number } | null,
+): string {
+  const part = partial
+    ? `${formatMoney(partial.amountMinor)} paid towards the month from ${formatDate(partial.monthStart)}`
+    : null;
+  if (!paidUntil) return part ? `${part[0]!.toUpperCase()}${part.slice(1)}` : 'No rent paid yet';
+  return part
+    ? `Paid until ${formatDate(paidUntil)}, and ${part}`
+    : `Paid until ${formatDate(paidUntil)}`;
+}
+
+/** `GH₵2,200.00 on 1 December 2026`, or that nothing more is billed. */
+export function nextDueLabel(
+  nextDue: { readonly dueDate: string; readonly amountMinor: number } | null,
+): string {
+  return nextDue
+    ? `${formatMoney(nextDue.amountMinor)} on ${formatDate(nextDue.dueDate)}`
+    : 'Nothing more to pay on this lease';
+}
+
+const PAYMENT_METHOD_LABELS: Readonly<Record<string, string>> = {
+  momo: 'Mobile money',
+  card: 'Card',
+  cash: 'Cash',
+  cheque: 'Cheque',
+  bank_transfer: 'Bank transfer',
+  test: 'Test payment',
+};
+
+/** How a payment was made, in words; an unknown method is shown as the API names it. */
+export function paymentMethodLabel(method: string): string {
+  return Object.hasOwn(PAYMENT_METHOD_LABELS, method)
+    ? PAYMENT_METHOD_LABELS[method]!
+    : method.replace(/_/g, ' ');
+}
