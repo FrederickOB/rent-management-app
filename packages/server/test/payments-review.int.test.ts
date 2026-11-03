@@ -1235,3 +1235,74 @@ describe('BC-12 a payment’s page says where provider money settles (web e2e)',
     expect((await b.read.payment(agency.manager, cash!.id)).settlesInto).toBeNull();
   });
 });
+
+describe('BC-06 a tenant downloads their own receipt, never a neighbour’s (links and tenant e2e)', () => {
+  it('lets a tenant session read its own receipt’s PDF and render request, and nobody else’s', async () => {
+    const pdf = async () => Buffer.from('%PDF-1.4\n%%EOF\n', 'latin1');
+    const receiptOf = async (phone: string, name: string) => {
+      const id = await lease(name, { phone });
+      await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+        leaseId: id,
+        amountMinor: 150_000,
+        receivedOn: today,
+      });
+      const [receipt] = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
+        tx.select().from(schema.receipt).where(eq(schema.receipt.leaseId, id)),
+      );
+      await s.documents.renderRequested(agency.companyId, receipt!.renderRequestId!, pdf);
+      const [tenantRow] = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
+        tx
+          .select({ id: schema.tenant.id, personId: schema.tenant.personId })
+          .from(schema.tenant)
+          .where(sql`${schema.tenant.id} = (select tenant_id from lease where id = ${id})`),
+      );
+      const [rendered] = await withCompany(ctx.database, sys(agency.companyId), (tx) =>
+        tx
+          .select({ documentId: schema.documentRenderRequest.documentId })
+          .from(schema.documentRenderRequest)
+          .where(eq(schema.documentRenderRequest.id, receipt!.renderRequestId!)),
+      );
+      return { receipt: receipt!, tenant: tenantRow!, documentId: rendered!.documentId! };
+    };
+    const mine = await receiptOf('+233200000811', 'Receipt Owner');
+    const theirs = await receiptOf('+233200000812', 'Receipt Neighbour');
+    const me = {
+      kind: 'tenant' as const,
+      personId: mine.tenant.personId!,
+      authMethod: 'phone_otp' as const,
+    };
+    expect(await p.tenantMoney.receiptDownload(me, mine.receipt.id)).toMatch(/^memory:\/\//);
+    await expect(p.tenantMoney.receiptDownload(me, theirs.receipt.id)).rejects.toMatchObject({
+      status: 404,
+    });
+    // Row Level Security itself: in my tenant session, my receipt's render request and document
+    // are visible, the neighbour's are not.
+    const seen = await withCompany(
+      ctx.database,
+      {
+        companyId: agency.companyId,
+        actorKind: 'tenant',
+        personId: mine.tenant.personId!,
+        tenantScope: { tenantIds: [mine.tenant.id] },
+      },
+      async (tx) => ({
+        requests: (
+          await tx
+            .select({ id: schema.documentRenderRequest.id })
+            .from(schema.documentRenderRequest)
+            .where(
+              sql`${schema.documentRenderRequest.id} in (${mine.receipt.renderRequestId}, ${theirs.receipt.renderRequestId})`,
+            )
+        ).map((r) => r.id),
+        documents: (
+          await tx
+            .select({ id: schema.document.id })
+            .from(schema.document)
+            .where(sql`${schema.document.id} in (${mine.documentId}, ${theirs.documentId})`)
+        ).map((d) => d.id),
+      }),
+    );
+    expect(seen.requests).toEqual([mine.receipt.renderRequestId]);
+    expect(seen.documents).toEqual([mine.documentId]);
+  });
+});

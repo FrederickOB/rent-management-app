@@ -13,6 +13,7 @@ import { chargeReference } from '@rent/domain/payments';
 import { InMemoryPayments } from '@rent/integrations';
 import { InvoicingService } from '@rent/server/billing';
 import { PAYMENT_PROVIDERS, type PaymentProviders } from '@rent/server/core';
+import { DocumentsService } from '@rent/server/documents';
 import { PayLinksService, WebhooksService } from '@rent/server/payments';
 import { createHmac } from 'node:crypto';
 import { withCompany, withSystem, sql } from '@rent/db';
@@ -303,5 +304,87 @@ describe('ADR-008 settlement accounts over HTTP', () => {
       body: { reason: 'Checking the number with the owner' },
     });
     expect(revealed.json).toEqual({ accountNumber: '1441000123456' });
+  });
+});
+
+describe('BC-06 a tenant downloads their own receipt over HTTP (links and tenant e2e)', () => {
+  it('serves the tenant’s own receipt PDF, and 404 to another tenant', async () => {
+    const created = await manager.call('/tenants', {
+      body: {
+        kind: 'individual',
+        displayName: 'Receipt Downloader',
+        phone: '020 000 0421',
+        consent: { sms: true },
+      },
+    });
+    const tenantId = (created.json.tenant as { id: string }).id;
+    const lease = await manager.call('/leases/paper', {
+      body: {
+        unitId: units[2]!.id,
+        tenantId,
+        startDate: today,
+        endDate: toIsoDate(addDays(addMonths(parseBusinessDate(today), 12), -1)),
+        monthlyRentMinor: 100_000,
+        cycle: 'monthly',
+        noticeDays: 30,
+        parties: [{ role: 'tenant', name: 'Receipt Downloader' }],
+        scanUploadId: await upload(manager, '/lease-uploads', {}),
+        signedOn: today,
+        billingStartDate: today,
+      },
+    });
+    expect(lease.status, JSON.stringify(lease.json)).toBe(200);
+    const leaseId = String(lease.json.id);
+    await api.app.get(InvoicingService).onLeaseSigned(agencyId, leaseId);
+    // Paid through the pay page, the webhook processed as the worker would.
+    const token = await payToken(leaseId);
+    const started = await links('/links/pay/intents', {
+      token,
+      client,
+      amountMinor: 100_000,
+      method: 'momo',
+      momo: { phone: '0240000004', network: 'mtn' },
+      submissionId: randomUUID(),
+    });
+    const webhook = await fake.completeCharge(chargeReference(String(started.json.intentId)), {
+      status: 'success',
+    });
+    await fetch(`${api.baseUrl}/webhooks/paystack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...webhook!.headers },
+      body: webhook!.rawBody,
+    });
+    const inbox = await withSystem(api.database, {}, (tx) =>
+      tx.execute<{ id: string }>(sql`select id from app.claim_webhook_inbox(10)`),
+    );
+    for (const row of inbox.rows) await api.app.get(WebhooksService).process(row.id);
+    const receipt = await withCompany(
+      api.database,
+      { companyId: agencyId, actorKind: 'system' },
+      (tx) =>
+        tx.execute<{ id: string; render_request_id: string }>(
+          sql`select id, render_request_id from receipt where lease_id = ${leaseId} and kind = 'receipt'`,
+        ),
+    );
+    const { id: receiptId, render_request_id: renderRequestId } = receipt.rows[0]!;
+    // The worker's PDF job, with a stand-in renderer.
+    await api.app.get(DocumentsService).renderRequested(agencyId, renderRequestId, async () => PDF);
+    const signIn = async (phone: string) => {
+      const device = new Device(api.baseUrl, 'Expo/Android');
+      await device.call('/api/auth/phone-number/send-otp', { body: { phoneNumber: phone } });
+      const code = /\b(\d{6})\b/.exec(api.sms.lastTo(phone)!.body)![1]!;
+      const verified = await device.call('/api/auth/phone-number/verify', {
+        body: { phoneNumber: phone, code },
+      });
+      expect(verified.status).toBe(200);
+      return device;
+    };
+    const tenant = await signIn('+233200000421');
+    const download = await tenant.call(`/me/receipts/${receiptId}/download`);
+    expect(download.status, JSON.stringify(download.json)).toBe(200);
+    expect(String(download.json.url)).toMatch(/^memory:\/\/download\//);
+    await createPerson(api, { name: 'Another tenant', phone: '+233200000422' });
+    const stranger = await signIn('+233200000422');
+    expect((await stranger.call(`/me/receipts/${receiptId}/download`)).status).toBe(404);
   });
 });

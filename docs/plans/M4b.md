@@ -328,6 +328,16 @@
     - `billing.int.test.ts` P29 carry-over (item 9). The arrears are now an unpaid one-off charge of 100,000 raised before the credit note, with all twelve months paid; the 70,000 credit still carries to the renewal. No service raises one-off charges yet, so the test issues it through the engine.
     - `rls.int.test.ts` fixture (item 1). The agreement names a `management_agreement.change` request approved by the fixture's second person. No assertion changed.
 
+**2026-11-03, links and tenant e2e fixes.**
+
+- **Tenant receipt downloads** (BC-06): migration `0022_tenant_receipt_documents` lets a tenant session read the render requests and documents of its own receipts. Before it, `GET /me/receipts/{id}/download` always answered 404. Receipts are tenant-scoped, so a neighbour's stay invisible. No tenant route serves invoice PDFs, so invoices were not added. Tests:
+    - "BC-06 a tenant downloads their own receipt, never a neighbour's": the service and RLS directly;
+    - "BC-06 a tenant downloads their own receipt over HTTP": the API.
+- **The fake provider's reset:** `DELETE /messages` now clears captured messages only, so a test that clears its inbox keeps the seed's subaccounts and charges. The new `DELETE /_reset` resets every store.
+    - **Existing test changed with the founder's approval:** `apps/fake-providers/src/server.test.ts`, formerly "DELETE /messages resets every store, not only messages", now calls `DELETE /_reset` and is titled to match. Every assertion is unchanged.
+    - New test: "DELETE /messages clears captured messages only: subaccounts and charges stay".
+- **CI:** `pnpm test:e2e` brings services up with `--no-recreate`, so it never recreates the fake provider the seed filled. Locally the compose configuration hash is the same in a plain shell and under pnpm, so the cause in CI was not reproduced. `pnpm dev`, `pnpm test` and `services:up` are unchanged.
+
 ## 6. Tests
 
 ★ marks the tests the playbook requires for M4.

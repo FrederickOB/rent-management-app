@@ -70,6 +70,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: cp .env.example .env
+      # pnpm test:e2e brings the services up again with --no-recreate, so the fake provider keeps
+      # the subaccounts and charges the seed made (it holds them in memory).
       - name: Start every Compose service, fake-providers included
         run: docker compose up -d --wait
       - run: pnpm db:migrate

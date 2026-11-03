@@ -24,20 +24,20 @@ pnpm dev
 
 ## Daily commands
 
-| Command                                   | What it does                                                                                            |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`                                | Starts the Compose services, then api, worker, web, links and the tenant app in watch mode              |
-| `pnpm services:up` / `pnpm services:down` | Starts or stops the Compose services                                                                    |
-| `pnpm build`                              | Production builds of web and links, and the tenant app's web export                                     |
-| `pnpm lint` / `pnpm typecheck`            | ESLint (typed rules and the repository's own rules) and TypeScript                                      |
-| `pnpm format` / `pnpm format:check`       | Prettier                                                                                                |
-| `pnpm test`                               | Starts the services, then every unit and integration test (real PostgreSQL with RLS) and the Expo tests |
-| `pnpm test:unit`                          | Unit tests only, no services                                                                            |
-| `pnpm test:e2e`                           | Playwright, one app at a time; keep `pnpm dev` running (links builds and serves its own copy on 3792)   |
-| `pnpm db:migrate`                         | Applies the SQL migrations as `rent_owner`                                                              |
-| `pnpm db:seed`                            | Loads the demo dataset; idempotent, and refuses any database that is not local                          |
-| `pnpm db:backup` / `pnpm db:restore`      | Local backup and restore ([runbook](docs/runbooks/backup-restore.md))                                   |
-| `pnpm rules:add`                          | Adds a row to the legal and tax rules table (TX-08)                                                     |
+| Command                                   | What it does                                                                                                                                                                                                          |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                                | Starts the Compose services, then api, worker, web, links and the tenant app in watch mode                                                                                                                            |
+| `pnpm services:up` / `pnpm services:down` | Starts or stops the Compose services                                                                                                                                                                                  |
+| `pnpm build`                              | Production builds of web and links, and the tenant app's web export                                                                                                                                                   |
+| `pnpm lint` / `pnpm typecheck`            | ESLint (typed rules and the repository's own rules) and TypeScript                                                                                                                                                    |
+| `pnpm format` / `pnpm format:check`       | Prettier                                                                                                                                                                                                              |
+| `pnpm test`                               | Starts the services, then every unit and integration test (real PostgreSQL with RLS) and the Expo tests                                                                                                               |
+| `pnpm test:unit`                          | Unit tests only, no services                                                                                                                                                                                          |
+| `pnpm test:e2e`                           | Playwright, one app at a time; keep `pnpm dev` running (links builds and serves its own copy on 3792). It starts missing services but never recreates running ones, so the fake provider keeps the seed's subaccounts |
+| `pnpm db:migrate`                         | Applies the SQL migrations as `rent_owner`                                                                                                                                                                            |
+| `pnpm db:seed`                            | Loads the demo dataset; idempotent, and refuses any database that is not local                                                                                                                                        |
+| `pnpm db:backup` / `pnpm db:restore`      | Local backup and restore ([runbook](docs/runbooks/backup-restore.md))                                                                                                                                                 |
+| `pnpm rules:add`                          | Adds a row to the legal and tax rules table (TX-08)                                                                                                                                                                   |
 
 ## Ports
 

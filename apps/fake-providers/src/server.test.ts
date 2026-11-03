@@ -97,11 +97,11 @@ describe('PLATFORM fake providers: server', () => {
     ).toHaveLength(1);
   });
 
-  it('DELETE /messages resets every store, not only messages', async () => {
+  it('DELETE /_reset resets every store, not only messages', async () => {
     const store = createStore();
     const app = buildServer(store);
     const { mediaId, ticketId, checkId } = await fillEveryStore(app);
-    expect((await app.inject({ method: 'DELETE', url: '/messages' })).statusCode).toBe(204);
+    expect((await app.inject({ method: 'DELETE', url: '/_reset' })).statusCode).toBe(204);
     expect(
       Object.values(store).every((s) =>
         Array.isArray(s) ? s.length === 0 : (s as Map<string, unknown>).size === 0,
@@ -128,6 +128,29 @@ describe('PLATFORM fake providers: server', () => {
     expect(
       (await app.inject({ method: 'GET', url: `/identity/checks/${checkId}` })).statusCode,
     ).toBe(404);
+  });
+
+  it('DELETE /messages clears captured messages only: subaccounts and charges stay (M4b e2e)', async () => {
+    const store = createStore();
+    const app = buildServer(store);
+    await fillEveryStore(app);
+    const subaccounts = store.subaccounts.size;
+    const transactions = store.transactions.size;
+    expect(subaccounts).toBeGreaterThan(0);
+    expect(transactions).toBeGreaterThan(0);
+    expect((await app.inject({ method: 'DELETE', url: '/messages' })).statusCode).toBe(204);
+    expect((await app.inject({ method: 'GET', url: '/messages' })).json()).toEqual([]);
+    expect(store.subaccounts.size).toBe(subaccounts);
+    expect(store.transactions.size).toBe(transactions);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: '/payments/transaction/verify/pay-1',
+          headers: auth,
+        })
+      ).statusCode,
+    ).toBe(200);
   });
 
   it('shows every channel and provider on the dev inbox, escaped and masked, under a strict CSP', async () => {
