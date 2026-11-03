@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ROLE_NAMES } from '@rent/config/eslint/roles';
 import {
+  AUDIT_NEEDS_WHOLE_COMPANY,
   can,
   checkMembershipScope,
   POLICY_ACTIONS,
@@ -33,10 +34,22 @@ const COLUMNS: Column[] = [
 ];
 
 /**
- * The matrices in docs/plans/M1.md section 4.6 and docs/plans/M2.md section 4.4. 1 = allowed.
- * Approval decisions are tested separately; scope is tested below.
+ * The matrices in docs/plans/M1.md section 4.6, docs/plans/M2.md section 4.4 and
+ * docs/plans/M3.md section 4.14. 1 = allowed. Approval decisions are tested separately; scope is
+ * tested below.
  */
 const MATRIX: Partial<Record<PolicyAction, string>> = {
+  'tenant.view': '11111110',
+  'tenant.view_details': '11111010',
+  'tenant.manage': '10110000',
+  'tenant.id.verify': '10110000',
+  'tenant.id.reveal': '10110000',
+  'lease.view': '11111110',
+  'lease.view_terms': '11111010',
+  'lease.manage': '10110000',
+  'lease.cancel_signed': '10110000',
+  'lease_template.manage': '10100000',
+  'tenancy.view_own': '00000000',
   'owner.view': '11111010',
   'owner.manage': '10100000',
   'register.view': '11111110',
@@ -118,6 +131,18 @@ describe('AD-03 policy matrix', () => {
     ).toBe(false);
     expect(can({ kind: 'system', companyId: 'c', job: 'x' }, 'company.view').allowed).toBe(false);
   });
+
+  it('lets a tenant see only their own tenancies, never staff views of tenants or leases', () => {
+    const tenant = { kind: 'tenant', personId: 't', authMethod: 'phone_otp' } as const;
+    expect(can(tenant, 'tenancy.view_own').allowed).toBe(true);
+    for (const action of [
+      'tenant.view',
+      'lease.view',
+      'lease.view_terms',
+      'tenant.id.reveal',
+    ] as const)
+      expect(can(tenant, action).allowed, action).toBe(false);
+  });
 });
 
 describe('AD-02 scope', () => {
@@ -151,6 +176,34 @@ describe('AD-02 scope', () => {
       propertyIds: [],
     });
     expect(scopeOf(actorFor('platform_admin'))).toBeNull();
+  });
+});
+
+describe('AD-07 audit search scope', () => {
+  const scoped = (column: Column, scope: { owners?: string[]; properties?: string[] }): Actor => {
+    const actor = actorFor(column);
+    return actor.kind === 'staff' ? { ...actor, scope } : actor;
+  };
+
+  it('refuses the audit log to anyone limited to some owners or properties, saying why', () => {
+    for (const scope of [{ owners: ['o1'] }, { properties: ['p1'] }]) {
+      for (const column of ['owner_own', 'agency_admin', 'accountant'] as const) {
+        const decision = can(scoped(column, scope), 'audit.search');
+        expect(decision.allowed, `${column} with ${JSON.stringify(scope)}`).toBe(false);
+        expect(decision.message).toBe(AUDIT_NEEDS_WHOLE_COMPANY);
+      }
+    }
+  });
+
+  it('keeps the audit log for the same roles across the whole company', () => {
+    for (const column of ['owner_own', 'agency_admin', 'accountant'] as const)
+      expect(can(scoped(column, {}), 'audit.search')).toMatchObject({ allowed: true });
+  });
+
+  it('gives a role without the permission the plain refusal, scoped or not', () => {
+    const decision = can(scoped('property_manager', { owners: ['o1'] }), 'audit.search');
+    expect(decision.allowed).toBe(false);
+    expect(decision.message).toBeUndefined();
   });
 });
 

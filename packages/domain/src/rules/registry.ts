@@ -39,6 +39,10 @@ const REGISTRY: readonly Entry[] = [
   ),
   entry(/^advance_rent\.max_months\.[a-z_]+$/, months),
   entry(/^rent_control\.registration_days$/, days),
+  // M3 trackers (plan 4.11): stamping within months of signing (OQ-45), and the term above which
+  // a lease takes the formal path (OQ-44).
+  entry(/^stamp_duty\.deadline_months$/, months),
+  entry(/^lease\.writing_exemption_max_years$/, years),
   entry(/^notice_to_quit\.statutory_min_days\.[a-z_]+$/, days, true),
   entry(/^data_retention\.financial_and_notices$/, years, true),
   entry(/^data_retention\.other\.[a-z_]+$/, years, true),

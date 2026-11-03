@@ -15,6 +15,9 @@
     "./companies": "./src/companies/index.ts",
     "./approvals": "./src/approvals/index.ts",
     "./portfolio": "./src/portfolio/index.ts",
+    "./esign": "./src/esign/index.ts",
+    "./tenancy": "./src/tenancy/index.ts",
+    "./messaging": "./src/messaging/index.ts",
     "./testing": "./test/support/index.ts"
   },
   "scripts": {

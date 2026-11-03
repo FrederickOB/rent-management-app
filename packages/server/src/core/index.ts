@@ -6,6 +6,8 @@ export * from './logging/logger';
 export * from './logging/redact';
 export * from './tokens';
 export * from './outbox';
+export * from './messages';
 export * from './crypto/field-cipher';
 export * from './crypto/db-key-store';
 export * from './db-errors';
+export * from './rate-limit';

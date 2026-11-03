@@ -53,6 +53,18 @@ export const POLICY_ACTIONS = [
   'property_photo.view',
   'property_paper.view',
   'property_file.upload',
+  // M3: tenants, leases and e-signing (plan section 4.14).
+  'tenant.view',
+  'tenant.view_details',
+  'tenant.manage',
+  'tenant.id.verify',
+  'tenant.id.reveal',
+  'lease.view',
+  'lease.view_terms',
+  'lease.manage',
+  'lease.cancel_signed',
+  'lease_template.manage',
+  'tenancy.view_own',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -65,11 +77,22 @@ export interface ApprovalResource {
 
 export interface Decision {
   readonly allowed: boolean;
+  /** Why, for logs and tests. */
   readonly reason: string;
+  /** Why, for people: a refusal that needs explaining carries it, and the API shows it. */
+  readonly message?: string;
 }
 
 const allow = (reason: string): Decision => ({ allowed: true, reason });
-const deny = (reason: string): Decision => ({ allowed: false, reason });
+const deny = (reason: string, message?: string): Decision =>
+  message === undefined ? { allowed: false, reason } : { allowed: false, reason, message };
+
+/**
+ * Audit events carry whole rows from every table, before and after, so the log cannot be cut down
+ * to some owners or properties: a session limited to some of them does not search it (M2 S1).
+ */
+export const AUDIT_NEEDS_WHOLE_COMPANY =
+  'The audit log covers the whole company, so it is not open to people limited to some owners or properties';
 
 type Grant = 'own_company' | 'agency_client';
 
@@ -158,6 +181,53 @@ const STAFF_MATRIX: Record<
     'adviser',
   ],
   'property_file.upload': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // M3 (plan section 4.14). A caretaker sees the tenants and leases in their scope, but only a
+  // tenant's name, phone and unit and a lease's unit and dates: the rest needs view_details or
+  // view_terms. ID numbers are revealed only with tenant.id.reveal, never to caretakers,
+  // accountants, advisers or agency client owners (PRD section 15).
+  'tenant.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'tenant.view_details': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'tenant.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'tenant.id.verify': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'tenant.id.reveal': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'lease.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'lease.view_terms': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'lease.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // Starts an approval; a second eligible person decides (M3 decision 6).
+  'lease.cancel_signed': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'lease_template.manage': ['owner:own_company', 'agency_admin'],
+  // A tenant's own tenancies in the tenant app; staff use lease.view.
+  'tenancy.view_own': [],
 };
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
@@ -179,9 +249,10 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
     case 'system':
       return deny('system actors act through jobs, not the policy layer');
     case 'tenant':
-      return action === 'session.manage_own'
-        ? allow('tenants manage their own sessions')
-        : deny('not available to tenants');
+      if (action === 'session.manage_own') return allow('tenants manage their own sessions');
+      // Only their own tenancies, which the tenancy module finds by person (TL-01, OQ-30).
+      if (action === 'tenancy.view_own') return allow('tenants see their own tenancies');
+      return deny('not available to tenants');
     case 'platform_admin':
       if (action === 'rules.view' || action === 'rules.add' || action === 'session.manage_own') {
         return allow('platform admin');
@@ -209,9 +280,11 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
       }
       if (action === 'approval.view' && actor.nominatedApprover) return allow('nominated approver');
       const allowed = STAFF_MATRIX[action];
-      return allowed.includes(staffKey(actor.role, actor.companyKind))
-        ? allow(`${actor.role} may ${action}`)
-        : deny(`${actor.role} may not ${action}`);
+      if (!allowed.includes(staffKey(actor.role, actor.companyKind)))
+        return deny(`${actor.role} may not ${action}`);
+      if (action === 'audit.search' && scopeOf(actor) !== null)
+        return deny('the audit log needs access to the whole company', AUDIT_NEEDS_WHOLE_COMPANY);
+      return allow(`${actor.role} may ${action}`);
     }
   }
 }

@@ -80,6 +80,27 @@ export function formatInstant(
   return `${text} (${timeZone})`;
 }
 
+const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+] as const;
+
+/** A business date for documents and messages, for example `1 November 2026`. */
+export function formatBusinessDate(iso: string): string {
+  const date = parseBusinessDate(iso);
+  return `${date.day} ${MONTH_NAMES[date.month - 1]} ${date.year}`;
+}
+
 export function isValidTimeZone(timeZone: string): boolean {
   try {
     Temporal.Now.instant().toZonedDateTimeISO(timeZone);

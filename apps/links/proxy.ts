@@ -18,5 +18,7 @@ export function proxy(request: NextRequest): NextResponse {
   });
   response.headers.set('Content-Security-Policy', csp);
   for (const [name, value] of SECURITY_HEADERS) response.headers.set(name, value);
+  // Link pages show personal documents: never stored by the browser or anything between.
+  if (request.nextUrl.pathname.startsWith('/l/')) response.headers.set('Cache-Control', 'no-store');
   return response;
 }

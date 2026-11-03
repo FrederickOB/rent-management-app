@@ -3,14 +3,14 @@ import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { authClient } from '../src/auth-client';
 import { useSession } from '../src/session';
-import { Body, Button, ErrorText, Field, Screen } from '../src/ui';
+import { Body, Button, ErrorText, Field, Notice, Screen } from '../src/ui';
 
 type Step = { kind: 'phone' } | { kind: 'code'; phone: string };
 
 /** Tenant sign-in by phone one-time code (AD-06). */
 export default function SignIn() {
   const router = useRouter();
-  const { refresh } = useSession();
+  const { refresh, ended } = useSession();
   const [step, setStep] = useState<Step>({ kind: 'phone' });
   const [phoneInput, setPhoneInput] = useState('');
   const [code, setCode] = useState('');
@@ -65,6 +65,9 @@ export default function SignIn() {
   if (step.kind === 'phone') {
     return (
       <Screen title="Sign in">
+        {ended ? (
+          <Notice testID="session-ended">Your session has ended. Sign in again to continue.</Notice>
+        ) : null}
         <Body>
           Enter the phone number your landlord has on record. We will text you a 6-digit code.
         </Body>

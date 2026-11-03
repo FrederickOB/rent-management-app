@@ -6,4 +6,5 @@ export * from './memberships';
 export * from './otp-hash';
 export * from './session-policy';
 export * from './person-accounts';
+export * from './person-directory';
 export * from './step-up';

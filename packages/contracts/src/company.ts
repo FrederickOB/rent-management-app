@@ -3,6 +3,9 @@ import { z } from 'zod';
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex colour such as #0F766E');
 
+/** The bounds the domain's company settings use (packages/domain/src/settings). */
+const daysBefore = z.array(z.number().int().min(0).max(366)).min(1).max(12);
+
 export const companySettingsSchema = z.object({
   rentReminderOffsetsDays: z.array(z.number().int()),
   noticeReminderOffsetsHours: z.array(z.number().int()),
@@ -10,6 +13,28 @@ export const companySettingsSchema = z.object({
   advanceRentPolicy: z.enum(['off', 'warn', 'block']),
   approvalExpiryDays: z.number().int(),
   approvalCoolingOffHours: z.number().int(),
+  // M3 (decision 4; plan 4.8 and 4.11). GET always returns the values in force, defaults
+  // applied; they are optional here so clients written before M3 keep their types.
+  /** A witness signs every lease (decision 4); new drafts take this. */
+  witnessRequired: z.boolean().optional(),
+  /** Track Rent Control registration for commercial leases too (TX-05, OQ-52). */
+  rentControlCommercial: z.boolean().optional(),
+  /** Days before the Rent Control deadline to remind staff; then weekly. */
+  rentControlReminderDaysBefore: daysBefore.optional(),
+  /** Days before the stamping deadline to remind staff; then weekly (OQ-45). */
+  stampingReminderDaysBefore: daysBefore.optional(),
+  /** Hours after the signing links go out that unsigned signers are reminded (TL-07). */
+  signingReminderHours: z
+    .array(
+      z
+        .number()
+        .int()
+        .min(1)
+        .max(24 * 30),
+    )
+    .min(1)
+    .max(12)
+    .optional(),
 });
 
 export const companyProfileSchema = z.object({

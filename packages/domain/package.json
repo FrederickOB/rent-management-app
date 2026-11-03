@@ -13,6 +13,9 @@
     "./rules": "./src/rules/index.ts",
     "./settings": "./src/settings/index.ts",
     "./portfolio": "./src/portfolio/index.ts",
+    "./tenancy": "./src/tenancy/index.ts",
+    "./esign": "./src/esign/index.ts",
+    "./messaging": "./src/messaging/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

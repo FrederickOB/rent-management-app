@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   addToOwnerScope,
   and,
@@ -15,10 +15,13 @@ import { isValidTimeZone } from '@rent/domain/dates';
 import { normalisePhone } from '@rent/domain/phone';
 import type { Actor } from '@rent/domain/policy';
 import { checkOwnerReference, type OwnerKind } from '@rent/domain/portfolio';
+import { checkTin, maskIdNumber } from '@rent/domain/tenancy';
 import { v7 as uuidv7 } from 'uuid';
+import { AuditService } from '../audit/audit.service';
+import type { FieldCipher } from '../core/crypto/field-cipher';
 import { isUniqueViolation } from '../core/db-errors';
 import { conflict, invalid, notFound } from '../core/errors';
-import { DATABASE } from '../core/tokens';
+import { DATABASE, FIELD_CIPHER } from '../core/tokens';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { staffActor } from './companies.service';
 
@@ -33,6 +36,11 @@ export interface OwnerView {
   readonly residenceCountry: string | null;
   readonly timeZone: string;
   readonly notes: string | null;
+  /** M3 tax fields (plan 4.13): a letting business pays income tax rather than final rent tax. */
+  readonly lettingBusiness: boolean;
+  readonly vatRegistered: boolean;
+  /** Masked; revealing it needs owner.manage and a reason, and is audited. */
+  readonly tinMasked: string | null;
   readonly archived: boolean;
   readonly createdAt: Date;
 }
@@ -47,7 +55,13 @@ export interface OwnerInput {
   readonly residenceCountry?: string | null;
   readonly timeZone?: string | null;
   readonly notes?: string | null;
+  readonly lettingBusiness?: boolean;
+  readonly vatRegistered?: boolean;
+  /** Encrypted with the field cipher, blind-indexed and masked (M3 plan 4.4). Null removes it. */
+  readonly tin?: string | null;
 }
+
+export const TIN_REVEAL_REASON_MIN_LENGTH = 10;
 
 type OwnerRow = typeof schema.owner.$inferSelect;
 
@@ -63,6 +77,9 @@ const view = (r: OwnerRow, options: { readonly notes: boolean }): OwnerView => (
   residenceCountry: r.residenceCountry,
   timeZone: r.timeZone,
   notes: options.notes ? r.notes : null,
+  lettingBusiness: r.lettingBusiness,
+  vatRegistered: r.vatRegistered,
+  tinMasked: r.tinMasked,
   archived: r.archivedAt !== null,
   createdAt: r.createdAt,
 });
@@ -91,6 +108,8 @@ function checked(input: Partial<OwnerInput>) {
     out.timeZone = input.timeZone;
   }
   if (input.notes !== undefined) out.notes = input.notes?.trim() || null;
+  if (input.lettingBusiness !== undefined) out.lettingBusiness = input.lettingBusiness;
+  if (input.vatRegistered !== undefined) out.vatRegistered = input.vatRegistered;
   return out;
 }
 
@@ -103,6 +122,9 @@ export class OwnersService {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(PolicyService) private readonly policy: PolicyService,
+    // Optional, so the register (M2) can use owners without the TIN features.
+    @Optional() @Inject(FIELD_CIPHER) private readonly cipher?: FieldCipher,
+    @Optional() @Inject(AuditService) private readonly audit?: AuditService,
   ) {}
 
   async list(
@@ -141,11 +163,13 @@ export class OwnersService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'owner.manage');
     const values = checked(input);
+    // One id for the row and for the TIN's encryption context, generated before the insert.
+    const id = uuidv7();
+    const tin = await this.sealTin(staff.companyId, id, input.tin);
     try {
       const [row] = await withCompany(this.database, staffContext(staff), async (tx) => {
         // An owner-scoped person sees only their owners (owner_scope policy); the new record
         // joins this transaction's scope so it can be written and returned.
-        const id = uuidv7();
         await addToOwnerScope(tx, id);
         return tx
           .insert(schema.owner)
@@ -161,6 +185,9 @@ export class OwnersService {
             residenceCountry: values.residenceCountry ?? null,
             timeZone: values.timeZone ?? 'Africa/Accra',
             notes: values.notes ?? null,
+            lettingBusiness: values.lettingBusiness ?? false,
+            vatRegistered: values.vatRegistered ?? false,
+            ...tin,
           })
           .returning();
       });
@@ -180,11 +207,13 @@ export class OwnersService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'owner.manage');
     const values = checked(patch);
+    const tin =
+      patch.tin !== undefined ? await this.sealTin(staff.companyId, ownerId, patch.tin) : {};
     try {
       const [row] = await withCompany(this.database, staffContext(staff), (tx) =>
         tx
           .update(schema.owner)
-          .set({ ...values, updatedAt: new Date() })
+          .set({ ...values, ...tin, updatedAt: new Date() })
           .where(and(eq(schema.owner.id, ownerId), isNull(schema.owner.archivedAt)))
           .returning(),
       );
@@ -195,6 +224,41 @@ export class OwnersService {
         throw conflict('owner_reference_taken', 'Another owner already has that reference');
       throw error;
     }
+  }
+
+  /**
+   * Shows an owner's TIN (plan 4.13): needs owner.manage and a reason, and writes the audit event
+   * `tin.revealed` with who, when and why, never the number itself.
+   */
+  async revealTin(actor: Actor | null, ownerId: string, reason: string): Promise<{ tin: string }> {
+    const staff = staffActor(actor);
+    this.policy.assert(staff, 'owner.manage');
+    const why = reason.trim();
+    if (why.length < TIN_REVEAL_REASON_MIN_LENGTH)
+      throw invalid(
+        'reason_required',
+        `Give a reason of at least ${TIN_REVEAL_REASON_MIN_LENGTH} characters`,
+      );
+    const { cipher, audit } = this.taxDependencies();
+    const row = await withCompany(this.database, staffContext(staff), async (tx) => {
+      const [found] = await tx.select().from(schema.owner).where(eq(schema.owner.id, ownerId));
+      if (!found) throw notFound('Owner');
+      if (!found.tinEncrypted) throw notFound('TIN');
+      await audit.append(tx, {
+        companyId: staff.companyId,
+        action: 'tin.revealed',
+        recordType: 'owner',
+        recordId: ownerId,
+        data: { reason: why.slice(0, 300) },
+      });
+      return found;
+    });
+    return {
+      tin: await cipher.decrypt(
+        { companyId: staff.companyId, table: 'owner', column: 'tin', rowId: ownerId },
+        row.tinEncrypted!,
+      ),
+    };
   }
 
   /** Archives an owner. The register checks first that they no longer own a property. */
@@ -247,6 +311,33 @@ export class OwnersService {
       .from(schema.owner)
       .where(isNull(schema.owner.archivedAt))
       .limit(2);
+  }
+
+  /** The TIN columns for a value: encrypted, indexed and masked, or all null to remove it. */
+  private async sealTin(
+    companyId: string,
+    ownerId: string,
+    value: string | null | undefined,
+  ): Promise<Partial<OwnerRow>> {
+    if (value === undefined) return {};
+    if (value === null || !value.trim())
+      return { tinEncrypted: null, tinIndex: null, tinMasked: null };
+    const { cipher } = this.taxDependencies();
+    const tin = checkTin(value);
+    return {
+      tinEncrypted: await cipher.encrypt(
+        { companyId, table: 'owner', column: 'tin', rowId: ownerId },
+        tin,
+      ),
+      tinIndex: cipher.blindIndex(companyId, `tin:${tin}`),
+      tinMasked: maskIdNumber(tin),
+    };
+  }
+
+  private taxDependencies(): { cipher: FieldCipher; audit: AuditService } {
+    if (!this.cipher || !this.audit)
+      throw new Error('Owner TINs need the field cipher and the audit log');
+    return { cipher: this.cipher, audit: this.audit };
   }
 
   /** The next free OWN-nn reference. */

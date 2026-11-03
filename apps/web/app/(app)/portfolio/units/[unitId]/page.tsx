@@ -36,6 +36,8 @@ export default async function UnitPage({ params }: { readonly params: Params }) 
       can={{
         manage: allowed(me, 'register.manage'),
         overrideBand: allowed(me, 'unit.band_override'),
+        seeLeases: allowed(me, 'lease.view'),
+        draftLease: allowed(me, 'lease.manage'),
       }}
     />
   );

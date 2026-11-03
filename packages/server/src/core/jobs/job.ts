@@ -20,7 +20,7 @@ export interface JobContext {
   enqueue(
     name: string,
     payload: Record<string, unknown>,
-    options?: { singletonKey?: string },
+    options?: { singletonKey?: string; startAfter?: Date },
   ): Promise<void>;
 }
 

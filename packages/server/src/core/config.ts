@@ -40,6 +40,11 @@ const configSchema = z.object({
   AUTH_RATE_LIMITS: z.enum(['on', 'off']).default('on'),
   OTP_SENDS_PER_PHONE: z.coerce.number().int().positive().default(3),
   OTP_SEND_WINDOW_MINUTES: minutes(15),
+  /**
+   * The key apps/links sends with every links API call (M3 plan 4.15). Required in production;
+   * elsewhere a shared development key stands in (DEV_LINKS_API_KEY).
+   */
+  LINKS_API_KEY: z.string().min(32).optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -57,5 +62,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (config.NODE_ENV === 'production' && config.AUTH_RATE_LIMITS === 'off') {
     throw new Error('AUTH_RATE_LIMITS cannot be turned off in production');
   }
+  if (
+    config.NODE_ENV === 'production' &&
+    (!config.LINKS_API_KEY || config.LINKS_API_KEY === DEV_LINKS_API_KEY)
+  ) {
+    throw new Error('LINKS_API_KEY must be set to a secret of its own in production');
+  }
   return config;
+}
+
+/**
+ * The development stand-in for LINKS_API_KEY, which apps/links uses when it has none. It is not
+ * a secret: production refuses it, so a links app deployed without its key fails closed.
+ */
+export const DEV_LINKS_API_KEY = 'dev-only-links-api-key-not-a-secret-000000';
+
+/** The key the links API accepts: the configured one, or the development stand-in outside production. */
+export function linksApiKeyOf(config: AppConfig): string {
+  return config.LINKS_API_KEY ?? DEV_LINKS_API_KEY;
 }

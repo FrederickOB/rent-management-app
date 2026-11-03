@@ -15,13 +15,18 @@ export interface AlertProps {
   readonly title?: ReactNode;
   readonly children?: ReactNode;
   readonly className?: string;
+  /**
+   * False for a second copy of a message already announced elsewhere on the page, such as a
+   * refusal repeated next to a form's button: it is shown, not announced twice.
+   */
+  readonly live?: boolean;
 }
 
 /** Errors interrupt screen readers (`role="alert"`); everything else is announced politely. */
-export function Alert({ tone = 'info', title, children, className }: AlertProps) {
+export function Alert({ tone = 'info', title, children, className, live = true }: AlertProps) {
   return (
     <div
-      role={tone === 'error' ? 'alert' : 'status'}
+      role={live ? (tone === 'error' ? 'alert' : 'status') : undefined}
       className={cn('rounded-md border px-4 py-3 text-sm', TONES[tone], className)}
     >
       {title ? <p className="font-semibold">{title}</p> : null}

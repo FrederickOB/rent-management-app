@@ -18,3 +18,6 @@ apps/tenant/android/
 next-env.d.ts
 apps/*/AGENTS.md
 .vitest/
+
+# Worktrees that Claude Code creates for isolated agents
+.claude/worktrees/

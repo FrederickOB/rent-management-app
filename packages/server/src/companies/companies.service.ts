@@ -1,10 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq, schema, withCompany, type Database } from '@rent/db';
+import { eq, schema, withCompany, type Database, type Tx } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import {
   brandingSchema,
   mergeCompanySettings,
   parseCompanySettings,
+  signingReminderHoursOf,
+  tenancySettingsOf,
   type CompanySettings,
 } from '@rent/domain/settings';
 import { forbidden, notFound } from '../core/errors';
@@ -30,6 +32,14 @@ export interface CompanyProfileView {
 }
 
 export type StaffActor = Extract<Actor, { kind: 'staff' }>;
+
+/** A company's row, read in the caller's company transaction (RLS applies): for other modules. */
+export type CompanyRecord = typeof schema.company.$inferSelect;
+
+export async function companyRecord(tx: Tx, companyId: string): Promise<CompanyRecord | null> {
+  const [row] = await tx.select().from(schema.company).where(eq(schema.company.id, companyId));
+  return row ?? null;
+}
 
 export function staffActor(actor: Actor | null): StaffActor {
   if (!actor || actor.kind !== 'staff') throw forbidden();
@@ -79,7 +89,7 @@ export class CompaniesService {
         senderName: company.senderName,
         logoUrl,
       },
-      settings: parseCompanySettings(company.settings),
+      settings: settingsInForce(parseCompanySettings(company.settings)),
     };
   }
 
@@ -143,4 +153,17 @@ export class CompaniesService {
     );
     return this.profile(staff);
   }
+}
+
+/** Stored settings with the M3 keys' defaults applied, so screens show the values in force. */
+function settingsInForce(settings: CompanySettings): CompanySettings {
+  const tenancy = tenancySettingsOf(settings);
+  return {
+    ...settings,
+    witnessRequired: tenancy.witnessRequired,
+    rentControlCommercial: tenancy.rentControlCommercial,
+    rentControlReminderDaysBefore: [...tenancy.rentControlReminderDaysBefore],
+    stampingReminderDaysBefore: [...tenancy.stampingReminderDaysBefore],
+    signingReminderHours: [...signingReminderHoursOf(settings)],
+  };
 }

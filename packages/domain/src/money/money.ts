@@ -92,6 +92,22 @@ export function multiplyBps(amount: Money, bps: number): Money {
 }
 
 /**
+ * Multiplies by a fraction, such as days used over days in the period (M3 rent schedule), and
+ * rounds half up to the minor unit, once. Exact in BigInt for every safe-integer input.
+ */
+export function multiplyRatio(amount: Money, numerator: number, denominator: number): Money {
+  if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || denominator <= 0)
+    throw new DomainError(
+      'money.bad_ratio',
+      'A ratio needs whole numbers and a positive denominator',
+    );
+  return fromBigInt(
+    divideRoundHalfUp(BigInt(amount.amountMinor) * BigInt(numerator), BigInt(denominator)),
+    amount.currency,
+  );
+}
+
+/**
  * Splits a total into parts proportional to `weights` by the largest remainder method, so the
  * parts always add up to the total exactly. Ties go to the earlier part (ADR-004: an annual
  * GH₵10,000 gives the four leftover pesewas to the first four months).

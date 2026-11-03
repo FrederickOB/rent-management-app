@@ -19,6 +19,20 @@ export const MODULE_MAP = {
   approvals: ['policy', 'audit', 'identity'],
   companies: ['policy', 'audit', 'documents', 'identity', 'rules'],
   portfolio: ['companies', 'documents', 'rules', 'audit', 'policy'],
+  // M3 (plan 4.1): e-signing in layer 2, tenancy in layer 4, the messaging core in layer 7.
+  esign: ['documents', 'audit'],
+  tenancy: [
+    'portfolio',
+    'esign',
+    'approvals',
+    'rules',
+    'companies',
+    'policy',
+    'documents',
+    'audit',
+    'identity',
+  ],
+  messaging: ['tenancy', 'esign', 'companies', 'identity', 'audit', 'policy'],
 };
 
 const DB_DRIVERS = [
