@@ -9,6 +9,7 @@ import { RulesModule } from '../rules/rules.module';
 import { GraService } from './gra.service';
 import { RentTaxService } from './rent-tax.service';
 import { TaxAlertsService } from './tax-alerts.service';
+import { TaxAssessmentService } from './tax-assessment.service';
 import { TaxReportService } from './tax-report.service';
 import { WithholdingService } from './withholding.service';
 
@@ -18,6 +19,8 @@ const SERVICES = [
   GraService,
   TaxReportService,
   TaxAlertsService,
+  // Review 7: rent tax not assessed when the money posted, assessed once the rules allow.
+  TaxAssessmentService,
 ];
 
 /**

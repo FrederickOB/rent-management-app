@@ -182,14 +182,18 @@ export class TerminationService {
     return { companyId: staff.companyId, personId: staff.personId, actorKind: 'staff' as const };
   }
 
-  /** The settlement for a lease that ended early, as it would be done now (nothing is kept). */
+  /**
+   * The settlement for a lease that ended early, as it would be done now (nothing is kept). It
+   * runs the real settlement in a savepoint under the same locks, so it is for the people who may
+   * ask for the settlement (`billing.manage`; M5 review N3).
+   */
   async preview(
     actor: Actor | null,
     leaseId: string,
     input: Pick<TerminationInput, 'charges' | 'deductions'>,
   ): Promise<TerminationFigures> {
     const staff = staffActor(actor);
-    this.policy.assert(staff, 'billing.view');
+    this.policy.assert(staff, 'billing.manage');
     await withCompany(this.database, staffContext(staff), (tx) => billingLeaseOf(tx, leaseId));
     return withCompany(this.database, this.unscoped(staff), async (tx) => {
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, leaseId));

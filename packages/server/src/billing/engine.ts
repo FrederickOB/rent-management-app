@@ -20,7 +20,7 @@ import {
   LINE_KIND_LABELS,
   lineBalance,
   linesToAccrue,
-  maxPaymentWithinCap,
+  advancePaymentCapMinor,
   monthsPaidAhead,
   paymentCredit,
   paymentShares,
@@ -29,9 +29,11 @@ import {
   planCreditNote,
   planTaxDraws,
   planPaymentReversal,
+  planWithholding,
   planReopenedDraws,
   planWriteOff,
   referenceFrom,
+  refundCredits,
   REFERENCE_PAYLOAD_LENGTH,
   walkLines,
   type AllocationSource,
@@ -43,6 +45,7 @@ import {
   type VatRates,
   type WalkResult,
   withheldOn,
+  withholdingDrawsFor,
 } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
@@ -173,6 +176,8 @@ export interface TaxHooks {
       readonly key: string;
       readonly valueDate: string;
       readonly credits: readonly PaymentAmount[];
+      /** The lease the credit came from (M5 review N2: what it was taxed on there). */
+      readonly fromLeaseId?: string;
     },
   ): Promise<void>;
 }
@@ -702,25 +707,23 @@ export class BillingEngine {
       });
       // Decision 8: tax withheld on the month while it had not started pays it now, each
       // withholding on its own key (Dr 2010, Cr 1100).
-      const withheld = new Map<string, number>();
-      for (const a of state.allocations)
-        if (a.lineId === record.id && a.source === 'withholding')
-          withheld.set(a.recordId, (withheld.get(a.recordId) ?? 0) + a.amountMinor);
-      for (const [withholdingId, amount] of withheld)
-        if (amount > 0)
-          await this.posting.post(tx, {
-            companyId: state.company.id,
-            rule: 'P02',
-            key: `P02:${record.id}:withholding:${withholdingId}`,
-            valueDate,
-            lines: withholdingDrawLines({
-              bookId: book.bookId,
-              lease: dims,
-              invoiceLineId: record.id,
-              amountMinor: amount,
-            }),
-            record: { type: 'invoice_line', id: record.id },
-          });
+      for (const { withholdingId, amountMinor: amount } of withholdingDrawsFor(
+        record.id,
+        state.allocations,
+      ))
+        await this.posting.post(tx, {
+          companyId: state.company.id,
+          rule: 'P02',
+          key: `P02:${record.id}:withholding:${withholdingId}`,
+          valueDate,
+          lines: withholdingDrawLines({
+            bookId: book.bookId,
+            lease: dims,
+            invoiceLineId: record.id,
+            amountMinor: amount,
+          }),
+          record: { type: 'invoice_line', id: record.id },
+        });
       pools = drawFromPools(pools, plan.draws);
       // Its VAT and levies, from the credit left (review 10).
       for (const tax of planTaxDraws(
@@ -1826,7 +1829,12 @@ export class BillingEngine {
       ...(await loadAllocations(tx, { leaseIds: [], paymentIds: reloaded.map((p) => p.id) })),
     ]);
     if (credits.length > 0)
-      await this.taxHooks?.afterCarryOver(tx, to, { key, valueDate, credits });
+      await this.taxHooks?.afterCarryOver(tx, to, {
+        key,
+        valueDate,
+        credits,
+        fromLeaseId: from.lease.id,
+      });
     return true;
   }
 
@@ -1951,6 +1959,7 @@ export class BillingEngine {
         key: `P29:${renewalId}:${payment.id}`,
         valueDate,
         credits: [{ paymentId: payment.id, amountMinor: credit }],
+        fromLeaseId: from.lease.id,
       });
   }
 
@@ -2153,15 +2162,13 @@ export class BillingEngine {
   ): Promise<void> {
     const limit = await this.advanceLimit(tx, state, valueDate);
     if (limit.policy !== 'block' || limit.limitMonths === null) return;
-    const walked = new Set(this.walk(state).lines.flatMap((l) => (l.lineId ? [l.lineId] : [])));
-    const otherDue = state.lines
-      .filter((l) => !walked.has(l.id) && l.dueDate <= valueDate)
-      .reduce((s, l) => s + lineBalance(l, state.allocations).outstandingMinor, 0);
-    const max = maxPaymentWithinCap({
+    // Review 9: the same function as the pay page's.
+    const max = advancePaymentCapMinor({
+      lines: state.lines,
+      allocations: state.allocations,
       walk: this.walk(state),
       valueDate,
       limitMonths: limit.limitMonths,
-      otherDueMinor: otherDue,
     });
     if (amountMinor <= max) return;
     const warning = limit.rule ? verificationWarning(limit.rule.verificationStatus) : null;
@@ -2244,23 +2251,50 @@ export class BillingEngine {
       readonly valueDate: string;
       readonly causedBy: string | null;
     },
-  ): Promise<PostedEntry> {
+  ): Promise<{ readonly posted: PostedEntry; readonly released: readonly PaymentAmount[] }> {
     const book = requireBook(state.book);
     const today = this.today(state);
     if (input.valueDate > today)
       throw invalid('received_in_future', 'The day the tax was withheld cannot be in the future');
     await this.carryOverIfStarted(tx, state, today);
     await this.accrue(tx, state, today);
-    const prepaid = new Set<string>();
-    for (const l of input.lines) {
-      const line = state.lines.find((x) => x.id === l.lineId);
-      if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
-      if (!isRecurring(line.kind))
-        throw invalid('withholding_line', 'Tax is withheld on rent and service charge only');
-      // Decision 8: a month not yet started holds it as its advance (Cr 2010), drawn when the
-      // month starts; a started month's receivable is settled (Cr 1100).
-      if (!line.accrued) prepaid.add(line.id);
+    // Decision 8: a month not yet started holds it as its advance (Cr 2010), drawn when the
+    // month starts; a started month's receivable is settled (Cr 1100). Review 2: cash that
+    // already paid the line moves back to its payment's credit first, as a credit note's does.
+    const sharing = new Set(
+      input.lines.flatMap((l) => [...paymentShares(l.lineId, state.allocations).keys()]),
+    );
+    const payments = (await paymentsByIds(tx, [...sharing])).filter(
+      (p) => !p.reversedAccountingDate,
+    );
+    let plan: ReturnType<typeof planWithholding>;
+    try {
+      plan = planWithholding({
+        lines: state.lines,
+        allocations: state.allocations,
+        payments,
+        withheld: input.lines,
+        paymentId: input.paymentId,
+      });
+    } catch (error) {
+      // The codes the API has answered since M5 began, for the lines it refuses.
+      if (error instanceof DomainError)
+        throw invalid(
+          error.code === 'withholding.line'
+            ? 'withholding_line'
+            : error.code === 'withholding.line_not_found'
+              ? 'line_not_found'
+              : error.code,
+          error.message,
+        );
+      throw error;
     }
+    const released = payments.filter((p) => plan.released.some((r) => r.paymentId === p.id));
+    const creditLeases = new Map<string, ReturnType<typeof dimsOf>>();
+    for (const payment of released)
+      if (payment.creditLeaseId && payment.creditLeaseId !== state.lease.id)
+        creditLeases.set(payment.id, dimsOf(await billingLeaseOf(tx, payment.creditLeaseId)));
+    const dims = dimsOf(state.lease);
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,
       rule: 'P19',
@@ -2268,35 +2302,35 @@ export class BillingEngine {
       valueDate: input.valueDate,
       lines: withholdingLines({
         bookId: book.bookId,
-        lease: dimsOf(state.lease),
+        lease: dims,
         paymentId: input.paymentId,
-        lines: input.lines.map((l) => ({
-          invoiceLineId: l.lineId,
+        lines: plan.lines.map((l) => ({
+          invoiceLineId: l.line.id,
           amountMinor: l.amountMinor,
-          prepaid: prepaid.has(l.lineId),
+          prepaid: l.prepaid,
+          released: l.released,
         })),
+        creditLeaseOf: (paymentId) => creditLeases.get(paymentId) ?? dims,
       }),
       record: { type: 'withholding', id: input.withholdingId },
       causedBy: input.causedBy,
     });
-    await this.writeAllocations(
-      tx,
-      state,
-      input.lines.map((l) => ({
-        lineId: l.lineId,
-        source: 'withholding' as const,
-        paymentId: null,
-        amountMinor: l.amountMinor,
-      })),
-      {
-        valueDate: input.valueDate,
-        accountingDate: posted!.accountingDate,
-        recordType: 'withholding',
-        recordId: input.withholdingId,
-        entryId: posted!.entryId,
-      },
-    );
-    return posted!;
+    await this.writeAllocations(tx, state, plan.rows, {
+      valueDate: input.valueDate,
+      accountingDate: posted!.accountingDate,
+      recordType: 'withholding',
+      recordId: input.withholdingId,
+      entryId: posted!.entryId,
+    });
+    if (plan.released.length > 0) {
+      // Credit released on a lease whose renewal has started moves to it (review 11), and the
+      // freed credit pays what is still owed, oldest first (M4b review F4).
+      for (const payment of released)
+        if (payment.creditLeaseId === state.lease.id)
+          await this.carryStranded(tx, state, payment, input.valueDate);
+      await this.drawCreditToOpen(tx, state, input.valueDate, input.causedBy);
+    }
+    return { posted: posted!, released: plan.released };
   }
 
   /** AR-04: agreed termination charges, one invoice of one-off lines (P01), named on the PDF. */
@@ -2403,17 +2437,17 @@ export class BillingEngine {
       readonly recordParts?: boolean;
     },
   ): Promise<PostedEntry> {
-    const pools = creditPools(state.payments, state.allocations);
-    const credits: PaymentAmount[] = [];
-    let need = input.amountMinor;
-    for (const pool of pools) {
-      if (need === 0) break;
-      const take = Math.min(pool.amountMinor, need);
-      credits.push({ paymentId: pool.paymentId, amountMinor: take });
-      need -= take;
+    let credits: PaymentAmount[];
+    try {
+      credits = refundCredits(creditPools(state.payments, state.allocations), input.amountMinor);
+    } catch (error) {
+      if (error instanceof DomainError)
+        throw conflict(
+          'refund_over_credit',
+          'The lease no longer holds this much credit to refund',
+        );
+      throw error;
     }
-    if (need > 0 || input.amountMinor <= 0)
-      throw conflict('refund_over_credit', 'The lease no longer holds this much credit to refund');
     const book = requireBook(state.book);
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,

@@ -160,6 +160,25 @@ export function withheldOn(lineId: string, allocations: readonly AllocationRow[]
   return total;
 }
 
+/**
+ * M5 decision 8: withholding held as a line's advance, by the withholding that holds it (its
+ * allocation rows' record), each drawn on its own key when the line accrues (Dr 2010, Cr 1100).
+ */
+export function withholdingDrawsFor(
+  lineId: string,
+  allocations: readonly AllocationRow[],
+): { readonly withholdingId: string; readonly amountMinor: number }[] {
+  const held = new Map<string, number>();
+  for (const a of allocations)
+    if (a.lineId === lineId && a.source === 'withholding') {
+      const id = a.recordId ?? '';
+      held.set(id, (held.get(id) ?? 0) + a.amountMinor);
+    }
+  return [...held]
+    .filter(([, amount]) => amount > 0)
+    .map(([withholdingId, amountMinor]) => ({ withholdingId, amountMinor }));
+}
+
 /** Pools after some draws: the next line's starting credit. */
 export function drawFromPools(
   pools: readonly CreditPool[],

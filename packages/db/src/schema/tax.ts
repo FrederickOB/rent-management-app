@@ -102,7 +102,11 @@ export const rentTaxItem = pgTable(
     unique('rent_tax_item_lease_key').on(t.companyId, t.leaseId, t.id),
     uniqueIndex('rent_tax_item_one_per_receipt')
       .on(t.companyId, t.paymentId, t.leaseId)
-      .where(sql`${t.kind} = 'receipt'`),
+      .where(sql`${t.kind} = 'receipt' and ${t.withholdingId} is null`),
+    // M5 review 2: the tax on a payment's cash a withholding returned to credit, once per both.
+    uniqueIndex('rent_tax_item_one_per_release')
+      .on(t.companyId, t.withholdingId, t.paymentId, t.leaseId)
+      .where(sql`${t.kind} = 'receipt' and ${t.withholdingId} is not null`),
     uniqueIndex('rent_tax_item_one_reversal')
       .on(t.companyId, t.reversesItemId)
       .where(sql`${t.kind} = 'reversal'`),
@@ -165,7 +169,10 @@ export const rentTaxItem = pgTable(
     ),
     check(
       'rent_tax_item_source_check',
-      sql`(${t.kind} in ('withholding', 'withholding_offset')) = (${t.withholdingId} is not null)
+      // A receipt item names a withholding only when it taxes cash that withholding returned to
+      // credit (M5 review 2); a reversal or a carry-over never does.
+      sql`(${t.kind} not in ('withholding', 'withholding_offset') or ${t.withholdingId} is not null)
+          and (${t.kind} not in ('reversal', 'carry_over') or ${t.withholdingId} is null)
           and (${t.kind} not in ('receipt', 'reversal') or ${t.paymentId} is not null)`,
     ),
     check('rent_tax_item_entry_check', sql`(${t.taxMinor} <> 0) = (${t.entryId} is not null)`),
@@ -243,6 +250,12 @@ export const withholding = pgTable(
     note: text(),
     entryId: uuid().notNull(),
     recordedBy: uuid().references(() => person.id),
+    /**
+     * How its rent tax was treated when it was recorded (M5 review 1): `accrued` (P17 accrued the
+     * amount withheld to 2200), `letting_business` or `not_assessed`. P20 follows what was
+     * recorded, never the owner's flag at confirmation. Null only for rows recorded before 0028.
+     */
+    rentTaxTreatment: text(),
     createdAt: tsNow(),
   },
   (t) => [
@@ -275,6 +288,10 @@ export const withholding = pgTable(
     }),
     index('withholding_lease_idx').on(t.companyId, t.leaseId),
     check('withholding_amount_check', sql`${t.amountMinor} > 0`),
+    check(
+      'withholding_rent_tax_treatment_check',
+      sql`${t.rentTaxTreatment} is null or ${t.rentTaxTreatment} in ('accrued', 'letting_business', 'not_assessed')`,
+    ),
     check('withholding_currency_check', sql`${t.currency} = 'GHS'`),
     check('withholding_dates_check', sql`${t.accountingDate} >= ${t.valueDate}`),
   ],

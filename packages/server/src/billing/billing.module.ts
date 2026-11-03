@@ -1,4 +1,4 @@
-import { Inject, Module, type OnModuleInit } from '@nestjs/common';
+import { Inject, Module, type OnApplicationBootstrap, type OnModuleInit } from '@nestjs/common';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { AuditModule } from '../audit/audit.module';
 import { DocumentsModule } from '../documents/documents.module';
@@ -35,11 +35,21 @@ const SERVICES = [
   providers: SERVICES,
   exports: SERVICES,
 })
-export class BillingModule implements OnModuleInit {
+export class BillingModule implements OnModuleInit, OnApplicationBootstrap {
   constructor(
     @Inject(MoneyService) private readonly money: MoneyService,
     @Inject(TerminationService) private readonly termination: TerminationService,
+    @Inject(BillingEngine) private readonly engine: BillingEngine,
   ) {}
+
+  /**
+   * M5 review 7: billing never runs without rent tax. The tax module registers its hooks with the
+   * engine as it starts; an app that loads billing without it would post receipts with no tax
+   * assessed and nobody told, so it refuses to start instead.
+   */
+  onApplicationBootstrap(): void {
+    assertTaxHooks(this.engine);
+  }
 
   /**
    * Cash, transfers, banking and every correction are two-person actions (decision 3), and so is
@@ -49,4 +59,12 @@ export class BillingModule implements OnModuleInit {
     this.money.registerApprovals();
     this.termination.registerApprovals();
   }
+}
+
+/** Throws unless the tax module registered its hooks with the billing engine (review 7). */
+export function assertTaxHooks(engine: Pick<BillingEngine, 'taxHooksRegistered'>): void {
+  if (!engine.taxHooksRegistered)
+    throw new Error(
+      'Billing needs rent tax: import TaxModule wherever BillingModule is used, so every receipt is assessed (M5 review 7)',
+    );
 }

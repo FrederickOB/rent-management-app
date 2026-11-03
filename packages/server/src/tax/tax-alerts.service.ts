@@ -69,15 +69,21 @@ export class TaxAlertsService {
         const owner = (await ownerFacts(tx, [ownerId])).get(ownerId);
         const lines = alerts.map(
           ({ item }) =>
-            `${item.receiptNumber ?? 'Credit carried'} (${item.unitCode}): ${format(money(item.outstandingMinor))} due ${formatBusinessDate(item.dueDate ?? item.valueDate)}`,
+            `${item.receiptNumber ?? 'Credit carried'} (${item.unitCode}): ${format(money(item.outstandingMinor))} due ${formatBusinessDate(item.dueDate ?? item.valueDate)}${item.dueDays === null ? '' : `, ${daysText(item.dueDays)} after it was received`}`,
         );
+        // Review 8: the days come from the rules rows the items used, never from this code.
+        const days = [...new Set(alerts.map(({ item }) => item.dueDays))];
+        const within =
+          days.length === 1 && days[0] !== null && days[0] !== undefined
+            ? `within ${daysText(days[0])} of the rent being received`
+            : 'by the due date shown';
         for (const personId of recipients)
           await queueMessage(tx, companyId, {
             recipient: { type: 'staff', personId },
             purpose: 'staff_notice',
             subject: `Rent tax due to GRA for ${owner?.displayName ?? 'an owner'}`,
             body: [
-              `Rent tax on these receipts for ${owner?.displayName ?? 'an owner'} is due to GRA within 30 days of the rent being received:`,
+              `Rent tax on these receipts for ${owner?.displayName ?? 'an owner'} is due to GRA ${within}:`,
               ...lines,
               'Record the GRA payment in Rent tax once it is paid.',
             ].join('\n'),
@@ -91,3 +97,5 @@ export class TaxAlertsService {
     });
   }
 }
+
+const daysText = (days: number) => `${days} day${days === 1 ? '' : 's'}`;

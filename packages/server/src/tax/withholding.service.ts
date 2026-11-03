@@ -1,13 +1,17 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, inArray, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
-import { isRecurring, lineBalance } from '@rent/domain/billing';
+import { isRecurring, lineBalance, paymentShares } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import { certificateLines, withholdingWriteOffLines } from '@rent/domain/ledger';
-import { money, multiplyBps } from '@rent/domain/money';
+import { format, money, multiplyBps } from '@rent/domain/money';
 import type { ApprovalStatus } from '@rent/domain/approvals';
 import type { Actor, CertificateResource, StaffRole } from '@rent/domain/policy';
-import { certificateDebitAccount, checkWithholding } from '@rent/domain/tax';
+import {
+  certificateDebitFor,
+  checkWithholding,
+  type WithholdingTaxTreatment,
+} from '@rent/domain/tax';
 import { v7 as uuidv7 } from 'uuid';
 import { z } from 'zod';
 import { ApprovalsService } from '../approvals/approvals.service';
@@ -24,7 +28,6 @@ import {
   requireBook,
 } from '../billing/records';
 import { companyRecord, staffActor, type StaffActor } from '../companies/companies.service';
-import { ownerFacts } from '../companies/owners.service';
 import type { Clock } from '../core/clock';
 import { conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
@@ -37,11 +40,15 @@ import { memberActors, membersWhoCan } from '../policy/members';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService } from '../rules/rules.service';
 import { billingLeaseOf } from '../tenancy/billing-facts';
-import { RentTaxService } from './rent-tax.service';
+import { RentTaxService, treatmentOf } from './rent-tax.service';
 
 export const WITHHOLDING_WRITE_OFF_ACTION = 'withholding.write_off';
 /** Decision 7: a single-user company's uploader confirms their certificate through this. */
 export const CERTIFICATE_SELF_CONFIRM_ACTION = 'withholding.certificate_confirm';
+/** Review 4: the same, to withdraw it instead (rejected, nothing posted). */
+export const CERTIFICATE_SELF_WITHDRAW_ACTION = 'withholding.certificate_withdraw';
+const SELF_ACTIONS = [CERTIFICATE_SELF_CONFIRM_ACTION, CERTIFICATE_SELF_WITHDRAW_ACTION] as const;
+type SelfDecision = 'confirm' | 'withdraw';
 
 const uuid = z.string().uuid();
 const writeOffPayload = z
@@ -98,6 +105,10 @@ export interface WithholdingView {
   };
   readonly differsFromRate: boolean;
   readonly note: string | null;
+  /** How its rent tax was treated when recorded (review 1); null for rows before 0028. */
+  readonly rentTaxTreatment: WithholdingTaxTreatment | null;
+  /** N1: things a person must act on, such as rent tax it replaced that GRA was already paid. */
+  readonly warnings: readonly string[];
   readonly lines: readonly {
     readonly lineId: string;
     readonly invoiceNumber: string;
@@ -133,6 +144,17 @@ export interface WithholdingView {
       readonly status: ApprovalStatus;
       readonly coolingOffUntil: Date | null;
     } | null;
+    /** Review 4: the uploader's request to withdraw it, when nobody else may decide it. */
+    readonly selfWithdrawal: {
+      readonly approvalId: string;
+      readonly status: ApprovalStatus;
+      readonly coolingOffUntil: Date | null;
+    } | null;
+    /**
+     * Review 4: whether the person reading, its uploader with nobody else to decide it and no
+     * request open, may raise a fresh request to confirm or withdraw it.
+     */
+    readonly mayRequestSelfDecision: boolean;
   } | null;
   readonly rejectedCertificates: number;
   readonly writeOff: {
@@ -208,8 +230,10 @@ export class WithholdingService {
       await this.engine.carryOverIfStarted(tx, state, this.engine.today(state));
       await this.engine.accrue(tx, state, this.engine.today(state));
       const check = this.check(state, input.lines, rateBps);
+      // Review 1: how the rent tax treats it is decided now and recorded with it; P20 follows it.
+      const assessment = await this.rentTax.assessment(tx, state, input.valueDate);
       const id = uuidv7();
-      const posted = await this.engine.withhold(tx, state, {
+      const { posted, released } = await this.engine.withhold(tx, state, {
         withholdingId: id,
         paymentId: input.paymentId ?? null,
         lines: input.lines,
@@ -235,16 +259,23 @@ export class WithholdingService {
         note: input.note?.trim().slice(0, 500) || null,
         entryId: posted.entryId,
         recordedBy: staff.personId,
+        rentTaxTreatment: treatmentOf(assessment),
       });
-      await this.rentTax.onWithholding(tx, state, {
-        id,
-        paymentId: input.paymentId ?? null,
-        valueDate: input.valueDate,
-        lines: input.lines,
-        rateBps,
-        rateRuleId: rule.ruleId,
-        causedBy: staff.personId,
-      });
+      await this.rentTax.onWithholding(
+        tx,
+        state,
+        {
+          id,
+          paymentId: input.paymentId ?? null,
+          valueDate: input.valueDate,
+          lines: input.lines,
+          rateBps,
+          rateRuleId: rule.ruleId,
+          causedBy: staff.personId,
+          released,
+        },
+        assessment,
+      );
       await options.claim?.done(tx, { withholdingId: id });
       return id;
     });
@@ -261,10 +292,13 @@ export class WithholdingService {
           const line = state.lines.find((x) => x.id === l.lineId);
           if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
           const b = lineBalance(line, state.allocations);
+          let cash = 0;
+          for (const share of paymentShares(line.id, state.allocations).values()) cash += share;
           return {
             lineId: l.lineId,
             netMinor: b.netMinor,
             outstandingMinor: b.outstandingMinor,
+            releasableMinor: cash,
             withheldMinor: l.amountMinor,
           };
         }),
@@ -562,6 +596,104 @@ export class WithholdingService {
   }
 
   /**
+   * Review 4: a fresh single-user request from the certificate's uploader, to confirm it (P20,
+   * decision 7) or to withdraw it (rejected, nothing posted), when nobody else may decide it and
+   * no request is open: the one raised at upload was cancelled or expired, or the only other
+   * person who could confirm it has left. It is decided as decision 7's is: after the cooling-off,
+   * with a code from their authenticator app.
+   */
+  async requestSelfDecision(
+    actor: Actor | null,
+    certificateId: string,
+    decision: SelfDecision,
+    options: { readonly claim?: IdempotencyClaim | null } = {},
+  ): Promise<string> {
+    const staff = staffActor(actor);
+    this.policy.assert(staff, 'billing.manage');
+    return withCompany(this.database, staffContext(staff), async (tx) => {
+      await options.claim?.claim(tx);
+      const [c] = await tx
+        .select()
+        .from(schema.withholdingCertificate)
+        .where(eq(schema.withholdingCertificate.id, certificateId));
+      if (!c) throw notFound('Certificate');
+      if (c.uploadedBy !== staff.personId)
+        throw conflict(
+          'certificate_not_yours',
+          'Only the person who uploaded a certificate asks to decide it themselves',
+        );
+      const company = await companyRecord(tx, staff.companyId);
+      const refusal = await this.selfDecisionRefusal(tx, company!, c);
+      if (refusal) throw refusal;
+      const w = await this.withholding(tx, c.withholdingId);
+      const requestId = await this.approvals.createInTx(tx, staff, {
+        actionType:
+          decision === 'confirm'
+            ? CERTIFICATE_SELF_CONFIRM_ACTION
+            : CERTIFICATE_SELF_WITHDRAW_ACTION,
+        subjectType: 'withholding_certificate',
+        subjectId: c.id,
+        propertyId: w.propertyId,
+        payload: {
+          certificateId: c.id,
+          withholdingId: w.id,
+          leaseId: w.leaseId,
+          unitCode: w.unitCode,
+          tenantName: w.tenantName.slice(0, 200),
+          amountMinor: w.amountMinor,
+          open: true,
+        },
+      });
+      await options.claim?.done(tx, { certificateId: c.id });
+      return requestId;
+    });
+  }
+
+  /** Why the uploader may not raise a fresh request to decide a certificate now, or null. */
+  private async selfDecisionRefusal(
+    tx: Tx,
+    company: { readonly id: string; readonly kind: string },
+    c: typeof schema.withholdingCertificate.$inferSelect,
+  ) {
+    if (c.status !== 'awaiting_confirmation')
+      return conflict('certificate_decided', 'This certificate was already confirmed or rejected');
+    const [open] = await tx
+      .select({ id: schema.approvalRequest.id })
+      .from(schema.approvalRequest)
+      .where(
+        and(
+          inArray(schema.approvalRequest.actionType, [...SELF_ACTIONS]),
+          eq(schema.approvalRequest.subjectType, 'withholding_certificate'),
+          eq(schema.approvalRequest.subjectId, c.id),
+          inArray(schema.approvalRequest.status, ['pending', 'cooling_off']),
+          sql`${schema.approvalRequest.expiresAt} > ${this.clock.now()}`,
+        ),
+      )
+      .limit(1);
+    if (open)
+      return conflict(
+        'approval_open',
+        'A request to decide this certificate is already waiting. Decide it, withdraw it or wait for it to expire.',
+        { requestId: open.id },
+      );
+    const resource = await this.certificateResource(tx, company, c.ownerId, c.uploadedBy);
+    const others = await membersWhoCan(
+      tx,
+      this.policy,
+      company,
+      'withholding.confirm',
+      { propertyId: c.propertyId, ownerId: c.ownerId },
+      resource,
+    );
+    if (others.length > 0)
+      return conflict(
+        'certificate_others_decide',
+        'Someone else can confirm or reject this certificate, so they decide it (decision 3)',
+      );
+    return null;
+  }
+
+  /**
    * P20 for a certificate waiting for confirmation, decided by `decidedBy`, in the caller's
    * transaction: the withholding settles the owner's rent tax (2200), or is a tax credit for a
    * letting business (1160). `selfConfirmRequestId` names the single-user request when the
@@ -577,9 +709,13 @@ export class WithholdingService {
   ): Promise<void> {
     const w = await this.withholding(tx, c.withholdingId);
     await this.refuseClosed(tx, c.withholdingId, true);
-    const owner = (await ownerFacts(tx, [w.ownerId])).get(w.ownerId);
-    if (!owner) throw notFound('Owner');
-    const debit = certificateDebitAccount(owner);
+    // Review 1: from what was recorded with the withholding, never the owner's flag today: 2200
+    // only when P17 accrued the amount withheld to 2200 (an item of kind `withholding`).
+    const accrued = await tx.execute<{ accrued: boolean }>(
+      sql`select exists (select 1 from rent_tax_item i where i.withholding_id = ${w.id}
+            and i.kind = 'withholding') as accrued`,
+    );
+    const debit = certificateDebitFor({ accruedToRentTax: accrued.rows[0]!.accrued });
     const lease = await billingLeaseOf(tx, w.leaseId);
     const posted = await this.posting.post(tx, {
       companyId,
@@ -612,10 +748,14 @@ export class WithholdingService {
       .where(eq(schema.withholdingCertificate.id, c.id));
   }
 
-  /** The latest request through which a certificate's uploader may confirm it (decision 7). */
+  /**
+   * The latest request through which a certificate's uploader may confirm it (decision 7), or
+   * withdraw it (review 4).
+   */
   async selfConfirmation(
     tx: Tx,
     certificateId: string,
+    decision: SelfDecision = 'confirm',
   ): Promise<{
     approvalId: string;
     mode: 'single_user' | 'two_person';
@@ -632,7 +772,12 @@ export class WithholdingService {
       .from(schema.approvalRequest)
       .where(
         and(
-          eq(schema.approvalRequest.actionType, CERTIFICATE_SELF_CONFIRM_ACTION),
+          eq(
+            schema.approvalRequest.actionType,
+            decision === 'confirm'
+              ? CERTIFICATE_SELF_CONFIRM_ACTION
+              : CERTIFICATE_SELF_WITHDRAW_ACTION,
+          ),
           eq(schema.approvalRequest.subjectType, 'withholding_certificate'),
           eq(schema.approvalRequest.subjectId, certificateId),
         ),
@@ -797,6 +942,66 @@ export class WithholdingService {
       },
     });
     this.approvals.register({
+      actionType: CERTIFICATE_SELF_WITHDRAW_ACTION,
+      // Review 4: as the confirmation above, to withdraw the upload instead (nothing posts).
+      eligibleRoles: [],
+      schema: selfConfirmPayload,
+      onePerSubject: true,
+      prepare: async (tx, request) => {
+        const leaseId = (request.payload as { leaseId: string }).leaseId;
+        await lockLeases(tx, request.companyId, await leaseGroup(tx, leaseId));
+      },
+      currentPayload: async (tx, request) => {
+        const proposed = request.payload as z.infer<typeof selfConfirmPayload>;
+        const [c] = await tx
+          .select({ status: schema.withholdingCertificate.status })
+          .from(schema.withholdingCertificate)
+          .where(eq(schema.withholdingCertificate.id, proposed.certificateId));
+        return { ...proposed, open: c?.status === 'awaiting_confirmation' };
+      },
+      execute: async (tx, request, payload) => {
+        const [c] = await tx
+          .select()
+          .from(schema.withholdingCertificate)
+          .where(eq(schema.withholdingCertificate.id, payload.certificateId))
+          .for('update');
+        if (!c || c.status !== 'awaiting_confirmation')
+          throw conflict(
+            'certificate_decided',
+            'This certificate was already confirmed or rejected',
+          );
+        let decidedBy = request.initiatedBy;
+        let named: string | null = request.id;
+        if (request.mode !== 'single_user') {
+          // A nominated approver who joined since decided it: they reject it, as anyone would.
+          const [decision] = await tx
+            .select({ decidedBy: schema.approvalDecision.decidedBy })
+            .from(schema.approvalDecision)
+            .where(
+              and(
+                eq(schema.approvalDecision.requestId, request.id),
+                eq(schema.approvalDecision.kind, 'approve'),
+              ),
+            )
+            .orderBy(desc(schema.approvalDecision.decidedAt))
+            .limit(1);
+          decidedBy = decision!.decidedBy;
+          named = null;
+        }
+        await tx
+          .update(schema.withholdingCertificate)
+          .set({
+            status: 'rejected',
+            decidedBy,
+            decidedAt: this.clock.now(),
+            rejectReason: 'Withdrawn by the person who uploaded it',
+            selfConfirmRequestId: named,
+            updatedAt: this.clock.now(),
+          })
+          .where(eq(schema.withholdingCertificate.id, c.id));
+      },
+    });
+    this.approvals.register({
       actionType: WITHHOLDING_WRITE_OFF_ACTION,
       eligibleRoles: MONEY_APPROVERS as readonly StaffRole[],
       schema: writeOffPayload,
@@ -920,7 +1125,7 @@ export class WithholdingService {
           from allocation a
           join invoice_line il on il.company_id = a.company_id and il.id = a.invoice_line_id
           join invoice i on i.company_id = il.company_id and i.id = il.invoice_id
-          where a.record_type = 'withholding' and a.record_id = ${id}
+          where a.record_type = 'withholding' and a.record_id = ${id} and a.source = 'withholding'
           group by a.invoice_line_id, i.number, il.period_start, il.period_end, il.amount_minor, il.company_id, il.id
           order by il.period_start nulls last`,
     );
@@ -936,10 +1141,31 @@ export class WithholdingService {
       .where(eq(schema.withholdingWriteOff.withholdingId, id));
     const open = await this.approvals.openFor(tx, [id]);
     let mayDecide = false;
+    let mayRequestSelfDecision = false;
     if (live && live.status === 'awaiting_confirmation') {
       const resource = await this.certificateResource(tx, company, live.ownerId, live.uploadedBy);
       mayDecide = this.policy.can(staff, 'withholding.confirm', resource).allowed;
+      mayRequestSelfDecision =
+        live.uploadedBy === staff.personId &&
+        (await this.selfDecisionRefusal(tx, company, live)) === null;
     }
+    const paidBefore = await tx.execute<{ overpaid: string }>(
+      sql`select coalesce(sum(greatest(0, paid - greatest(0, net))), 0)::bigint as overpaid from (
+            select (select coalesce(sum(p.amount_minor), 0) from gra_payment_item p
+                      where p.company_id = i.company_id and p.item_id = i.id) as paid,
+                   i.tax_minor + (select coalesce(sum(c.tax_minor), 0) from rent_tax_item c
+                      where c.company_id = i.company_id and c.reverses_item_id = i.id) as net
+            from rent_tax_item i
+            where i.id in (select o.reverses_item_id from rent_tax_item o
+                           where o.withholding_id = ${id} and o.kind = 'withholding_offset')) x`,
+    );
+    const overpaid = Number(paidBefore.rows[0]?.overpaid ?? 0);
+    const warnings =
+      overpaid > 0
+        ? [
+            `GRA was already paid ${format(money(overpaid))} of the rent tax this withholding replaced. The owner's rent tax is overpaid by that much: reclaim it from GRA or set it against later rent tax.`,
+          ]
+        : [];
     return {
       id: w.id,
       leaseId: w.leaseId,
@@ -958,6 +1184,8 @@ export class WithholdingService {
       },
       differsFromRate: w.differsFromRate,
       note: w.note,
+      rentTaxTreatment: (w.rentTaxTreatment as WithholdingTaxTreatment | null) ?? null,
+      warnings,
       lines: lines.rows.map((l) => ({
         lineId: l.line_id,
         invoiceNumber: formatInvoiceNumber(Number(l.invoice_number)),
@@ -996,6 +1224,12 @@ export class WithholdingService {
                 ? { approvalId: r.approvalId, status: r.status, coolingOffUntil: r.coolingOffUntil }
                 : null,
             ),
+            selfWithdrawal: await this.selfConfirmation(tx, live.id, 'withdraw').then((r) =>
+              r && r.mode === 'single_user'
+                ? { approvalId: r.approvalId, status: r.status, coolingOffUntil: r.coolingOffUntil }
+                : null,
+            ),
+            mayRequestSelfDecision,
           }
         : null,
       rejectedCertificates: certificates.filter((c) => c.status === 'rejected').length,

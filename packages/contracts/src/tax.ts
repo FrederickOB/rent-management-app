@@ -1,5 +1,5 @@
 import { oc } from '@orpc/contract';
-import { TAX_ITEM_KINDS, TAX_ITEM_STATUSES } from '@rent/domain/tax';
+import { TAX_ITEM_KINDS, TAX_ITEM_STATUSES, WITHHOLDING_TAX_TREATMENTS } from '@rent/domain/tax';
 import { z } from 'zod';
 import { approvalSchema } from './approvals';
 
@@ -69,9 +69,36 @@ export const rentTaxItemSchema = z.object({
   rules: z.array(ruleRef),
   /** A rule it used is not verified: show the warning. */
   warning: z.boolean(),
+  /**
+   * M5 review 8: the days its rules rows held (`rent_tax.due_days_after_receipt`,
+   * `rent_tax.alert_days`), for text such as "due within N days"; never a hard-coded value.
+   * Optional for clients written before.
+   */
+  dueDays: z.number().int().nullable().optional(),
+  alertDays: z.array(z.number().int()).optional(),
   createdAt: iso,
 });
 export type RentTaxItemView = z.infer<typeof rentTaxItemSchema>;
+
+/** Rent tax not assessed when the money posted (TX-08; M5 review 7), until a later run does. */
+export const rentTaxNotAssessedSchema = z.object({
+  /** The P17 key it is assessed on: `P17:<payment>`, `P17:<carry-over>` or `P17:<withholding>`. */
+  eventKey: z.string(),
+  event: z.enum(['receipt', 'carry_over', 'withholding']),
+  leaseId: uuid,
+  ownerId: uuid,
+  unitCode: z.string(),
+  paymentId: uuid.nullable(),
+  withholdingId: uuid.nullable(),
+  valueDate: isoDate,
+  /** `rule_missing`: no rules row in force; `rule_unsupported`: one this build cannot apply. */
+  reason: z.enum(['rule_missing', 'rule_unsupported']),
+  ruleKey: z.string().nullable(),
+  message: z.string(),
+  recordedAt: iso,
+  /** A later run has assessed it (or left it for a person, when it had moved on). */
+  assessed: z.boolean(),
+});
 
 export const rentTaxDueItemSchema = rentTaxItemSchema.extend({
   /** Days from today to the due date (negative once overdue). */
@@ -119,7 +146,12 @@ export const rentTaxReportSchema = z.object({
     withheldMinor: minor,
     paidToGraMinor: minor,
     settledByCertificatesMinor: minor,
-    /** Rent tax payable (2200) at the period's end, withheld tax awaiting certificates included. */
+    /**
+     * M5 review 3: tax tenants withheld whose certificate is still awaited at the period's end.
+     * The tenant pays it to GRA, so it is not in `outstandingMinor`. Optional for older clients.
+     */
+    withheldAwaitingCertificateMinor: minor.optional(),
+    /** Rent tax the owner still owes GRA at the period's end (2200, less withheld tax awaiting certificates). */
     outstandingMinor: minor,
   }),
   /** One line per rules row used that is not verified (CLAUDE.md section 7). */
@@ -197,6 +229,21 @@ export const rentTaxContract = {
         url: z.string().nullable(),
       }),
     ),
+  notAssessed: oc
+    .route({
+      method: 'GET',
+      path: '/rent-tax/not-assessed',
+      summary:
+        'Receipts, carry-overs and withholdings whose rent tax was not assessed because a rules row was missing or unsupported (TX-08); a daily run assesses them once the rules allow',
+    })
+    .input(
+      z.object({
+        ownerId: uuid.optional(),
+        /** true: only those still waiting; false: only those assessed since. */
+        open: z.enum(['true', 'false']).optional(),
+      }),
+    )
+    .output(z.array(rentTaxNotAssessedSchema)),
   createUpload: oc
     .route({
       method: 'POST',
@@ -275,6 +322,17 @@ export const withholdingSchema = z.object({
   /** The amount differs from the rate on its lines: shown, not refused (the tenant decides). */
   differsFromRate: z.boolean(),
   note: z.string().nullable(),
+  /**
+   * M5 review 1: how its rent tax was treated when it was recorded, which the certificate (P20)
+   * follows: `accrued` (settles 2200), `letting_business` (a tax credit, 1160) or `not_assessed`
+   * (a rules row was missing). Null for withholding recorded before; optional for older clients.
+   */
+  rentTaxTreatment: z.enum(WITHHOLDING_TAX_TREATMENTS).nullable().optional(),
+  /**
+   * N1: what a person must act on, such as rent tax this withholding replaced that GRA was already
+   * paid (the owner's rent tax is then overpaid). Optional for older clients.
+   */
+  warnings: z.array(z.string()).optional(),
   lines: z.array(
     z.object({
       lineId: uuid,
@@ -328,6 +386,30 @@ export const withholdingSchema = z.object({
         })
         .nullable()
         .optional(),
+      /**
+       * M5 review 4: the uploader's single-user request to withdraw it instead (rejected, nothing
+       * posted), decided like `selfConfirmation`. Null otherwise; optional for older clients.
+       */
+      selfWithdrawal: z
+        .object({
+          approvalId: uuid,
+          status: z.enum([
+            'pending',
+            'cooling_off',
+            'approved',
+            'rejected',
+            'cancelled',
+            'expired',
+          ]),
+          coolingOffUntil: iso.nullable(),
+        })
+        .nullable()
+        .optional(),
+      /**
+       * M5 review 4: whether the person reading, its uploader, may raise a fresh request to
+       * confirm or withdraw it (nobody else may decide it and no request is open).
+       */
+      mayRequestSelfDecision: z.boolean().optional(),
     })
     .nullable(),
   rejectedCertificates: z.number().int(),
@@ -468,6 +550,15 @@ export const withholdingContract = {
       summary: 'Reject a certificate (the same people as confirm)',
     })
     .input(z.object({ certificateId: uuid, reason: z.string().trim().min(5).max(500) }))
+    .output(withholdingSchema),
+  requestSelfDecision: oc
+    .route({
+      method: 'POST',
+      path: '/withholding-certificates/{certificateId}/self-decision-requests',
+      summary:
+        'Its uploader asks to confirm or withdraw a certificate nobody else may decide, after the cooling-off with a TOTP code (decision 7, review 4)',
+    })
+    .input(z.object({ certificateId: uuid, decision: z.enum(['confirm', 'withdraw']) }))
     .output(withholdingSchema),
   requestWriteOff: oc
     .route({

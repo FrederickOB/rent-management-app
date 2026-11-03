@@ -197,6 +197,20 @@
       "when": 1793723659787,
       "tag": "0027_certificate_self_confirm_security",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1793729858594,
+      "tag": "0028_withholding_treatment",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1793729859375,
+      "tag": "0029_certificate_self_decisions",
+      "breakpoints": true
     }
   ]
 }

@@ -39,6 +39,9 @@ export interface TaxItemRecord {
   readonly rateRuleId: string;
   readonly ruleIds: readonly string[];
   readonly alertRuleId: string | null;
+  /** The due days and alert days its rules rows held (TX-02, TX-08; M5 review 8). */
+  readonly dueDays: number | null;
+  readonly alertDays: readonly number[];
   readonly correctedMinor: number;
   readonly paidMinor: number;
   readonly withholdingWrittenOff: boolean;
@@ -75,6 +78,8 @@ type ItemRow = {
   service_charge_rule_id: string | null;
   due_rule_id: string | null;
   alert_rule_id: string | null;
+  due_value: unknown;
+  alert_value: unknown;
   corrected: string;
   paid: string;
   written_off: boolean;
@@ -99,6 +104,8 @@ export async function taxItems(
           i.due_date::text, i.base_minor, i.rate_bps, i.tax_minor, i.lease_use, i.unit_code, i.tenant_name,
           i.receipt_number, i.rate_rule_id, i.base_rule_id, i.rounding_rule_id, i.service_charge_rule_id,
           i.due_rule_id, i.alert_rule_id, i.created_at,
+          (select r.value from rule r where r.id = i.due_rule_id) as due_value,
+          (select r.value from rule r where r.id = i.alert_rule_id) as alert_value,
           coalesce((select sum(x.tax_minor) from rent_tax_item x
                     where x.company_id = i.company_id and x.reverses_item_id = i.id and ${until}), 0)::bigint as corrected,
           coalesce((select sum(p.amount_minor) from gra_payment_item p
@@ -151,6 +158,8 @@ export async function taxItems(
         r.alert_rule_id,
       ].filter((x): x is string => x !== null),
       alertRuleId: r.alert_rule_id,
+      dueDays: daysOf(r.due_value),
+      alertDays: alertDaysOf(r.alert_value),
       correctedMinor: facts.correctedMinor,
       paidMinor: facts.paidMinor,
       withholdingWrittenOff: r.written_off,
@@ -244,6 +253,108 @@ export async function lockOwnerTax(tx: Tx, companyId: string, ownerId: string): 
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`rent_tax:${companyId}:${ownerId}`}, 0))`,
   );
+}
+
+/**
+ * The lock order for rent tax items (M5 review 10): lease locks first (every billing write holds
+ * them), then the owners' tax locks, in id order. A GRA payment takes only its owner's tax lock,
+ * and every correction of an item (a reversal's P21, a withholding's offset) takes it after its
+ * lease locks, so an item is never settled beyond its net tax and no two writers wait on each
+ * other in a circle.
+ */
+export async function lockOwnersTax(
+  tx: Tx,
+  companyId: string,
+  ownerIds: readonly string[],
+): Promise<void> {
+  for (const ownerId of [...new Set(ownerIds)].sort()) await lockOwnerTax(tx, companyId, ownerId);
+}
+
+/** A rules row's whole number of days (`rent_tax.due_days_after_receipt`), or null. */
+export function daysOf(value: unknown): number | null {
+  const days = (value as { days?: unknown } | null)?.days;
+  return typeof days === 'number' && Number.isSafeInteger(days) ? days : null;
+}
+
+/** A rules row's alert days (`rent_tax.alert_days`), in order. */
+export function alertDaysOf(value: unknown): number[] {
+  const days = (value as { days?: unknown } | null)?.days;
+  return Array.isArray(days)
+    ? days
+        .filter((d): d is number => typeof d === 'number' && Number.isSafeInteger(d))
+        .sort((a, b) => a - b)
+    : [];
+}
+
+/** A rent tax event that could not be assessed (M5 review 7), as the audit log keeps it. */
+export interface NotAssessedEvent {
+  readonly event: 'receipt' | 'carry_over' | 'withholding';
+  /** The P17 key its assessment uses: `P17:<payment>`, `P17:<carry-over>` or `P17:<withholding>`. */
+  readonly eventKey: string;
+  readonly leaseId: string;
+  readonly ownerId: string;
+  readonly propertyId: string;
+  readonly unitCode: string;
+  readonly paymentId: string | null;
+  readonly withholdingId: string | null;
+  readonly valueDate: string;
+  /** The most it may be taxed on: the receipt's rent money, the credit carried, the amount withheld. */
+  readonly capMinor: number;
+  /** For a withholding: cash it returned to credit, by payment (review 2). */
+  readonly released: readonly { readonly paymentId: string; readonly amountMinor: number }[];
+  readonly reason: 'rule_missing' | 'rule_unsupported';
+  readonly ruleKey: string | null;
+  readonly message: string;
+}
+
+export const NOT_ASSESSED_ACTION = 'rent_tax.not_assessed';
+export const ASSESSED_ACTION = 'rent_tax.assessed';
+
+/**
+ * Records in the audit log (append-only, hash-chained) that an event's rent tax was not assessed,
+ * or was assessed later: the money posted all the same (TX-08; M5 review 7).
+ */
+export async function appendTaxEvent(
+  tx: Tx,
+  companyId: string,
+  action: typeof NOT_ASSESSED_ACTION | typeof ASSESSED_ACTION,
+  eventKey: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await tx.execute(
+    sql`select audit.append(${companyId}::uuid, ${action}, ${'rent_tax_event'}, ${eventKey}, ${JSON.stringify(data)}::jsonb)`,
+  );
+}
+
+/** Events not assessed and not assessed since, oldest first, optionally for an owner or a lease. */
+export async function notAssessedEvents(
+  tx: Tx,
+  filter: { readonly ownerId?: string; readonly leaseId?: string; readonly open?: boolean } = {},
+): Promise<(NotAssessedEvent & { readonly recordedAt: Date; readonly assessed: boolean })[]> {
+  const rows = await tx.execute<{
+    data: NotAssessedEvent;
+    occurred_at: Date | string;
+    assessed: boolean;
+  }>(
+    sql`select e.data, e.occurred_at,
+          exists (select 1 from audit_event a where a.company_id = e.company_id and a.action = ${ASSESSED_ACTION}
+                    and a.record_type = 'rent_tax_event' and a.record_id = e.record_id) as assessed
+        from audit_event e
+        where e.action = ${NOT_ASSESSED_ACTION} and e.record_type = 'rent_tax_event'
+        order by e.seq`,
+  );
+  return rows.rows
+    .map((r) => ({
+      ...r.data,
+      recordedAt: typeof r.occurred_at === 'string' ? new Date(r.occurred_at) : r.occurred_at,
+      assessed: r.assessed,
+    }))
+    .filter(
+      (e) =>
+        (!filter.ownerId || e.ownerId === filter.ownerId) &&
+        (!filter.leaseId || e.leaseId === filter.leaseId) &&
+        (filter.open === undefined || e.assessed !== filter.open),
+    );
 }
 
 export { schema };

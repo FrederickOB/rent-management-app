@@ -1,3 +1,4 @@
+import { lineBalance, type AllocationRow, type BillingLine } from './lines';
 import type { WalkResult } from './walk';
 
 /**
@@ -35,4 +36,31 @@ export function maxPaymentWithinCap(input: {
     .filter((l) => l.periodStart <= cutoff)
     .reduce((sum, l) => sum + l.remainingMinor, 0);
   return recurring + input.otherDueMinor;
+}
+
+/**
+ * The most one payment may be under `block` (AR-05, decision 4), the same on every path: the pay
+ * page, cash and transfers (M5 review 9). The limit counts months of rent (and service charge)
+ * paid ahead; VAT and levies are not rent, so they never use it up, but each month's VAT and
+ * levies are paid with it (M4b decision 9), so the most includes the VAT of the months up to the
+ * limit. Plus what is due by the payment's date on lines outside the walk (deposits, one-off
+ * charges). The walk is the lease's before the payment, so credit the tenant holds counts.
+ */
+export function advancePaymentCapMinor(input: {
+  readonly lines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly walk: WalkResult;
+  readonly valueDate: string;
+  readonly limitMonths: number;
+}): number {
+  const walked = new Set(input.walk.lines.flatMap((l) => (l.lineId ? [l.lineId] : [])));
+  const otherDueMinor = input.lines
+    .filter((l) => !walked.has(l.id) && l.dueDate <= input.valueDate)
+    .reduce((sum, l) => sum + lineBalance(l, input.allocations).outstandingMinor, 0);
+  return maxPaymentWithinCap({
+    walk: input.walk,
+    valueDate: input.valueDate,
+    limitMonths: input.limitMonths,
+    otherDueMinor,
+  });
 }

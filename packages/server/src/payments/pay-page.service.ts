@@ -1,7 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
 import {
-  advanceCapMinor,
   chargeReference,
   checkPayAmount,
   invoiceRemainingMinor,
@@ -11,7 +10,7 @@ import {
   syntheticCustomerEmail,
   type MomoNetwork,
 } from '@rent/domain/payments';
-import { creditPools, moneySummary } from '@rent/domain/billing';
+import { advancePaymentCapMinor } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import { maskPhone, tryNormalisePhone } from '@rent/domain/phone';
@@ -689,7 +688,7 @@ export class PayPageService {
         walk,
       }),
     });
-    const advance = await this.advanceLimit(state, walk, today, due);
+    const advance = await this.advanceLimit(state, walk, today);
     // `block` stops the amounts at the limit; `warn` shows it and flags a payment past it.
     const amounts =
       advance?.policy === 'block'
@@ -777,7 +776,6 @@ export class PayPageService {
     state: Awaited<ReturnType<BillingEngine['load']>>,
     walk: ReturnType<BillingEngine['walk']>,
     today: string,
-    dueNowMinor: number,
   ): Promise<{
     policy: 'warn' | 'block';
     limitMonths: number;
@@ -804,19 +802,14 @@ export class PayPageService {
     }
     const months = (rule.value as { months?: unknown } | null)?.months;
     if (typeof months !== 'number' || !Number.isSafeInteger(months) || months < 0) return null;
-    const pools = creditPools(state.payments, state.allocations);
-    const summary = moneySummary({
+    // Review 9: the same function as cash and transfers (`BillingEngine.checkAdvanceCap`), from
+    // the walk: what is due, then months of rent up to the limit with their VAT and levies.
+    const capMinor = advancePaymentCapMinor({
       lines: state.lines,
       allocations: state.allocations,
-      pools,
       walk,
-      today,
-    });
-    const capMinor = advanceCapMinor({
-      dueNowMinor,
-      monthlyMinor: terms.monthlyRentMinor + (terms.serviceChargeMonthlyMinor ?? 0),
+      valueDate: today,
       limitMonths: months,
-      aheadMinor: summary.unearnedRentMinor + summary.creditMinor,
     });
     return {
       policy,

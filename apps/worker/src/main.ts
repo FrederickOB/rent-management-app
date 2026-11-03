@@ -47,7 +47,7 @@ import {
   PropertyFilesService,
   RegisterImportService,
 } from '@rent/server/portfolio';
-import { TaxAlertsService, TaxModule } from '@rent/server/tax';
+import { TaxAlertsService, TaxAssessmentService, TaxModule } from '@rent/server/tax';
 import {
   IdChecksService,
   LeaseLifecycleService,
@@ -148,6 +148,7 @@ const definitions = [
   ...taxJobs({
     ...deps,
     taxAlerts: app.get(TaxAlertsService),
+    taxAssessment: app.get(TaxAssessmentService),
     advance: app.get(AdvanceService),
   }),
 ];

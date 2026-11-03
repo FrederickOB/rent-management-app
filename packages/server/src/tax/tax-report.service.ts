@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { eq, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
-import { templates, type RentTaxReportData } from '@rent/documents';
+import { templates, type RentTaxReportV2Data as RentTaxReportData } from '@rent/documents';
 import { addDays, daysBetween, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { toDecimal, money } from '@rent/domain/money';
 import type { Actor } from '@rent/domain/policy';
@@ -24,7 +24,8 @@ import { GraService, type GraPaymentView } from './gra.service';
 import { ruleStatuses, ruleWarnings, taxItems, type TaxItemRecord, uuids } from './tax-records';
 import { WithholdingService } from './withholding.service';
 
-export const RENT_TAX_REPORT_TEMPLATE = { key: 'tax.rent-tax-report', version: 1 } as const;
+/** Version 2 (M5 review 3) adds tax withheld by tenants and awaiting a certificate. */
+export const RENT_TAX_REPORT_TEMPLATE = { key: 'tax.rent-tax-report', version: 2 } as const;
 
 const KIND_LABELS: Record<TaxItemKind, string> = {
   receipt: 'Receipt',
@@ -214,8 +215,16 @@ export class TaxReportService {
       from: input.from,
       to: input.to,
     });
-    const sums = await tx.execute<{ certificates: string; balance: string }>(
+    const sums = await tx.execute<{ certificates: string; balance: string; awaiting: string }>(
       sql`select
+            coalesce((select sum(i.tax_minor) from rent_tax_item i
+              where i.owner_id = ${input.ownerId} and i.kind = 'withholding'
+                and i.accounting_date <= ${input.to}::date
+                and not exists (select 1 from withholding_certificate c where c.company_id = i.company_id
+                  and c.withholding_id = i.withholding_id and c.status = 'confirmed'
+                  and c.accounting_date <= ${input.to}::date)
+                and not exists (select 1 from withholding_write_off o where o.company_id = i.company_id
+                  and o.withholding_id = i.withholding_id and o.accounting_date <= ${input.to}::date)), 0)::bigint as awaiting,
             coalesce((select sum(l.amount_minor) from journal_line l
               join journal_entry e on e.company_id = l.company_id and e.id = l.entry_id
               join book b on b.company_id = l.company_id and b.id = l.book_id
@@ -247,7 +256,10 @@ export class TaxReportService {
           .reduce((s, i) => s + i.taxMinor, 0),
         paidToGraMinor: graPayments.reduce((s, g) => s + g.amountMinor, 0),
         settledByCertificatesMinor: Number(sums.rows[0]?.certificates ?? 0),
-        outstandingMinor: Number(sums.rows[0]?.balance ?? 0),
+        // Review 3: tax a tenant withheld is the tenant's to pay GRA; while its certificate is
+        // awaited it is shown on its own, never as still owed by the owner.
+        withheldAwaitingCertificateMinor: Number(sums.rows[0]?.awaiting ?? 0),
+        outstandingMinor: Number(sums.rows[0]?.balance ?? 0) - Number(sums.rows[0]?.awaiting ?? 0),
       },
       warnings: warnings.map((w) => `Rules not yet verified: ${w}`),
     };
@@ -447,6 +459,19 @@ export function reportCsv(data: RentTaxReportData): string {
       '',
       '',
       amount(data.totals.paidToGraMinor),
+      '',
+      '',
+    ],
+    [
+      'Withheld by tenants, awaiting certificate',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      amount(data.totals.withheldAwaitingCertificateMinor),
       '',
       '',
     ],

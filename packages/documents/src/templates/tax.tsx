@@ -61,10 +61,33 @@ const rentTaxReportSchema = z.strictObject({
 
 export type RentTaxReportData = z.infer<typeof rentTaxReportSchema>;
 
+/**
+ * Version 2 (M5 review 3): tax withheld by tenants and still awaiting its certificate is shown on
+ * its own, and "still owed" leaves it out (the tenant pays it to GRA). Version 1 stays registered
+ * so documents rendered with it keep their template (ADR-006).
+ */
+const rentTaxReportV2Schema = rentTaxReportSchema.extend({
+  totals: z.strictObject({
+    baseMinor: z.int(),
+    taxMinor: z.int(),
+    withheldMinor: z.int(),
+    paidToGraMinor: z.int(),
+    settledByCertificatesMinor: z.int(),
+    withheldAwaitingCertificateMinor: z.int(),
+    outstandingMinor: z.int(),
+  }),
+});
+
+export type RentTaxReportV2Data = z.infer<typeof rentTaxReportV2Schema>;
+
 const amount = (minor: number) => format(money(minor));
 const percent = (bps: number) => `${(bps / 100).toString()}%`;
 
-function RentTaxReport({ data, branding }: TemplateProps<RentTaxReportData>) {
+function RentTaxReport({ data, branding }: TemplateProps<RentTaxReportData | RentTaxReportV2Data>) {
+  const awaiting =
+    'withheldAwaitingCertificateMinor' in data.totals
+      ? data.totals.withheldAwaitingCertificateMinor
+      : null;
   return (
     <Letterhead branding={branding}>
       <h1>Rent tax report</h1>
@@ -145,6 +168,12 @@ function RentTaxReport({ data, branding }: TemplateProps<RentTaxReportData>) {
             <th scope="row">Settled by withholding certificates in the period</th>
             <td className="amount">{amount(data.totals.settledByCertificatesMinor)}</td>
           </tr>
+          {awaiting === null ? null : (
+            <tr>
+              <th scope="row">Withheld by tenants, awaiting certificate</th>
+              <td className="amount">{amount(awaiting)}</td>
+            </tr>
+          )}
           <tr>
             <th scope="row">Still owed at the end of the period</th>
             <td className="amount">{amount(data.totals.outstandingMinor)}</td>
@@ -185,6 +214,15 @@ export const rentTaxReportV1 = defineTemplate({
   version: 1,
   title: 'Rent tax report',
   schema: rentTaxReportSchema,
+  Component: RentTaxReport,
+  pdfDate: (data) => data.to,
+});
+
+export const rentTaxReportV2 = defineTemplate({
+  key: 'tax.rent-tax-report',
+  version: 2,
+  title: 'Rent tax report',
+  schema: rentTaxReportV2Schema,
   Component: RentTaxReport,
   pdfDate: (data) => data.to,
 });

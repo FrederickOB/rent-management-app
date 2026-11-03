@@ -99,3 +99,30 @@ export function refundDue(creditLeftMinor: number, deductionsMinor: number): num
     );
   return creditLeftMinor - deductionsMinor;
 }
+
+/**
+ * P13 refund approved (AR-04, decision 6): the credit left becomes a refund payable payment by
+ * payment, first in, first out. Each payment's share reduces its credit (the engine records it).
+ */
+export function refundCredits(
+  pools: readonly { readonly paymentId: string; readonly amountMinor: number }[],
+  amountMinor: number,
+): PaymentAmount[] {
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0)
+    throw new DomainError('termination.bad_refund', 'A refund is an amount above zero');
+  const credits: PaymentAmount[] = [];
+  let need = amountMinor;
+  for (const pool of pools) {
+    if (need === 0) break;
+    const take = Math.min(pool.amountMinor, need);
+    if (take <= 0) continue;
+    credits.push({ paymentId: pool.paymentId, amountMinor: take });
+    need -= take;
+  }
+  if (need > 0)
+    throw new DomainError(
+      'termination.refund_over_credit',
+      'The lease no longer holds this much credit to refund',
+    );
+  return credits;
+}

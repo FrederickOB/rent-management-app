@@ -2,7 +2,12 @@ import { Controller, Inject } from '@nestjs/common';
 import { Implement, implement } from '@orpc/nest';
 import { contract } from '@rent/contracts';
 import { IdempotencyStore, notFound } from '@rent/server/core';
-import { GraService, TaxReportService, WithholdingService } from '@rent/server/tax';
+import {
+  GraService,
+  TaxAssessmentService,
+  TaxReportService,
+  WithholdingService,
+} from '@rent/server/tax';
 import { toApproval } from '../governance/governance.controller';
 import { idempotent } from '../http/idempotency';
 import { Ctx, type RequestContext } from '../http/request-context';
@@ -19,6 +24,7 @@ export class TaxController {
     @Inject(GraService) private readonly gra: GraService,
     @Inject(WithholdingService) private readonly withholding: WithholdingService,
     @Inject(IdempotencyStore) private readonly idempotency: IdempotencyStore,
+    @Inject(TaxAssessmentService) private readonly assessment: TaxAssessmentService,
   ) {}
 
   @Implement(contract.rentTax)
@@ -65,6 +71,14 @@ export class TaxController {
             if (!payment) throw notFound('GRA payment');
             return serialize(payment);
           },
+        ),
+      ),
+      notAssessed: implement(contract.rentTax.notAssessed).handler(async ({ input }) =>
+        serialize(
+          await this.assessment.list(ctx.actor, {
+            ...(input.ownerId ? { ownerId: input.ownerId } : {}),
+            ...(input.open ? { open: input.open === 'true' } : {}),
+          }),
         ),
       ),
       file: implement(contract.rentTax.file).handler(async ({ input }) => ({
@@ -148,6 +162,26 @@ export class TaxController {
           (id) => ofCertificate(id),
           { required: false },
         ),
+      ),
+      requestSelfDecision: implement(contract.withholding.requestSelfDecision).handler(
+        ({ input }) =>
+          idempotent(
+            this.idempotency,
+            ctx,
+            'tax.certificate_self_decision',
+            input,
+            async (claim) => {
+              await this.withholding.requestSelfDecision(
+                ctx.actor,
+                input.certificateId,
+                input.decision,
+                { claim },
+              );
+              return input.certificateId;
+            },
+            (id) => ofCertificate(id),
+            { required: false },
+          ),
       ),
       requestWriteOff: implement(contract.withholding.requestWriteOff).handler(({ input }) =>
         idempotent(

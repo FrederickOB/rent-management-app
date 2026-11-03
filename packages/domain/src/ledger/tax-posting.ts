@@ -120,7 +120,15 @@ export function withholdingLines(input: {
      * line, as P03 holds a prepayment), drawn when the month starts (`withholdingDrawLines`).
      */
     readonly prepaid?: boolean;
+    /**
+     * M5 review 2: payments' cash the line already held, returned to their credit so the
+     * withholding fits (Dr 1100 on a started line, or Dr 2010 on the line for one not started;
+     * Cr 2010 on the payment), as a credit note releases money.
+     */
+    readonly released?: readonly PaymentAmount[];
   }[];
+  /** The lease a payment's credit sits on, when it moved to a renewal (P29; as P27). */
+  readonly creditLeaseOf?: (paymentId: string) => LeaseDimensions;
 }): JournalLineDraft[] {
   return compactLines(
     input.lines.flatMap((l) => {
@@ -131,7 +139,27 @@ export function withholdingLines(input: {
         invoiceLineId: l.invoiceLineId,
       };
       positive(l.amountMinor, 'Withholding');
+      const releases = (l.released ?? []).flatMap((r) => {
+        positive(r.amountMinor, 'Released cash');
+        return [
+          {
+            ...dims,
+            paymentId: r.paymentId,
+            accountCode: l.prepaid ? ('2010' as const) : ('1100' as const),
+            amountMinor: r.amountMinor,
+          },
+          {
+            bookId: input.bookId,
+            ...input.lease,
+            ...(input.creditLeaseOf ? input.creditLeaseOf(r.paymentId) : {}),
+            paymentId: r.paymentId,
+            accountCode: '2010' as const,
+            amountMinor: -r.amountMinor,
+          },
+        ];
+      });
       return [
+        ...releases,
         { ...dims, accountCode: '1150' as const, amountMinor: l.amountMinor },
         l.prepaid
           ? { ...dims, paymentId: null, accountCode: '2010' as const, amountMinor: -l.amountMinor }

@@ -25,8 +25,22 @@ import {
   planAllocation,
   planReopenedDraws,
   planTaxDraws,
+  withholdingDrawsFor,
 } from '../allocation';
-import { linesAfterEnd, planCreditNote, planPaymentReversal, planWriteOff } from '../corrections';
+import {
+  linesAfterEnd,
+  planCreditNote,
+  planPaymentReversal,
+  planWithholding,
+  planWriteOff,
+} from '../corrections';
+import {
+  creditApplicationLines,
+  refundApprovedLines,
+  withholdingDrawLines,
+  withholdingLines,
+} from '../../ledger/tax-posting';
+import { applyCreditToOpenLines, refundCredits } from '../termination';
 import type { InvoiceLineDraft } from '../invoicing';
 import {
   creditPools,
@@ -247,6 +261,19 @@ export class LeaseLedgerModel {
           }),
           line.periodStart as string,
         );
+      // M5 decision 8: withholding held as its advance pays it now, each on its own key.
+      for (const d of withholdingDrawsFor(line.id, this.allocations))
+        this.post(
+          'P02',
+          `P02:${line.id}:withholding:${d.withholdingId}`,
+          withholdingDrawLines({
+            bookId: this.book,
+            lease: this.lease,
+            invoiceLineId: line.id,
+            amountMinor: d.amountMinor,
+          }),
+          line.periodStart as string,
+        );
       // Its VAT and levies, from the credit left (review 10).
       for (const tax of planTaxDraws(
         this.lines.filter((l) => l.baseLineId === line.id),
@@ -433,6 +460,88 @@ export class LeaseLedgerModel {
     }
     this.post('P27', `P27:${key}`, lines);
     this.drawCreditToOpen();
+  }
+
+  /**
+   * P19 as `BillingEngine.withhold` posts it (TX-04; M5 decision 8 and review 2), with the same
+   * planning and posting functions: pinned to its lines, started or not; cash already on a line
+   * returns to its payment's credit first, and that credit then pays reopened debt.
+   */
+  withhold(
+    withheld: readonly { readonly lineId: string; readonly amountMinor: number }[],
+    key: string,
+    paymentId: string | null = null,
+  ): void {
+    this.accrueTo(this.today);
+    const plan = planWithholding({
+      lines: this.lines,
+      allocations: this.allocations,
+      payments: this.livePayments(),
+      withheld,
+      paymentId,
+    });
+    for (const row of plan.rows) this.addAllocation({ ...row, recordId: key });
+    this.post(
+      'P19',
+      `P19:${key}`,
+      withholdingLines({
+        bookId: this.book,
+        lease: this.lease,
+        paymentId,
+        lines: plan.lines.map((l) => ({
+          invoiceLineId: l.line.id,
+          amountMinor: l.amountMinor,
+          prepaid: l.prepaid,
+          released: l.released,
+        })),
+      }),
+    );
+    if (plan.released.length > 0) this.drawCreditToOpen();
+  }
+
+  /** P13 apply as `BillingEngine.applyCreditToOpen` posts it: credit pays open charged lines. */
+  applyCreditToOpen(key: string): void {
+    const { applications } = applyCreditToOpenLines(
+      this.lines,
+      this.allocations,
+      creditPools(this.livePayments(), this.allocations),
+    );
+    if (applications.length === 0) return;
+    for (const a of applications)
+      for (const d of a.draws)
+        this.addAllocation({
+          lineId: a.lineId,
+          source: 'payment',
+          paymentId: d.paymentId,
+          amountMinor: d.amountMinor,
+        });
+    this.post(
+      'P13',
+      `P13:${key}:apply`,
+      creditApplicationLines({
+        bookId: this.book,
+        lease: this.lease,
+        applications: applications.map((a) => ({ invoiceLineId: a.lineId, draws: a.draws })),
+      }),
+    );
+  }
+
+  /**
+   * P13 refund approved as `BillingEngine.approveRefund` posts it: first in, first out by payment;
+   * each payment's share reduces its credit, as the engine's refund parts do.
+   */
+  refund(key: string, amountMinor: number): void {
+    const credits = refundCredits(creditPools(this.livePayments(), this.allocations), amountMinor);
+    this.post(
+      'P13',
+      `P13:${key}:refund`,
+      refundApprovedLines({ bookId: this.book, lease: this.lease, credits }),
+    );
+    for (const c of credits) {
+      const index = this.payments.findIndex((p) => p.id === c.paymentId);
+      const payment = this.payments[index] as ModelPayment;
+      this.payments[index] = { ...payment, amountMinor: payment.amountMinor - c.amountMinor };
+    }
   }
 
   /** P24 on a charged line still owed. */
