@@ -1,6 +1,6 @@
 # M4a: Ledger core and billing
 
-- **Status:** approved by the founder on 2026-10-30 with every recommendation in section 2. Being built: progress notes are in section 5.
+- **Status:** approved by the founder on 2026-10-30 with every recommendation in section 2. Built on 2026-10-30; progress notes are in section 5 and the report is section 11.
 - **Inputs:**
     - `BUILD_PLAYBOOK.md` (the M4 prompt, first half) and `docs/plans/roadmap.md` (the M4a row and prompt amendment);
     - `CLAUDE.md` sections 4 to 8 and 11;
@@ -390,7 +390,7 @@ The seed extends the M3 paper leases with money that exercises every flow, all t
     6. **References** are drawn again whenever 0 and Z would be neighbours, the one swap Luhn mod 32 cannot detect.
     7. **For you to look at in the report:** within one invoice the approved order pays every rent line before any service charge. A part payment on an annual invoice with service charge therefore covers rent for every month but service charge for none, and paid-until shows no whole month. Allocating month by month would fix that, but changes the approved order.
 
-**2026-10-30, the backend: steps 2 to 5 and 7 (in the working tree for review, not committed).** The web screens (step 6) are being built separately.
+**2026-10-30, the backend: steps 2 to 5 and 7 (5970500).** The web screens (step 6) are 3834bc7.
 
 - **Database (step 2):** three migrations; `docs/architecture.md` sections 3.4 and 11 list the tables and policies.
     - **`0012_ledger_billing`,** generated from the Drizzle schema:
@@ -539,7 +539,7 @@ The seed extends the M3 paper leases with money that exercises every flow, all t
     - **The worker:** `apps/worker/src/billing.jobs.test.ts` (2).
     - **Isolation:** M1's tests cover the new tables, with fixture rows for each.
 
-**2026-10-30, the independent review's fixes (backend; in the working tree, not committed).** Each finding has a regression test that fails before its fix.
+**2026-10-30, the independent review's fixes (backend, f598292; the web's are 0477838).** Each finding has a regression test. The reviewers' probes, which failed on the unfixed code, became the tests for the late move-out, the value date, the lock order and the second check's A to C. The sub-ledger snapshot test was also seen failing without its fix. The other tests were written with their fixes and were not seen failing first.
 
 - **Must fix:**
     1. **A late move-out keeps what was earned.** System credit notes cancel only lines never charged; accrual never charges a period after the last billable day. Charged lines after the end stay owed and are listed on the lease's money card (`chargedAfterEnd`) for a credit note two people approve. Test: `BC-01 a move-out recorded late keeps what was earned`.
@@ -626,3 +626,128 @@ None expected: the ledger uses PostgreSQL, Drizzle and fast-check, which are alr
 - **M10:** subscriptions (P26).
 - **M11:** opening balances (P25) with the pilot import.
 - **Phase 2:** ownership transfer once a property has ledger entries; joint ownership (PR-07); statement import; late fees (BC-10, OQ-15).
+
+## 11. Report
+
+Written 2026-10-30, at the end of the build, and completed on 2026-11-03 with the founder's answers. Verified on this machine and on GitHub.
+
+### Done criteria
+
+| # | Criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | PRD section 7's acceptance criteria in scope as automated tests | Done | **A two-year advance:** ★ `AR-01 a two-year advance month by month` (server and domain) checks paid-until and unearned rent every month; `AR-02 the lease page shows paid-until and unearned rent` (e2e) shows them on the seed's GH₵36,000 advance.<br>**Billing and collection:** `BC-01 invoices from lease terms` (cycles, escalation, lead days, holding over, billing start); part payments, overpayments and credit in ★ `BC-07 allocation never exceeds what is owed`; oldest debt first in `BC-07 allocation order`; ★ `BC-05 cash posts only after a second person approves` and `BC-05 and P07 cash on hand` (e2e); `BC-08 arrears ageing` and `BC-08 arrears screen` (e2e); ★ `BC-11 deposits never reach income`. |
+| 2 | The roadmap's M4a tests | Done | The nine ★ tests in section 6, listed under Tests. |
+| 3 | Every balance on screen from the ledger and its sub-ledgers | Done | Amount due, paid-until, unearned rent, deposit held, credit, arrears and collectors' cash are derived on every read; none is stored. The seed ends with the sub-ledger check: `0 mismatches`. |
+| 4 | CI green, and no open "must fix" from an independent review | Done | **Review:** two independent reviews of 3834bc7 (backend and web) and a third check of the backend fixes; every must-fix item and the check's three defects are fixed (Independent review below).<br>**CI:** see Checks. |
+| 5 | Report | Done | This section. |
+
+### Requirement IDs
+
+| ID | Delivered | Main tests |
+| --- | --- | --- |
+| AC-01 | **The journal:** double entry in one book per owner and one per company, with property, unit, lease, invoice line, payment and collector on each line. Zero per book and two lines or more, checked at commit; append-only; written only by `PostingService` as `ledger_writer`; one idempotency key per entry.<br>**Rules:** P01 to P10, P21, P23, P24, P27 to P29 and P32. | ★ `AC-01 the ledger balances` (domain, and the database against the model); ★ `AC-01 replaying an event changes nothing`; `AC-01 the journal is append-only`; `AC-01 only the posting service writes the journal`; `AC-01 the sub-ledger check reads one snapshot` |
+| BC-01 | **Invoices** from the lease terms, 14 days ahead (a company setting), one per billing cycle, with escalation, the initial advance, a deposit invoice at signing and holding over month by month. Nothing is billed after the last billable day. Invoice PDFs for staff. | `BC-01 invoices from lease terms`; `BC-01 a move-out recorded late keeps what was earned`; `BC-01 one failing lease never stops the daily runs` |
+| BC-03 (references) | A 7-character reference per lease (Crockford base32 with a Luhn mod 32 check), unique across the platform, issued at signing and shown on invoices, receipts and the lease page. | `BC-03 payment references` (fast-check) |
+| BC-05 and P07 | **Cash and cheques** with a photo, and **transfers** with proof, post only after a second person approves; the database refuses the recorder as approver. **Banking** with the slip, never more than is held less banking already waiting. Cash on hand per collector. | ★ `BC-05 cash posts only after a second person approves`; `BC-05 a reversal from the collector and banking never deadlock`; `BC-05 a collector counts banking someone else asked for`; `BC-05 and P07 cash on hand` (e2e) |
+| BC-07 | **Allocation:** oldest debt first, classified as of the day the money arrived; credit held on the payment; every allocation records its source. | ★ `BC-07 allocation never exceeds what is owed`; `BC-07 allocation order`; `BC-07 a payment is classified as of the day it arrived`; `P03 money is classified as of the day it arrived` |
+| BC-08 | Ageing in 0–30, 31–60, 61–90 and 90+ days from the due date, by tenant, property and owner, as of any date. | `BC-08 arrears ageing`; `BC-08 arrears screen` (e2e) |
+| BC-11 | Deposits in 2100 per lease, never in income; carried to a renewal per payment (P29). | ★ `BC-11 deposits never reach income`; `P29 a reversal after the deposit moved to the renewal` |
+| AR-01 | An advance is a prepayment, drawn into income as each period starts (P02), from the line's own advance and then credit, oldest payment first. | ★ `AR-01 recognition plus prepayments equal what was prepaid`; ★ `AR-01 a two-year advance month by month` |
+| AR-02 | Paid-until by the forward walk, with partial cover ("plus GH₵X towards the month starting …"); never stored, never past the last billable day. | ★ `AR-02 paid-until moves back only on a reversal, credit note or schedule change`; `AR-02 the lease page shows paid-until and unearned rent` (e2e) |
+| AR-03 | Unearned rent: the rent share of the lease's prepayments, in cedis. | `AR-03 unearned rent`; ★ `AR-01 a two-year advance month by month` |
+| CT-04 | VAT, NHIL and GETFund lines on a VAT-registered owner's commercial invoices, from unverified rules rows with the staff warning; owed from their tax point; paid by credit with their base line. | `CT-04 VAT on commercial invoices`; `CT-04 credit pays VAT lines too`; `CT-04 VAT is never owed before its tax point`; `CT-04 a tax line is owed from its tax point` |
+| Also | **Corrections:** reversals from current allocations (P21) with a credit receipt; credit notes (P27) and write-offs (P24) by two people, one open request per line. **Unmatched transfers** (P23). **Renewals** (P29). **Period locks** and the two dates. **Idempotent money writes** (M2 S8). **Receipt and invoice numbers** without gaps. **Same-day owner correction** (M2 S5). **Approval requests scoped by property** (AD-02). | `P21 payment reversal from current allocations`; `P27 credit notes` and `P24 write-offs`; `P23 unmatched direct receipts`; `P23 matching and reversing the same unmatched money`; `P29 renewal carry-over`; `P29 no credit is stranded on an ended lease`; `AC-04 accounting dates under a lock`; `M2 S8 idempotent requests`; `M2 S8 a committed write always has its answer`; ★ `BC-06 receipt numbers have no gaps under concurrency`; `PR-07 an owner correction and the first invoice wait for each other`; `AD-02 approval requests are scoped by property`; `NFR-SEC billing isolation and scope` |
+
+### Tests
+
+1,541 unit and integration tests pass in 13 packages, against real PostgreSQL with RLS on. M3 ended with 1,236.
+
+| Package | Tests | Notes |
+| --- | --- | --- |
+| `packages/domain` | 533 | Posting rules, allocation, accrual, the walk, corrections, ageing, invoicing, VAT and references, with an in-memory model of a lease's books (`LeaseLedgerModel`) and property tests over random sequences. |
+| `packages/config` | 22 | Includes the `rent/ledger-writes` lint rule. |
+| `packages/contracts` | 2 | |
+| `packages/db` | 74 | The journal's checks in the database: writer, zero per book, append-only, locked months. |
+| `packages/integrations` | 199 | |
+| `packages/documents` | 60 | Invoice and receipt templates. |
+| `packages/server` | 255 | Billing, money, approvals, locks, and the differential properties (the database against the model, 24 random leases per property by default). |
+| `apps/api` | 53 | Billing over HTTP, idempotency, caretaker refusals. |
+| `apps/worker` | 13 | Billing jobs. |
+| `apps/fake-providers` | 31 | |
+| `apps/links` | 19 | |
+| `apps/web` | 238 | Billing screens' logic: limits from the API, error codes, uploads, in-flight holds. |
+| `apps/tenant` | 42 Jest | |
+
+The roadmap's nine M4a tests (★ in section 6) are in `packages/domain/src/billing/invariants.test.ts`, `packages/server/test/billing-properties.int.test.ts`, `billing.int.test.ts` and `billing-money.int.test.ts`. The end-to-end specs `BC-05 and P07 cash on hand`, `AR-02 the lease page shows paid-until and unearned rent` and `BC-08 arrears screen` run in CI on a freshly seeded database.
+
+### Checks
+
+- **Locally, on 0477838:** format, lint and typecheck (25 of 25 Turborepo tasks), then unit and integration tests (13 of 13 tasks).
+- **CI on 0477838:** five of six jobs passed, the end-to-end tests on a freshly seeded database included. The Integration job timed out two domain property tests at 30 s (38.6 s and 30.7 s); every assertion that ran passed. The cost was in test code, not in billing: the lease model re-scanned the journal for every line and payment when checking invariants, and the caps test captured a stack trace for every expected refusal. a4af7d6 fixes both without changing run counts, timeouts or assertions.
+- **CI on a4af7d6 (31 October):** five of six jobs passed, and the domain property tests passed (533). The Integration job failed two tests written during the review fixes, `P03 money is classified as of the day it arrived` in `packages/server/test/billing-money.int.test.ts`. They look for a rent period that starts today. Their lease starts a month earlier, which on 31 October is 30 September, so its periods start on the 30th and the lookup finds nothing. The billing code is right: a copy of the two tests that uses the current period's start passed on 31 October. The founder approved correcting their setup on 2026-11-03 (c4f34b9).
+- **CI on c4f34b9:** all six GitHub Actions jobs pass (format, lint and typecheck; unit; integration; end-to-end on a freshly seeded database; Expo; backup and restore).
+- **A note for local runs:** on battery with the lid closed, the Mac goes into maintenance sleep for about 900 s at a time, and a test running across one fails its timeout at about 902 s. `pmset -g log` shows the sleeps. These are not hangs: the same inputs finish in seconds when the machine is awake.
+
+### Independent review
+
+Fresh agents that had not written the code reviewed 3834bc7: one the backend (posting rules, allocation, accrual, locks and security), one the web screens. Each had a brief written for its area, not the playbook's review prompt word for word; the playbook's own review comes at the end of M4, after M4b. A third agent then checked the backend fixes and reproduced three new defects, which were fixed and its probe re-run: all three of its tests now pass.
+
+**Backend review (3834bc7)**
+
+| # | Finding | Outcome |
+| --- | --- | --- |
+| 1 (must fix) | A move-out recorded late let system credit notes cancel rent already earned, with no approval. | **Fixed.** System credit notes cancel only lines never accrued; accrual stops at the last billable day; accrued lines after it stay owed and are listed (`chargedAfterEnd`) for a two-person credit note. |
+| 2 (must fix) | Payments were classified by today's state, not the value date (against P03). | **Fixed.** Classified as of the value date, with a late draw (Dr 2010, Cr 1100) at the period start for periods accrued since. |
+| 3 | A confirmed deadlock between money paths. | **Fixed.** One lock order; reversals lock their leases in id order. |
+| 4 | Paid-until counted zero-net lines and could pass an early end. | **Fixed.** |
+| 5 | A match and a reversal of the same unmatched money could both happen. | **Fixed.** A lock per payment and `RA049`. |
+| 6 | The sub-ledger check could raise false alarms mid-payment. | **Fixed.** One read-only snapshot. |
+| 7 | One failing lease stopped the daily runs. | **Fixed.** A transaction per lease. |
+| 8 | Approval requests were company-wide (AD-02). | **Fixed.** Requests carry their property; restrictive RLS and a policy check. |
+| 9 | A reversal after a deposit carry-over took the deposit from the wrong lease. | **Fixed.** Deposits carry per payment. |
+| 10 | Credit did not pay VAT lines. | **Fixed.** |
+| 11 | Credit could be stranded on an ended lease. | **Fixed.** |
+| 12 to 14 | Tests that did not prove enough (caretaker scope, replay, model coverage). | **Fixed.** |
+| 15 to 18, 20 | Re-check leases after locking; module boundaries; the idempotent answer in the write's transaction; one open correction per line; the owner against the first invoice. | **Fixed** (16: the sub-ledger check keeps its own SQL over the journal, deliberately). |
+| 19 | Within one invoice, all rent is paid before any service charge (design detail 7). | **Decided 2026-11-03,** built in M4b: month by month (open item 1). |
+
+**Verification check of the backend fixes**
+
+| # | Finding | Outcome |
+| --- | --- | --- |
+| A | A back-dated payment on a VAT lease left the tax lines' receivable negative for past dates. | **Fixed.** Tax and one-off lines are owed from the day they were charged; invoices a payment issues are charged at its date. OQ-20 item 7 asks the tax adviser about the tax point. |
+| B | The new owner lock made an owner correction and the first invoice deadlock. | **Fixed.** The property-owner lock comes straight after the lease locks, before anything audited. |
+| C | A scoped collector could not see banking someone else requested for their cash, so could request it again (approval still refused to bank it twice). | **Fixed.** Pending banking is read through a narrow definer function that returns amounts only. |
+| D | Reversal locks out of id order; `issueForAdvance` issuing for a payment that pays none of the new cycles; the migration's session settings. | **Fixed.** |
+
+**Web review (3834bc7):** 2 must-fix items (approvers could not see the evidence photo; the holder choice was gated on the wrong permission) and 16 others, all fixed in 0477838: unknown-outcome 409s, re-upload prompts, limits from the API, approval names from the payload, the billing start always sent, the reused-key message with "Start again", forms held while a write is in flight, and the three e2e specs rewritten for the fresh seed.
+
+**Test changes, for your review.** No test was edited to make it pass. Two kinds of change touched existing tests:
+- **One assertion changed:** the expected wording of the reused-key message in `apps/web/lib/idempotency.test.ts`, because the review asked for new wording. The tests of how each error is classified are unchanged.
+- **Seven tests removed with their code:** the browser no longer computes credit-note, write-off and banking limits itself (the four `lineCorrections` tests and three `bankable()` assertions). New tests check that the screens follow the limits the API sends.
+- **One test made faster (a4af7d6):** `P27 and P24 what a line can take` in `packages/domain/src/billing/correction-caps.test.ts` turns stack-trace capture off while it runs (`Error.stackTraceLimit = 0`, restored afterwards), because capturing a trace for each expected refusal was most of its time on CI. Its property, assertions and 150 runs are unchanged. The lease model's invariant check, which is test support rather than a test, now sums the journal in one pass and makes the same checks.
+- **Two tests' setup corrected, with the founder's approval (c4f34b9):** the two `P03 money is classified as of the day it arrived` tests looked for a rent period starting today, which month ends do not have. They now use the current period's start; their assertions are unchanged.
+
+### Deviations
+
+Beyond section 9:
+1. **System credit notes** (section 9, item 3) now cancel only lines never accrued. Rent already charged after a late move-out needs a credit note two people approve.
+2. **Approval requests carry their property** (a change to M1's engine). Banking spans properties, so it is company-level and only people with the whole company in scope decide it. In a landlord company whose only other approver is a nominated adviser (scoped by role), banking falls back to self-confirmation after cooling off (OQ-29).
+3. **Tax point:** invoices issued because of an advance payment are charged (P01, P32) at the payment's date, before their issue date.
+4. **A reversal may answer 409 `payment_moved`** when a lease joined the payment while it waited for locks; a retry succeeds.
+5. **Banking asks for at most what is held less banking already waiting.**
+6. **P01 one-off charges:** the rule and its posting exist, but plan 4.18 has no endpoint to raise one.
+7. **TINs print masked** on invoices and receipts (OQ-20 item 6 asks whether VAT invoices need them in full).
+8. **Invoice and receipt PDFs are for staff;** tenants get them in M4b.
+9. **Landlord owners hold `billing.manage`,** because a self-managing landlord is their company's admin (section 5).
+
+### Open items
+
+1. **Rent before service charge (finding 19, design detail 7): decided 2026-11-03, built in M4b.** In M4a, a part payment on an annual invoice with service charge covers rent for every month and service charge for none, so paid-until shows no whole month. The founder's answer: "rent in Ghana is paid monthly, bi-annually, annually and two years in advance; handle it as such." M4b allocates month by month within an invoice (each month's rent, then its service charge), and adds a two-yearly rent cycle beside monthly, six-monthly ("bi-annually") and annual (the M4b plan records it).
+2. **M3 is not in `main`.** PR #3 was merged into `m2-register`. PR #5 (`m3-tenancy` to `main`, opened 2026-11-03) brings it in; then this PR can target `main`.
+3. **The dev database `rent`** stops at migration 0014 and still holds M3's data under the M4a seed. `pnpm db:migrate` brings it to 0017; for the seed's figures, reset it with the commands in section 5 (the backup is `backups/20261030T132525Z.dump`).
+4. **Accountants** may record and bank other people's cash (`cash.bank_others`) but cannot list people (`membership.view`), so the "who holds it" choice is hidden from them and they record cash as their own. A narrow list of collectors would fix it.
+5. **Photos upload at full size.** Shrinking them in the browser would help on 3G.
+6. **The browser's Back button** is not held while a money write is in flight (links, Cancel and closing the tab are). The idempotency key makes a retry safe, but the person may not see the answer.
+7. **Carry-overs made before migration 0017** have no payment, so a later reversal takes their deposit from the original lease. Only development data has them.
+8. **Waiting on the tax adviser:** OQ-20 items 6 (full TINs) and 7 (the tax point for money matched later).
