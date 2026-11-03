@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { useCallback, useState } from 'react';
 import { AdvanceFlagAlert } from '@/components/advance-flag';
 import { useApp } from '@/components/app-context';
+import { TerminationPanel } from '@/components/termination-panel';
+import { WithholdingPanel } from '@/components/withholding-panel';
 import { secondaryLink } from '@/components/link-styles';
 import { PageHeader } from '@/components/page-header';
 import { LeaseStatusBadge, PaperBadge } from '@/components/tenancy-badges';
@@ -16,6 +18,7 @@ import { formatBusinessDate } from '@/lib/business-dates';
 import { formatDate, formatTime } from '@/lib/format';
 import { isPayable } from '@/lib/lease-pick';
 import { COUNSEL_WARNING, wasSigned } from '@/lib/lease-view';
+import { endedEarly } from '@/lib/termination';
 import {
   BREAK_PARTY_LABELS,
   cycleLabel,
@@ -39,6 +42,13 @@ export interface LeasePermissions {
   readonly seeTenant: boolean;
   /** M4a: the money card, invoices and payments, and recording money (plan 4.19). */
   readonly money: MoneyPermissions;
+  /**
+   * M5 (plan 5.8): billing.manage records withholding, uploads certificates and asks for an early
+   * termination's refund; withholding.confirm confirms a certificate (decision 3).
+   */
+  readonly tax: { readonly manage: boolean; readonly confirm: boolean };
+  /** An agency says which account money was paid from; a landlord pays from their own. */
+  readonly agency: boolean;
 }
 
 const SAVED_NOTES: Record<string, string> = {
@@ -154,7 +164,20 @@ export function LeaseDetail({
 
       {/* Money exists once a lease is signed (M4a decision 1): before that it is not billed. */}
       {signed && can.money.view ? (
-        <LeaseMoney leaseId={lease.id} unitCode={lease.unit.code} can={can.money} />
+        <LeaseMoney
+          leaseId={lease.id}
+          unitCode={lease.unit.code}
+          term={{ endDate: t.endDate, renewalOffered: lease.renewal !== null }}
+          can={can.money}
+        />
+      ) : null}
+      {/* AR-04: once a move-out ends the lease early, the settlement and the refund (P13). */}
+      {signed && can.money.view && endedEarly(lease) ? (
+        <TerminationPanel
+          leaseId={lease.id}
+          agency={can.agency}
+          can={{ manage: can.tax.manage, seeApprovals: can.seeApprovals }}
+        />
       ) : null}
 
       <Card data-testid="lease-terms">
@@ -233,6 +256,18 @@ export function LeaseDetail({
         <>
           <LeaseInvoices leaseId={lease.id} />
           <LeasePayments leaseId={lease.id} />
+          {/* TX-04: a company tenant may withhold tax from rent (M5 plan 5.2). */}
+          {lease.tenant.kind === 'company' ? (
+            <WithholdingPanel
+              leaseId={lease.id}
+              leaseUse={lease.use}
+              can={{
+                manage: can.tax.manage,
+                confirm: can.tax.confirm,
+                seeApprovals: can.seeApprovals,
+              }}
+            />
+          ) : null}
         </>
       ) : null}
 

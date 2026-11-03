@@ -116,6 +116,9 @@ const RECORD_LINKS: Record<string, string> = {
   cash_banking: 'Cash on hand',
   settlement_account: 'Settlement accounts',
   owner: 'Where the owner’s rent goes',
+  // M5: withholding and early terminations are shown on their lease's page.
+  withholding: 'Open the lease',
+  early_termination: 'Open the lease',
 };
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */

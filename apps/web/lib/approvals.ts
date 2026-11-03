@@ -34,7 +34,14 @@ const ACTION_LABELS: Record<string, string> = {
   'payment.refund_unmatched': 'Refund unmatched money to its payer',
   // M4b review: where an agency owner's rent goes is changed only with a second person.
   'management_agreement.change': 'Change where an owner’s rent goes',
+  // M5 (plan 5.2 and 5.4): withholding whose certificate never came (P24), and an early
+  // termination's settlement and refund (P13).
+  'withholding.write_off': 'Write off withholding tax whose certificate never came',
+  'lease.refund': 'Settle an early termination and refund the tenant',
 };
+
+const WITHHOLDING_WRITE_OFF = 'withholding.write_off';
+const LEASE_REFUND = 'lease.refund';
 
 const REFUND_ACTION = 'payment.refund_unmatched';
 
@@ -55,6 +62,8 @@ export const MONEY_ACTIONS: readonly string[] = [
   'invoice.write_off',
   'payment.refund_unmatched',
   ...SETTLEMENT_ACTIONS,
+  WITHHOLDING_WRITE_OFF,
+  LEASE_REFUND,
 ];
 
 export function approvalActionLabel(actionType: string): string {
@@ -171,6 +180,8 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   const cheque = [str('chequeNumber'), str('chequeBank')].filter(Boolean).join(', ');
   add('Cheque', cheque || null);
   add('Received on', date('receivedOn'));
+  // Withholding (P19) is dated the day the tenant withheld it.
+  if (actionType === WITHHOLDING_WRITE_OFF) add('Withheld on', date('valueDate'));
   add('Banked on', date('bankedOn'));
   add('Paid by', str('payerName'));
   // Only ever masked (CLAUDE.md section 10).
@@ -186,6 +197,21 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
     add('Rent goes to now', pick(DESTINATION_LABELS, data.currentDestination) ?? 'Not chosen yet');
     add('Rent would go to', pick(DESTINATION_LABELS, data.destination));
     add('From', date('effectiveFrom'));
+  }
+  // An early termination's settlement (P13; plan 5.4): each step's figure as the API worked it
+  // out, refreshed when the approver opens it, so the second person checks the same steps.
+  if (actionType === LEASE_REFUND) {
+    const minor = (key: string): string | null => {
+      const value = data[key];
+      return Number.isSafeInteger(value) ? formatMinor(value as number) : null;
+    };
+    add('Last day of the tenancy', date('lastDay'));
+    add('Agreed charges', amountList(data.charges));
+    add('Unused days credited', minor('unusedDaysCreditMinor'));
+    add('Prepayment applied to open charges', minor('appliedMinor'));
+    add('Deductions', amountList(data.deductions));
+    add('Refund to the tenant', minor('refundMinor'));
+    add('Still owed after it', minor('arrearsMinor'));
   }
   // A settlement account (ADR-008): whose it is, and only ever its masked number.
   add('Whose account', data.holder === 'agency' ? 'The agency’s client account' : null);
@@ -205,6 +231,21 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   add('Where the money is now', pick(MONEY_LOCATION_LABELS, data.moneyNowIn));
   add('Note', str('note'));
   return facts;
+}
+
+/** `Early exit fee, GH₵500.00; Paint, GH₵100.00`, or `None` for an empty list. */
+function amountList(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const items = value
+    .map(asRecord)
+    .filter(
+      (item): item is Record<string, unknown> =>
+        item !== null &&
+        typeof item.description === 'string' &&
+        Number.isSafeInteger(item.amountMinor),
+    )
+    .map((item) => `${String(item.description)}, ${formatMinor(item.amountMinor as number)}`);
+  return items.length ? items.join('; ') : 'None';
 }
 
 export interface ApprovalWarning {
@@ -249,6 +290,16 @@ export function approvalWarning(actionType: string, payload: unknown): ApprovalW
           title: 'Rent stops settling into this account',
           text: 'Once approved, pay links for its leases work only if another account is in use for them.',
         };
+  if (actionType === LEASE_REFUND && data.open === false)
+    return {
+      title: 'The figures no longer hold',
+      text: 'The lease’s money has moved since this was asked for, or the request was replaced. Reject it, and ask again with the figures as they are now.',
+    };
+  if (actionType === WITHHOLDING_WRITE_OFF && data.open === false)
+    return {
+      title: 'No longer open',
+      text: 'A certificate has been confirmed for this withholding, or it has been written off, since this was asked for. There is nothing to write off.',
+    };
   if (actionType === REFUND_ACTION && data.refundable === false)
     return {
       title: 'No longer refundable',
@@ -332,6 +383,12 @@ export function subjectHref(
       return '/cash';
     case 'settlement_account':
       return '/settings/settlement';
+    // M5: withholding and an early termination are kept on their lease's page.
+    case 'withholding':
+    case 'early_termination': {
+      const leaseId = id('leaseId');
+      return leaseId ? `/leases/${leaseId}` : null;
+    }
     case 'owner':
       // Where an owner's rent goes is kept with the settlement accounts.
       return data && 'destination' in data ? '/settings/settlement' : '/owners';

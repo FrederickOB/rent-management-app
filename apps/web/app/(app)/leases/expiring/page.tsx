@@ -4,7 +4,9 @@ import { NoAccess } from '@/components/no-access';
 import { PageHeader } from '@/components/page-header';
 import { allowed } from '@/lib/policy';
 import { getCompany, getMe } from '@/lib/server/session';
+import { promptWindowDays } from '@/lib/paid-until-prompt';
 import { ExpiringView } from './expiring-view';
+import { PaidUntilEnding } from './paid-until-ending';
 
 export const metadata: Metadata = { title: 'Leases ending soon' };
 
@@ -41,6 +43,10 @@ export default async function ExpiringPage({
         description={`Active leases that end within the window, with their renewals.${reminders.length ? ` Your company is reminded ${reminders.join(', ')} days before a lease ends.` : ''}`}
       />
       <ExpiringView initialDays={days} windows={WINDOWS} canRenew={allowed(me, 'lease.manage')} />
+      {/* AR-06 (M5 decision 5): leases paid until a date within the prompt's window. */}
+      {allowed(me, 'billing.view') ? (
+        <PaidUntilEnding windowDays={promptWindowDays(company?.settings)} />
+      ) : null}
     </>
   );
 }

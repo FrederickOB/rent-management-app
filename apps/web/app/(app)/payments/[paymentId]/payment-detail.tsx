@@ -10,6 +10,7 @@ import { secondaryLink, textLink } from '@/components/link-styles';
 import { Empty } from '@/components/load-state';
 import { PageHeader } from '@/components/page-header';
 import { ReceiptDelivery } from '@/components/receipt-delivery';
+import { WithholdingPanel } from '@/components/withholding-panel';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -46,6 +47,7 @@ import { CORRECTION_REASON_MIN, reversalForm, type ReversalDraft } from '@/lib/p
 import { formatMinor } from '@/lib/tenancy-format';
 import { queueOwnerOf } from '@/lib/unmatched-queue';
 import { SuggestionsPanel } from '../unmatched/suggestions-panel';
+import { PaymentTax } from './payment-tax';
 
 export interface PaymentPermissions {
   /** billing.manage: ask for a reversal. */
@@ -54,6 +56,8 @@ export interface PaymentPermissions {
   readonly match: boolean;
   readonly seeApprovals: boolean;
   readonly seeLease: boolean;
+  /** withholding.confirm: confirm a withholding certificate (M5 decision 3). */
+  readonly confirmCertificate: boolean;
 }
 
 function Fact({ label, children }: { readonly label: string; readonly children: ReactNode }) {
@@ -68,9 +72,12 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
 /** A payment (plan 4.19): what it paid for, its receipts, and corrections. */
 export function PaymentDetailView({
   initial,
+  withholding = null,
   can,
 }: {
   readonly initial: PaymentDetail;
+  /** The lease's tenant is a company, which may withhold tax from rent (TX-04), and its use. */
+  readonly withholding?: { readonly leaseUse: 'residential' | 'commercial' } | null;
   readonly can: PaymentPermissions;
 }) {
   const { timeZone } = useApp();
@@ -300,6 +307,22 @@ export function PaymentDetailView({
           )}
         </CardBody>
       </Card>
+
+      {/* M5: rent tax on the receipt and months paid ahead (TX-01, AR-05). */}
+      {payment.leaseId ? <PaymentTax paymentId={payment.id} leaseId={payment.leaseId} /> : null}
+      {payment.leaseId && withholding ? (
+        <WithholdingPanel
+          leaseId={payment.leaseId}
+          leaseUse={withholding.leaseUse}
+          paymentId={payment.id}
+          paymentDate={payment.receivedOn}
+          can={{
+            manage: can.manage && payment.status === 'confirmed',
+            confirm: can.confirmCertificate,
+            seeApprovals: can.seeApprovals,
+          }}
+        />
+      ) : null}
 
       {payment.status === 'unmatched' && can.match ? (
         <Card data-testid="payment-match">
