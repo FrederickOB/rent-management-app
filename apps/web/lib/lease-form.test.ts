@@ -472,3 +472,23 @@ describe('TL-07 adding signers from the tenant’s contacts and the company’s 
     expect(staffSigner(records.staff![1]!, 'guarantor')).toBeNull();
   });
 });
+
+describe('M4b decision 9 a lease billed every two years', () => {
+  it('takes a two-yearly cycle on a two-year lease, billed 24 months at a time', () => {
+    const {
+      input,
+      terms: checked,
+      errors,
+    } = termsFromDraft(terms({ endDate: endAfterMonths('2026-11-01', 24), cycle: 'two_yearly' }));
+    expect(errors).toEqual({});
+    expect(input?.cycle).toBe('two_yearly');
+    // Rent periods stay monthly, anchored on the start, whatever the cycle.
+    expect(projectedSchedule(checked)).toHaveLength(24);
+  });
+
+  it('refuses it on a lease shorter than two years, on the cycle field', () => {
+    expect(termsFromDraft(terms({ cycle: 'two_yearly' })).errors.cycle).toMatch(
+      /longer than the lease/,
+    );
+  });
+});

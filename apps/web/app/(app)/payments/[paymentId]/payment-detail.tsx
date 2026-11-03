@@ -9,6 +9,7 @@ import { EvidenceButton } from '@/components/evidence-button';
 import { secondaryLink, textLink } from '@/components/link-styles';
 import { Empty } from '@/components/load-state';
 import { PageHeader } from '@/components/page-header';
+import { ReceiptDelivery } from '@/components/receipt-delivery';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -24,6 +25,7 @@ import {
   RECEIPT_KIND_LABELS,
   RECEIVED_INTO_LABELS,
   REVERSAL_REASON_LABELS,
+  reversalSummary,
   type MoneyLocation,
   type ReversalReason,
 } from '@/lib/billing-format';
@@ -43,11 +45,13 @@ import { ownerAccountOf } from '@/lib/lease-pick';
 import { waitingNote } from '@/lib/money-requests';
 import { CORRECTION_REASON_MIN, reversalForm, type ReversalDraft } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
-import { MatchForm } from '../match-form';
+import { SuggestionsPanel } from '../unmatched/suggestions-panel';
 
 export interface PaymentPermissions {
-  /** billing.manage: ask for a reversal, match an unmatched receipt. */
+  /** billing.manage: ask for a reversal. */
   readonly manage: boolean;
+  /** payments.match: confirm a match for an unmatched receipt (BC-12, P23). */
+  readonly match: boolean;
   readonly seeApprovals: boolean;
   readonly seeLease: boolean;
 }
@@ -77,6 +81,8 @@ export function PaymentDetailView({
   // One key for the reversal request while the page is open, even if its form is closed and
   // opened again after an attempt nobody heard back from.
   const reversalKeeper = useIdempotencyKeeper();
+  // One key for matching this money while the page is open, whichever lease is chosen (P23).
+  const matchKeeper = useIdempotencyKeeper();
   // Money in an owner's own account can be matched only to that owner's leases (P23).
   const unmatchedOwner = ownerAccountOf(payment);
 
@@ -98,6 +104,8 @@ export function PaymentDetailView({
   }
 
   const title = `Payment of ${formatMinor(payment.amountMinor)}`;
+  // Who reversed it and why: a person with approval, or the provider (P21b; plan 4.8).
+  const reversal = payment.reversal ? reversalSummary(payment.reversal) : null;
   const cheque = [payment.chequeNumber, payment.chequeBank].filter(Boolean).join(', ');
 
   return (
@@ -123,6 +131,11 @@ export function PaymentDetailView({
         <div className="flex flex-wrap items-center gap-2">
           <PaymentStatusBadge status={payment.status} />
           <Badge>{PAYMENT_METHOD_LABELS[payment.method]}</Badge>
+          {reversal?.byProvider ? (
+            <Badge tone="red">
+              {payment.reversal?.reason === 'chargeback' ? 'Chargeback' : 'Provider refund'}
+            </Badge>
+          ) : null}
         </div>
       </div>
 
@@ -264,10 +277,14 @@ export function PaymentDetailView({
                   data-testid="receipt"
                   className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
                 >
-                  <span>
-                    <span className="font-mono font-semibold">{receipt.number}</span> ·{' '}
-                    {RECEIPT_KIND_LABELS[receipt.kind]} · {formatMinor(receipt.amountMinor)} ·{' '}
-                    issued {formatTime(receipt.issuedAt, timeZone)}
+                  <span className="space-y-1">
+                    <span className="block">
+                      <span className="font-mono font-semibold">{receipt.number}</span> ·{' '}
+                      {RECEIPT_KIND_LABELS[receipt.kind]} · {formatMinor(receipt.amountMinor)} ·{' '}
+                      issued {formatTime(receipt.issuedAt, timeZone)}
+                    </span>
+                    {/* BC-06: on its way to the tenant, and how fast. */}
+                    <ReceiptDelivery delivery={receipt.delivery} />
                   </span>
                   <Button
                     size="sm"
@@ -283,21 +300,22 @@ export function PaymentDetailView({
         </CardBody>
       </Card>
 
-      {payment.status === 'unmatched' && can.manage ? (
+      {payment.status === 'unmatched' && can.match ? (
         <Card data-testid="payment-match">
           <CardHeader
             title="Match to a lease"
             description="This money arrived before anyone knew which lease it pays for."
           />
           <CardBody>
-            <MatchForm
+            {/* Ranked suggestions, each confirmed by a person, or a lease chosen by hand (BC-12, P23). */}
+            <SuggestionsPanel
               paymentId={payment.id}
+              amountMinor={payment.amountMinor}
               owner={unmatchedOwner}
-              onMatched={(next, lease) => {
-                setPayment(next);
-                setNotice(
-                  `Matched to ${lease.unitCode}. It has paid the lease’s oldest debt first.`,
-                );
+              keeper={matchKeeper}
+              onMatched={(unitCode) => {
+                setNotice(`Matched to ${unitCode}. It has paid the lease’s oldest debt first.`);
+                void refresh();
               }}
             />
           </CardBody>
@@ -307,14 +325,30 @@ export function PaymentDetailView({
       {can.manage || payment.status === 'reversed' || payment.openApprovalId ? (
         <Card data-testid="payment-reversal">
           <CardHeader
-            title="Reverse this payment"
-            description="For a bounced cheque or a wrong entry. To move a payment to the right lease, reverse it and record it again."
+            title={payment.status === 'reversed' ? 'Reversal' : 'Reverse this payment'}
+            description={
+              payment.status === 'reversed'
+                ? 'Nothing was changed: the reversal added rows with a minus sign.'
+                : 'For a bounced cheque or a wrong entry. To move a payment to the right lease, reverse it and record it again.'
+            }
           />
           <CardBody>
             {payment.status === 'reversed' ? (
-              <Alert tone="info">
-                This payment was reversed. Its receipt stays, and a credit receipt was issued.
-              </Alert>
+              reversal ? (
+                <Alert tone={reversal.byProvider ? 'warning' : 'info'} title={reversal.title}>
+                  <span data-testid="payment-reversal-summary">
+                    {reversal.lines.map((line) => (
+                      <span key={line} className="block">
+                        {line}
+                      </span>
+                    ))}
+                  </span>
+                </Alert>
+              ) : (
+                <Alert tone="info">
+                  This payment was reversed. Its receipt stays, and a credit receipt was issued.
+                </Alert>
+              )
             ) : payment.openApprovalId ? (
               <Alert tone="info">
                 A reversal is waiting for a second person to approve it.{' '}

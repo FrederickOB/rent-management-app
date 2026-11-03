@@ -4,12 +4,14 @@ import {
   evidenceOfMethod,
   MONEY_LOCATION_LABELS,
   PAYMENT_METHOD_LABELS,
+  RECEIVED_INTO_LABELS,
   RECEIVING_ACCOUNT_LABELS,
   REVERSAL_REASON_LABELS,
   type EvidenceKind,
 } from './billing-format';
 import { formatBusinessDate } from './business-dates';
 import { humanise } from './format';
+import { nameCheck } from './settlement';
 import { formatMinor } from './tenancy-format';
 
 // The approvals screen (AD-05; M3 decision 6). What a person may do is decided by the API's
@@ -26,9 +28,21 @@ const ACTION_LABELS: Record<string, string> = {
   'payment.reversal': 'Reverse a payment',
   'invoice.credit_note': 'Issue a credit note',
   'invoice.write_off': 'Write off a debt',
+  // M4b (plan 4.2 and 4.5): where rent settles (ADR-008), and refunds of unmatched money (P31).
+  'settlement_account.change': 'Add a bank account rent settles into',
+  'settlement_account.retire': 'Stop settling rent into a bank account',
+  'payment.refund_unmatched': 'Refund unmatched money to its payer',
 };
 
-/** The money actions (M4a), whose payloads are summarised fact by fact. */
+const REFUND_ACTION = 'payment.refund_unmatched';
+
+/** Requests about where rent settles (ADR-008): redirecting rent is the likeliest fraud. */
+export const SETTLEMENT_ACTIONS: readonly string[] = [
+  'settlement_account.change',
+  'settlement_account.retire',
+];
+
+/** The money actions (M4a, M4b), whose payloads are summarised fact by fact. */
 export const MONEY_ACTIONS: readonly string[] = [
   'payment.cash_receipt',
   'payment.direct_receipt',
@@ -36,6 +50,8 @@ export const MONEY_ACTIONS: readonly string[] = [
   'payment.reversal',
   'invoice.credit_note',
   'invoice.write_off',
+  'payment.refund_unmatched',
+  ...SETTLEMENT_ACTIONS,
 ];
 
 export function approvalActionLabel(actionType: string): string {
@@ -154,12 +170,23 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   add('Received on', date('receivedOn'));
   add('Banked on', date('bankedOn'));
   add('Paid by', str('payerName'));
+  // Only ever masked (CLAUDE.md section 10).
+  add('Payer’s phone', str('payerPhoneMasked'));
   add('Unit', str('unitCode'));
   add('Tenant', str('tenantName'));
   add('Held by', str('collectorName'));
-  add('Received into', pick(RECEIVING_ACCOUNT_LABELS, data.receivedInto));
+  add('Received into', pick(RECEIVED_INTO_LABELS, data.receivedInto));
   add('Banked into', pick(RECEIVING_ACCOUNT_LABELS, data.bankedInto));
   add('Owner', str('ownerName'));
+  // A settlement account (ADR-008): whose it is, and only ever its masked number.
+  add('Whose account', data.holder === 'agency' ? 'The agency’s client account' : null);
+  const bank = [str('bankName'), str('branch') ? `${str('branch')} branch` : null]
+    .filter(Boolean)
+    .join(', ');
+  add('Bank', bank || null);
+  add('Account number', str('numberMasked'));
+  add('Name on the account', str('accountName'));
+  add('Name the bank gave', str('accountNameChecked'));
   add('Sender’s reference', str('senderReference'));
   add('Invoice', str('invoiceNumber'));
   add('Line', str('lineLabel'));
@@ -171,6 +198,56 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   return facts;
 }
 
+export interface ApprovalWarning {
+  readonly title: string;
+  readonly text: string;
+}
+
+/**
+ * What an approver must know before deciding an M4b request, from the request's own payload
+ * as the API refreshes it: that the record has moved on since it was asked for (`awaiting`,
+ * `live`, `refundable` false), that the bank's name for a new account differs from the one typed
+ * (ADR-008), or that retiring an account stops rent settling into it. Null for anything else.
+ */
+export function approvalWarning(actionType: string, payload: unknown): ApprovalWarning | null {
+  const data = asRecord(payload);
+  if (!data) return null;
+  const [add, retire] = SETTLEMENT_ACTIONS;
+  if (actionType === add) {
+    if (data.awaiting === false)
+      return {
+        title: 'No longer waiting',
+        text: 'The account has been decided since this was asked for, so there is nothing left to approve.',
+      };
+    const accountName = data.accountName;
+    const checked = data.accountNameChecked;
+    if (typeof accountName !== 'string' || !accountName.trim()) return null;
+    const check = nameCheck({
+      accountName,
+      accountNameChecked: typeof checked === 'string' ? checked : null,
+    });
+    return check.kind === 'matches'
+      ? null
+      : { title: 'Check the name on the account', text: check.text };
+  }
+  if (actionType === retire)
+    return data.live === false
+      ? {
+          title: 'No longer in use',
+          text: 'The account no longer takes rent, so there is nothing to retire.',
+        }
+      : {
+          title: 'Rent stops settling into this account',
+          text: 'Once approved, pay links for its leases work only if another account is in use for them.',
+        };
+  if (actionType === REFUND_ACTION && data.refundable === false)
+    return {
+      title: 'No longer refundable',
+      text: 'The money has since been matched to a lease, reversed or refunded, so it cannot be refunded now.',
+    };
+  return null;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The file each money request is approved on, by its action. */
@@ -178,6 +255,8 @@ const EVIDENCE_OF: Record<string, (data: Record<string, unknown>) => EvidenceKin
   'payment.cash_receipt': (data) => evidenceOfMethod(data.method === 'cheque' ? 'cheque' : 'cash'),
   'payment.direct_receipt': () => 'transfer_proof',
   'cash.banking': () => 'banking_slip',
+  // A transfer refunded outside the provider is recorded with its proof (P31).
+  'payment.refund_unmatched': () => 'transfer_proof',
 };
 
 /**
@@ -242,6 +321,8 @@ export function subjectHref(
     case 'cash_record':
     case 'cash_banking':
       return '/cash';
+    case 'settlement_account':
+      return '/settings/settlement';
     default: {
       const invoiceId = id('invoiceId');
       if (invoiceId) return `/invoices/${invoiceId}`;

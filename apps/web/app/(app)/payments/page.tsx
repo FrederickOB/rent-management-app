@@ -39,6 +39,11 @@ export default async function PaymentsPage({
           <Link href="/payments/unmatched" className={secondaryLink}>
             Unmatched receipts
           </Link>
+          {allowed(me, 'payments.view') ? (
+            <Link href="/payments/reconciliation" className={secondaryLink}>
+              Reconciliation
+            </Link>
+          ) : null}
           {allowed(me, 'payment.record_transfer') ? (
             <Link href="/payments/transfer" className={secondaryLink}>
               Record a transfer

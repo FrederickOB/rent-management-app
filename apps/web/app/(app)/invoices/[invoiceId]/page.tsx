@@ -49,6 +49,7 @@ export default async function InvoicePage({ params }: { readonly params: Params 
         correct: allowed(me, 'billing.manage'),
         seeApprovals: allowed(me, 'approval.view'),
         seeLease: allowed(me, 'lease.view'),
+        sendPayLink: allowed(me, 'billing.manage'),
       }}
     />
   );

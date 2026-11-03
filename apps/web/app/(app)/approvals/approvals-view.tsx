@@ -24,6 +24,7 @@ import {
   approvalEvidence,
   approvalFacts,
   approvalMoves,
+  approvalWarning,
   closeReasonLabel,
   payloadLeaseId,
   payloadReason,
@@ -113,6 +114,7 @@ const RECORD_LINKS: Record<string, string> = {
   invoice_line: 'Open the invoice',
   cash_record: 'Cash on hand',
   cash_banking: 'Cash on hand',
+  settlement_account: 'Settlement accounts',
 };
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
@@ -265,6 +267,10 @@ function ApprovalItem({
     (fact) => !(subject && (fact.label === 'Unit' || fact.label === 'Tenant')),
   );
   const evidence = approvalEvidence(row.actionType, row.payload);
+  // What to know before deciding an M4b request: a bank name that differs (ADR-008), or a
+  // record that has moved on since.
+  const waiting = row.status === 'pending' || row.status === 'cooling_off';
+  const warning = waiting ? approvalWarning(row.actionType, row.payload) : null;
   const reason = facts.length ? null : payloadReason(row.payload);
   const recordHref = subjectHref(row);
   const href = subject?.href ?? recordHref;
@@ -330,6 +336,11 @@ function ApprovalItem({
             </div>
           ) : null}
         </dl>
+        {warning ? (
+          <Alert tone="warning" title={warning.title} live={false}>
+            {warning.text}
+          </Alert>
+        ) : null}
         {evidence || otherRecord ? (
           <div className="flex flex-wrap items-center gap-3">
             {/* The approver checks the photo, proof or slip before deciding (BC-05, P07, P28). */}

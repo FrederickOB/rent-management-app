@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useCallback } from 'react';
 import { InvoiceStatusBadge, PaymentStatusBadge } from '@/components/billing-badges';
 import { secondaryLink, textLink } from '@/components/link-styles';
+import { SendPayLink } from '@/components/send-pay-link';
 import { Empty, Loading, LoadFailed } from '@/components/load-state';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -18,6 +19,7 @@ import {
   periodLabel,
 } from '@/lib/billing-format';
 import { formatBusinessDate } from '@/lib/business-dates';
+import { payLinkState } from '@/lib/collection';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
 
@@ -28,6 +30,8 @@ export interface MoneyPermissions {
   readonly recordCash: boolean;
   /** payment.record_transfer: transfers straight into an account. */
   readonly recordTransfer: boolean;
+  /** billing.manage: send the tenant a pay link (BC-04); the API checks consent and destination. */
+  readonly sendPayLink: boolean;
 }
 
 const ROWS = 12;
@@ -114,13 +118,23 @@ export function LeaseMoney({
         {state.status === 'error' ? (
           <LoadFailed message={state.problem.message} onRetry={reload} />
         ) : null}
-        {state.status === 'ready' ? <MoneySummary data={state.data} unitCode={unitCode} /> : null}
+        {state.status === 'ready' ? (
+          <MoneySummary data={state.data} unitCode={unitCode} canSendPayLink={can.sendPayLink} />
+        ) : null}
       </CardBody>
     </Card>
   );
 }
 
-function MoneySummary({ data, unitCode }: { readonly data: MoneyData; readonly unitCode: string }) {
+function MoneySummary({
+  data,
+  unitCode,
+  canSendPayLink,
+}: {
+  readonly data: MoneyData;
+  readonly unitCode: string;
+  readonly canSendPayLink: boolean;
+}) {
   const { billing } = data;
   return (
     <>
@@ -177,10 +191,38 @@ function MoneySummary({ data, unitCode }: { readonly data: MoneyData; readonly u
           </div>
         ))}
       </dl>
+      {canSendPayLink && billing.payLink ? <PayLinkSection payLink={billing.payLink} /> : null}
       {billing.chargedAfterEnd.length > 0 ? (
         <ChargedAfterEnd lines={billing.chargedAfterEnd} />
       ) : null}
     </>
+  );
+}
+
+/**
+ * The pay link for the lease (BC-04; plan 4.2 and 4.3), as the API answers before anyone tries:
+ * for the oldest invoice still to pay, since payments pay the oldest debt first and the pay page
+ * shows everything due (deviation 3); or why it cannot go now.
+ */
+function PayLinkSection({ payLink }: { readonly payLink: NonNullable<LeaseBilling['payLink']> }) {
+  const state = payLinkState(payLink);
+  return (
+    <div className="space-y-2 border-t border-slate-200 pt-4" data-testid="money-pay-link">
+      <p className="text-sm font-medium text-slate-900">Pay link</p>
+      {state.kind === 'send' ? (
+        <>
+          <p className="text-sm text-slate-700">
+            Send the tenant a link to pay by mobile money or card, by SMS or email. It is for the
+            oldest invoice still to pay, and the page shows everything due on the lease.
+          </p>
+          <SendPayLink invoiceId={state.invoiceId} detail="for this lease" />
+        </>
+      ) : (
+        <Alert tone={state.tone} live={false}>
+          <span data-testid="pay-link-unavailable">{state.text}</span>
+        </Alert>
+      )}
+    </div>
   );
 }
 

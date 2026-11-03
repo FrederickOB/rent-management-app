@@ -6,8 +6,9 @@ import { useState, type FormEvent } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
-import { CheckboxField, SelectField, TextField } from '@/components/ui/field';
+import { CheckboxField, SelectField, TextAreaField, TextField } from '@/components/ui/field';
 import { api } from '@/lib/api';
+import { ladderWords, MANUAL_INSTRUCTIONS_MAX, manualInstructionsOf } from '@/lib/collection';
 import { toProblem } from '@/lib/errors';
 import { formatIntegerList, parseInteger, parseIntegerList } from '@/lib/integers';
 import {
@@ -121,6 +122,11 @@ export function SettingsForm({
     tenancyValuesOf(company.settings),
   );
   const [tenancyErrors, setTenancyErrors] = useState<TenancySettingsErrors>({});
+  // M4b (plan 4.3 and 4.9): shown on the pay page when online payment is unavailable.
+  const [instructions, setInstructions] = useState(
+    company.settings.manualPaymentInstructions ?? '',
+  );
+  const [instructionsError, setInstructionsError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -141,16 +147,24 @@ export function SettingsForm({
     event.preventDefault();
     const { settings, errors: found } = parse(values);
     const leases = parseTenancySettings(tenancy);
+    const manual = manualInstructionsOf(instructions);
     setErrors(found);
     setTenancyErrors(leases.errors);
+    setInstructionsError(manual.error);
     setProblem(null);
     setSaved(false);
-    if (Object.keys(found).length > 0 || Object.keys(leases.errors).length > 0) return;
+    if (Object.keys(found).length > 0 || Object.keys(leases.errors).length > 0 || manual.error)
+      return;
     setPending(true);
     try {
-      const updated = await api().company.updateSettings({ ...settings, ...leases.settings });
+      const updated = await api().company.updateSettings({
+        ...settings,
+        ...leases.settings,
+        manualPaymentInstructions: manual.value,
+      });
       setValues(toValues(updated.settings));
       setTenancy(tenancyValuesOf(updated.settings));
+      setInstructions(updated.settings.manualPaymentInstructions ?? '');
       setSaved(true);
       router.refresh();
     } catch (failure) {
@@ -161,6 +175,7 @@ export function SettingsForm({
   }
 
   const policy = POLICIES.find((p) => p.value === values.advanceRentPolicy);
+  const ladder = ladderWords(parseIntegerList(values.rentReminderOffsetsDays) ?? []);
 
   return (
     <Card>
@@ -181,6 +196,14 @@ export function SettingsForm({
               error={errors.rentReminderOffsetsDays}
               onChange={(event) => set('rentReminderOffsetsDays', event.target.value)}
             />
+            {/* BC-09: the ladder as tenants will get it. */}
+            {ladder ? (
+              <p className="-mt-2 text-sm text-slate-700" data-testid="reminder-ladder">
+                Each invoice’s reminders go {ladder}, at 08:00 in the company’s time zone. The first
+                one carries the invoice, every one carries the pay link, each goes once and only on
+                channels the tenant agreed to, and they stop as soon as the invoice is paid.
+              </p>
+            ) : null}
             <TextField
               label="Notice reminders (hours after issue)"
               hint="When a tenant who has not opened a notice is reminded about it. Default: 24, 72, 120, 168 (one to seven days)."
@@ -230,6 +253,22 @@ export function SettingsForm({
                 onChange={(event) => set('approvalCoolingOffHours', event.target.value)}
               />
             </div>
+            <fieldset className="space-y-4 border-t border-slate-200 pt-4">
+              <legend className="pt-4 text-sm font-semibold text-slate-900">Payments</legend>
+              <TextAreaField
+                label="Your own payment instructions (optional)"
+                hint="Shown to tenants on the pay page when paying online is not available, for example while the payment provider is down. Say how else to pay, such as your bank details or MoMo number and the reference to quote."
+                rows={3}
+                maxLength={MANUAL_INSTRUCTIONS_MAX}
+                value={instructions}
+                error={instructionsError}
+                onChange={(event) => {
+                  setInstructions(event.target.value);
+                  setSaved(false);
+                }}
+                className="[&_textarea]:font-sans"
+              />
+            </fieldset>
             <fieldset className="space-y-4 border-t border-slate-200 pt-4">
               <legend className="pt-4 text-sm font-semibold text-slate-900">Leases</legend>
               <CheckboxField

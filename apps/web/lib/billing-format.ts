@@ -5,7 +5,9 @@ import type {
   MONEY_LOCATIONS,
   PAYMENT_METHODS,
   PAYMENT_STATUSES,
+  PaymentDetail,
   RECEIVING_ACCOUNTS,
+  RECORDED_REVERSAL_REASONS,
   REVERSAL_REASONS,
 } from '@rent/contracts';
 import {
@@ -94,6 +96,52 @@ export const MONEY_LOCATION_LABELS: Record<MoneyLocation, string> = {
   agency_account: 'In the agency’s account',
   provider: 'With the payment provider',
 };
+
+export type RecordedReversalReason = (typeof RECORDED_REVERSAL_REASONS)[number];
+
+/**
+ * A reversal's reason as recorded (P21b; M4b plan 4.8): a person's, which a second person
+ * approved, or the payment provider's own, which needs no approval.
+ */
+export const RECORDED_REVERSAL_LABELS: Record<RecordedReversalReason, string> = {
+  ...REVERSAL_REASON_LABELS,
+  chargeback: 'A chargeback: the payer disputed it with their bank or network',
+  provider_refund: 'Refunded to the payer through the payment provider',
+};
+
+const PROVIDER_REVERSALS: ReadonlySet<RecordedReversalReason> = new Set([
+  'chargeback',
+  'provider_refund',
+]);
+
+/**
+ * A reversed payment in words (P21b; plan 4.8): who reversed it and why, where the money was
+ * taken back from, and what followed. A chargeback or provider refund is deducted from a later
+ * settlement, with a credit receipt and an alert to managers; it needs no approval.
+ */
+export function reversalSummary(reversal: NonNullable<PaymentDetail['reversal']>): {
+  readonly title: string;
+  readonly byProvider: boolean;
+  readonly lines: readonly string[];
+} {
+  const byProvider = PROVIDER_REVERSALS.has(reversal.reason);
+  const on = formatBusinessDate(reversal.valueDate);
+  return {
+    title: byProvider
+      ? reversal.reason === 'chargeback'
+        ? 'Reversed by a chargeback'
+        : 'Refunded through the payment provider'
+      : 'Reversed, with a second person’s approval',
+    byProvider,
+    lines: [
+      `${RECORDED_REVERSAL_LABELS[reversal.reason]}, on ${on}.`,
+      reversal.note.trim() ? `Note: ${reversal.note.trim()}` : null,
+      byProvider
+        ? 'The provider took the money back, so it comes off a later settlement. Its receipt stays, a credit receipt was issued and managers were alerted.'
+        : `Where the money was: ${MONEY_LOCATION_LABELS[reversal.moneyNowIn].toLowerCase()}. Its receipt stays, and a credit receipt was issued.`,
+    ].filter((line): line is string => line !== null),
+  };
+}
 
 export const ALLOCATION_SOURCE_LABELS: Record<AllocationSource, string> = {
   payment: 'Payment',
