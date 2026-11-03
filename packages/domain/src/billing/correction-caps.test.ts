@@ -23,6 +23,47 @@ describe('P27 and P24 what a line can take', () => {
   });
 });
 
+/** One broken claim, named so a failure reads as plainly as one assertion did. */
+interface CapFailure {
+  readonly line: string;
+  readonly kind: 'credit_note' | 'write_off';
+  readonly limit: number;
+  readonly problem: string;
+}
+
+/**
+ * The three claims for one line and one kind, checked in plain code (M4b: six `expect` calls per
+ * line per step were most of this test's time in CI): the limit is at least zero; the limit
+ * itself is accepted when it is above zero; and the limit plus one pesewa is refused with a
+ * DomainError.
+ */
+function checkCap(
+  failures: CapFailure[],
+  line: string,
+  kind: CapFailure['kind'],
+  limit: number,
+  plan: (amountMinor: number) => unknown,
+): void {
+  const fail = (problem: string) => failures.push({ line, kind, limit, problem });
+  if (!(limit >= 0)) fail('the limit is below zero');
+  if (limit > 0) {
+    try {
+      plan(limit);
+    } catch (error) {
+      fail(`the limit itself was refused: ${String(error)}`);
+    }
+  }
+  let refused: unknown = null;
+  try {
+    plan(limit + 1);
+  } catch (error) {
+    refused = error;
+  }
+  if (refused === null) fail('the limit plus one pesewa was accepted');
+  else if (!(refused instanceof DomainError))
+    fail(`the limit plus one pesewa was refused, but not with a DomainError: ${String(refused)}`);
+}
+
 function runCaps(): void {
   fc.assert(
     fc.property(leaseArbitrary, operationsArbitrary(true), (lease, ops) => {
@@ -30,21 +71,25 @@ function runCaps(): void {
       for (const op of ops) {
         run.apply(op);
         const { lines, allocations, payments } = run.model;
+        const failures: CapFailure[] = [];
         for (const line of lines) {
           const taxLines = lines.filter((l) => l.baseLineId === line.id);
-          const credit = (amountMinor: number) =>
-            planCreditNote({ line, taxLines, allocations, payments, amountMinor });
-          const creditable = creditableMinor(line, allocations);
-          expect(creditable).toBeGreaterThanOrEqual(0);
-          if (creditable > 0) expect(() => credit(creditable)).not.toThrow();
-          expect(() => credit(creditable + 1)).toThrow(DomainError);
-          const writeOff = (amountMinor: number) =>
-            planWriteOff({ line, allocations, amountMinor });
-          const writable = writeOffableMinor(line, allocations);
-          expect(writable).toBeGreaterThanOrEqual(0);
-          if (writable > 0) expect(() => writeOff(writable)).not.toThrow();
-          expect(() => writeOff(writable + 1)).toThrow(DomainError);
+          checkCap(
+            failures,
+            line.id,
+            'credit_note',
+            creditableMinor(line, allocations),
+            (amountMinor) => planCreditNote({ line, taxLines, allocations, payments, amountMinor }),
+          );
+          checkCap(
+            failures,
+            line.id,
+            'write_off',
+            writeOffableMinor(line, allocations),
+            (amountMinor) => planWriteOff({ line, allocations, amountMinor }),
+          );
         }
+        expect(failures).toEqual([]);
       }
     }),
     { numRuns: 150 },

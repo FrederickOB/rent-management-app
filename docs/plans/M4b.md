@@ -327,6 +327,12 @@
     - `corrections.test.ts` "restores every line and the credit exactly" (item 9). The P21 claim is now asserted on the reversal's own rows (they take back exactly the payment's share). What the later payment's credit redrew is allowed for in the outstanding; the 2100 and 1050 assertions are unchanged.
     - `billing.int.test.ts` P29 carry-over (item 9). The arrears are now an unpaid one-off charge of 100,000 raised before the credit note, with all twelve months paid; the 70,000 credit still carries to the renewal. No service raises one-off charges yet, so the test issues it through the engine.
     - `rls.int.test.ts` fixture (item 1). The agreement names a `management_agreement.change` request approved by the fixture's second person. No assertion changed.
+    - `packages/domain/src/billing/correction-caps.test.ts`, "P27 and P24 what a line can take" (CI timed out at 32.6 s against 30 s once the two-yearly leases widened the generator).
+        - **Why:** profiling showed 63% of its time in chai's and vitest's assertion machinery (six `expect` calls per line per step). The domain code under test was about a quarter, so making that code cheaper could not reach the target.
+        - **What changed:** the checks are made in plain code and asserted once per step (`expect(failures).toEqual([])`). Each failure names the line, the kind (credit note or write-off), the limit and what went wrong.
+        - **Unchanged:** the 150 runs, the generator and every claim. For each line and kind, the limit is at least zero, the limit itself is accepted when above zero, and the limit plus one pesewa is refused with a `DomainError` (`instanceof`).
+        - **The stack-trace switch stays:** without it the test takes about 2.0 s, with it about 1.2 s.
+        - **Times:** before, about 4.3 s alone locally; after, about 1.2 s.
 
 **2026-11-03, links and tenant e2e fixes.**
 
