@@ -26,7 +26,7 @@ import {
   parseBusinessDate,
   toIsoDate,
 } from '@rent/domain/dates';
-import { format, money as moneyOf, multiplyBps } from '@rent/domain/money';
+import { allocate, format, money as moneyOf, multiplyBps } from '@rent/domain/money';
 import { defaultCompanySettings, type CompanySettings } from '@rent/domain/settings';
 import type { StoragePort } from '@rent/integrations';
 import type { Actor, CompanyKind, MembershipRole } from '@rent/domain/policy';
@@ -2192,7 +2192,8 @@ async function ensureTax(
       });
   }
 
-  // 3. VAT and levies paid with the return for the VAT-registered owner's first VAT month (P33).
+  // 3. VAT and levies paid with the return for the VAT-registered owner's first VAT month (P33):
+  // half of what it owes, so the VAT screens have a payment and a balance still to pay.
   const vatDone = await withCompany(database, sys, (tx) =>
     tx.execute<{ n: number }>(sql`select count(*)::int as n from vat_payment`),
   );
@@ -2209,12 +2210,13 @@ async function ensureTax(
     const month = firstVat.rows[0]?.month;
     if (month) {
       const report = await services.gra.vatReport(accountant, { ownerId: ownerB, month });
-      if (report.totals.outstandingMinor > 0)
+      const [half] = allocate(moneyOf(report.totals.outstandingMinor), [1, 1]);
+      if (half && half.amountMinor > 0)
         await services.gra.recordVatPayment(accountant, {
           ownerId: ownerB,
           periodMonth: month,
           paidOn: today,
-          amountMinor: report.totals.outstandingMinor,
+          amountMinor: half.amountMinor,
           graReceiptNumber: 'GRA-VAT-DEMO-0001',
           receiptUploadId: await evidenceUpload(services, (input) =>
             services.gra.createUpload(accountant, input),

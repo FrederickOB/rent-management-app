@@ -357,6 +357,8 @@ function certificateDecision(
       'The person who uploaded a certificate cannot confirm it',
     );
   if (actsForOwner(actor, resource.ownerId)) return allow('a user for the owner');
+  // M5 decision 7 (OQ-29): the company's nominated second approver confirms too.
+  if (actor.nominatedApprover) return allow('the nominated approver');
   if (actor.role === 'agency_admin' && !resource.ownerHasUser)
     return allow('an agency admin, for an owner with no user');
   return deny(
@@ -412,6 +414,13 @@ export function can(actor: Actor, action: PolicyAction, resource?: PolicyResourc
         return isInitiator ? allow('the initiator') : deny('only the initiator can do this');
       }
       if (action === 'approval.view' && actor.nominatedApprover) return allow('nominated approver');
+      // M5 decision 7: a nominated approver confirms certificates whatever their role.
+      if (
+        action === 'withholding.confirm' &&
+        actor.nominatedApprover &&
+        resource?.kind === 'certificate'
+      )
+        return certificateDecision(actor, resource);
       const allowed = STAFF_MATRIX[action];
       if (!allowed.includes(staffKey(actor.role, actor.companyKind)))
         return deny(`${actor.role} may not ${action}`);

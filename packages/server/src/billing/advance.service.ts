@@ -87,7 +87,7 @@ export class AdvanceService {
         rule_id: string | null;
         rule_key: string | null;
         verification_status: VerificationStatus | null;
-        created_at: Date;
+        created_at: Date | string;
       }>(
         sql`select a.lease_id, u.code as unit_code, p.name as property_name,
               coalesce(t.legal_name, t.display_name) as tenant_name, a.payment_id, a.value_date::text,
@@ -118,7 +118,8 @@ export class AdvanceService {
             r.rule_id && r.rule_key && r.verification_status
               ? { ruleId: r.rule_id, key: r.rule_key, verificationStatus: r.verification_status }
               : null,
-          createdAt: r.created_at,
+          // Raw queries return timestamps as text: the contract wants an ISO instant.
+          createdAt: new Date(r.created_at),
         })),
       };
     });

@@ -283,6 +283,11 @@ export const withholdingSchema = z.object({
       periodEnd: isoDate.nullable(),
       lineAmountMinor: minor,
       withheldMinor: minor,
+      /**
+       * M5 decision 8: the month had not started, so the withholding is held as its advance and
+       * drawn when the month starts. Optional for clients written before.
+       */
+      heldAsAdvance: z.boolean().optional(),
     }),
   ),
   status: z.enum(WITHHOLDING_STATUSES),
@@ -303,6 +308,26 @@ export const withholdingSchema = z.object({
       debitAccount: z.enum(['2200', '1160']).nullable(),
       /** Whether you may confirm or reject it (a user for the owner, never its uploader). */
       mayDecide: z.boolean(),
+      /**
+       * M5 decision 7 (OQ-29): in a single-user company the uploader confirms it themselves,
+       * after the cooling-off, with a TOTP code, through this approval request
+       * (`approvals.decide` with `self_confirm`). Null otherwise.
+       */
+      selfConfirmation: z
+        .object({
+          approvalId: uuid,
+          status: z.enum([
+            'pending',
+            'cooling_off',
+            'approved',
+            'rejected',
+            'cancelled',
+            'expired',
+          ]),
+          coolingOffUntil: iso.nullable(),
+        })
+        .nullable()
+        .optional(),
     })
     .nullable(),
   rejectedCertificates: z.number().int(),
@@ -313,6 +338,24 @@ export const withholdingSchema = z.object({
 export type WithholdingView = z.infer<typeof withholdingSchema>;
 
 /** What the withholding form needs for a lease (TX-04): its open months and the rule's rate. */
+const withholdingOptionLine = z.object({
+  lineId: uuid,
+  invoiceId: uuid,
+  invoiceNumber: z.string(),
+  kind: z.enum(['rent', 'service_charge']),
+  periodStart: isoDate,
+  periodEnd: isoDate,
+  /**
+   * M5 decision 8: false for a month not yet started; its withholding is held as its
+   * advance and drawn when the month starts. Optional for clients written before.
+   */
+  started: z.boolean().optional(),
+  netMinor: minor,
+  outstandingMinor: minor,
+  /** The rate on the line's amount, at most what is still owed. */
+  suggestedMinor: minor,
+});
+
 export const withholdingOptionsSchema = z.object({
   leaseId: uuid,
   valueDate: isoDate,
@@ -325,21 +368,13 @@ export const withholdingOptionsSchema = z.object({
     /** Show the warning: the rule is not verified. */
     warning: z.boolean(),
   }),
-  /** Rent and service-charge months that have started and are still owed. */
-  lines: z.array(
-    z.object({
-      lineId: uuid,
-      invoiceId: uuid,
-      invoiceNumber: z.string(),
-      kind: z.enum(['rent', 'service_charge']),
-      periodStart: isoDate,
-      periodEnd: isoDate,
-      netMinor: minor,
-      outstandingMinor: minor,
-      /** The rate on the line's amount, at most what is still owed. */
-      suggestedMinor: minor,
-    }),
-  ),
+  /** Rent and service-charge months that have started and are still owed (P19 settles them). */
+  lines: z.array(withholdingOptionLine),
+  /**
+   * M5 decision 8: invoiced months not yet started and still owed; withholding on them is held as
+   * their advance (Dr 1150, Cr 2010) and drawn as each month starts. Optional for older clients.
+   */
+  advanceLines: z.array(withholdingOptionLine).optional(),
   /** The lease's recent live payments, for "paid net with". */
   payments: z.array(
     z.object({
@@ -393,7 +428,7 @@ export const withholdingContract = {
         /** The payment the tenant paid net with, when there is one. */
         paymentId: uuid.nullable().optional(),
         valueDate: isoDate,
-        /** Rent and service-charge lines of months that have started. */
+        /** Rent and service-charge lines; a month not yet started holds it as an advance (decision 8). */
         lines: z
           .array(z.object({ lineId: uuid, amountMinor: positiveMinor }))
           .min(1)

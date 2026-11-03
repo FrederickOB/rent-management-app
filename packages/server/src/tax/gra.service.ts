@@ -312,7 +312,7 @@ export class GraService {
       receipt_document_id: string;
       paid_from: 'owner_account' | 'agency_account';
       note: string | null;
-      created_at: Date;
+      created_at: Date | string;
     }>(
       sql`select g.id, g.owner_id, o.display_name as owner_name, g.paid_on::text, g.accounting_date::text,
             g.amount_minor, g.gra_receipt_number, g.receipt_document_id, g.paid_from, g.note, g.created_at
@@ -359,7 +359,8 @@ export class GraService {
           valueDate: i.value_date,
           amountMinor: Number(i.amount_minor),
         })),
-      createdAt: r.created_at,
+      // Raw queries return timestamps as text: the contract wants an ISO instant.
+      createdAt: new Date(r.created_at),
     }));
   }
 

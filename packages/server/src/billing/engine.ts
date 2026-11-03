@@ -42,6 +42,7 @@ import {
   type ScheduleRow,
   type VatRates,
   type WalkResult,
+  withheldOn,
 } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
@@ -63,6 +64,7 @@ import {
   unmatchedArrivalLines,
   unmatchedMatchLines,
   vatChargeLines,
+  withholdingDrawLines,
   withholdingLines,
   writeOffLines,
   type CashAccount,
@@ -698,6 +700,27 @@ export class BillingEngine {
         accountingDate,
         entryId: posted?.entryId ?? null,
       });
+      // Decision 8: tax withheld on the month while it had not started pays it now, each
+      // withholding on its own key (Dr 2010, Cr 1100).
+      const withheld = new Map<string, number>();
+      for (const a of state.allocations)
+        if (a.lineId === record.id && a.source === 'withholding')
+          withheld.set(a.recordId, (withheld.get(a.recordId) ?? 0) + a.amountMinor);
+      for (const [withholdingId, amount] of withheld)
+        if (amount > 0)
+          await this.posting.post(tx, {
+            companyId: state.company.id,
+            rule: 'P02',
+            key: `P02:${record.id}:withholding:${withholdingId}`,
+            valueDate,
+            lines: withholdingDrawLines({
+              bookId: book.bookId,
+              lease: dims,
+              invoiceLineId: record.id,
+              amountMinor: amount,
+            }),
+            record: { type: 'invoice_line', id: record.id },
+          });
       pools = drawFromPools(pools, plan.draws);
       // Its VAT and levies, from the credit left (review 10).
       for (const tax of planTaxDraws(
@@ -1511,6 +1534,7 @@ export class BillingEngine {
   ): Promise<string> {
     const line = state.lines.find((l) => l.id === input.lineId);
     if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
+    this.refuseWithheldCredit(state, line.id, input.amountMinor);
     const taxLines = state.lines.filter((l) => l.baseLineId === line.id);
     const sharing = new Set(
       [line, ...taxLines].flatMap((l) => [...paymentShares(l.id, state.allocations).keys()]),
@@ -1594,6 +1618,20 @@ export class BillingEngine {
         await this.carryStranded(tx, state, payment, input.valueDate);
     await this.drawCreditToOpen(tx, state, input.valueDate, input.createdBy);
     return creditNoteId;
+  }
+
+  /**
+   * Decision 9 (M5): a credit note that would have to take back tax the tenant withheld on the
+   * month is refused, plainly: only payments' money returns to credit, and how withheld tax is
+   * treated when rent is credited back is for the tax adviser (OQ-56).
+   */
+  refuseWithheldCredit(state: LeaseState, lineId: string, amountMinor: number): void {
+    const line = state.lines.find((l) => l.id === lineId);
+    if (!line || withheldOn(lineId, state.allocations) <= 0) return;
+    const balance = lineBalance(line, state.allocations);
+    let fromPayments = 0;
+    for (const share of paymentShares(lineId, state.allocations).values()) fromPayments += share;
+    if (amountMinor > balance.outstandingMinor + fromPayments) throw creditNoteWithheld();
   }
 
   /**
@@ -2190,10 +2228,11 @@ export class BillingEngine {
 
   /**
    * P19 (TX-04): tax a corporate tenant withheld, pinned to the lines it was withheld on, which
-   * skips the oldest-first order (BC-07): Dr 1150, Cr 1100 per line, with allocation rows of
-   * source `withholding`. Only rent and service-charge months that have started: P19 credits
-   * receivables. The lease is brought up to date first, as every money path does. The tax module
-   * records the withholding itself and its rent tax.
+   * skips the oldest-first order (BC-07), with allocation rows of source `withholding`. A month
+   * that has started: Dr 1150, Cr 1100. A month not yet started (decision 8): Dr 1150, Cr 2010 on
+   * the line, its advance, drawn when the month starts. Rent and service charge only. The lease is
+   * brought up to date first, as every money path does. The tax module records the withholding
+   * itself and its rent tax.
    */
   async withhold(
     tx: Tx,
@@ -2212,16 +2251,15 @@ export class BillingEngine {
       throw invalid('received_in_future', 'The day the tax was withheld cannot be in the future');
     await this.carryOverIfStarted(tx, state, today);
     await this.accrue(tx, state, today);
+    const prepaid = new Set<string>();
     for (const l of input.lines) {
       const line = state.lines.find((x) => x.id === l.lineId);
       if (!line) throw invalid('line_not_found', 'That invoice line is not on this lease');
       if (!isRecurring(line.kind))
         throw invalid('withholding_line', 'Tax is withheld on rent and service charge only');
-      if (!line.accrued)
-        throw invalid(
-          'withholding_not_started',
-          'Record withholding on a month that has started: its rent is not owed before then',
-        );
+      // Decision 8: a month not yet started holds it as its advance (Cr 2010), drawn when the
+      // month starts; a started month's receivable is settled (Cr 1100).
+      if (!line.accrued) prepaid.add(line.id);
     }
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,
@@ -2232,7 +2270,11 @@ export class BillingEngine {
         bookId: book.bookId,
         lease: dimsOf(state.lease),
         paymentId: input.paymentId,
-        lines: input.lines.map((l) => ({ invoiceLineId: l.lineId, amountMinor: l.amountMinor })),
+        lines: input.lines.map((l) => ({
+          invoiceLineId: l.lineId,
+          amountMinor: l.amountMinor,
+          prepaid: prepaid.has(l.lineId),
+        })),
       }),
       record: { type: 'withholding', id: input.withholdingId },
       causedBy: input.causedBy,
@@ -2477,6 +2519,14 @@ export class BillingEngine {
     return paymentCredit(payment, allocations);
   }
 }
+
+/** Decision 9: the plain refusal of a credit note on tax a tenant withheld. */
+export const creditNoteWithheld = () =>
+  new AppError(
+    422,
+    'credit_note_withheld',
+    'This month has tax the tenant withheld; a credit note cannot take that back. Settle it by hand.',
+  );
 
 /** Allocation rows without repeats (a payment's rows can be loaded with its lease's). */
 export function dedupe(rows: readonly AllocationRecord[]): AllocationRecord[] {

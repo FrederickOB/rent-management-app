@@ -309,11 +309,21 @@ export const withholdingCertificate = pgTable(
     entryId: uuid(),
     valueDate: day(),
     accountingDate: day(),
+    /**
+     * M5 decision 7 (OQ-29): in a single-user company the uploader confirms through a single-user
+     * approval request, after its cooling-off and with TOTP; this names that request.
+     */
+    selfConfirmRequestId: uuid(),
     createdAt: tsNow(),
     updatedAt: tsNow(),
   },
   (t) => [
     unique('withholding_certificate_company_id_id_key').on(t.companyId, t.id),
+    foreignKey({
+      name: 'withholding_certificate_self_confirm_fk',
+      columns: [t.companyId, t.selfConfirmRequestId],
+      foreignColumns: [approvalRequest.companyId, approvalRequest.id],
+    }),
     uniqueIndex('withholding_certificate_one_live')
       .on(t.companyId, t.withholdingId)
       .where(sql`${t.status} in ('awaiting_confirmation', 'confirmed')`),
@@ -347,10 +357,11 @@ export const withholdingCertificate = pgTable(
       sql`${t.status} in ('awaiting_confirmation', 'confirmed', 'rejected')`,
     ),
     check('withholding_certificate_amount_check', sql`${t.amountMinor} > 0`),
-    // Decision 3, in the database: the uploader never confirms (nor rejects) their own certificate.
+    // Decision 3, in the database: the uploader never confirms (nor rejects) their own
+    // certificate, except through a single-user request (decision 7), which the trigger checks.
     check(
       'withholding_certificate_two_people_check',
-      sql`${t.decidedBy} is null or ${t.decidedBy} <> ${t.uploadedBy}`,
+      sql`${t.decidedBy} is null or ${t.decidedBy} <> ${t.uploadedBy} or ${t.selfConfirmRequestId} is not null`,
     ),
     check(
       'withholding_certificate_decided_check',

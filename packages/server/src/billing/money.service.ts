@@ -747,6 +747,8 @@ export class MoneyService {
     const line = state.lines.find((l) => l.id === lineId);
     if (!line) throw notFound('Invoice line');
     if (actionType === CREDIT_NOTE_ACTION)
+      this.engine.refuseWithheldCredit(state, lineId, amountMinor);
+    if (actionType === CREDIT_NOTE_ACTION)
       planCreditNote({
         line,
         taxLines: state.lines.filter((l) => l.baseLineId === lineId),

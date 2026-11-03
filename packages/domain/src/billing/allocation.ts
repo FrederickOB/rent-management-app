@@ -132,7 +132,10 @@ export function planAccrual(
     amountMinor,
   }));
   const advanceTotal = advance.reduce((sum, a) => sum + a.amountMinor, 0);
-  if (advanceTotal !== balance.settledMinor || balance.writtenOffMinor !== 0)
+  // M5 decision 8: tax a tenant withheld on a month not yet started is held as its advance too
+  // (source `withholding`); the engine draws it on its own key when the month starts.
+  const withheld = withheldOn(line.id, allocations);
+  if (advanceTotal + withheld !== balance.settledMinor || balance.writtenOffMinor !== 0)
     throw new DomainError(
       'billing.unexpected_allocation',
       `Line ${line.id} has allocations a line not yet started cannot have`,
@@ -147,6 +150,14 @@ export function planAccrual(
     need -= amount;
   }
   return { amountMinor: balance.netMinor, advance, draws, owedMinor: need };
+}
+
+/** Tax a tenant withheld on a line (TX-04, P19): allocations of source `withholding`, net. */
+export function withheldOn(lineId: string, allocations: readonly AllocationRow[]): number {
+  let total = 0;
+  for (const a of allocations)
+    if (a.lineId === lineId && a.source === 'withholding') total += a.amountMinor;
+  return total;
 }
 
 /** Pools after some draws: the next line's starting credit. */

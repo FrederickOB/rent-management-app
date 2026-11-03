@@ -1,10 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import { and, desc, eq, inArray, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
 import { isRecurring, lineBalance } from '@rent/domain/billing';
 import { parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import { certificateLines, withholdingWriteOffLines } from '@rent/domain/ledger';
 import { money, multiplyBps } from '@rent/domain/money';
+import type { ApprovalStatus } from '@rent/domain/approvals';
 import type { Actor, CertificateResource, StaffRole } from '@rent/domain/policy';
 import { certificateDebitAccount, checkWithholding } from '@rent/domain/tax';
 import { v7 as uuidv7 } from 'uuid';
@@ -39,6 +40,8 @@ import { billingLeaseOf } from '../tenancy/billing-facts';
 import { RentTaxService } from './rent-tax.service';
 
 export const WITHHOLDING_WRITE_OFF_ACTION = 'withholding.write_off';
+/** Decision 7: a single-user company's uploader confirms their certificate through this. */
+export const CERTIFICATE_SELF_CONFIRM_ACTION = 'withholding.certificate_confirm';
 
 const uuid = z.string().uuid();
 const writeOffPayload = z
@@ -51,6 +54,19 @@ const writeOffPayload = z
     valueDate: z.string(),
     reason: z.string().min(5).max(500),
     /** Decision facts, re-read at approval: a certificate confirmed since, or written off already. */
+    open: z.boolean(),
+  })
+  .strict();
+
+const selfConfirmPayload = z
+  .object({
+    certificateId: uuid,
+    withholdingId: uuid,
+    leaseId: uuid,
+    unitCode: z.string(),
+    tenantName: z.string().nullable(),
+    amountMinor: z.number().int().positive(),
+    /** Decision fact: the certificate still waits (not confirmed or rejected since). */
     open: z.boolean(),
   })
   .strict();
@@ -89,6 +105,8 @@ export interface WithholdingView {
     readonly periodEnd: string | null;
     readonly lineAmountMinor: number;
     readonly withheldMinor: number;
+    /** Decision 8: the month has not started, so the withholding is held as its advance. */
+    readonly heldAsAdvance: boolean;
   }[];
   readonly status: 'awaiting_certificate' | 'certificate_uploaded' | 'certified' | 'written_off';
   readonly certificate: {
@@ -106,6 +124,15 @@ export interface WithholdingView {
     readonly debitAccount: '2200' | '1160' | null;
     /** Whether the person reading may confirm or reject it now (decision 3). */
     readonly mayDecide: boolean;
+    /**
+     * Decision 7: in a single-user company, the request through which the uploader confirms it
+     * after the cooling-off with a TOTP code (`approvals.decide`, `self_confirm`).
+     */
+    readonly selfConfirmation: {
+      readonly approvalId: string;
+      readonly status: ApprovalStatus;
+      readonly coolingOffUntil: Date | null;
+    } | null;
   } | null;
   readonly rejectedCertificates: number;
   readonly writeOff: {
@@ -270,8 +297,10 @@ export class WithholdingService {
         parseBusinessDate(date),
       );
       const rateBps = (rule.value as { bps: number }).bps;
-      const lines = state.lines
-        .filter((l) => isRecurring(l.kind) && l.periodStart !== null && l.periodStart <= today)
+      // Every invoiced month still owed: started ones (P19 settles the receivable) and, under
+      // decision 8, ones not yet started (held as their advance until each month starts).
+      const owed = state.lines
+        .filter((l) => isRecurring(l.kind) && l.periodStart !== null)
         .map((l) => ({ line: l, balance: lineBalance(l, state.allocations) }))
         .filter((x) => x.balance.outstandingMinor > 0)
         .map(({ line, balance }) => ({
@@ -281,6 +310,7 @@ export class WithholdingService {
           kind: line.kind as 'rent' | 'service_charge',
           periodStart: line.periodStart!,
           periodEnd: line.periodEnd!,
+          started: line.periodStart! <= today,
           netMinor: balance.netMinor,
           outstandingMinor: balance.outstandingMinor,
           suggestedMinor: Math.min(
@@ -288,6 +318,9 @@ export class WithholdingService {
             multiplyBps(money(balance.netMinor), rateBps).amountMinor,
           ),
         }));
+      const lines = owed.filter((l) => l.started);
+      const advanceLines = owed.filter((l) => !l.started);
+
       const recent = await tx.execute<{ id: string }>(
         sql`select p.id from payment p
             left join payment_match m on m.company_id = p.company_id and m.payment_id = p.id
@@ -325,6 +358,7 @@ export class WithholdingService {
           warning: rule.warning,
         },
         lines,
+        advanceLines,
         payments: payments
           .sort((a, b) => (a.row.receivedOn < b.row.receivedOn ? 1 : -1))
           .map((p) => ({
@@ -402,14 +436,33 @@ export class WithholdingService {
       });
       const company = await companyRecord(tx, staff.companyId);
       const resource = await this.certificateResource(tx, company!, w.ownerId, staff.personId);
-      for (const personId of await membersWhoCan(
+      const confirmers = await membersWhoCan(
         tx,
         this.policy,
         company!,
         'withholding.confirm',
         { propertyId: w.propertyId, ownerId: w.ownerId },
         resource,
-      ))
+      );
+      // Decision 7 (OQ-29): nobody but the uploader may confirm it, so they confirm it themselves
+      // through a single-user request: after its cooling-off, with a code from their app.
+      if (confirmers.length === 0)
+        await this.approvals.createInTx(tx, staff, {
+          actionType: CERTIFICATE_SELF_CONFIRM_ACTION,
+          subjectType: 'withholding_certificate',
+          subjectId: id,
+          propertyId: w.propertyId,
+          payload: {
+            certificateId: id,
+            withholdingId,
+            leaseId: w.leaseId,
+            unitCode: w.unitCode,
+            tenantName: w.tenantName.slice(0, 200),
+            amountMinor: w.amountMinor,
+            open: true,
+          },
+        });
+      for (const personId of confirmers)
         await queueMessage(tx, staff.companyId, {
           recipient: { type: 'staff', personId },
           purpose: 'staff_notice',
@@ -460,8 +513,22 @@ export class WithholdingService {
         .where(eq(schema.withholdingCertificate.id, certificateId));
       if (!c) throw notFound('Certificate');
       const company = await companyRecord(tx, staff.companyId);
-      return { c, resource: await this.certificateResource(tx, company!, c.ownerId, c.uploadedBy) };
+      return {
+        c,
+        resource: await this.certificateResource(tx, company!, c.ownerId, c.uploadedBy),
+        selfConfirm: await this.selfConfirmation(tx, c.id),
+      };
     });
+    if (
+      found.c.uploadedBy === staff.personId &&
+      found.selfConfirm &&
+      ['pending', 'cooling_off'].includes(found.selfConfirm.status)
+    )
+      throw conflict(
+        'certificate_self_confirm',
+        'Nobody else can confirm this certificate, so you confirm it yourself after the cooling-off, with a code from your authenticator app (OQ-29).',
+        { approvalId: found.selfConfirm.approvalId },
+      );
     this.policy.assert(staff, 'withholding.confirm', found.resource);
     await withCompany(this.database, this.unscoped(staff), async (tx) => {
       await options.claim?.claim(tx);
@@ -489,42 +556,97 @@ export class WithholdingService {
         await options.claim?.done(tx, { certificateId });
         return;
       }
-      const w = await this.withholding(tx, c.withholdingId);
-      await this.refuseClosed(tx, c.withholdingId, true);
-      const owner = (await ownerFacts(tx, [w.ownerId])).get(w.ownerId);
-      if (!owner) throw notFound('Owner');
-      const debit = certificateDebitAccount(owner);
-      const lease = await billingLeaseOf(tx, w.leaseId);
-      const posted = await this.posting.post(tx, {
-        companyId: staff.companyId,
-        rule: 'P20',
-        key: `P20:${certificateId}`,
-        valueDate: today,
-        lines: certificateLines({
-          bookId: w.bookId,
-          lease: dimsOf(lease),
-          paymentId: w.paymentId,
-          debit,
-          amountMinor: w.amountMinor,
-        }),
-        record: { type: 'withholding_certificate', id: certificateId },
-        causedBy: staff.personId,
-      });
-      await tx
-        .update(schema.withholdingCertificate)
-        .set({
-          status: 'confirmed',
-          decidedBy: staff.personId,
-          decidedAt: this.clock.now(),
-          debitAccount: debit,
-          entryId: posted!.entryId,
-          valueDate: today,
-          accountingDate: posted!.accountingDate,
-          updatedAt: this.clock.now(),
-        })
-        .where(eq(schema.withholdingCertificate.id, certificateId));
+      await this.confirmIn(tx, staff.companyId, c, staff.personId, null, today);
       await options.claim?.done(tx, { certificateId });
     });
+  }
+
+  /**
+   * P20 for a certificate waiting for confirmation, decided by `decidedBy`, in the caller's
+   * transaction: the withholding settles the owner's rent tax (2200), or is a tax credit for a
+   * letting business (1160). `selfConfirmRequestId` names the single-user request when the
+   * uploader confirms (decision 7); the database checks it.
+   */
+  private async confirmIn(
+    tx: Tx,
+    companyId: string,
+    c: typeof schema.withholdingCertificate.$inferSelect,
+    decidedBy: string,
+    selfConfirmRequestId: string | null,
+    today: string,
+  ): Promise<void> {
+    const w = await this.withholding(tx, c.withholdingId);
+    await this.refuseClosed(tx, c.withholdingId, true);
+    const owner = (await ownerFacts(tx, [w.ownerId])).get(w.ownerId);
+    if (!owner) throw notFound('Owner');
+    const debit = certificateDebitAccount(owner);
+    const lease = await billingLeaseOf(tx, w.leaseId);
+    const posted = await this.posting.post(tx, {
+      companyId,
+      rule: 'P20',
+      key: `P20:${c.id}`,
+      valueDate: today,
+      lines: certificateLines({
+        bookId: w.bookId,
+        lease: dimsOf(lease),
+        paymentId: w.paymentId,
+        debit,
+        amountMinor: w.amountMinor,
+      }),
+      record: { type: 'withholding_certificate', id: c.id },
+      causedBy: decidedBy,
+    });
+    await tx
+      .update(schema.withholdingCertificate)
+      .set({
+        status: 'confirmed',
+        decidedBy,
+        decidedAt: this.clock.now(),
+        debitAccount: debit,
+        entryId: posted!.entryId,
+        valueDate: today,
+        accountingDate: posted!.accountingDate,
+        selfConfirmRequestId,
+        updatedAt: this.clock.now(),
+      })
+      .where(eq(schema.withholdingCertificate.id, c.id));
+  }
+
+  /** The latest request through which a certificate's uploader may confirm it (decision 7). */
+  async selfConfirmation(
+    tx: Tx,
+    certificateId: string,
+  ): Promise<{
+    approvalId: string;
+    mode: 'single_user' | 'two_person';
+    status: ApprovalStatus;
+    coolingOffUntil: Date | null;
+  } | null> {
+    const [r] = await tx
+      .select({
+        id: schema.approvalRequest.id,
+        mode: schema.approvalRequest.mode,
+        status: schema.approvalRequest.status,
+        coolingOffUntil: schema.approvalRequest.coolingOffUntil,
+      })
+      .from(schema.approvalRequest)
+      .where(
+        and(
+          eq(schema.approvalRequest.actionType, CERTIFICATE_SELF_CONFIRM_ACTION),
+          eq(schema.approvalRequest.subjectType, 'withholding_certificate'),
+          eq(schema.approvalRequest.subjectId, certificateId),
+        ),
+      )
+      .orderBy(desc(schema.approvalRequest.createdAt))
+      .limit(1);
+    return r
+      ? {
+          approvalId: r.id,
+          mode: r.mode as 'single_user' | 'two_person',
+          status: r.status as ApprovalStatus,
+          coolingOffUntil: r.coolingOffUntil,
+        }
+      : null;
   }
 
   /**
@@ -616,10 +738,64 @@ export class WithholdingService {
     });
   }
 
-  /** Registers the write-off with the approvals engine (two-person, P24). Once per process. */
+  /**
+   * Registers the write-off with the approvals engine (two-person, P24), and the certificate a
+   * single-user company's uploader confirms after the cooling-off (decision 7). Once per process.
+   */
   registerApprovals(): void {
     if (this.approvalsRegistered) return;
     this.approvalsRegistered = true;
+    this.approvals.register({
+      actionType: CERTIFICATE_SELF_CONFIRM_ACTION,
+      // Raised only when nobody but the uploader may confirm: no role decides it but a nominated
+      // approver, so it is single-user unless one joins (then they decide it).
+      eligibleRoles: [],
+      schema: selfConfirmPayload,
+      onePerSubject: true,
+      prepare: async (tx, request) => {
+        const leaseId = (request.payload as { leaseId: string }).leaseId;
+        await lockLeases(tx, request.companyId, await leaseGroup(tx, leaseId));
+      },
+      currentPayload: async (tx, request) => {
+        const proposed = request.payload as z.infer<typeof selfConfirmPayload>;
+        const [c] = await tx
+          .select({ status: schema.withholdingCertificate.status })
+          .from(schema.withholdingCertificate)
+          .where(eq(schema.withholdingCertificate.id, proposed.certificateId));
+        return { ...proposed, open: c?.status === 'awaiting_confirmation' };
+      },
+      execute: async (tx, request, payload) => {
+        const [c] = await tx
+          .select()
+          .from(schema.withholdingCertificate)
+          .where(eq(schema.withholdingCertificate.id, payload.certificateId))
+          .for('update');
+        if (!c || c.status !== 'awaiting_confirmation')
+          throw conflict(
+            'certificate_decided',
+            'This certificate was already confirmed or rejected',
+          );
+        const company = await companyRecord(tx, request.companyId);
+        const today = isoNow(this.clock, company!.timeZone);
+        if (request.mode === 'single_user') {
+          await this.confirmIn(tx, request.companyId, c, request.initiatedBy, request.id, today);
+          return;
+        }
+        // A nominated approver who joined since decided it: they confirm, as anyone else would.
+        const [decision] = await tx
+          .select({ decidedBy: schema.approvalDecision.decidedBy })
+          .from(schema.approvalDecision)
+          .where(
+            and(
+              eq(schema.approvalDecision.requestId, request.id),
+              eq(schema.approvalDecision.kind, 'approve'),
+            ),
+          )
+          .orderBy(desc(schema.approvalDecision.decidedAt))
+          .limit(1);
+        await this.confirmIn(tx, request.companyId, c, decision!.decidedBy, null, today);
+      },
+    });
     this.approvals.register({
       actionType: WITHHOLDING_WRITE_OFF_ACTION,
       eligibleRoles: MONEY_APPROVERS as readonly StaffRole[],
@@ -735,14 +911,17 @@ export class WithholdingService {
       period_end: string | null;
       line_amount: string;
       withheld: string;
+      started: boolean;
     }>(
       sql`select a.invoice_line_id as line_id, i.number as invoice_number, il.period_start::text,
-            il.period_end::text, il.amount_minor as line_amount, sum(a.amount_minor)::bigint as withheld
+            il.period_end::text, il.amount_minor as line_amount, sum(a.amount_minor)::bigint as withheld,
+            exists (select 1 from invoice_line_accrual x where x.company_id = il.company_id
+                    and x.invoice_line_id = il.id) as started
           from allocation a
           join invoice_line il on il.company_id = a.company_id and il.id = a.invoice_line_id
           join invoice i on i.company_id = il.company_id and i.id = il.invoice_id
           where a.record_type = 'withholding' and a.record_id = ${id}
-          group by a.invoice_line_id, i.number, il.period_start, il.period_end, il.amount_minor
+          group by a.invoice_line_id, i.number, il.period_start, il.period_end, il.amount_minor, il.company_id, il.id
           order by il.period_start nulls last`,
     );
     const certificates = await tx
@@ -786,6 +965,7 @@ export class WithholdingService {
         periodEnd: l.period_end,
         lineAmountMinor: Number(l.line_amount),
         withheldMinor: Number(l.withheld),
+        heldAsAdvance: !l.started,
       })),
       status: writeOff
         ? 'written_off'
@@ -811,6 +991,11 @@ export class WithholdingService {
             rejectReason: live.rejectReason,
             debitAccount: live.debitAccount as '2200' | '1160' | null,
             mayDecide,
+            selfConfirmation: await this.selfConfirmation(tx, live.id).then((r) =>
+              r && r.mode === 'single_user'
+                ? { approvalId: r.approvalId, status: r.status, coolingOffUntil: r.coolingOffUntil }
+                : null,
+            ),
           }
         : null,
       rejectedCertificates: certificates.filter((c) => c.status === 'rejected').length,

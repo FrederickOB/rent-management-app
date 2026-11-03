@@ -1,6 +1,6 @@
 # Open questions
 
-55 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+56 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -49,6 +49,7 @@
 | OQ-18 | Does per-receipt rent tax apply to corporate owners? When a corporate tenant withholds tax, does it settle the owner's rent tax, or is it a credit? (prd-issues 12, 13) | Tax adviser | M5 | Withholding on rent is final for individuals and for companies not in the business of letting (Act 896 s.119(1)); for a letting business it is a credit (s.120). Owners carry a `letting_business` flag, and rent tax per receipt applies to the rest (P17, P20). | |
 | OQ-19 | Does rent tax apply to service charge? Does refunding an advance reduce rent tax already accrued or paid? (prd-issues 14) | Tax adviser | M5 | Service charge may count as rent (Act 896 defines rent to include payment for "assistance ancillary to a use"), so it is taxed by default, switchable in the rules table. No automatic adjustment on refunds. | |
 | OQ-20 | How do VAT and levies apply to commercial rent: rates, tax point, service charge, VAT withholding by designated agents, and GRA's E-VAT invoicing? | Tax adviser | M4a | VAT-registered commercial owners charge 15% VAT plus 2.5% NHIL and 2.5% GETFund on commercial rent (Act 1151, GRA guidance AG/26/001), at the invoice or the payment, whichever comes first (P32). Dwellings are exempt. | Decided 2026-10-28: commercial landlords are in the pilot, so VAT lines on commercial invoices are built in M4a. |
+| OQ-56 | When rent on a month is credited back (a correction, or the unused days of an early end), how is tax the tenant withheld on that month treated: does the owner reclaim it from GRA, carry it as a credit, or return it to the tenant? (M5 decision 9) | Tax adviser | Before the commercial pilot | A credit note that would take back withheld tax is refused (`credit_note_withheld`); staff settle it by hand, and the withheld tax stays on the month. | |
 | OQ-48 | Services carry VAT with no registration threshold. Must the platform register for VAT, and charge VAT and levies on subscription invoices? | Tax adviser | M10 | Register, and show VAT and levies on subscription invoices. | |
 
 ## Platform and providers

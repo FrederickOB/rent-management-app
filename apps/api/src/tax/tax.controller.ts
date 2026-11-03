@@ -128,6 +128,9 @@ export class TaxController {
             return input.certificateId;
           },
           (id) => ofCertificate(id),
+          // A decision, like an approval's: the policy answers first (403 for its uploader), and
+          // a retry finds it already confirmed (P20 is keyed on the certificate).
+          { required: false },
         ),
       ),
       rejectCertificate: implement(contract.withholding.rejectCertificate).handler(({ input }) =>

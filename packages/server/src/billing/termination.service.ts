@@ -6,6 +6,7 @@ import {
   linesAfterEnd,
   refundDue,
   unusedDaysCredits,
+  withheldOn,
 } from '@rent/domain/billing';
 import { formatBusinessDate, parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
@@ -21,7 +22,7 @@ import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, REFUND_PROOF_UPLOAD } from '../documents/documents.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { billingLeaseOf } from '../tenancy/billing-facts';
-import { BillingEngine, lineLabel, type LeaseState } from './engine';
+import { BillingEngine, creditNoteWithheld, lineLabel, type LeaseState } from './engine';
 import { MONEY_APPROVERS } from './money.service';
 import {
   formatInvoiceNumber,
@@ -236,11 +237,10 @@ export class TerminationService {
         'An early-termination settlement is for a lease that ended before its end date',
       );
     requireBook(state.book);
-    if (
-      linesAfterEnd(state.lines, lastDay).some(
-        (l) => lineBalance(l, state.allocations).netMinor > 0,
-      )
-    )
+    const after = linesAfterEnd(state.lines, lastDay);
+    // Decision 9: tax the tenant withheld on a month after the end cannot be credited back.
+    if (after.some((l) => withheldOn(l.id, state.allocations) > 0)) throw creditNoteWithheld();
+    if (after.some((l) => lineBalance(l, state.allocations).netMinor > 0))
       throw conflict(
         'end_not_processed',
         'The lease’s end is still being processed. Try again in a minute.',

@@ -112,7 +112,15 @@ export function withholdingLines(input: {
   readonly lease: LeaseDimensions;
   /** The payment the tenant paid net with; null when the tenant advised it on its own. */
   readonly paymentId: string | null;
-  readonly lines: readonly { readonly invoiceLineId: string; readonly amountMinor: number }[];
+  readonly lines: readonly {
+    readonly invoiceLineId: string;
+    readonly amountMinor: number;
+    /**
+     * M5 decision 8: a month not yet started holds the withholding as its advance (Cr 2010 on the
+     * line, as P03 holds a prepayment), drawn when the month starts (`withholdingDrawLines`).
+     */
+    readonly prepaid?: boolean;
+  }[];
 }): JournalLineDraft[] {
   return compactLines(
     input.lines.flatMap((l) => {
@@ -125,10 +133,31 @@ export function withholdingLines(input: {
       positive(l.amountMinor, 'Withholding');
       return [
         { ...dims, accountCode: '1150' as const, amountMinor: l.amountMinor },
-        { ...dims, accountCode: '1100' as const, amountMinor: -l.amountMinor },
+        l.prepaid
+          ? { ...dims, paymentId: null, accountCode: '2010' as const, amountMinor: -l.amountMinor }
+          : { ...dims, accountCode: '1100' as const, amountMinor: -l.amountMinor },
       ];
     }),
   );
+}
+
+/**
+ * P02's draw of withholding held as a month's advance (M5 decision 8): when the month starts it
+ * is charged in full (P02), and the tax withheld on it moves from prepayments to pay it: Dr 2010,
+ * Cr 1100 on the line. Its own key per withholding, beside the line's P02.
+ */
+export function withholdingDrawLines(input: {
+  readonly bookId: string;
+  readonly lease: LeaseDimensions;
+  readonly invoiceLineId: string;
+  readonly amountMinor: number;
+}): JournalLineDraft[] {
+  const amount = positive(input.amountMinor, 'A withholding draw');
+  const dims = { bookId: input.bookId, ...input.lease, invoiceLineId: input.invoiceLineId };
+  return [
+    { ...dims, accountCode: '2010', amountMinor: amount },
+    { ...dims, accountCode: '1100', amountMinor: -amount },
+  ];
 }
 
 /**
