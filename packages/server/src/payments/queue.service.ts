@@ -1,7 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, isNull, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
 import { unmatchedRefundLines, type CashAccount } from '@rent/domain/ledger';
-import { suggestMatches, type MatchCandidate, type MatchReason } from '@rent/domain/payments';
+import {
+  monthlyChargeMinor,
+  suggestMatches,
+  type MatchCandidate,
+  type MatchReason,
+} from '@rent/domain/payments';
 import { moneySummary } from '@rent/domain/billing';
 import { creditPools } from '@rent/domain/billing';
 import { tryNormalisePhone } from '@rent/domain/phone';
@@ -176,10 +181,8 @@ export class QueueService {
               sql`${schema.payment.payerPhoneIndex} is not null`,
             ),
           );
-        const monthly = state.schedule
-          .filter((s) => s.periodStart <= today)
-          .slice(-2)
-          .reduce((sum, s) => sum + s.amountMinor, 0);
+        // One month by its charge period, not the last two periods (M4b review: rent-only).
+        const monthly = monthlyChargeMinor(state.schedule, state.lease.terms, today);
         candidates.push({
           leaseId: lease.id,
           tenantName: lease.tenant_name,

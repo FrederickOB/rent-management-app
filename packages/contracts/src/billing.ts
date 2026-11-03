@@ -283,6 +283,11 @@ export const paymentDetailSchema = paymentRowSchema.extend({
   /** Where the money can be taken back from if it is reversed (P21b). */
   reversalOptions: z.array(z.enum(MONEY_LOCATIONS)),
   openApprovalId: uuid.nullable(),
+  /**
+   * M4b: where a provider payment settles, the owner's account or the agency's, as the unmatched
+   * queue's `settlesInto` says; null for other money. Lets the match picker narrow to the owner.
+   */
+  settlesInto: z.enum(RECEIVING_ACCOUNTS).nullable().optional(),
   /** M4b: the reversal, once reversed: by a person (with approval) or by the provider (chargeback). */
   reversal: z
     .object({

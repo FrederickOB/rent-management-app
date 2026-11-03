@@ -257,6 +257,11 @@ export interface PaymentDetailView extends PaymentRowView {
   readonly proofDocumentId: string | null;
   readonly reversalOptions: ('collector' | 'owner_account' | 'agency_account' | 'provider')[];
   readonly openApprovalId: string | null;
+  /**
+   * M4b: where a provider payment settles, the owner's account or the agency's (as the unmatched
+   * queue says), so a match can be narrowed to that owner. Null for other money.
+   */
+  readonly settlesInto: 'owner_account' | 'agency_account' | null;
   /** M4b: the reversal, once reversed, by a person or by the provider (a chargeback). */
   readonly reversal: {
     readonly reason:
@@ -978,8 +983,20 @@ export class BillingReadService {
         paymentId,
       );
       const open = openId ? { id: openId } : undefined;
+      const [account] = payment.row.settlementAccountId
+        ? await tx
+            .select({ holder: schema.settlementAccount.holder })
+            .from(schema.settlementAccount)
+            .where(eq(schema.settlementAccount.id, payment.row.settlementAccountId))
+        : [];
       return {
         ...row!,
+        // As the unmatched queue says it (settlesInto there).
+        settlesInto: !account
+          ? null
+          : account.holder !== 'agency' || staff.companyKind !== 'agency'
+            ? ('owner_account' as const)
+            : ('agency_account' as const),
         allocations: await this.allocationViews(tx, allocations, lines),
         receipts,
         paidUntilAfter,

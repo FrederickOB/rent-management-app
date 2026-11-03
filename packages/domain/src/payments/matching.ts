@@ -1,5 +1,7 @@
-import { daysBetween, parseBusinessDate } from '../dates';
+import { daysBetween, parseBusinessDate, toIsoDate } from '../dates';
+import type { ScheduleRow } from '../billing/invoicing';
 import { normaliseReference, REFERENCE_LENGTH } from '../billing/references';
+import { fullPeriodEnd, rentOn, type LeaseTerms } from '../tenancy/lease-terms';
 
 /**
  * Matching provider payments to leases (BC-03, BC-12; M4b plan 4.5). Only two things match
@@ -90,6 +92,33 @@ export interface Suggestion {
   readonly leaseId: string;
   readonly score: number;
   readonly reasons: readonly MatchReason[];
+}
+
+/**
+ * One month of a lease as billed now, for the queue's "a month of its rent" reason (BC-12): the
+ * charge period in force today, found by its start (the first one before the lease starts), its
+ * rent and service charge added together. Charge periods are monthly whatever the billing cycle,
+ * so a quarterly or two-yearly lease's month is still one month, and an escalation counts from
+ * its period. A short final period is charged by the day, which is not a month: its full monthly
+ * amounts are used instead (M4b review: the queue had added the last two periods together).
+ */
+export function monthlyChargeMinor(
+  schedule: readonly Pick<
+    ScheduleRow,
+    'sequence' | 'chargeType' | 'periodStart' | 'periodEnd' | 'amountMinor'
+  >[],
+  terms: Pick<LeaseTerms, 'startDate' | 'monthlyRentMinor' | 'steps' | 'serviceChargeMonthlyMinor'>,
+  today: string,
+): number {
+  if (schedule.length === 0) return 0;
+  const starts = [...new Set(schedule.map((r) => r.periodStart))].sort();
+  const current = starts.filter((start) => start <= today).at(-1) ?? starts[0]!;
+  const rows = schedule.filter((r) => r.periodStart === current);
+  const first = rows[0]!;
+  const fullEnd = toIsoDate(fullPeriodEnd(parseBusinessDate(terms.startDate), first.sequence));
+  if (first.periodEnd < fullEnd)
+    return rentOn(terms, current) + (terms.serviceChargeMonthlyMinor ?? 0);
+  return rows.reduce((sum, r) => sum + r.amountMinor, 0);
 }
 
 const nameWords = (name: string): Set<string> =>

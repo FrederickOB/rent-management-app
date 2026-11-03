@@ -1168,3 +1168,70 @@ describe('ADR-008 a new account is used only after its 24 hours (review)', () =>
     });
   });
 });
+
+describe('BC-12 a month of a lease is one month’s rent and service charge (web e2e)', () => {
+  it('suggests the lease for a month’s money, rent-only or with service charge', async () => {
+    for (const [name, serviceCharge] of [
+      ['Rent Only Payer', null],
+      ['Service Charge Payer', 20_000],
+    ] as const) {
+      // Three months have started, so "the last two periods" would be two months of rent.
+      const start = plusMonths(today, -2);
+      const leaseId = (
+        await billedLease(ctx, s, b, agency.manager, {
+          unitId: units.shift()!,
+          tenantId: await tenant(name),
+          startDate: start,
+          endDate: plusDays(plusMonths(start, 12), -1),
+          monthlyRentMinor: 80_000,
+          serviceChargeMonthlyMinor: serviceCharge,
+          cycle: 'monthly',
+          depositMinor: null,
+          signedOn: start,
+          billingStartDate: start,
+        })
+      ).id;
+      const month = 80_000 + (serviceCharge ?? 0);
+      // Paid up, so nothing is due and no invoice is open: only the month can be the reason.
+      await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+        leaseId,
+        amountMinor: 3 * month,
+        receivedOn: today,
+      });
+      expect((await moneyCard(ctx, b, agency.companyId, leaseId)).dueNowMinor).toBe(0);
+      await approvedTransfer(ctx, s, b, agency.manager, agency.admin, {
+        receivedInto: 'owner_account',
+        ownerId: ownerA,
+        amountMinor: month,
+        receivedOn: today,
+        senderReference: `Month for ${name}`,
+      });
+      const row = (await b.read.unmatched(agency.manager)).find(
+        (u) => u.senderReference === `Month for ${name}`,
+      )!;
+      const suggestions = await p.queue.suggestions(agency.manager, row.paymentId);
+      expect(suggestions.find((x) => x.leaseId === leaseId)?.reasons).toContain(
+        'amount_is_a_month',
+      );
+    }
+  });
+});
+
+describe('BC-12 a payment’s page says where provider money settles (web e2e)', () => {
+  it('gives settlesInto for provider money, as the unmatched queue does, and null for cash', async () => {
+    const { paymentId } = await unmatchedExternal(agencyAccount, 27_000);
+    const queued = (await b.read.unmatched(agency.manager)).find((u) => u.paymentId === paymentId)!;
+    expect(queued.settlesInto).toBe('agency_account');
+    expect((await b.read.payment(agency.manager, paymentId)).settlesInto).toBe('agency_account');
+    const { payment } = await paidLease('Settles To Owner');
+    expect((await b.read.payment(agency.manager, payment.id)).settlesInto).toBe('owner_account');
+    const cashLease = await lease('Cash Payer');
+    await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: cashLease,
+      amountMinor: 150_000,
+      receivedOn: today,
+    });
+    const [cash] = await paymentsOf(cashLease);
+    expect((await b.read.payment(agency.manager, cash!.id)).settlesInto).toBeNull();
+  });
+});
