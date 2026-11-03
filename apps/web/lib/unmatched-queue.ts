@@ -48,9 +48,13 @@ export function confirmMatchText(
  * transfer into their account, or provider money that settles into it. Null when it sits with
  * the agency, which may match it to any lease it manages.
  */
-export function queueOwnerOf(
-  row: Pick<UnmatchedRow, 'receivedInto' | 'settlesInto' | 'ownerId' | 'ownerName'>,
-): { readonly ownerId: string; readonly ownerName: string | null } | null {
+export function queueOwnerOf(row: {
+  /** Where the money arrived, as a queue row or a payment says it. */
+  readonly receivedInto: string;
+  readonly settlesInto?: UnmatchedRow['settlesInto'];
+  readonly ownerId: string | null;
+  readonly ownerName: string | null;
+}): { readonly ownerId: string; readonly ownerName: string | null } | null {
   const intoOwner =
     row.receivedInto === 'owner_account' ||
     (row.receivedInto === 'provider' && row.settlesInto === 'owner_account');

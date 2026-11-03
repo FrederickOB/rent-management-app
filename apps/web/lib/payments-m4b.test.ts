@@ -88,6 +88,19 @@ describe('BC-12 provider payments in the unmatched queue', () => {
     expect(queueOwnerOf({ ...provider, receivedInto: 'agency_account' })).toBeNull();
   });
 
+  it('P23 narrows the same way on the payment page, from the payment’s own settlesInto', () => {
+    const payment = {
+      receivedInto: 'provider',
+      settlesInto: 'owner_account' as const,
+      ownerId: OWNER,
+      ownerName: 'Ama Owner-London (demo)',
+    };
+    expect(queueOwnerOf(payment)?.ownerId).toBe(OWNER);
+    expect(queueOwnerOf({ ...payment, settlesInto: null })).toBeNull();
+    // Cash with a collector belongs to no owner's account until it is banked.
+    expect(queueOwnerOf({ ...payment, receivedInto: 'collector', settlesInto: null })).toBeNull();
+  });
+
   it('P31 says a refund already asked for, waiting or approved', () => {
     const refund = {
       refundId: '019a3000-0000-7000-8000-0000000000b1',

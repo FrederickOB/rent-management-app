@@ -41,10 +41,10 @@ import {
   type IdempotencyKeeper,
 } from '@/lib/idempotency';
 import { useHoldWhileSending } from '@/lib/in-flight';
-import { ownerAccountOf } from '@/lib/lease-pick';
 import { waitingNote } from '@/lib/money-requests';
 import { CORRECTION_REASON_MIN, reversalForm, type ReversalDraft } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
+import { queueOwnerOf } from '@/lib/unmatched-queue';
 import { SuggestionsPanel } from '../unmatched/suggestions-panel';
 
 export interface PaymentPermissions {
@@ -83,8 +83,9 @@ export function PaymentDetailView({
   const reversalKeeper = useIdempotencyKeeper();
   // One key for matching this money while the page is open, whichever lease is chosen (P23).
   const matchKeeper = useIdempotencyKeeper();
-  // Money in an owner's own account can be matched only to that owner's leases (P23).
-  const unmatchedOwner = ownerAccountOf(payment);
+  // Money in an owner's own account, or provider money that settles into it, can be matched
+  // only to that owner's leases (P23), as in the queue.
+  const unmatchedOwner = queueOwnerOf(payment);
 
   async function refresh() {
     try {
