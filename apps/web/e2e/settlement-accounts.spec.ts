@@ -135,6 +135,47 @@ test.describe('ADR-008 settlement account changes', () => {
     await expect(page.locator('body')).not.toContainText(OWNER_A_ACCOUNT.number);
   });
 
+  test('M4b review a change to where an owner’s rent goes waits for a second person; nothing changes at once', async ({
+    page,
+  }) => {
+    await signIn(page, PEOPLE.agencyAdmin.email);
+    await openSettlement(page);
+    const row = page.getByTestId('management-agreement').filter({ hasText: OWNER_B.name });
+    await expect(row).toContainText('The agency’s client account');
+    await row.getByRole('button', { name: /^Change/ }).click();
+    const form = page.getByRole('form', { name: `Where ${OWNER_B.name}’s rent goes` });
+    await expect(form).toContainText('nothing changes yet');
+    await form.getByLabel('Rent goes to').selectOption({ label: 'The owner’s own account' });
+    const asked = page.waitForResponse(
+      (r) =>
+        /\/api\/v1\/owners\/[0-9a-f-]{36}\/management-agreement$/.test(new URL(r.url()).pathname) &&
+        r.request().method() === 'PUT',
+    );
+    await form.getByRole('button', { name: 'Ask for approval' }).click();
+    expect((await asked).status(), 'ask to change where rent goes').toBe(200);
+    await expect(page.getByText(`Asked for ${OWNER_B.name}’s rent to go to`)).toBeVisible();
+
+    // Rent still goes where it did; the change waits, and no second one can be asked for.
+    await expect(row.locator('td').nth(1)).toContainText('The agency’s client account');
+    await expect(row.getByTestId('agreement-waiting')).toContainText(
+      'Waiting for a second person: the owner’s own account from',
+    );
+    await expect(row.getByRole('button', { name: /^Change/ })).toHaveCount(0);
+
+    // The request reads plainly in Approvals; she withdraws it, so the seed stays as it was.
+    await nav(page).getByRole('link', { name: 'Approvals' }).click();
+    const request = page
+      .getByTestId('approval')
+      .filter({ hasText: 'Change where an owner’s rent goes' })
+      .filter({ hasText: OWNER_B.name });
+    await expect(request).toHaveCount(1);
+    await expect(request).toContainText('The agency’s client account');
+    await expect(request).toContainText('The owner’s own account');
+    await expect(request.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
+    await request.getByRole('button', { name: 'Withdraw the request' }).click();
+    await expect(page.getByText('Withdrew the request. Nothing changed.')).toBeVisible();
+  });
+
   test('a manager sees the accounts but cannot ask to change where rent goes', async ({ page }) => {
     await signIn(page, PEOPLE.managerOne.email);
     await openSettlement(page);

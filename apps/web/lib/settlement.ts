@@ -7,6 +7,7 @@ import {
   type RentDestination,
   type SettlementAccountStatus,
 } from '@rent/domain/payments';
+import { formatBusinessDate } from './business-dates';
 import { formatTime } from './format';
 
 // Where rent settles (D1, ADR-008; M4b plan 4.2 and decision 6). Rent goes straight from the
@@ -181,6 +182,27 @@ export function destinationProblem(
   );
   if (candidates.length === 0) return 'no_active_account';
   return candidates.some((a) => a.providerReady) ? null : 'no_subaccount';
+}
+
+/**
+ * What is coming for an owner's agreement (M4b review): an approved change that starts later,
+ * and a change still waiting for a second person. A change never takes effect at once: it
+ * starts on the day asked, or on the first day 24 hours after approval if that is later.
+ */
+export function agreementChanges(agreement: Pick<AgreementRow, 'next' | 'openRequest'>): {
+  readonly next: string | null;
+  readonly waiting: string | null;
+} {
+  const words = (destination: RentDestination, from: string) =>
+    `${DESTINATION_LABELS[destination].toLowerCase()} from ${formatBusinessDate(from)}`;
+  return {
+    next: agreement.next
+      ? `Approved: ${words(agreement.next.destination, agreement.next.effectiveFrom)}.`
+      : null,
+    waiting: agreement.openRequest
+      ? `Waiting for a second person: ${words(agreement.openRequest.destination, agreement.openRequest.effectiveFrom)}, or 24 hours after approval if that is later.`
+      : null,
+  };
 }
 
 const DESTINATION_IS_OWNER: Record<RentDestination, boolean> = {

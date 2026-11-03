@@ -39,7 +39,8 @@ test.describe('BC-06 a receipt’s delivery to the tenant', () => {
     );
 
     // The receipts list shows it too, in a word and a time.
-    await nav(page).getByRole('link', { name: 'Receipts' }).click();
+    // Exact: "Unmatched receipts" is in the navigation too.
+    await nav(page).getByRole('link', { name: 'Receipts', exact: true }).click();
     const labels = page.getByTestId('receipt-delivery-label');
     await expect(labels.first()).toBeVisible();
     for (const label of await labels.allTextContents()) expect(label).toMatch(DELIVERY_LABELS);

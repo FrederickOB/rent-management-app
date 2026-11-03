@@ -165,3 +165,34 @@ describe('P31 a refund request reads plainly, with its proof', () => {
     ).toBe('No longer refundable');
   });
 });
+
+describe('M4b review a change to where an owner’s rent goes reads plainly to the second person', () => {
+  const payload = {
+    ownerId: OWNER,
+    ownerName: 'Ama Owner-London (demo)',
+    destination: 'agency_client_account',
+    currentDestination: 'owner_account',
+    effectiveFrom: '2026-11-05',
+  };
+
+  it('names the request, where rent goes now, where it would go, and from when', () => {
+    expect(approvalActionLabel('management_agreement.change')).toBe(
+      'Change where an owner’s rent goes',
+    );
+    expect(approvalFacts('management_agreement.change', payload)).toEqual([
+      { label: 'Owner', value: 'Ama Owner-London (demo)' },
+      { label: 'Rent goes to now', value: 'The owner’s own account' },
+      { label: 'Rent would go to', value: 'The agency’s client account' },
+      { label: 'From', value: '5 Nov 2026' },
+    ]);
+    expect(
+      approvalFacts('management_agreement.change', { ...payload, currentDestination: null })[1],
+    ).toEqual({ label: 'Rent goes to now', value: 'Not chosen yet' });
+  });
+
+  it('leads to the settlement accounts screen, where the agreements are', () => {
+    expect(subjectHref({ subjectType: 'owner', subjectId: OWNER, payload })).toBe(
+      '/settings/settlement',
+    );
+  });
+});

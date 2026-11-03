@@ -115,6 +115,7 @@ const RECORD_LINKS: Record<string, string> = {
   cash_record: 'Cash on hand',
   cash_banking: 'Cash on hand',
   settlement_account: 'Settlement accounts',
+  owner: 'Where the owner’s rent goes',
 };
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
@@ -300,7 +301,7 @@ function ApprovalItem({
               <dd>
                 {href ? (
                   <Link href={href} className="font-medium underline underline-offset-2">
-                    {subject?.title ?? 'Open the record'}
+                    {subject?.title ?? RECORD_LINKS[row.subjectType] ?? 'Open the record'}
                   </Link>
                 ) : (
                   subject?.title

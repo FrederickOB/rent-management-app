@@ -1,6 +1,7 @@
 import type { SettlementAccountView } from '@rent/contracts';
 import { describe, expect, it } from 'vitest';
 import {
+  agreementChanges,
   destinationProblem,
   holderLabel,
   mayRetire,
@@ -228,5 +229,34 @@ describe('decision 6 where each agency owner’s rent goes', () => {
         account({ holder: 'agency', ownerId: null, ownerName: null }),
       ]),
     ).toBeNull();
+  });
+});
+
+describe('M4b review a change to where rent goes waits for approval', () => {
+  const approval = '019a3000-0000-7000-8000-0000000000f8';
+
+  it('shows an approved change still to start, and one waiting for a second person', () => {
+    expect(
+      agreementChanges({
+        next: { destination: 'agency_client_account', effectiveFrom: '2026-11-05' },
+        openRequest: null,
+      }),
+    ).toEqual({
+      next: 'Approved: the agency’s client account from 5 Nov 2026.',
+      waiting: null,
+    });
+    expect(
+      agreementChanges({
+        next: null,
+        openRequest: {
+          approvalId: approval,
+          destination: 'owner_account',
+          effectiveFrom: '2026-11-03',
+        },
+      }).waiting,
+    ).toBe(
+      'Waiting for a second person: the owner’s own account from 3 Nov 2026, or 24 hours after approval if that is later.',
+    );
+    expect(agreementChanges({})).toEqual({ next: null, waiting: null });
   });
 });

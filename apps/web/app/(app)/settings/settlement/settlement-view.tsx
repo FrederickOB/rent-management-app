@@ -151,6 +151,7 @@ export function SettlementView({
           agreements={state.data.agreements}
           accounts={state.data.accounts}
           canChange={can.change}
+          seeApprovals={can.seeApprovals}
           onChanged={(text) => {
             setNotice(text);
             reload();

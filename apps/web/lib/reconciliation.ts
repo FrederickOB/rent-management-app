@@ -30,8 +30,9 @@ export const EXCEPTION_WORDS: Record<ExceptionKind, ExceptionWords> = {
       'We have a payment the provider did not list for that day. Check the payment with the provider before relying on it.',
   },
   amount_differs: {
-    title: 'The amounts differ',
-    check: 'The provider’s amount is not the amount we recorded. Check both with the provider.',
+    title: 'The amount or currency differs',
+    check:
+      'The provider’s amount, or its currency, is not what we recorded; the detail above says which. Only cedis are ever posted, so a charge in another currency was not. Check it with the provider.',
   },
   not_successful_at_provider: {
     title: 'Not successful at the provider',

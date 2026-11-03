@@ -11,7 +11,7 @@ import {
 } from './billing-format';
 import { formatBusinessDate } from './business-dates';
 import { humanise } from './format';
-import { nameCheck } from './settlement';
+import { DESTINATION_LABELS, nameCheck } from './settlement';
 import { formatMinor } from './tenancy-format';
 
 // The approvals screen (AD-05; M3 decision 6). What a person may do is decided by the API's
@@ -32,6 +32,8 @@ const ACTION_LABELS: Record<string, string> = {
   'settlement_account.change': 'Add a bank account rent settles into',
   'settlement_account.retire': 'Stop settling rent into a bank account',
   'payment.refund_unmatched': 'Refund unmatched money to its payer',
+  // M4b review: where an agency owner's rent goes is changed only with a second person.
+  'management_agreement.change': 'Change where an owner’s rent goes',
 };
 
 const REFUND_ACTION = 'payment.refund_unmatched';
@@ -40,6 +42,7 @@ const REFUND_ACTION = 'payment.refund_unmatched';
 export const SETTLEMENT_ACTIONS: readonly string[] = [
   'settlement_account.change',
   'settlement_account.retire',
+  'management_agreement.change',
 ];
 
 /** The money actions (M4a, M4b), whose payloads are summarised fact by fact. */
@@ -178,6 +181,12 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   add('Received into', pick(RECEIVED_INTO_LABELS, data.receivedInto));
   add('Banked into', pick(RECEIVING_ACCOUNT_LABELS, data.bankedInto));
   add('Owner', str('ownerName'));
+  // Where an owner's rent goes (decision 6; M4b review): now, asked for, and from when.
+  if (actionType === 'management_agreement.change') {
+    add('Rent goes to now', pick(DESTINATION_LABELS, data.currentDestination) ?? 'Not chosen yet');
+    add('Rent would go to', pick(DESTINATION_LABELS, data.destination));
+    add('From', date('effectiveFrom'));
+  }
   // A settlement account (ADR-008): whose it is, and only ever its masked number.
   add('Whose account', data.holder === 'agency' ? 'The agency’s client account' : null);
   const bank = [str('bankName'), str('branch') ? `${str('branch')} branch` : null]
@@ -323,6 +332,9 @@ export function subjectHref(
       return '/cash';
     case 'settlement_account':
       return '/settings/settlement';
+    case 'owner':
+      // Where an owner's rent goes is kept with the settlement accounts.
+      return data && 'destination' in data ? '/settings/settlement' : '/owners';
     default: {
       const invoiceId = id('invoiceId');
       if (invoiceId) return `/invoices/${invoiceId}`;
