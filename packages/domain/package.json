@@ -22,6 +22,7 @@
     "./payments": "./src/payments/index.ts",
     "./tax": "./src/tax/index.ts",
     "./maintenance": "./src/maintenance/index.ts",
+    "./notices": "./src/notices/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

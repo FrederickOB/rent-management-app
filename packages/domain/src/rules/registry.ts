@@ -46,6 +46,9 @@ const REGISTRY: readonly Entry[] = [
   entry(/^stamp_duty\.deadline_months$/, months),
   entry(/^lease\.writing_exemption_max_years$/, years),
   entry(/^notice_to_quit\.statutory_min_days\.[a-z_]+$/, days, true),
+  // M7 decision 3: no notice to quit within this many months of a Rent Officer assessment
+  // (Act 220 s.23; the row is `unverified` until counsel confirms).
+  entry(/^notice_to_quit\.assessment_bar_months$/, months),
   entry(/^data_retention\.financial_and_notices$/, years, true),
   entry(/^data_retention\.other\.[a-z_]+$/, years, true),
 ];

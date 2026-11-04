@@ -116,3 +116,39 @@ export function isValidTimeZone(timeZone: string): boolean {
     return false;
   }
 }
+
+// Times of day in a time zone (M7: the notice ladder's sending window, decision 11).
+
+/** Parses a time of day, `HH:MM` from 00:00 to 23:59, into minutes after midnight. */
+export function parseTimeOfDay(text: string): number {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text);
+  if (!match) throw new DomainError('time.invalid', `Not a time of day: ${text}`);
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+/** Whole minutes after local midnight at which `instant` falls in `timeZone` (0 to 1439). */
+export function minutesIntoDay(instant: Instant, timeZone: string = DEFAULT_TIME_ZONE): number {
+  const local = instant.toZonedDateTimeISO(timeZone);
+  return local.hour * 60 + local.minute;
+}
+
+/**
+ * The instant `minutes` after local midnight on `date` in `timeZone`. A time a clock change
+ * skips moves forward to the first one that exists.
+ */
+export function instantAtMinutes(
+  date: BusinessDate,
+  minutes: number,
+  timeZone: string = DEFAULT_TIME_ZONE,
+): Instant {
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes >= 24 * 60)
+    throw new DomainError('time.invalid', `Not a time of day: ${minutes} minutes`);
+  const plainTime = Temporal.PlainTime.from({
+    hour: Math.floor(minutes / 60),
+    minute: minutes % 60,
+  });
+  return date.toZonedDateTime({ timeZone, plainTime }).toInstant();
+}
+
+export const compareInstants = (a: Instant, b: Instant): -1 | 0 | 1 =>
+  Temporal.Instant.compare(a, b) as -1 | 0 | 1;
