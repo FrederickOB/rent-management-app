@@ -1,6 +1,11 @@
 import type { ContactRow, TenantDetailView } from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
-import { CURRENT_CONSENT_TEXT, consentText, type MessageChannel } from '@rent/domain/messaging';
+import {
+  CURRENT_CONSENT_TEXT,
+  consentText,
+  type ConsentChannel,
+  type MessageChannel,
+} from '@rent/domain/messaging';
 import { tryNormalisePhone } from '@rent/domain/phone';
 import { checkGhanaCard, checkPassport, checkTin } from '@rent/domain/tenancy';
 import { changedFields } from './patch';
@@ -19,8 +24,11 @@ export type ContactPatch = Omit<
   'tenantId' | 'contactId'
 >;
 
-/** What staff record a person agreed to, by channel, in the words stored with it (decision 2). */
-export function consentWording(channel: MessageChannel): string {
+/**
+ * What staff record a person agreed to, by channel, in the words stored with it (decision 2).
+ * M6 adds WhatsApp and app notifications (CM-09).
+ */
+export function consentWording(channel: ConsentChannel): string {
   return consentText(CURRENT_CONSENT_TEXT, channel);
 }
 export const CONSENT_VERSION = CURRENT_CONSENT_TEXT;
@@ -350,32 +358,6 @@ const samePhone = (stored: string | null, typed: string): boolean =>
 const sameEmail = (stored: string | null, typed: string): boolean =>
   (stored ?? '').toLowerCase() === typed.trim().toLowerCase();
 
-/**
- * What to tell staff when they change a phone or email that has consent on record (CM-09).
- * Consent is kept by channel, so it stays when the number or address changes: staff should make
- * sure the person agreed to messages at the new one. Wording only; nothing is changed for them.
- */
-export function consentChangeNotes(
-  stored: {
-    readonly phone: string | null;
-    readonly email: string | null;
-    readonly consent: ConsentDraft;
-  },
-  typed: { readonly phone: string; readonly email: string },
-  who: string,
-): string[] {
-  const notes: string[] = [];
-  if (stored.consent.sms && typed.phone.trim() && !samePhone(stored.phone, typed.phone))
-    notes.push(
-      `The SMS consent on record stays with the new phone number. Make sure ${who} agreed to messages at that number.`,
-    );
-  if (stored.consent.email && typed.email.trim() && !sameEmail(stored.email, typed.email))
-    notes.push(
-      `The email consent on record stays with the new email address. Make sure ${who} agreed to messages at that address.`,
-    );
-  return notes;
-}
-
 /** `SMS and email`, `SMS`, or `No channel` for a consent state. */
 export function consentSummary(consent: ConsentDraft): string {
   const channels = [consent.sms ? 'SMS' : null, consent.email ? 'email' : null].filter(Boolean);
@@ -388,4 +370,55 @@ export function revealReasonProblem(reason: string): string | null {
   return reason.trim().length < REVEAL_REASON_MIN
     ? `Give a reason of at least ${REVEAL_REASON_MIN} characters, such as "checking the tenant's ID for the lease"`
     : null;
+}
+
+interface ReachableAt {
+  readonly phone: string | null;
+  /** Tenants only; contacts have one phone for SMS and WhatsApp. */
+  readonly whatsappPhone?: string | null;
+  readonly email: string | null;
+}
+
+interface TypedAt {
+  readonly phone: string;
+  readonly whatsappPhone?: string;
+  readonly email: string;
+}
+
+const changedPhone = (stored: string | null, typed: string): boolean =>
+  typed.trim() !== '' && !samePhone(stored, typed);
+const changedEmail = (stored: string | null, typed: string): boolean =>
+  typed.trim() !== '' && !sameEmail(stored, typed);
+
+/**
+ * What the edit forms say about consent when a phone or email changes (CM-09; M6 decision 8,
+ * OQ-54): a changed phone or email starts with no consent on that channel, and staff record the
+ * person's agreement for the new one. WhatsApp goes to the WhatsApp number, or to the phone when
+ * there is none. Wording only: the API applies the rule.
+ */
+export function consentResetNotes(stored: ReachableAt, typed: TypedAt, who: string): string[] {
+  const notes: string[] = [];
+  const phoneChanged = changedPhone(stored.phone, typed.phone);
+  const separateWhatsApp =
+    typed.whatsappPhone !== undefined
+      ? typed.whatsappPhone.trim() !== ''
+      : Boolean(stored.whatsappPhone);
+  const whatsappChanged =
+    typed.whatsappPhone !== undefined &&
+    changedPhone(stored.whatsappPhone ?? null, typed.whatsappPhone);
+  if (phoneChanged)
+    notes.push(
+      separateWhatsApp
+        ? `The new phone number starts with no SMS consent. Once ${who} agrees to messages at it, record that below.`
+        : `The new phone number starts with no SMS or WhatsApp consent. Once ${who} agrees to messages at it, record that below.`,
+    );
+  if (whatsappChanged)
+    notes.push(
+      `The new WhatsApp number starts with no WhatsApp consent. Once ${who} agrees to messages at it, record that below.`,
+    );
+  if (changedEmail(stored.email, typed.email))
+    notes.push(
+      `The new email address starts with no email consent. Once ${who} agrees to messages at it, record that below.`,
+    );
+  return notes;
 }

@@ -228,8 +228,9 @@ export function InvoiceDetailView({
           {can.sendPayLink && payLinkOffered(invoice) ? (
             <div className="space-y-1 border-t border-slate-200 pt-4">
               <p className="text-sm text-slate-700">
-                The tenant gets a link to pay by mobile money or card, by SMS or email where they
-                have agreed to messages. The page shows everything due on the lease, oldest first.
+                The tenant gets a link to pay by mobile money or card, on the first channel they
+                have agreed to: app notification, WhatsApp, SMS or email. The page shows everything
+                due on the lease, oldest first.
               </p>
               <SendPayLink invoiceId={invoice.id} detail={`for invoice ${invoice.number}`} />
             </div>

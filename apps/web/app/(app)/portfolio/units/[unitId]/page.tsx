@@ -3,8 +3,9 @@ import { notFound } from 'next/navigation';
 import { cache } from 'react';
 import { NoAccess } from '@/components/no-access';
 import { PageHeader } from '@/components/page-header';
+import { hasFeature } from '@/lib/plan';
 import { allowed } from '@/lib/policy';
-import { getMe, loadUnit } from '@/lib/server/session';
+import { getCompany, getMe, loadUnit } from '@/lib/server/session';
 import { UnitDetail } from './unit-detail';
 
 type Params = Promise<{ readonly unitId: string }>;
@@ -18,7 +19,7 @@ export async function generateMetadata({ params }: { readonly params: Params }):
 
 /** One unit: details, availability with its history, billing band and meters (PR-02 to PR-09). */
 export default async function UnitPage({ params }: { readonly params: Params }) {
-  const [{ unitId }, me] = await Promise.all([params, getMe()]);
+  const [{ unitId }, me, company] = await Promise.all([params, getMe(), getCompany()]);
   if (!me) return null;
   const loaded = await unit(unitId);
   if (!loaded.ok) {
@@ -38,6 +39,7 @@ export default async function UnitPage({ params }: { readonly params: Params }) 
         overrideBand: allowed(me, 'unit.band_override'),
         seeLeases: allowed(me, 'lease.view'),
         draftLease: allowed(me, 'lease.manage'),
+        conversations: allowed(me, 'messaging.inbox.read') && hasFeature(company, 'inbox'),
       }}
     />
   );

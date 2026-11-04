@@ -11,13 +11,32 @@ import { DESTINATION_PROBLEM_TEXT } from '@rent/domain/payments';
 export type PayLinkAnswer = Awaited<ReturnType<ApiClient['paymentsQueue']['sendPayLink']>>;
 type Channel = PayLinkAnswer['channels'][number];
 
-const CHANNEL_WORDS: Record<Channel, string> = { sms: 'SMS', email: 'email' };
+/** M6 adds app notifications and WhatsApp (C2): a pay link goes on the first that works. */
+const CHANNEL_WORDS: Record<'push' | 'whatsapp' | 'sms' | 'email', string> = {
+  push: 'app notification',
+  whatsapp: 'WhatsApp',
+  sms: 'SMS',
+  email: 'email',
+};
 
 /** `SMS and email`, `email`. */
 export function channelsLabel(channels: readonly Channel[]): string {
   const words = [...new Set(channels)].map((c) => CHANNEL_WORDS[c]);
   if (words.length <= 1) return words[0] ?? '';
   return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
+}
+
+/**
+ * Where a pay link goes (C2): the API lists the consented channels in the order it tries them, and
+ * one of them carries the link. `by SMS`; `by WhatsApp (by SMS if that fails)`; `by app
+ * notification (if that fails, by WhatsApp, then SMS)`.
+ */
+export function payLinkRoute(channels: readonly Channel[]): string {
+  const [first, ...rest] = [...new Set(channels)].map((c) => CHANNEL_WORDS[c]);
+  if (!first) return '';
+  if (rest.length === 0) return `by ${first}`;
+  if (rest.length === 1) return `by ${first} (by ${rest[0]} if that fails)`;
+  return `by ${first} (if that fails, by ${rest.join(', then ')})`;
 }
 
 /** What the API did with a pay link, in one sentence: where it went, or why nothing went. */
@@ -28,7 +47,10 @@ export function payLinkOutcome(answer: PayLinkAnswer): {
   if (answer.channels.length > 0)
     return {
       sent: true,
-      text: `Pay link sent by ${channelsLabel(answer.channels)}. It works until the invoice is paid, or for 60 days.`,
+      text:
+        answer.channels.length === 1
+          ? `Pay link sent ${payLinkRoute(answer.channels)}. It works until the invoice is paid, or for 60 days.`
+          : `Pay link on its way ${payLinkRoute(answer.channels)}. It works until the invoice is paid, or for 60 days.`,
     };
   return {
     sent: false,
@@ -62,7 +84,7 @@ export const PAY_LINK_PROBLEM_LABELS: Record<PayLinkProblem, string> = {
   not_billed: 'The lease is not billed, so there is nothing to pay by link',
   nothing_due: 'Nothing is left to pay on this lease now',
   no_consent:
-    'The tenant has not agreed to messages by SMS or email, so a link cannot be sent to them',
+    'The tenant has not agreed to messages on any channel (app notifications, WhatsApp, SMS or email), so a link cannot be sent to them',
 };
 
 export type PayLinkState =

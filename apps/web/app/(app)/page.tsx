@@ -7,6 +7,7 @@ import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { companyKindLabel, roleLabel } from '@/lib/format';
+import { companyFeatures } from '@/lib/plan';
 import { allowed } from '@/lib/policy';
 import { totalOf } from '@/lib/register-format';
 import { formatBusinessDate } from '@/lib/business-dates';
@@ -24,7 +25,7 @@ export default async function HomePage() {
   const [me, company] = await Promise.all([getMe(), getCompany()]);
   if (!me) return null;
   const membership = me.memberships.find((m) => m.companyId === me.activeCompanyId);
-  const sections = navFor(me).filter((item) => item.href !== '/');
+  const sections = navFor(me, companyFeatures(company)).filter((item) => item.href !== '/');
   // The start of the DA-01 dashboard (M9): what is in the register, by status (M2 plan 4.11).
   const [properties, units] = allowed(me, 'register.view')
     ? await Promise.all([loadPropertyList(), loadUnitCounts()])

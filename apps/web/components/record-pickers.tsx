@@ -91,10 +91,13 @@ export function TenantPicker({
   value,
   onChange,
   error,
+  label = 'Tenant for this lease',
 }: {
   readonly value: PickedTenant | null;
   readonly onChange: (tenant: PickedTenant | null) => void;
   readonly error?: string | null;
+  /** The choice's label; lease forms keep the default. */
+  readonly label?: string;
 }) {
   const [search, setSearch] = useState('');
   const query = useDebounced(search);
@@ -133,7 +136,7 @@ export function TenantPicker({
         onChange={(event) => setSearch(event.target.value)}
       />
       <SelectField
-        label="Tenant for this lease"
+        label={label}
         value={value?.id ?? ''}
         error={problem ?? error}
         options={[

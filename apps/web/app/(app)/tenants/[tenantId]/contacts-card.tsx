@@ -1,6 +1,7 @@
 'use client';
 
 import type { ContactRow, TenantDetailView } from '@rent/contracts';
+import type { ConsentChannel } from '@rent/domain/messaging';
 import { useState, type FormEvent } from 'react';
 import { ConfirmBox } from '@/components/confirm-box';
 import { Alert } from '@/components/ui/alert';
@@ -10,9 +11,10 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { CheckboxField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import type { ChannelConsent } from '@/lib/messaging-consent';
 import { CONTACT_KIND_LABELS, CONTACT_KINDS_FOR } from '@/lib/tenancy-format';
 import {
-  consentChangeNotes,
+  consentResetNotes,
   contactCreateInput,
   contactDraftOf,
   contactPatch,
@@ -31,10 +33,18 @@ export function ContactsCard({
   tenant,
   canManage,
   onChanged,
+  consentOf,
+  consentProblem,
+  onRecordConsent,
 }: {
   readonly tenant: TenantDetailView;
   readonly canManage: boolean;
   readonly onChanged: (text: string) => Promise<void>;
+  /** The contact's consent on every channel (CM-09); null while it loads or if the read failed. */
+  readonly consentOf: (contact: ContactRow) => readonly ChannelConsent[] | null;
+  /** Why the consent read failed; the consent card above offers the retry. */
+  readonly consentProblem: string | null;
+  readonly onRecordConsent: ConsentRecorder;
 }) {
   const [adding, setAdding] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -85,6 +95,9 @@ export function ContactsCard({
               contact={contact}
               canManage={canManage && !contact.archived}
               onChanged={onChanged}
+              consent={consentOf(contact)}
+              consentProblem={consentProblem}
+              onRecordConsent={onRecordConsent}
             />
           ))}
         </ul>
@@ -93,16 +106,29 @@ export function ContactsCard({
   );
 }
 
+/** Records a consent event for a contact and says what was recorded. */
+export type ConsentRecorder = (
+  contact: ContactRow,
+  channel: ConsentChannel,
+  action: 'grant' | 'withdraw',
+) => Promise<void>;
+
 function ContactItem({
   tenant,
   contact,
   canManage,
   onChanged,
+  consent,
+  consentProblem,
+  onRecordConsent,
 }: {
   readonly tenant: TenantDetailView;
   readonly contact: ContactRow;
   readonly canManage: boolean;
   readonly onChanged: (text: string) => Promise<void>;
+  readonly consent: readonly ChannelConsent[] | null;
+  readonly consentProblem: string | null;
+  readonly onRecordConsent: ConsentRecorder;
 }) {
   const [mode, setMode] = useState<'view' | 'edit' | 'archive'>('view');
   const [busy, setBusy] = useState(false);
@@ -184,25 +210,20 @@ function ContactItem({
         />
       ) : null}
       {!contact.archived ? (
-        <ConsentRows
-          consent={contact.consent}
-          addresses={{ sms: contact.phone, email: contact.email }}
-          canManage={canManage}
-          who={contact.name}
-          onRecord={async (channel, action) => {
-            await api().tenants.recordConsent({
-              tenantId: tenant.id,
-              contactId: contact.id,
-              channel,
-              action,
-            });
-            await onChanged(
-              action === 'grant'
-                ? `Recorded ${channel === 'sms' ? 'SMS' : 'email'} consent for ${contact.name}.`
-                : `Recorded that ${contact.name} withdrew ${channel === 'sms' ? 'SMS' : 'email'} consent.`,
-            );
-          }}
-        />
+        consent ? (
+          <ConsentRows
+            channels={consent}
+            canManage={canManage}
+            who={contact.name}
+            onRecord={(channel, action) => onRecordConsent(contact, channel, action)}
+          />
+        ) : (
+          <p className="text-sm text-slate-600" role="status">
+            {consentProblem
+              ? 'Their consent could not be loaded. Try again from the Messages card above.'
+              : 'Loading their consent…'}
+          </p>
+        )
       ) : null}
     </li>
   );
@@ -225,7 +246,7 @@ function EditContact({
   const [error, setError] = useState<string | null>(null);
   // Consent is recorded on its own below the contact, so it is not checked here.
   const problems = contactProblems({ ...draft, consent: { sms: false, email: false } });
-  const consentNotes = consentChangeNotes(contact, draft, contact.name);
+  const consentNotes = consentResetNotes(contact, draft, contact.name);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

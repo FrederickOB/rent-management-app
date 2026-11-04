@@ -3,8 +3,9 @@ import { notFound } from 'next/navigation';
 import { cache } from 'react';
 import { NoAccess } from '@/components/no-access';
 import { PageHeader } from '@/components/page-header';
+import { hasFeature } from '@/lib/plan';
 import { allowed } from '@/lib/policy';
-import { getMe, loadTenant } from '@/lib/server/session';
+import { getCompany, getMe, loadTenant } from '@/lib/server/session';
 import { TenantLimited, TenantProfile } from './tenant-profile';
 
 type Params = Promise<{ readonly tenantId: string }>;
@@ -27,7 +28,12 @@ export default async function TenantPage({
   readonly params: Params;
   readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const [{ tenantId }, query, me] = await Promise.all([params, searchParams, getMe()]);
+  const [{ tenantId }, query, me, company] = await Promise.all([
+    params,
+    searchParams,
+    getMe(),
+    getCompany(),
+  ]);
   if (!me) return null;
   const loaded = await tenant(tenantId);
   if (!loaded.ok) {
@@ -50,6 +56,8 @@ export default async function TenantPage({
         verify: allowed(me, 'tenant.id.verify'),
         reveal: allowed(me, 'tenant.id.reveal'),
         lease: allowed(me, 'lease.manage'),
+        messages: allowed(me, 'messaging.inbox.read') && hasFeature(company, 'inbox'),
+        write: allowed(me, 'messaging.reply') && hasFeature(company, 'inbox'),
       }}
     />
   );
