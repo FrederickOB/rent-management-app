@@ -2,6 +2,8 @@ module.exports = {
   preset: 'jest-expo',
   testMatch: ['**/?(*.)test.tsx', '**/?(*.)test.ts'],
   testPathIgnorePatterns: ['/node_modules/', '/web-build/'],
+  // The offline cache's store, in memory and empty for each test.
+  setupFilesAfterEnv: ['<rootDir>/__tests__/jest-setup.ts'],
   // React Native loads its components lazily and Babel transforms them on first use, so the first
   // render in a run is slow: 3 seconds on a CI runner with a cold cache, 18 when other suites share
   // its CPUs. Jest's 5-second default charges all of that to whichever test renders first.

@@ -39,6 +39,8 @@ export async function createApiApp(core: CoreOptions = {}): Promise<NestFastifyA
     adapter,
     {
       logger: new NestLogger(logger),
+      // Provider webhooks are verified against the exact bytes received (M4b plan 4.4).
+      rawBody: true,
     },
   );
 
@@ -72,6 +74,13 @@ export async function createApiApp(core: CoreOptions = {}): Promise<NestFastifyA
     .ensureBuckets({ files: config.S3_BUCKET_FILES, evidence: config.S3_BUCKET_EVIDENCE })
     .catch((error: unknown) => logger.warn({ err: error }, 'could not ensure storage buckets'));
 
+  // Decision 3 (OQ-03): config refuses a live key without the switch; when it is on, the log
+  // records who turned it on (never the key).
+  if (config.LIVE_RENT_COLLECTION === 'enabled')
+    logger.warn(
+      { liveRentCollection: true, enabledBy: config.LIVE_RENT_COLLECTION_ENABLED_BY },
+      'live rent collection is enabled',
+    );
   await app.init();
   return app;
 }

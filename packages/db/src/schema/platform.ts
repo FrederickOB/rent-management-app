@@ -136,6 +136,12 @@ export const approvalRequest = pgTable(
     actionType: text().notNull(),
     subjectType: text().notNull(),
     subjectId: text().notNull(),
+    /**
+     * The property the subject belongs to (AD-02; M4a review 8), or null for a company-level
+     * request. Scoped people see and decide only requests for their properties. The foreign key
+     * (with company_id) is in migration 0016.
+     */
+    propertyId: uuid(),
     payload: jsonb().notNull(),
     payloadHash: text().notNull(),
     initiatedBy: uuid()

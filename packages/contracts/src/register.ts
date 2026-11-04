@@ -423,6 +423,15 @@ export const registerContract = {
     .route({ method: 'POST', path: '/properties/{propertyId}/ownership' })
     .input(z.object({ propertyId: uuid, ownerId: uuid, effectiveFrom: isoDate }))
     .output(propertyDetailSchema),
+  correctOwner: oc
+    .route({
+      method: 'POST',
+      path: '/properties/{propertyId}/ownership/correction',
+      summary:
+        'Correct a property’s owner on the same date, before it has any invoice or payment (M2 S5; M4a decision 6)',
+    })
+    .input(z.object({ propertyId: uuid, ownerId: uuid, reason: z.string().trim().min(5).max(300) }))
+    .output(propertyDetailSchema),
   addBlock: oc
     .route({ method: 'POST', path: '/properties/{propertyId}/blocks' })
     .input(

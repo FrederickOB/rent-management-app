@@ -1,10 +1,18 @@
 import type { TenancyGroupView, TenantSigningView } from '@rent/contracts';
 import { Redirect, useRouter } from 'expo-router';
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
-import { leasesAre, leaseStatusLabel, leaseStatusTone, rentLabel, termLabel } from '../src/format';
+import {
+  formatTime,
+  leasesAre,
+  leaseStatusLabel,
+  leaseStatusTone,
+  rentLabel,
+  termLabel,
+} from '../src/format';
 import { useSession } from '../src/session';
+import { isBilled, TenancyMoney } from '../src/tenancy-money';
 import {
   Badge,
   Body,
@@ -18,6 +26,7 @@ import {
   Screen,
   Small,
 } from '../src/ui';
+import { useCachedLoad, type CachedView } from '../src/use-cached-load';
 import { useLoad, useReloadOnReturn, type LoadState } from '../src/use-load';
 
 type Tenancy = TenancyGroupView['tenancies'][number];
@@ -26,22 +35,26 @@ const loadTenancies = () => api.tenantApp.tenancies();
 const loadSigning = () => api.tenantApp.signing();
 
 /**
- * Home (TL-01): the tenant's tenancies, grouped by landlord, and what is waiting for their
- * signature (TL-07). Each landlord's tenancies stay in a box of their own (TL-12): the screen never
- * merges or compares one landlord's records with another's. Balance, paid-until and next due
- * arrive with the ledger (M4a).
+ * Home (TL-01): the tenant's tenancies, grouped by landlord, each with what is due, paid-until
+ * and the next payment, and Pay (M4b plan 4.10); and what is waiting for their signature (TL-07).
+ * Each landlord's tenancies and money stay in a box of their own (TL-12): the screen never merges,
+ * totals or compares one landlord's records with another's. Offline, the figures last fetched on
+ * this device show, with the time they were fetched.
  */
 export default function Home() {
   const router = useRouter();
   const { me, loading } = useSession();
-  const tenancies = useLoad(loadTenancies, Boolean(me));
+  const tenancies = useCachedLoad('tenancies', loadTenancies, Boolean(me));
   const signing = useLoad(loadSigning, Boolean(me));
+  // Each tenancy's money reloads when this goes up: on coming back to the screen or the app.
+  const [moneyTick, setMoneyTick] = useState(0);
   const { reload: reloadTenancies } = tenancies;
   const { reload: reloadSigning } = signing;
   useReloadOnReturn(
     useCallback(() => {
       reloadTenancies();
       reloadSigning();
+      setMoneyTick((tick) => tick + 1);
     }, [reloadTenancies, reloadSigning]),
   );
 
@@ -50,9 +63,17 @@ export default function Home() {
     <Screen title={me ? `Hello, ${me.name}` : 'Hello'} scroll>
       <ToSignEntry state={signing.state} onOpen={() => router.push('/to-sign')} />
       <Tenancies
-        state={tenancies.state}
+        view={tenancies.view}
         onRetry={tenancies.retry}
+        onReload={tenancies.reload}
+        moneyTick={moneyTick}
         onOpen={(leaseId) => router.push(`/tenancy/${leaseId}`)}
+      />
+      <Button
+        label="Payments and receipts"
+        variant="quiet"
+        testID="open-payments"
+        onPress={() => router.push('/payments')}
       />
       <Button
         label="Profile and devices"
@@ -103,30 +124,42 @@ function ToSignEntry({
 }
 
 function Tenancies({
-  state,
+  view,
   onRetry,
+  onReload,
+  moneyTick,
   onOpen,
 }: {
-  state: LoadState<TenancyGroupView[]>;
+  view: CachedView<TenancyGroupView[]>;
   onRetry: () => void;
+  onReload: () => void;
+  moneyTick: number;
   onOpen: (leaseId: string) => void;
 }) {
-  if (state.status === 'loading') return <Loading label="Loading your tenancies" />;
-  if (state.status === 'error') {
+  if (view.status === 'loading') return <Loading label="Loading your tenancies" />;
+  if (view.status === 'error') {
     return (
       <View style={styles.stack}>
-        <ErrorText>We could not load your tenancies. {state.problem.message}</ErrorText>
+        <ErrorText>We could not load your tenancies. {view.problem.message}</ErrorText>
         <Button label="Try again" variant="quiet" testID="retry" onPress={onRetry} />
       </View>
     );
   }
-  const groups = state.data;
+  const groups = view.data;
   return (
     <View style={styles.stack}>
-      {state.refreshProblem && state.refreshProblem.status !== 401 ? (
+      {view.offline ? (
+        <View style={styles.stack}>
+          <Notice testID="offline">
+            You are offline. This is what we last fetched, at {formatTime(view.fetchedAt)}, so it
+            may be out of date.
+          </Notice>
+          <Button label="Try again" variant="quiet" testID="retry-offline" onPress={onReload} />
+        </View>
+      ) : null}
+      {view.refreshProblem && view.refreshProblem.status !== 401 ? (
         <Notice testID="refresh-problem">
-          We could not update this just now, so it may be out of date.{' '}
-          {state.refreshProblem.message}
+          We could not update this just now, so it may be out of date. {view.refreshProblem.message}
         </Notice>
       ) : null}
       {groups.length === 0 ? (
@@ -135,19 +168,26 @@ function Tenancies({
         </Body>
       ) : (
         groups.map((group) => (
-          <LandlordGroup key={group.landlord.companyId} group={group} onOpen={onOpen} />
+          <LandlordGroup
+            key={group.landlord.companyId}
+            group={group}
+            moneyTick={moneyTick}
+            onOpen={onOpen}
+          />
         ))
       )}
     </View>
   );
 }
 
-/** One landlord's tenancies, in a box of their own (TL-12). */
+/** One landlord's tenancies and their money, in a box of their own (TL-12). */
 function LandlordGroup({
   group,
+  moneyTick,
   onOpen,
 }: {
   group: TenancyGroupView;
+  moneyTick: number;
   onOpen: (leaseId: string) => void;
 }) {
   return (
@@ -157,30 +197,49 @@ function LandlordGroup({
         <Heading>{group.landlord.name}</Heading>
       </View>
       {group.tenancies.map((tenancy) => (
-        <TenancyRow key={tenancy.leaseId} tenancy={tenancy} onOpen={onOpen} />
+        <TenancyRow key={tenancy.leaseId} tenancy={tenancy} moneyTick={moneyTick} onOpen={onOpen} />
       ))}
     </Card>
   );
 }
 
-function TenancyRow({ tenancy, onOpen }: { tenancy: Tenancy; onOpen: (leaseId: string) => void }) {
+/** A tenancy: its terms, which open the lease, then its money and Pay beside them. */
+function TenancyRow({
+  tenancy,
+  moneyTick,
+  onOpen,
+}: {
+  tenancy: Tenancy;
+  moneyTick: number;
+  onOpen: (leaseId: string) => void;
+}) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityHint="Opens the lease terms"
-      testID="tenancy-card"
-      onPress={() => onOpen(tenancy.leaseId)}
-      style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-    >
-      <View style={styles.rowTop}>
-        <Text style={styles.unit}>{tenancy.unitCode}</Text>
-        <Badge label={leaseStatusLabel(tenancy.status)} tone={leaseStatusTone(tenancy.status)} />
-      </View>
-      <Text style={styles.property}>{tenancy.propertyName}</Text>
-      <Small>{rentLabel(tenancy.monthlyRentMinor, tenancy.cycle)}</Small>
-      <Small>{termLabel(tenancy.startDate, tenancy.endDate)}</Small>
-      <Text style={styles.more}>See the lease ›</Text>
-    </Pressable>
+    <View style={styles.row} testID="tenancy-row">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityHint="Opens the lease terms"
+        testID="tenancy-card"
+        onPress={() => onOpen(tenancy.leaseId)}
+        style={({ pressed }) => [styles.terms, pressed && styles.pressed]}
+      >
+        <View style={styles.rowTop}>
+          <Text style={styles.unit}>{tenancy.unitCode}</Text>
+          <Badge label={leaseStatusLabel(tenancy.status)} tone={leaseStatusTone(tenancy.status)} />
+        </View>
+        <Text style={styles.property}>{tenancy.propertyName}</Text>
+        <Small>{rentLabel(tenancy.monthlyRentMinor, tenancy.cycle)}</Small>
+        <Small>{termLabel(tenancy.startDate, tenancy.endDate)}</Small>
+        <Text style={styles.more}>See the lease ›</Text>
+      </Pressable>
+      {isBilled(tenancy.status) ? (
+        <TenancyMoney
+          leaseId={tenancy.leaseId}
+          status={tenancy.status}
+          endDate={tenancy.endDate}
+          refreshTick={moneyTick}
+        />
+      ) : null}
+    </View>
   );
 }
 
@@ -190,8 +249,9 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colours.line,
     paddingTop: 12,
-    gap: 4,
+    gap: 8,
   },
+  terms: { gap: 4 },
   pressed: { opacity: 0.7 },
   rowTop: {
     flexDirection: 'row',

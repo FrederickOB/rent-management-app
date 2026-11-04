@@ -70,6 +70,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: cp .env.example .env
+      # pnpm test:e2e brings the services up again with --no-recreate, so the fake provider keeps
+      # the subaccounts and charges the seed made (it holds them in memory).
       - name: Start every Compose service, fake-providers included
         run: docker compose up -d --wait
       - run: pnpm db:migrate
@@ -137,8 +139,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: cp .env.example .env
-      # The seed needs no fake providers, so their image is not built here.
-      - run: docker compose up -d --wait postgres seaweedfs mailpit
+      # The seed takes its demo payments through the fake payment provider (M4b), so it runs too.
+      - run: docker compose up -d --wait postgres seaweedfs mailpit fake-providers
       - run: pnpm db:migrate
       - run: pnpm db:seed
       - name: Restore a dump and verify its audit chains

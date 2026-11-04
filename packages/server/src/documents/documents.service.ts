@@ -1,9 +1,16 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
-import { renderTemplateHtml, sha256Hex, verifyFingerprint, type Branding } from '@rent/documents';
+import {
+  renderTemplateHtml,
+  sha256Hex,
+  templates,
+  verifyFingerprint,
+  withFixedPdfDates,
+  type Branding,
+} from '@rent/documents';
 import { businessDateOf, instantFrom } from '@rent/domain/dates';
-import type { StoragePort } from '@rent/integrations';
+import { StorageError, type ObjectInfo, type StoragePort } from '@rent/integrations';
 import sharp from 'sharp';
 import { v7 as uuidv7 } from 'uuid';
 import type { Clock } from '../core/clock';
@@ -62,7 +69,18 @@ const DOWNLOAD_SECONDS = 300;
 const UPLOAD_SECONDS = 600;
 
 export interface UploadPurpose {
-  readonly purpose: 'logo' | 'property_photo' | 'property_paper' | 'register_import' | 'lease_file';
+  readonly purpose:
+    | 'logo'
+    | 'property_photo'
+    | 'property_paper'
+    | 'register_import'
+    | 'lease_file'
+    | 'cash_photo'
+    | 'transfer_proof'
+    | 'banking_slip'
+    | 'gra_receipt'
+    | 'withholding_certificate'
+    | 'refund_proof';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }
@@ -77,10 +95,34 @@ export const LEASE_FILE_UPLOAD: UploadPurpose = {
   maxBytes: 20_000_000,
 };
 
+/**
+ * Proof of money (M4a plan 4.8): a photo of the receipt-book page or the cheque, a transfer's proof
+ * (a screenshot or statement line) and a banking slip. Stored write-once as evidence.
+ */
+const MONEY_PROOF = {
+  contentTypes: ['image/jpeg', 'image/png', 'application/pdf'],
+  maxBytes: 10_000_000,
+} as const;
+export const CASH_PHOTO_UPLOAD: UploadPurpose = { purpose: 'cash_photo', ...MONEY_PROOF };
+export const TRANSFER_PROOF_UPLOAD: UploadPurpose = { purpose: 'transfer_proof', ...MONEY_PROOF };
+export const BANKING_SLIP_UPLOAD: UploadPurpose = { purpose: 'banking_slip', ...MONEY_PROOF };
+/**
+ * M5: GRA's receipt for rent tax or VAT paid (P18, P33), a withholding certificate (P20) and the
+ * proof a refund was paid (P13). Evidence, stored write-once like the money proofs.
+ */
+export const GRA_RECEIPT_UPLOAD: UploadPurpose = { purpose: 'gra_receipt', ...MONEY_PROOF };
+export const WITHHOLDING_CERTIFICATE_UPLOAD: UploadPurpose = {
+  purpose: 'withholding_certificate',
+  ...MONEY_PROOF,
+};
+export const REFUND_PROOF_UPLOAD: UploadPurpose = { purpose: 'refund_proof', ...MONEY_PROOF };
+
 /** An upload checked and copied to write-once storage, waiting to be recorded as a document. */
 export interface StagedEvidence {
   readonly companyId: string;
   readonly uploadId: string;
+  /** The plain copy in the files bucket, removed once the write that records it has committed. */
+  readonly uploadKey: string;
   readonly contentType: string;
   readonly bytes: Buffer;
   readonly storageKey: string;
@@ -89,6 +131,13 @@ export interface StagedEvidence {
   readonly retainUntil: Date;
   readonly createdBy: string;
 }
+
+/** One evidence key per upload, so staging it again finds the copy already made. */
+const evidenceKeyOf = (intent: {
+  readonly companyId: string;
+  readonly purpose: string;
+  readonly id: string;
+}): string => `evidence/${intent.companyId}/${intent.purpose}/${intent.id}`;
 
 /** What the bytes really are, whatever the upload declared. */
 function sniffContentType(bytes: Buffer): string | null {
@@ -297,7 +346,12 @@ export class DocumentsService {
       request.data,
       branding,
     );
-    const pdf = await render(html);
+    const rendered = await render(html);
+    // A report that must regenerate identically carries its own date, not the render's (M5).
+    const fixedDate = templates
+      .get(request.templateKey, request.templateVersion)
+      .pdfDate(request.data);
+    const pdf = fixedDate ? Buffer.from(await withFixedPdfDates(rendered, fixedDate)) : rendered;
     const file = await this.storeWriteOnce({
       companyId,
       countryCode: company.countryCode,
@@ -452,7 +506,12 @@ export class DocumentsService {
   /**
    * Checks an upload (its uploader, purpose, size, declared type and real bytes) and copies it to
    * the evidence bucket under Object Lock, with the retention from the rules table. Runs outside
-   * any transaction; the caller then records it with recordStagedEvidence in its own.
+   * any transaction; the caller then records it with recordStagedEvidence in its own, and calls
+   * discardStagedUpload once that has committed.
+   *
+   * Safe to repeat until the upload is recorded: the evidence copy has one key per upload, so a
+   * retry after a write that failed, was refused or lost its answer finds the copy it already made
+   * instead of storing a second one, and the plain copy stays until the write has committed.
    */
   async stageEvidenceUpload(
     ctx: { companyId: string; personId: string },
@@ -474,6 +533,35 @@ export class DocumentsService {
       throw notFound('Upload');
     if (intent.status !== 'pending' || intent.expiresAt.getTime() < this.clock.now().getTime())
       throw invalid('upload_expired', 'That upload has expired; upload the file again');
+    const [company] = await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+      tx
+        .select({ countryCode: schema.company.countryCode })
+        .from(schema.company)
+        .where(eq(schema.company.id, ctx.companyId)),
+    );
+    const retention = await this.evidenceRetention(company?.countryCode ?? 'GH');
+    const evidence = { bucket: this.config.S3_BUCKET_EVIDENCE, key: evidenceKeyOf(intent) };
+    const staged = (
+      bytes: Buffer,
+      versionId: string,
+      lock: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
+    ): StagedEvidence => ({
+      companyId: ctx.companyId,
+      uploadId,
+      uploadKey: intent.storageKey,
+      contentType: intent.contentType,
+      bytes,
+      storageKey: evidence.key,
+      storageVersionId: versionId,
+      retentionMode: lock.mode,
+      retainUntil: lock.retainUntil,
+      createdBy: ctx.personId,
+    });
+    // An earlier attempt copied it already: use that copy, checked again.
+    const earlier = await this.storage.head(evidence);
+    if (earlier)
+      return staged(...(await this.earlierEvidence(evidence, intent, earlier, retention)));
+
     const head = await this.storage.head({
       bucket: this.config.S3_BUCKET_FILES,
       key: intent.storageKey,
@@ -491,39 +579,65 @@ export class DocumentsService {
       await this.rejectUpload(ctx, uploadId, 'contents do not match the declared type');
       throw invalid('upload_rejected', 'The file is not the PDF or image it was declared as');
     }
-    const [company] = await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
-      tx
-        .select({ countryCode: schema.company.countryCode })
-        .from(schema.company)
-        .where(eq(schema.company.id, ctx.companyId)),
-    );
-    const retention = await this.evidenceRetention(company?.countryCode ?? 'GH');
-    const storageKey = `evidence/${ctx.companyId}/${purpose.purpose}/${uuidv7()}`;
-    const stored = await this.storage.putWriteOnce({
-      bucket: this.config.S3_BUCKET_EVIDENCE,
-      key: storageKey,
-      body: bytes,
-      contentType: intent.contentType,
-      retainUntil: retention.retainUntil,
-      mode: retention.mode,
-    });
+    let stored: { readonly versionId: string; readonly sha256: string };
+    try {
+      stored = await this.storage.putWriteOnce({
+        ...evidence,
+        body: bytes,
+        contentType: intent.contentType,
+        retainUntil: retention.retainUntil,
+        mode: retention.mode,
+      });
+    } catch (error) {
+      // Another request staged the same upload at the same moment: use its copy.
+      const raced =
+        error instanceof StorageError && error.code === 'already_exists'
+          ? await this.storage.head(evidence)
+          : null;
+      if (!raced) throw error;
+      return staged(...(await this.earlierEvidence(evidence, intent, raced, retention)));
+    }
     if (stored.sha256 !== createHash('sha256').update(bytes).digest('hex'))
       throw new Error('Stored bytes do not match the upload');
-    // The plain copy in the files bucket is no longer needed.
-    await this.storage
-      .delete({ bucket: this.config.S3_BUCKET_FILES, key: intent.storageKey })
-      .catch(() => undefined);
-    return {
-      companyId: ctx.companyId,
-      uploadId,
-      contentType: intent.contentType,
+    return staged(bytes, stored.versionId, retention);
+  }
+
+  /**
+   * The evidence copy an earlier attempt made of an upload: its bytes, checked against the
+   * checksum the store kept and the declared type, with the lock it was stored under.
+   */
+  private async earlierEvidence(
+    evidence: { readonly bucket: string; readonly key: string },
+    intent: { readonly contentType: string },
+    info: ObjectInfo,
+    retention: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
+  ): Promise<
+    [Buffer, string, { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date }]
+  > {
+    if (!info.versionId) throw new Error('The evidence copy has no version');
+    const bytes = await this.storage.get({ ...evidence, versionId: info.versionId });
+    if (info.sha256 && info.sha256 !== createHash('sha256').update(bytes).digest('hex'))
+      throw new Error('The evidence copy does not match its checksum');
+    if (sniffContentType(bytes) !== intent.contentType)
+      throw new Error('The evidence copy is not the type its upload declared');
+    return [
       bytes,
-      storageKey,
-      storageVersionId: stored.versionId,
-      retentionMode: retention.mode,
-      retainUntil: retention.retainUntil,
-      createdBy: ctx.personId,
-    };
+      info.versionId,
+      {
+        mode: info.retentionMode ?? retention.mode,
+        retainUntil: info.retainUntil ?? retention.retainUntil,
+      },
+    ];
+  }
+
+  /**
+   * Removes an upload's plain copy from the files bucket once the write that recorded it has
+   * committed. It never throws: a copy left behind is only a stray file nobody can be sent.
+   */
+  async discardStagedUpload(staged: StagedEvidence): Promise<void> {
+    await this.storage
+      .delete({ bucket: this.config.S3_BUCKET_FILES, key: staged.uploadKey })
+      .catch(() => undefined);
   }
 
   /** Records a staged upload as a write-once document in the caller's transaction. */

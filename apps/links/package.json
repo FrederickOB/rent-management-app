@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@rent/contracts": "workspace:*",
+    "@rent/domain": "workspace:*",
     "next": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",

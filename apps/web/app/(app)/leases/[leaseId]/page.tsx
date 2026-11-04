@@ -39,7 +39,8 @@ export default async function LeasePage({
       </>
     );
   }
-  if (loaded.data.access === 'limited') return <LeaseLimited lease={loaded.data} />;
+  if (loaded.data.access === 'limited')
+    return <LeaseLimited lease={loaded.data} canRecordCash={allowed(me, 'payment.record')} />;
   const saved = typeof query.saved === 'string' ? query.saved : null;
   return (
     <LeaseDetail
@@ -50,6 +51,18 @@ export default async function LeasePage({
         cancelSigned: allowed(me, 'lease.cancel_signed'),
         seeApprovals: allowed(me, 'approval.view'),
         seeTenant: allowed(me, 'tenant.view'),
+        money: {
+          view: allowed(me, 'billing.view'),
+          recordCash: allowed(me, 'payment.record'),
+          recordTransfer: allowed(me, 'payment.record_transfer'),
+          sendPayLink: allowed(me, 'billing.manage'),
+        },
+        tax: {
+          manage: allowed(me, 'billing.manage'),
+          confirm: allowed(me, 'withholding.confirm'),
+        },
+        agency:
+          me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind === 'agency',
       }}
     />
   );

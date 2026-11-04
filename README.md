@@ -24,20 +24,20 @@ pnpm dev
 
 ## Daily commands
 
-| Command                                   | What it does                                                                                            |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`                                | Starts the Compose services, then api, worker, web, links and the tenant app in watch mode              |
-| `pnpm services:up` / `pnpm services:down` | Starts or stops the Compose services                                                                    |
-| `pnpm build`                              | Production builds of web and links, and the tenant app's web export                                     |
-| `pnpm lint` / `pnpm typecheck`            | ESLint (typed rules and the repository's own rules) and TypeScript                                      |
-| `pnpm format` / `pnpm format:check`       | Prettier                                                                                                |
-| `pnpm test`                               | Starts the services, then every unit and integration test (real PostgreSQL with RLS) and the Expo tests |
-| `pnpm test:unit`                          | Unit tests only, no services                                                                            |
-| `pnpm test:e2e`                           | Playwright, one app at a time; keep `pnpm dev` running (links builds and serves its own copy on 3792)   |
-| `pnpm db:migrate`                         | Applies the SQL migrations as `rent_owner`                                                              |
-| `pnpm db:seed`                            | Loads the demo dataset; idempotent, and refuses any database that is not local                          |
-| `pnpm db:backup` / `pnpm db:restore`      | Local backup and restore ([runbook](docs/runbooks/backup-restore.md))                                   |
-| `pnpm rules:add`                          | Adds a row to the legal and tax rules table (TX-08)                                                     |
+| Command                                   | What it does                                                                                                                                                                                                          |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                                | Starts the Compose services, then api, worker, web, links and the tenant app in watch mode                                                                                                                            |
+| `pnpm services:up` / `pnpm services:down` | Starts or stops the Compose services                                                                                                                                                                                  |
+| `pnpm build`                              | Production builds of web and links, and the tenant app's web export                                                                                                                                                   |
+| `pnpm lint` / `pnpm typecheck`            | ESLint (typed rules and the repository's own rules) and TypeScript                                                                                                                                                    |
+| `pnpm format` / `pnpm format:check`       | Prettier                                                                                                                                                                                                              |
+| `pnpm test`                               | Starts the services, then every unit and integration test (real PostgreSQL with RLS) and the Expo tests                                                                                                               |
+| `pnpm test:unit`                          | Unit tests only, no services                                                                                                                                                                                          |
+| `pnpm test:e2e`                           | Playwright, one app at a time; keep `pnpm dev` running (links builds and serves its own copy on 3792). It starts missing services but never recreates running ones, so the fake provider keeps the seed's subaccounts |
+| `pnpm db:migrate`                         | Applies the SQL migrations as `rent_owner`                                                                                                                                                                            |
+| `pnpm db:seed`                            | Loads the demo dataset; idempotent, and refuses any database that is not local                                                                                                                                        |
+| `pnpm db:backup` / `pnpm db:restore`      | Local backup and restore ([runbook](docs/runbooks/backup-restore.md))                                                                                                                                                 |
+| `pnpm rules:add`                          | Adds a row to the legal and tax rules table (TX-08)                                                                                                                                                                   |
 
 ## Ports
 
@@ -58,19 +58,21 @@ Created by `pnpm db:seed` (`packages/server/scripts/seed.ts`). All are fictional
 
 **Staff** sign in to the web app with an email, the password `demo-password-2026` and a TOTP code.
 
-| Email                       | Role                                                                                 | Company                     |
-| --------------------------- | ------------------------------------------------------------------------------------ | --------------------------- |
-| `admin@demo.invalid`        | Platform admin                                                                       | Rent Platform               |
-| `agency.admin@demo.invalid` | Agency admin                                                                         | Osu Ridge Property Managers |
-| `manager.one@demo.invalid`  | Property manager                                                                     | Osu Ridge Property Managers |
-| `manager.two@demo.invalid`  | Property manager                                                                     | Osu Ridge Property Managers |
-| `new.manager@demo.invalid`  | Property manager with no TOTP yet: enrols at first sign-in; every seed run resets it | Osu Ridge Property Managers |
-| `accountant@demo.invalid`   | Accountant                                                                           | Osu Ridge Property Managers |
-| `adviser@demo.invalid`      | Adviser (read-only), sees owner OWN-01's properties                                  | Osu Ridge Property Managers |
-| `owner.accra@demo.invalid`  | Owner, agency client (OWN-02): sees ACC-OSU only                                     | Osu Ridge Property Managers |
-| `owner.london@demo.invalid` | Owner, agency client living in London (OWN-01): sees ACC-LEG and ACC-ELG             | Osu Ridge Property Managers |
-| `landlord@demo.invalid`     | Owner, self-managing landlord                                                        | Kwabena Owusu-Demo          |
-| `approver@demo.invalid`     | Adviser, nominated approver for the landlord                                         | Kwabena Owusu-Demo          |
+| Email                           | Role                                                                                 | Company                     |
+| ------------------------------- | ------------------------------------------------------------------------------------ | --------------------------- |
+| `admin@demo.invalid`            | Platform admin                                                                       | Rent Platform               |
+| `agency.admin@demo.invalid`     | Agency admin                                                                         | Osu Ridge Property Managers |
+| `manager.one@demo.invalid`      | Property manager                                                                     | Osu Ridge Property Managers |
+| `manager.two@demo.invalid`      | Property manager                                                                     | Osu Ridge Property Managers |
+| `new.manager@demo.invalid`      | Property manager with no TOTP yet: enrols at first sign-in; every seed run resets it | Osu Ridge Property Managers |
+| `accountant@demo.invalid`       | Accountant                                                                           | Osu Ridge Property Managers |
+| `adviser@demo.invalid`          | Adviser (read-only), sees owner OWN-01's properties                                  | Osu Ridge Property Managers |
+| `owner.accra@demo.invalid`      | Owner, agency client (OWN-02): sees ACC-OSU only                                     | Osu Ridge Property Managers |
+| `owner.london@demo.invalid`     | Owner, agency client living in London (OWN-01): sees ACC-LEG and ACC-ELG             | Osu Ridge Property Managers |
+| `landlord@demo.invalid`         | Owner, self-managing landlord                                                        | Kwabena Owusu-Demo          |
+| `approver@demo.invalid`         | Adviser, nominated approver for the landlord                                         | Kwabena Owusu-Demo          |
+| `abokobi.landlord@demo.invalid` | Owner, self-managing landlord with `advance_rent_policy = warn` (M5)                 | Abokobi Homes               |
+| `abokobi.manager@demo.invalid`  | Property manager                                                                     | Abokobi Homes               |
 
 **TOTP.** Every demo staff member shares one development secret. In an authenticator app, add an account by entering this setup key (time-based, 6 digits, 30 seconds):
 
@@ -89,6 +91,8 @@ Or, with oath-toolkit installed: `oathtool --totp -b OJSW45BNMRSW23ZNORXXI4BNONS
 **Phone sign-in.** The tenant signs in to the tenant app with `+233 20 000 0021` (or `020 000 0021`); the caretakers sign in to the web app at http://localhost:3701/sign-in/phone with `+233 20 000 0011` (Kojo, assigned to ACC-LEG) and `+233 20 000 0012` (Abena, assigned to ACC-OSU). Codes go to the fake SMS provider: read them in the inbox at http://localhost:4010. A phone gets at most 3 codes in 15 minutes.
 
 **Demo register (M2).** The agency manages `ACC-LEG` (a compound house in Legon: blocks B1 and B2, 12 rooms, one under repair) and `ACC-ELG` (8 flats in East Legon) for OWN-01, and `ACC-OSU` (shops in block G, offices in block F1, one not lettable) for OWN-02. The self-managing landlord has `TEM-EST` (a house in Tema). GhanaPost codes in the demo use the unused `000` area.
+
+**Demo tax and advance rent (M5).** Every seeded receipt carries its rent tax. The pharmacy at `ACC-OSU-G-01` withheld 15% on its first two months' rent: one certificate is confirmed by OWN-02's user, the other waits for `owner.accra@demo.invalid` to confirm it. One GRA payment settles owner A's oldest rent tax item, and OWN-02 has paid one month's VAT. `ACC-LEG-B1-03` was paid six months ahead and the tenant moved out ten days before the seed ran; its early-termination settlement and refund (`lease.refund`) wait for a second person. Abokobi Homes (`ACC-ABK`) has advance warnings on: its tenant paid a year ahead, which is flagged over the limit in the advance-rent compliance report; the main companies stay `off`.
 
 **Demo e-signing (M3).** `ACC-ELG-B1-03` has a lease out for signature: the tenant Kojo Signing (`+233 20 000 0040`) and his guarantor (`+233 20 000 0042`) get their links by SMS in the fake inbox, and Kofi Manager (for the landlord) and Akosua Manager (witness) by email in Mailpit. The worker must be running to render the PDF and send them. Each link opens the signing page on http://localhost:3702; "Send me a code" sends a code to the same inbox. Staff can also hand a link over from the lease (`POST /signing-requests/{id}/signers/{signerId}/link`). `apps/links` calls the API with the key in `LINKS_API_KEY`; locally both sides use a shared development key, which production refuses.
 

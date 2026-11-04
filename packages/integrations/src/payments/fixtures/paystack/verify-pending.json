@@ -1,0 +1,20 @@
+{
+  "status": true,
+  "message": "Verification successful",
+  "data": {
+    "id": 4099260517,
+    "domain": "test",
+    "status": "ongoing",
+    "reference": "pi-0192f5a8111172228333444455558888",
+    "amount": 80050,
+    "gateway_response": "Pending authorization",
+    "paid_at": null,
+    "created_at": "2026-11-03T09:20:01.000Z",
+    "channel": "card",
+    "currency": "GHS",
+    "metadata": "",
+    "fees": null,
+    "customer": { "id": 290002, "email": "tenant@example.test", "phone": null },
+    "subaccount": {}
+  }
+}

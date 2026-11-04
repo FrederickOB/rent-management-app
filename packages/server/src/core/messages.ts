@@ -26,6 +26,8 @@ export const messageRecipientSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tenant_contact'), tenantId: uuid, contactId: uuid }).strict(),
   z.object({ type: z.literal('staff'), personId: uuid }).strict(),
   z.object({ type: z.literal('signer'), signerId: uuid }).strict(),
+  // M4b: an owner in the register, for settlement-account alerts (ADR-008).
+  z.object({ type: z.literal('owner'), ownerId: uuid }).strict(),
 ]);
 export type MessageRecipient = z.infer<typeof messageRecipientSchema>;
 
@@ -41,7 +43,10 @@ export const messageRequestSchema = z
     body: z.string().min(1).max(4_000),
     /** Made at send time: a signing link or a signed copy (targets a signer), an ID capture link. */
     link: z
-      .object({ purpose: z.enum(['sign', 'signed_copy', 'id_capture']), targetId: uuid })
+      .object({
+        purpose: z.enum(['sign', 'signed_copy', 'id_capture', 'pay', 'receipt']),
+        targetId: uuid,
+      })
       .strict()
       .nullable(),
     /** The channels it may go by, in order; the consented ones are tried in this order. */

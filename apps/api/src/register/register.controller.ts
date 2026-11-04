@@ -110,6 +110,10 @@ export class RegisterController {
         await this.register.changeOwner(ctx.actor, input.propertyId, input);
         return property(input.propertyId);
       }),
+      correctOwner: implement(contract.register.correctOwner).handler(async ({ input }) => {
+        await this.register.correctOwner(ctx.actor, input.propertyId, input);
+        return property(input.propertyId);
+      }),
       addBlock: implement(contract.register.addBlock).handler(async ({ input }) => {
         const { propertyId, ...block } = input;
         await this.register.addBlock(ctx.actor, propertyId, block);

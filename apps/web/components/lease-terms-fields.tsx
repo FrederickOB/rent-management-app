@@ -1,6 +1,6 @@
 'use client';
 
-import { BREAK_PARTIES, RENT_CYCLES, type LeaseUse } from '@rent/domain/tenancy';
+import { BREAK_PARTIES, type LeaseUse } from '@rent/domain/tenancy';
 import { useId } from 'react';
 import {
   endAfterMonths,
@@ -9,7 +9,7 @@ import {
   type TermsDraft,
   type TermsErrors,
 } from '@/lib/lease-form';
-import { BREAK_PARTY_LABELS, cycleLabel } from '@/lib/tenancy-format';
+import { BREAK_PARTY_LABELS, CYCLE_OPTIONS } from '@/lib/tenancy-format';
 import { Button } from './ui/button';
 import { CheckboxField, SelectField, TextField } from './ui/field';
 
@@ -95,9 +95,9 @@ export function LeaseTermsFields({
           label="Billing cycle"
           value={draft.cycle}
           error={errors.cycle}
-          options={RENT_CYCLES.map((c) => ({ value: c, label: cycleLabel(c) }))}
+          options={CYCLE_OPTIONS}
           onChange={(event) => {
-            const cycle = RENT_CYCLES.find((c) => c === event.target.value);
+            const cycle = CYCLE_OPTIONS.find((c) => c.value === event.target.value)?.value;
             if (cycle) set('cycle', cycle);
           }}
         />

@@ -4,6 +4,7 @@ import { format, money } from '@rent/domain/money';
 import {
   LEASE_STATUS_LABELS,
   RENT_CYCLE_LABELS,
+  RENT_CYCLES,
   type BreakParty,
   type LeaseStatus,
   type RentCycle,
@@ -76,6 +77,13 @@ export function endedLabel(endedOn: string, reason: LeaseEndReason | null): stri
 
 export const leaseStatusLabel = (status: LeaseStatus): string => LEASE_STATUS_LABELS[status];
 export const cycleLabel = (cycle: RentCycle): string => RENT_CYCLE_LABELS[cycle];
+
+/**
+ * The billing cycles a lease form offers (TL-06; M4b decision 9): monthly, quarterly, every six
+ * months, annually and every two years, in the domain's order. Rent periods stay monthly.
+ */
+export const CYCLE_OPTIONS: readonly { readonly value: RentCycle; readonly label: string }[] =
+  RENT_CYCLES.map((value) => ({ value, label: cycleLabel(value) }));
 export const signerRoleLabel = (role: SignerRole): string => SIGNER_ROLE_LABELS[role];
 
 /** Pesewas for people, at the edge only (CLAUDE.md section 4): `GH₵1,500.00`. */

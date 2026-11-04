@@ -63,4 +63,15 @@ button:disabled { opacity: 0.6; }
 .pad canvas { display: block; width: 100%; height: 10rem; background: #ffffff; border: 1px dashed var(--line); border-radius: 0.375rem; touch-action: none; }
 .pad .row { display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem; }
 .contact { margin: 1.5rem 0 0; }
+.panel h2.label { font-size: 0.9375rem; font-weight: 600; color: var(--muted); margin: 0 0 0.25rem; }
+.amount { font-size: 2rem; font-weight: 700; line-height: 1.2; margin: 0 0 0.5rem; }
+dl.facts { margin: 1rem 0 0; }
+dl.facts div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 0.75rem; padding: 0.375rem 0; border-top: 1px solid var(--line); }
+dl.facts dt { color: var(--muted); }
+dl.facts dd { margin: 0; font-weight: 600; text-align: right; }
+fieldset { border: 0; padding: 0; margin: 0 0 1rem; min-width: 0; }
+legend { font-weight: 600; padding: 0; margin: 0 0 0.5rem; }
+.check input[type="radio"] { margin-top: 0.15rem; }
+.hint { margin-top: -0.5rem; }
+.instructions { white-space: pre-line; }
 `;

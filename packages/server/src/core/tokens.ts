@@ -8,6 +8,8 @@ export const EMAIL_PORT = Symbol('EMAIL_PORT');
 export const WHATSAPP_PORT = Symbol('WHATSAPP_PORT');
 export const PUSH_PORT = Symbol('PUSH_PORT');
 export const PAYMENTS_PORT = Symbol('PAYMENTS_PORT');
+/** The payment provider registry (M4b plan 4.9). */
+export const PAYMENT_PROVIDERS = Symbol('PAYMENT_PROVIDERS');
 export const IDENTITY_VERIFICATION_PORT = Symbol('IDENTITY_VERIFICATION_PORT');
 export const ADDRESS_LOOKUP_PORT = Symbol('ADDRESS_LOOKUP_PORT');
 export const KMS_PORT = Symbol('KMS_PORT');

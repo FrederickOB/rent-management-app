@@ -6,6 +6,12 @@ import type { AlertPort, StoragePort } from '@rent/integrations';
 import { ApprovalsModule, ApprovalsService } from '@rent/server/approvals';
 import { AuditModule, AuditService } from '@rent/server/audit';
 import {
+  AdvanceService,
+  BillingModule,
+  InvoicingService,
+  SubledgerCheckService,
+} from '@rent/server/billing';
+import {
   ALERT_PORT,
   CLOCK,
   CONFIG,
@@ -14,29 +20,47 @@ import {
   DATABASE,
   loadConfig,
   NestLogger,
+  PAYMENT_PROVIDERS,
   STORAGE_PORT,
   type AppConfig,
   type Clock,
+  type PaymentProviders,
 } from '@rent/server/core';
 import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
+import { LedgerModule } from '@rent/server/ledger';
 import { MessagingModule, MessagingService } from '@rent/server/messaging';
+import {
+  PaymentsModule,
+  ProviderPaymentsService,
+  QueueService,
+  ReceiptsService,
+  ReconciliationService,
+  RemindersService,
+  SettlementAccountsService,
+  WebhookInboxRelay,
+  WebhooksService,
+} from '@rent/server/payments';
 import {
   PortfolioModule,
   PropertyFilesService,
   RegisterImportService,
 } from '@rent/server/portfolio';
+import { TaxAlertsService, TaxAssessmentService, TaxModule } from '@rent/server/tax';
 import {
   IdChecksService,
   LeaseLifecycleService,
   TenancyModule,
   TenancyRemindersService,
 } from '@rent/server/tenancy';
+import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
+import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
+import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
 const config = loadConfig();
@@ -52,6 +76,11 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     EsignModule,
     TenancyModule,
     MessagingModule,
+    LedgerModule,
+    BillingModule,
+    PaymentsModule,
+    // M5: rent tax is assessed in every receipt's posting transaction once this module starts.
+    TaxModule,
   ],
 })
 class WorkerModule {}
@@ -100,6 +129,28 @@ const definitions = [
     lifecycle: app.get(LeaseLifecycleService),
     render: renderOnPool,
   }),
+  ...billingJobs({
+    ...deps,
+    invoicing: app.get(InvoicingService),
+    subledger: app.get(SubledgerCheckService),
+  }),
+  ...paymentsJobs({
+    ...deps,
+    providers: app.get<PaymentProviders>(PAYMENT_PROVIDERS),
+    webhooks: app.get(WebhooksService),
+    providerPayments: app.get(ProviderPaymentsService),
+    receipts: app.get(ReceiptsService),
+    reminders: app.get(RemindersService),
+    reconciliation: app.get(ReconciliationService),
+    accounts: app.get(SettlementAccountsService),
+    queue: app.get(QueueService),
+  }),
+  ...taxJobs({
+    ...deps,
+    taxAlerts: app.get(TaxAlertsService),
+    taxAssessment: app.get(TaxAssessmentService),
+    advance: app.get(AdvanceService),
+  }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -114,14 +165,20 @@ const relay = new OutboxRelay(
     ...REGISTER_EVENT_TYPES,
     ...TENANCY_EVENT_TYPES,
     ...ESIGN_EVENT_TYPES,
+    ...BILLING_EVENT_TYPES,
+    ...PAYMENTS_EVENT_TYPES,
   ]),
 );
 await relay.start();
+// Provider webhooks stored by the API, queued for processing as they arrive (M4b plan 4.4).
+const inbox = new WebhookInboxRelay(database, jobs, logger);
+await inbox.start();
 logger.info({ jobs: definitions.map((d) => d.name) }, 'worker started');
 
 async function shutdown(signal: string) {
   logger.info({ signal }, 'worker stopping');
   await relay.stop();
+  await inbox.stop();
   await jobs.stop();
   await closeRenderer();
   await app.close();

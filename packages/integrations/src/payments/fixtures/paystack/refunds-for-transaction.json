@@ -1,0 +1,26 @@
+{
+  "status": true,
+  "message": "Refunds retrieved",
+  "data": [
+    {
+      "id": 6001010,
+      "transaction": 4099260516,
+      "dispute": null,
+      "amount": 20000,
+      "deducted_amount": 0,
+      "currency": "GHS",
+      "status": "failed",
+      "settlement": null
+    },
+    {
+      "id": 6001011,
+      "transaction": 4099260516,
+      "dispute": null,
+      "amount": 20000,
+      "deducted_amount": 0,
+      "currency": "GHS",
+      "status": "processing",
+      "settlement": null
+    }
+  ]
+}

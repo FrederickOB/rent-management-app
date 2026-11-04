@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -85,6 +85,20 @@ async function seedCompany(companyId: string) {
       [companyId, portfolios[0]!.id],
     );
     const propertyId = properties[0]!.id;
+    // A same-day correction of the owner (M2 S5, M4a): the property was first filed under the
+    // wrong owner, and that row is superseded by the owner's row below.
+    const { rows: wrong } = await app.query<{ id: string }>(
+      "insert into owner (company_id, reference, kind, display_name) values ($1, 'OWN-02', 'individual', 'Wrong Owner') returning id",
+      [companyId],
+    );
+    const { rows: ownership } = await app.query<{ id: string }>(
+      'insert into property_ownership (company_id, property_id, owner_id, share_bps, effective_from) values ($1, $2, $3, 10000, current_date) returning id',
+      [companyId, propertyId, wrong[0]!.id],
+    );
+    await app.query(
+      "insert into property_ownership_correction (company_id, property_id, ownership_id, reason) values ($1, $2, $3, 'Filed under the wrong owner')",
+      [companyId, propertyId, ownership[0]!.id],
+    );
     await app.query(
       'insert into property_ownership (company_id, property_id, owner_id, share_bps, effective_from) values ($1, $2, $3, 10000, current_date)',
       [companyId, propertyId, owners[0]!.id],
@@ -206,7 +220,434 @@ async function seedCompany(companyId: string) {
       "insert into message_event (company_id, message_id, status) values ($1, $2, 'queued')",
       [companyId, messages[0]!.id],
     );
+    await seedMoney(companyId, {
+      initiator,
+      initiatorMembership,
+      approver,
+      approverMembership,
+      requestId: requests[0]!.id,
+      documentId: docs[0]!.id,
+      ownerId: owners[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * The ledger and billing (M4a): one row in each of their tables. Books come from the database
+ * itself (with the company and the owner); journal rows are written as ledger_writer, the only
+ * role that may.
+ */
+async function seedMoney(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    approver: string;
+    approverMembership: string;
+    requestId: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const { rows: books } = await app.query<{ id: string }>(
+    'select id from book where owner_id = $1',
+    [ids.ownerId],
+  );
+  const bookId = books[0]!.id;
+  const { rows: periods } = await app.query<{ id: string; period_start: string }>(
+    "select id, period_start::text from charge_period where lease_id = $1 and charge_type = 'rent'",
+    [ids.leaseId],
+  );
+  const period = periods[0]!;
+  const lease = [companyId, ids.propertyId, ids.tenantId, ids.leaseId];
+  const reference = `K${randomBytes(3)
+    .toString('hex')
+    .toUpperCase()
+    .replace(/[ILOU]/g, '1')
+    .slice(0, 6)}`.slice(0, 7);
+  await app.query(
+    'insert into payment_reference (company_id, property_id, tenant_id, lease_id, reference) values ($1, $2, $3, $4, $5)',
+    [...lease, reference.padEnd(7, '0')],
+  );
+  const { rows: invoices } = await app.query<{ id: string }>(
+    `insert into invoice (company_id, property_id, tenant_id, lease_id, number, kind, unit_id, owner_id, book_id, issue_date,
+       due_date, cycle_start, payment_reference, unit_code, property_name, billed_to_name, billed_from_name)
+     values ($1, $2, $3, $4, 1, 'cycle', $5, $6, $7, current_date, $8, $8, 'K000000', 'ACC-LEG-B1-01', 'Legon', 'Tenant', 'Owner')
+     returning id`,
+    [...lease, ids.unitId, ids.ownerId, bookId, period.period_start],
+  );
+  const { rows: lines } = await app.query<{ id: string }>(
+    `insert into invoice_line (company_id, property_id, tenant_id, lease_id, invoice_id, position, kind, charge_period_id,
+       period_start, period_end, due_date, amount_minor)
+     values ($1, $2, $3, $4, $5, 1, 'rent', $6, $7, $7::date + 29, $7, 150000) returning id`,
+    [...lease, invoices[0]!.id, period.id, period.period_start],
+  );
+  const lineId = lines[0]!.id;
+  const paymentId = randomUUID();
+  const cashRecordId = randomUUID();
+  const accrual = randomUUID();
+  const receiptEntry = randomUUID();
+  await app.query('set local role ledger_writer');
+  for (const [entryId, rule, key] of [
+    [accrual, 'P02', `P02:${lineId}`],
+    [receiptEntry, 'P06', `P06:${paymentId}`],
+  ] as const)
+    await app.query(
+      // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+      `insert into journal_entry (id, company_id, rule, idempotency_key, value_date, accounting_date, record_type, record_id)
+       values ($1, $2, $3, $4, current_date, current_date, 'fixture', $1)`,
+      [entryId, companyId, rule, key],
+    );
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_line (id, company_id, entry_id, line_no, book_id, account_code, amount_minor, property_id, unit_id,
+       lease_id, tenant_id, invoice_line_id, payment_id, collector_id)
+     values (gen_random_uuid(), $1, $2, 1, $3, '1100', 150000, $4, $5, $6, $7, $8, null, null),
+            (gen_random_uuid(), $1, $2, 2, $3, '4000', -150000, $4, $5, $6, $7, $8, null, null),
+            (gen_random_uuid(), $1, $9, 1, $3, '1060', 150000, $4, $5, $6, $7, null, $10, $11),
+            (gen_random_uuid(), $1, $9, 2, $3, '1100', -150000, $4, $5, $6, $7, $8, $10, null)`,
+    [
+      companyId,
+      accrual,
+      bookId,
+      ids.propertyId,
+      ids.unitId,
+      ids.leaseId,
+      ids.tenantId,
+      lineId,
+      receiptEntry,
+      paymentId,
+      ids.initiator,
+    ],
+  );
+  await app.query('set local role none');
+  await app.query(
+    `insert into invoice_line_accrual (company_id, property_id, tenant_id, lease_id, invoice_line_id, amount_minor, value_date,
+       accounting_date, entry_id) values ($1, $2, $3, $4, $5, 150000, current_date, current_date, $6)`,
+    [...lease, lineId, accrual],
+  );
+  await app.query(
+    `insert into cash_record (id, company_id, property_id, tenant_id, lease_id, unit_id, method, amount_minor, received_on,
+       payer_name, collector_person_id, photo_document_id, approval_request_id, recorded_by)
+     values ($5, $1, $2, $3, $4, $6, 'cash', 150000, current_date, 'Tenant', $7, $8, $9, $7)`,
+    [...lease, cashRecordId, ids.unitId, ids.initiator, ids.documentId, ids.requestId],
+  );
+  await app.query(
+    `insert into payment (id, company_id, property_id, tenant_id, lease_id, unit_id, method, amount_minor, received_on,
+       accounting_date, owner_id, book_id, cash_account, collector_person_id, source_type, source_id, entry_id, recorded_by)
+     values ($5, $1, $2, $3, $4, $6, 'cash', 150000, current_date, current_date, $7, $8, '1060', $9, 'cash_record', $10, $11, $9)`,
+    [
+      ...lease,
+      paymentId,
+      ids.unitId,
+      ids.ownerId,
+      bookId,
+      ids.initiator,
+      cashRecordId,
+      receiptEntry,
+    ],
+  );
+  await app.query(
+    `insert into allocation (company_id, property_id, tenant_id, lease_id, invoice_line_id, source, payment_id, amount_minor,
+       value_date, accounting_date, record_type, record_id, entry_id)
+     values ($1, $2, $3, $4, $5, 'payment', $6, 150000, current_date, current_date, 'payment', $6, $7)`,
+    [...lease, lineId, paymentId, receiptEntry],
+  );
+  const { rows: receipts } = await app.query<{ id: string }>(
+    `insert into receipt (company_id, property_id, tenant_id, lease_id, number, kind, payment_id, amount_minor)
+     values ($1, $2, $3, $4, 1, 'receipt', $5, 150000) returning id`,
+    [...lease, paymentId],
+  );
+  await app.query(
+    `insert into payment_match (company_id, property_id, tenant_id, lease_id, payment_id, unit_id, book_id, entry_id, value_date,
+       accounting_date) values ($1, $2, $3, $4, $5, $6, $7, $8, current_date, current_date)`,
+    [...lease, paymentId, ids.unitId, bookId, receiptEntry],
+  );
+  await app.query(
+    `insert into payment_reversal (company_id, property_id, tenant_id, lease_id, payment_id, reason, note, money_now_in,
+       approval_request_id, entry_id, value_date, accounting_date)
+     values ($1, $2, $3, $4, $5, 'other', 'A fixture', 'collector', $6, $7, current_date, current_date)`,
+    [...lease, paymentId, ids.requestId, receiptEntry],
+  );
+  await app.query(
+    `insert into credit_carry_over (company_id, property_id, tenant_id, lease_id, from_lease_id, kind, amount_minor, entry_id,
+       value_date, accounting_date) values ($1, $2, $3, $4, $4, 'deposit', 1000, $5, current_date, current_date)`,
+    [...lease, receiptEntry],
+  );
+  await app.query(
+    `insert into credit_note (company_id, property_id, tenant_id, lease_id, invoice_line_id, amount_minor, reason, kind,
+       value_date, accounting_date) values ($1, $2, $3, $4, $5, 1000, 'A fixture', 'system', current_date, current_date)`,
+    [...lease, lineId],
+  );
+  await app.query(
+    `insert into write_off (company_id, property_id, tenant_id, lease_id, invoice_line_id, amount_minor, reason,
+       approval_request_id, entry_id, value_date, accounting_date)
+     values ($1, $2, $3, $4, $5, 1000, 'A fixture', $6, $7, current_date, current_date)`,
+    [...lease, lineId, ids.requestId, receiptEntry],
+  );
+  await app.query(
+    `insert into direct_receipt (id, company_id, received_into, owner_id, amount_minor, received_on, proof_document_id,
+       approval_request_id, recorded_by)
+     values (gen_random_uuid(), $1, 'owner_account', $2, 1000, current_date, $3, $4, $5)`,
+    [companyId, ids.ownerId, ids.documentId, ids.requestId, ids.initiator],
+  );
+  await app.query(
+    `insert into cash_banking (id, company_id, collector_person_id, owner_id, book_id, banked_into, amount_minor, banked_on,
+       slip_document_id, approval_request_id, recorded_by)
+     values (gen_random_uuid(), $1, $2, $3, $4, 'owner_account', 1000, current_date, $5, $6, $2)`,
+    [companyId, ids.initiator, ids.ownerId, bookId, ids.documentId, ids.requestId],
+  );
+  await app.query(
+    "insert into period_lock (company_id, book_id, month, source) values ($1, $2, '2099-01-01', 'manual')",
+    [companyId, bookId],
+  );
+  await app.query(
+    "insert into company_counter (company_id, name, value) values ($1, 'receipt', 1)",
+    [companyId],
+  );
+  await app.query(
+    "insert into idempotent_request (company_id, key, operation, person_id, request_hash) values ($1, 'fixture-key', 'fixture', $2, $3)",
+    [companyId, ids.initiator, '0'.repeat(64)],
+  );
+  await seedPayments(companyId, {
+    ...ids,
+    bookId,
+    invoiceId: invoices[0]!.id,
+    paymentId,
+    receiptId: receipts[0]!.id,
+    entryId: receiptEntry,
+  });
+  await seedTax(companyId, {
+    ...ids,
+    bookId,
+    paymentId,
+    lineId,
+    chargePeriodId: period.id,
+    entryId: receiptEntry,
+  });
+}
+
+/** Rent tax, withholding, advance rent and early termination (M5): one row in each table. */
+async function seedTax(
+  companyId: string,
+  ids: {
+    initiator: string;
+    approver: string;
+    requestId: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+    bookId: string;
+    paymentId: string;
+    lineId: string;
+    chargePeriodId: string;
+    entryId: string;
+  },
+) {
+  const lease = [companyId, ids.propertyId, ids.tenantId, ids.leaseId];
+  const { rows: rules } = await app.query<{ id: string }>(
+    "select id from rule where key = 'rent_tax.rate.residential' limit 1",
+  );
+  const ruleId = rules[0]!.id;
+  const { rows: items } = await app.query<{ id: string }>(
+    `insert into rent_tax_item (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, kind, payment_id,
+       value_date, accounting_date, due_date, base_minor, rate_bps, tax_minor, lease_use, unit_code, tenant_name,
+       rate_rule_id, entry_id)
+     values ($1, $2, $3, $4, $5, $6, $7, 'receipt', $8, current_date, current_date, current_date + 30, 120000, 800, 9600,
+       'residential', 'ACC-LEG-B1-01', 'Tenant', $9, $10) returning id`,
+    [...lease, ids.unitId, ids.ownerId, ids.bookId, ids.paymentId, ruleId, ids.entryId],
+  );
+  const itemId = items[0]!.id;
+  await app.query(
+    `insert into rent_tax_item_line (company_id, item_id, property_id, tenant_id, lease_id, charge_period_id, invoice_line_id,
+       base_minor, tax_minor) values ($1, $5, $2, $3, $4, $6, $7, 120000, 9600)`,
+    [...lease, itemId, ids.chargePeriodId, ids.lineId],
+  );
+  const { rows: withholdings } = await app.query<{ id: string }>(
+    `insert into withholding (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, payment_id,
+       value_date, accounting_date, amount_minor, rate_bps, rate_rule_id, differs_from_rate, entry_id, recorded_by)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, current_date, current_date, 1000, 800, $9, true, $10, $11) returning id`,
+    [
+      ...lease,
+      ids.unitId,
+      ids.ownerId,
+      ids.bookId,
+      ids.paymentId,
+      ruleId,
+      ids.entryId,
+      ids.initiator,
+    ],
+  );
+  const withholdingId = withholdings[0]!.id;
+  await app.query(
+    `insert into withholding_certificate (company_id, withholding_id, property_id, tenant_id, lease_id, owner_id, document_id,
+       amount_minor, uploaded_by) values ($1, $5, $2, $3, $4, $6, $7, 1000, $8)`,
+    [...lease, withholdingId, ids.ownerId, ids.documentId, ids.initiator],
+  );
+  await app.query(
+    `insert into withholding_write_off (company_id, withholding_id, property_id, tenant_id, lease_id, amount_minor, reason,
+       approval_request_id, entry_id, value_date, accounting_date)
+     values ($1, $5, $2, $3, $4, 1000, 'A fixture', $6, $7, current_date, current_date)`,
+    [...lease, withholdingId, ids.requestId, ids.entryId],
+  );
+  const { rows: gra } = await app.query<{ id: string }>(
+    `insert into gra_payment (company_id, owner_id, book_id, paid_on, accounting_date, amount_minor, gra_receipt_number,
+       receipt_document_id, paid_from, entry_id, recorded_by)
+     values ($1, $2, $3, current_date, current_date, 1000, 'GRA-1', $4, 'owner_account', $5, $6) returning id`,
+    [companyId, ids.ownerId, ids.bookId, ids.documentId, ids.entryId, ids.initiator],
+  );
+  await app.query(
+    'insert into gra_payment_item (company_id, gra_payment_id, item_id, amount_minor) values ($1, $2, $3, 1000)',
+    [companyId, gra[0]!.id, itemId],
+  );
+  await app.query(
+    `insert into vat_payment (company_id, owner_id, book_id, period_month, paid_on, accounting_date, amount_minor,
+       gra_receipt_number, receipt_document_id, paid_from, entry_id, recorded_by)
+     values ($1, $2, $3, date_trunc('month', current_date)::date, current_date, current_date, 1000, 'GRA-V1', $4,
+       'owner_account', $5, $6)`,
+    [companyId, ids.ownerId, ids.bookId, ids.documentId, ids.entryId, ids.initiator],
+  );
+  await app.query(
+    `insert into rent_tax_alert (company_id, item_id, owner_id, property_id, alert_day, alert_date, recipients)
+     values ($1, $2, $3, $4, 21, current_date, 1)`,
+    [companyId, itemId, ids.ownerId, ids.propertyId],
+  );
+  await app.query(
+    `insert into payment_advance (company_id, payment_id, property_id, tenant_id, lease_id, value_date, months_ahead, policy,
+       over_limit, flagged) values ($1, $5, $2, $3, $4, current_date, 0, 'off', false, false)`,
+    [...lease, ids.paymentId],
+  );
+  await app.query(
+    `insert into paid_until_prompt (company_id, property_id, tenant_id, lease_id, paid_until, prompted_on, staff_messages)
+     values ($1, $2, $3, $4, current_date + 90, current_date, 1)`,
+    lease,
+  );
+  const { rows: terminations } = await app.query<{ id: string }>(
+    `insert into early_termination (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, last_day,
+       charges, deductions, unused_days_credit_minor, applied_minor, refund_minor, approval_request_id, requested_by)
+     values ($1, $2, $3, $4, $5, $6, $7, current_date, '[]', '[]', 0, 0, 1000, $8, $9) returning id`,
+    [...lease, ids.unitId, ids.ownerId, ids.bookId, ids.requestId, ids.initiator],
+  );
+  await app.query(
+    `insert into early_termination_refund_part (company_id, termination_id, property_id, tenant_id, lease_id, payment_id,
+       amount_minor) values ($1, $5, $2, $3, $4, $6, 1000)`,
+    [...lease, terminations[0]!.id, ids.paymentId],
+  );
+}
+
+/**
+ * Provider payments (M4b): one row in each of their company tables. The unmatched refund needs
+ * money with no lease, so a direct transfer waiting for its lease is recorded too.
+ */
+async function seedPayments(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    approver: string;
+    approverMembership: string;
+    requestId: string;
+    ownerId: string;
+    propertyId: string;
+    tenantId: string;
+    leaseId: string;
+    bookId: string;
+    invoiceId: string;
+    paymentId: string;
+    receiptId: string;
+    entryId: string;
+  },
+) {
+  const accountId = randomUUID();
+  await app.query(
+    `insert into settlement_account (id, company_id, holder, owner_id, bank_code, bank_name, account_name, number_encrypted,
+       number_index, number_masked, approval_request_id, created_by)
+     values ($1, $2, 'owner', $3, 'GCB', 'GCB Bank', 'Owner', '\\x01', 'index', '•••• 6789', $4, $5)`,
+    [accountId, companyId, ids.ownerId, ids.requestId, ids.initiator],
+  );
+  await app.query(
+    "insert into provider_subaccount (company_id, settlement_account_id, provider, subaccount_code) values ($1, $2, 'paystack', $3)",
+    [companyId, accountId, `ACCT_${randomBytes(6).toString('hex')}`],
+  );
+  // Where the owner's rent goes is set only through a request a second person approved (RA056).
+  const { rows: agreementRequests } = await app.query<{ id: string }>(
+    `insert into approval_request (company_id, action_type, subject_type, subject_id, payload, payload_hash, initiated_by,
+       initiator_membership_id, mode, status, expires_at)
+     values ($1, 'management_agreement.change', 'owner', $2, '{}', 'h', $3, $4, 'two_person', 'pending', now() + interval '1 day') returning id`,
+    [companyId, ids.ownerId, ids.initiator, ids.initiatorMembership],
+  );
+  await app.query(
+    "insert into approval_decision (company_id, request_id, decided_by, decided_by_membership_id, kind, payload_hash) values ($1, $2, $3, $4, 'approve', 'h')",
+    [companyId, agreementRequests[0]!.id, ids.approver, ids.approverMembership],
+  );
+  await app.query(
+    "insert into management_agreement (company_id, owner_id, destination, effective_from, approval_request_id) values ($1, $2, 'owner_account', current_date, $3)",
+    [companyId, ids.ownerId, agreementRequests[0]!.id],
+  );
+  const { rows: links } = await app.query<{ id: string }>(
+    `insert into secure_link (company_id, property_id, tenant_id, purpose, token_hash, invoice_id, expires_at)
+     values ($1, $2, $3, 'pay', $4, $5, now() + interval '60 days') returning id`,
+    [companyId, ids.propertyId, ids.tenantId, randomBytes(32).toString('hex'), ids.invoiceId],
+  );
+  await app.query(
+    `insert into payment_intent (company_id, property_id, tenant_id, lease_id, invoice_id, secure_link_id, submission_id,
+       amount_minor, method, reference, settlement_account_id)
+     values ($1, $2, $3, $4, $5, $6, 'fixture-submission-0001', 150000, 'card', $7, $8)`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.tenantId,
+      ids.leaseId,
+      ids.invoiceId,
+      links[0]!.id,
+      `pi_${randomBytes(12).toString('hex')}`,
+      accountId,
+    ],
+  );
+  await app.query(
+    `insert into provider_settlement (company_id, provider, settlement_ref, settlement_account_id, subaccount_code, gross_minor,
+       fees_minor, deductions_minor, net_minor, settled_at)
+     values ($1, 'paystack', 'stl-1', $2, 'ACCT_x', 150000, 2925, 0, 147075, now())`,
+    [companyId, accountId],
+  );
+  await app.query(
+    `insert into reconciliation_exception (company_id, kind, provider, reference, detail, dedupe_key)
+     values ($1, 'missing_here', 'paystack', 'ref-1', 'A fixture', 'fixture')`,
+    [companyId],
+  );
+  await app.query(
+    `insert into reminder_sent (company_id, property_id, tenant_id, lease_id, invoice_id, offset_days, status, step_date)
+     values ($1, $2, $3, $4, $5, -7, 'skipped', current_date)`,
+    [companyId, ids.propertyId, ids.tenantId, ids.leaseId, ids.invoiceId],
+  );
+  await app.query(
+    `insert into receipt_delivery (company_id, property_id, tenant_id, lease_id, receipt_id, payment_id, message_id, confirmed_at)
+     values ($1, $2, $3, $4, $5, $6, gen_random_uuid(), now())`,
+    [companyId, ids.propertyId, ids.tenantId, ids.leaseId, ids.receiptId, ids.paymentId],
+  );
+  const unmatched = randomUUID();
+  await app.query(
+    `insert into payment (id, company_id, method, amount_minor, received_on, accounting_date, owner_id, book_id, cash_account,
+       source_type, source_id, entry_id)
+     values ($1, $2, 'bank_transfer', 1000, current_date, current_date, $3, $4, '1010', 'direct_receipt', gen_random_uuid(), $5)`,
+    [unmatched, companyId, ids.ownerId, ids.bookId, ids.entryId],
+  );
+  await app.query(
+    `insert into unmatched_refund (company_id, payment_id, owner_id, amount_minor, reason, approval_request_id, requested_by)
+     values ($1, $2, $3, 1000, 'A fixture', $4, $5)`,
+    [companyId, unmatched, ids.ownerId, ids.requestId, ids.initiator],
+  );
 }
 
 async function companyScopedTables(): Promise<string[]> {

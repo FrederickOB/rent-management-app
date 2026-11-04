@@ -9,8 +9,12 @@ import {
 } from '../dates';
 import { DomainError } from '../errors';
 
-/** Billing cycles (TL-06). Rent periods are monthly whatever the cycle; invoices bundle them. */
-export const RENT_CYCLES = ['monthly', 'quarterly', 'six_monthly', 'annual'] as const;
+/**
+ * Billing cycles (TL-06). Rent periods are monthly whatever the cycle; invoices bundle them. Rent
+ * in Ghana is paid monthly, twice a year, yearly and two years ahead (M4b decision 9); quarterly
+ * stays for the leases that use it.
+ */
+export const RENT_CYCLES = ['monthly', 'quarterly', 'six_monthly', 'annual', 'two_yearly'] as const;
 export type RentCycle = (typeof RENT_CYCLES)[number];
 
 export const CYCLE_MONTHS: Record<RentCycle, number> = {
@@ -18,6 +22,7 @@ export const CYCLE_MONTHS: Record<RentCycle, number> = {
   quarterly: 3,
   six_monthly: 6,
   annual: 12,
+  two_yearly: 24,
 };
 
 export const RENT_CYCLE_LABELS: Record<RentCycle, string> = {
@@ -25,6 +30,7 @@ export const RENT_CYCLE_LABELS: Record<RentCycle, string> = {
   quarterly: 'Quarterly',
   six_monthly: 'Every six months',
   annual: 'Annually',
+  two_yearly: 'Every two years',
 };
 
 export const LEASE_USES = ['residential', 'commercial'] as const;

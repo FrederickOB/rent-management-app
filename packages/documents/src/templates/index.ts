@@ -11,6 +11,18 @@ export {
   type TemplateProps,
 } from './registry';
 export { renderHtml, renderTemplateContent, renderTemplateHtml } from './render';
+export {
+  invoiceV1,
+  receiptV1,
+  type InvoiceDocumentData,
+  type ReceiptDocumentData,
+} from './billing';
 export { leaseV1, type LeaseDocumentData } from './lease';
 export { signingCertificateV1, type SigningCertificateData } from './signing-certificate';
 export { systemSampleV1, type SystemSampleData } from './system-sample';
+export {
+  rentTaxReportV1,
+  rentTaxReportV2,
+  type RentTaxReportData,
+  type RentTaxReportV2Data,
+} from './tax';

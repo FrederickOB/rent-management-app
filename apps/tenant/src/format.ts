@@ -99,3 +99,72 @@ export const SIGNER_STATUS_LABELS: Record<SignerStatus, string> = {
 export function leasesAre(count: number): string {
   return count === 1 ? '1 lease is' : `${count} leases are`;
 }
+
+// Money on the tenant's own tenancies (M4b plan 4.10): integer pesewas from the API, words here.
+
+/** `GH₵1,500.00`, or that nothing is due. */
+export function dueNowLabel(dueNowMinor: number): string {
+  return dueNowMinor > 0 ? formatMoney(dueNowMinor) : 'Nothing due now';
+}
+
+/**
+ * `Paid until 14 November 2026`, with any part of the next month already paid. Rent periods run
+ * from the lease's start day (CLAUDE.md section 11), so the partly paid month is named by its
+ * first day.
+ */
+export function paidUntilLabel(
+  paidUntil: string | null,
+  partial: { readonly monthStart: string; readonly amountMinor: number } | null,
+): string {
+  const part = partial
+    ? `${formatMoney(partial.amountMinor)} paid towards the month from ${formatDate(partial.monthStart)}`
+    : null;
+  if (!paidUntil) return part ? `${part[0]!.toUpperCase()}${part.slice(1)}` : 'No rent paid yet';
+  return part
+    ? `Paid until ${formatDate(paidUntil)}, and ${part}`
+    : `Paid until ${formatDate(paidUntil)}`;
+}
+
+/**
+ * `GH₵2,200.00 on 1 December 2026`: the next invoice due after today with something left on it.
+ * The API names only invoices already issued (14 days before they fall due), so when it names
+ * none, a lease with rent still to come has simply no invoice out yet (`rentToCome`); only a lease
+ * paid to its end, or over, has nothing more to pay.
+ */
+export function nextDueLabel(
+  nextDue: { readonly dueDate: string; readonly amountMinor: number } | null,
+  rentToCome = false,
+): string {
+  if (nextDue) return `${formatMoney(nextDue.amountMinor)} on ${formatDate(nextDue.dueDate)}`;
+  return rentToCome ? 'The next invoice is not out yet' : 'Nothing more to pay on this lease';
+}
+
+/**
+ * Whether a lease still has rent to come: it is signed or in force and not paid to its last day.
+ * A tenant holding over pays month by month, so always has.
+ */
+export function rentToCome(
+  status: LeaseStatus,
+  endDate: string,
+  paidUntil: string | null,
+): boolean {
+  if (status === 'holding_over') return true;
+  if (status !== 'signed' && status !== 'active' && status !== 'ending') return false;
+  return paidUntil === null || paidUntil < endDate;
+}
+
+const PAYMENT_METHOD_LABELS: Readonly<Record<string, string>> = {
+  momo: 'Mobile money',
+  card: 'Card',
+  cash: 'Cash',
+  cheque: 'Cheque',
+  bank_transfer: 'Bank transfer',
+  test: 'Test payment',
+};
+
+/** How a payment was made, in words; an unknown method is shown as the API names it. */
+export function paymentMethodLabel(method: string): string {
+  return Object.hasOwn(PAYMENT_METHOD_LABELS, method)
+    ? PAYMENT_METHOD_LABELS[method]!
+    : method.replace(/_/g, ' ');
+}

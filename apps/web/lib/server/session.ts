@@ -136,3 +136,18 @@ type TemplateList = Awaited<ReturnType<ApiClient['leaseTemplates']['list']>>;
 export function loadTemplates(): Promise<Loaded<TemplateList>> {
   return load((api) => api.leaseTemplates.list({}));
 }
+
+// M4a: invoices and payments (plan 4.18). A refusal or a missing record is returned, not thrown.
+
+type InvoiceView = Awaited<ReturnType<ApiClient['invoices']['get']>>;
+type PaymentView = Awaited<ReturnType<ApiClient['payments']['get']>>;
+
+/** An invoice with its lines, allocations and warnings (BC-01, CT-04). */
+export function loadInvoice(invoiceId: string): Promise<Loaded<InvoiceView>> {
+  return load((api) => api.invoices.get({ invoiceId }));
+}
+
+/** A payment with its allocations, receipts and reversal options (BC-07, P21). */
+export function loadPayment(paymentId: string): Promise<Loaded<PaymentView>> {
+  return load((api) => api.payments.get({ paymentId }));
+}

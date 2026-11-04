@@ -1,0 +1,12 @@
+{
+  "event": "refund.processed",
+  "data": {
+    "status": "processed",
+    "transaction_reference": "pi-0192f5a8111172228333444455557777",
+    "refund_reference": "RF6001001",
+    "amount": 150000,
+    "currency": "GHS",
+    "processor": "mtn",
+    "domain": "test"
+  }
+}

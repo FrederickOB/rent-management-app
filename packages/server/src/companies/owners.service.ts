@@ -4,6 +4,7 @@ import {
   and,
   asc,
   eq,
+  inArray,
   isNull,
   isScoped,
   schema,
@@ -354,4 +355,49 @@ export class OwnersService {
     }
     return `OWN-${String(highest + 1).padStart(2, '0')}`;
   }
+}
+
+/** What billing needs to know about owners (M4a): names, VAT registration and the masked TIN. */
+export interface OwnerFacts {
+  readonly id: string;
+  /** The name invoices are issued from: the registered name, or the display name. */
+  readonly name: string;
+  readonly displayName: string;
+  readonly vatRegistered: boolean;
+  /** Masked (CLAUDE.md section 10). */
+  readonly tinMasked: string | null;
+  /** M5 decision 2: a letting business is taxed on income, not per receipt (OQ-18). */
+  readonly lettingBusiness: boolean;
+}
+
+/** Owners by id, read in the caller's transaction (RLS applies). */
+export async function ownerFacts(
+  tx: Tx,
+  ownerIds: readonly string[],
+): Promise<Map<string, OwnerFacts>> {
+  if (ownerIds.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      id: schema.owner.id,
+      displayName: schema.owner.displayName,
+      legalName: schema.owner.legalName,
+      vatRegistered: schema.owner.vatRegistered,
+      tinMasked: schema.owner.tinMasked,
+      lettingBusiness: schema.owner.lettingBusiness,
+    })
+    .from(schema.owner)
+    .where(inArray(schema.owner.id, [...new Set(ownerIds)]));
+  return new Map(
+    rows.map((r) => [
+      r.id,
+      {
+        id: r.id,
+        name: r.legalName ?? r.displayName,
+        displayName: r.displayName,
+        vatRegistered: r.vatRegistered,
+        tinMasked: r.tinMasked,
+        lettingBusiness: r.lettingBusiness,
+      },
+    ]),
+  );
 }

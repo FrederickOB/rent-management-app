@@ -116,7 +116,7 @@ flowchart TB
 | `audit` | 14 | Hash-chained audit log, search, verification (AD-07) | core |
 | `rules` | 8 | Rules engine and localisation (TX-08; NFR localisation) | core |
 | `documents` | Platform | Files, PDF rendering, fingerprints, write-once storage (PR-04 storage) | core, audit, rules (retention) |
-| `ledger` | 8 | Books, accounts, journal, posting service, period locks (AC-01) | core |
+| `ledger` | 8 | Books, accounts, journal, posting service, period locks (AC-01) | core, audit (one `ledger.entry_posted` event per entry, M4a) |
 | `policy` | 14 | `PolicyService`, role permissions, scopes (AD-03; AD-04 in P2) | identity |
 | `approvals` | 14 | Two-person approvals (AD-05) | policy, audit, identity (step-up TOTP) |
 | `companies` | 14 | Companies and branding, owners, management agreements, settlement accounts (AD-01, AD-02) | policy, audit, documents, identity (invites), rules |
@@ -124,7 +124,7 @@ flowchart TB
 | `esign` | 2, 4 | Signing requests, secure links, one-time codes, evidence, certificate PDFs (TL-07; LN-02, LN-04 signing) | documents, audit |
 | `portfolio` | 1 | Portfolios, properties, blocks, units, codes, meters, amenities, import, billing bands (PR-01 to PR-10, PB-01) | companies (owners), documents, rules, audit, policy |
 | `tenancy` | 2 | Tenants, ID verification, leases, templates, rent schedule, occupancy, renewals, trackers, advance-cap check (TL-01 to TL-10, TL-12, TL-13, PB-09, TX-05, AR-05 check) | portfolio, esign, approvals, rules, companies, policy, documents, audit, identity (staff to notify) |
-| `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents |
+| `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents, policy, audit, companies (owner facts, settings), portfolio (a property's owner on a date), identity (collector names, memberships) |
 | `payments` | 3 | Providers, pay links, webhooks, verification, matching, unmatched queue, receipts, reconciliation (BC-02 to BC-04, BC-06, BC-12, BC-14) | billing, ledger, companies, documents |
 | `tax` | 8 | Rent tax per receipt, due dates, GRA payments, withholding tax (TX-01 to TX-07) | billing, ledger, rules, documents |
 | `maintenance` | 6 | Jobs, priorities, assignment, artisan job sheets, inspections (MI-01 to MI-12) | tenancy, portfolio, documents, esign, tasks, approvals |
@@ -402,6 +402,53 @@ erDiagram
 
 Receipt numbers come from a per-company counter row locked in the posting transaction, so they have no gaps. A reversed payment keeps its receipt and gets a credit receipt with its own number. `journal_entry.reverses_entry_id` is unique, so an entry can be reversed only once.
 
+**As built in M4a** (migrations 0012 to 0014; M4a plan, section 5):
+- **Tables:**
+    - the ledger: `ledger_account`, `book`, `journal_entry`, `journal_line` and `period_lock`;
+    - billing: `payment_reference`, `invoice`, `invoice_line`, `invoice_line_accrual`, `payment`, `payment_match`, `payment_reversal`, `receipt`, `company_counter`, `cash_record`, `direct_receipt`, `cash_banking`, `credit_carry_over`, `credit_note`, `write_off`, `allocation` and `idempotent_request`;
+    - the register: `property_ownership_correction` (M2 S5).
+- **Payments:** a payment row exists only once money is confirmed. Cash, cheques and direct transfers wait in their own records until a second person approves them. Provider payments start as a payment intent (one per charge attempt, from a pay link or the tenant app) and become a payment only once the provider's verify endpoint confirms the amount, currency, status and reference (M4b).
+- **Who writes what:**
+    - Books are made by database triggers when an owner or a landlord or agency company is created.
+    - Books, the journal, period locks and every billing table are append-only, except the counters and the idempotency keys.
+    - `lease.billing_start_date` is set once, when the lease is signed.
+
+  The database refuses (`RA040` to `RA048`):
+    - journal writes by any role but `ledger_writer`;
+    - unbalanced books or entries with fewer than two lines;
+    - an account outside its kind of book;
+    - lines added to an entry from an earlier transaction;
+    - lines in a locked month;
+    - an owner change once a property has ledger entries;
+    - a billing start set other than at signing;
+    - an invoice for a lease already billed in another book.
+
+**As built in M4b** (migrations 0018 and 0019; M4b plan, section 5):
+- **Tables:**
+    - settlement: `settlement_account` (bank accounts only, decision 2; the number encrypted with a blind index and a mask), `provider_subaccount` and `management_agreement` (effective-dated, one destination per owner in an agency, decision 6);
+    - provider payments: `payment_intent`, `provider_settlement`, `reconciliation_exception` and `unmatched_refund` (P31);
+    - delivery: `reminder_sent` (one row per invoice and ladder step) and `receipt_delivery` (channel, time sent and latency);
+    - `webhook_inbox`: global, not company-scoped, unique on (provider, event id) among rows with a valid signature; written and read only through system paths;
+    - new columns: `payment.provider_reference`, `settlement_account_id`, `payer_phone_index` and `payer_phone_masked`; `secure_link.invoice_id` and `receipt_id`; `message.owner_id`.
+- **Row Level Security:** every new company table; property scope on intents, reminders and receipt deliveries; an owner's settlement account (and its subaccounts and settlements) only for people with that owner in scope, the agency's own account only for people who see the whole company.
+- **System functions (ADR-002), ids and amounts only:** an intent by its reference, a settlement account by its provider subaccount, payments by provider reference or between two instants, companies with pending intents, and the inbox relay's claim.
+
+  The database refuses (`RA051` to `RA054`):
+    - a settlement account changed other than through its states (`awaiting_approval`, then `rejected` or `cooling_off` for 24 hours, then `active`, then `retired`), or a change of its holder, bank or number;
+    - money matched while a refund of it is live, or a refund of money that belongs to a lease or was reversed;
+    - a payment intent changed other than through its states, or once confirmed;
+    - a pay or receipt link without its tenant.
+
+  **Review fixes** (migrations 0020 and 0021):
+    - `unmatched_refund` gains `sent`: approved, then sent while the provider makes it, then refunded or failed.
+    - `provider_settlement.net_minor` may be below zero, and `charge_references` keeps the charges each settlement paid out.
+    - `payment_intent` records an advance accepted over the limit under `warn` (`advance_over_limit`, the limit and the rule).
+    - `webhook_inbox` keeps the body only for a valid signature. Otherwise it keeps `body_sha256`, `body_bytes`, three headers and a keyed hash of the sender's address.
+    - `management_agreement.approval_request_id` names the request that set it.
+    - The database refuses (`RA055`, `RA056`):
+        - a reversal of money being or already refunded to its payer;
+        - an agreement without a second person's approval.
+
 ### 3.5 Notices, signatures and messaging
 
 ```mermaid
@@ -529,8 +576,8 @@ Sign convention: debits positive, credits negative. Lines carry dimensions (leas
 | Rule | Event | Debit | Credit | Notes |
 | --- | --- | --- | --- | --- |
 | P01 | Invoice raised (BC-01) | none | none | Rent, service-charge and deposit lines are billing documents only; periods post when they start (P02) and deposits when received (P10). One-off lines (P2 charges, termination charges) post at issue: Dr 1100, Cr 4200. Deposit lines are raised when the lease is signed. VAT lines post at their tax point (P32). |
-| P02 | Charge period starts (accrual) | 2010: the line's advance allocations plus surplus applied now<br>1100: the rest | 4000 (rent) or 4100 (service charge): the line amount | Per lease in one transaction, lines in accrual order (period start, rent before service charge). Surplus is applied first in, first out by payment. Catches up every started line not yet accrued. |
-| P03 | Provider payment confirmed and matched (BC-02, BC-03) | 1050: verified amount | 1100: started lines and one-off lines<br>2100: deposit lines<br>2010: lines not yet started, and surplus | Allocation oldest debt first (section 6). P17 and P14 follow in the same transaction. |
+| P02 | Charge period starts (accrual) | 2010: the line's advance allocations plus surplus applied now<br>1100: the rest | 4000 (rent) or 4100 (service charge): the line amount | Per lease in one transaction, lines in accrual order (period start, rent before service charge). Surplus is applied first in, first out by payment. Catches up every started line not yet accrued; never a period after the lease's last billable day. **VAT and levies (M4a review 10):** the surplus left after the base line also pays its VAT and levy lines (Dr 2010, Cr 1100 on the tax line, under key `P02:<tax line>`); the forward walk expects the same, including the VAT of periods not invoiced yet. **Late draw (review 2):** a payment that arrived before a period started, for a period accrued since, is held as the line's advance by P03 and drawn at once (Dr 2010, Cr 1100), dated at the period start, under key `P02:<line>:<payment>`. |
+| P03 | Provider payment confirmed and matched (BC-02, BC-03) | 1050: verified amount | 1100: started lines and one-off lines<br>2100: deposit lines<br>2010: lines not yet started, and surplus | Allocation oldest debt first (section 6). Each allocation is classified **as of the payment's value date** (the day the money arrived, also for a match of unmatched money), not the day it is recorded: a line not started on that day takes 2010, then the late draw of P02 if it has accrued since (review 2). A one-off or VAT line counts from the day it was charged (its P01 or P32 value date) in the same way. P17 and P14 follow in the same transaction. |
 | P04 | Partial payment | as P03 | as P03 | The line stays partly outstanding. |
 | P05 | Overpayment to credit (BC-07) | as P03 | as P03; surplus to 2010 | Surplus stays with its payment until P02 applies it. |
 | P06 | Cash or cheque receipt approved (BC-05) | 1060 (collector) | as P03 | Nothing posts while the record awaits a second user's approval. |
@@ -544,11 +591,11 @@ Sign convention: debits positive, credits negative. Lines carry dimensions (leas
 | P14 | Management fee (AC-02) | 5100 | 2300 | Agency-managed owners only. Percentage fees per receipt on the agreement's base (prd-issues 18); fixed fees monthly per unit. |
 | P15 | Expense (AC-03) | 5000 or 5400 (property, unit) | 2500 if unpaid, 1070 if paid by the agent, 1010 if paid by the owner | A payable paid later: Dr 2500, Cr 1070 or 1010. |
 | P16 | Owner remittance (AC-05) | 1010: net amount<br>2300: fees retained | 1070: total | The agent pays the owner and keeps its fees in one entry. |
-| P17 | Rent tax accrued (TX-01) | 5300 | 2200 (receipt, line, property) | Per receipt, at the rate for the unit's band, rule version recorded. Base: the receipt's rent share from the section 6 walk, including advances, plus its service-charge share while `rent_tax.includes_service_charge` is on (the default). Never deposits, VAT or surplus beyond the lease end. A line's tax never exceeds rate × line amount. Owners outside the letting business only (OQ-17 to OQ-19). Due 30 days after the value date. |
+| P17 | Rent tax accrued (TX-01) | 5300 | 2200 (receipt, line, property) | Per receipt, at the rate for the unit's band, rule version recorded. Base: the receipt's rent share from the section 6 walk, including advances, plus its service-charge share while `rent_tax.includes_service_charge` is on (the default). Never deposits, VAT or surplus beyond the lease end. A line's tax never exceeds rate × line amount. Owners outside the letting business only (OQ-17 to OQ-19). Due by the rules row's days after the value date (`rent_tax.due_days_after_receipt`, 30 in the seed). A rules row missing or not one this build applies leaves the event not assessed: the money posts, the audit log records `rent_tax.not_assessed`, a person is alerted, and `tax.assess-pending` assesses it on the same key once the rules allow (M5 review 7). Credit carried to a renewal is taxed only on what was never taxed on the old lease (review N2). |
 | P18 | Rent tax paid to GRA (TX-03) | 2200 | 1010 or 1070 | GRA receipt attached; settles specific rent tax items. |
-| P19 | Withholding tax by a corporate tenant (TX-04) | 1150: amount withheld | 1100: the lines it was withheld on (allocation source: withholding) | Recorded with the payment or when the tenant advises it later; the cash allocates normally (P03). Tax on those lines becomes the amount withheld: P17 accrues it, rent tax already accrued on their cash is reversed, and the tax item is marked "withheld by tenant" so TX-02 alerts do not fire. |
-| P20 | WHT certificate confirmed (TX-04) | owner outside the letting business: 2200<br>letting-business owner: 1160 | 1150 | Manager uploads, a landlord user confirms; the WHT item links to its rent tax items. A certificate that never comes is written off (P24). |
-| P21 | Reversal | (a) correction: each original line, sign flipped<br>(b) payment reversal: 1100 for started lines, 2010 for lines not started and surplus, 2100 for deposit lines | (a) each original line, sign flipped<br>(b) where the money now sits: 1050 if unsettled or to be deducted from a settlement, 1060 if not banked, 1010 or 1070 if banked | (a) only when nothing has consumed the entry since; otherwise (b) or P27. (b) covers chargebacks, bounced cheques and wrong matches. It is built from the current state of the payment's allocations, adds negative allocation rows, and mirrors the payment's P17 and P14 entries. A reversal is never itself reversed. |
+| P19 | Withholding tax by a corporate tenant (TX-04) | 1150: amount withheld | 1100: the lines it was withheld on, months started (allocation source: withholding)<br>2010: months not yet started, on the line (M5 decision 8) | Recorded with the payment or when the tenant advises it later; the cash allocates normally (P03). A month not yet started holds it as its advance, as P03 holds a prepayment; when the month starts, P02 charges it in full and the withholding is drawn on its own key, `P02:<line>:withholding:<withholding>` (Dr 2010, Cr 1100). Tax on those lines becomes the amount withheld: P17 accrues it, rent tax already accrued on their cash is reversed, and the tax item is marked "withheld by tenant" so TX-02 alerts do not fire. Withholding recorded after the tenant's cash already paid the month (review 2): as much of that cash as the withholding needs returns to its payment's credit first, by allocation correction rows as a credit note releases money (Dr 1100 on a started month, or Dr 2010 on the line for one not started; Cr 2010 on the payment), in the same entry; the freed credit then pays later months in the usual order (a P02 credit draw for any month started and owed; the walk applies it to months not started). Rent tax: the tax on the moved cash is offset with the month's, the amount withheld becomes the month's tax, and the moved cash is taxed as it covers the months it now pays (a receipt item naming the withholding, `P17:<withholding>:<payment>`). A credit note never takes withheld tax back (M5 decision 9, OQ-56). |
+| P20 | WHT certificate confirmed (TX-04) | owner outside the letting business: 2200<br>letting-business owner: 1160 | 1150 | Manager uploads, a landlord user confirms; the WHT item links to its rent tax items. A certificate that never comes is written off (P24). The debit follows what was recorded with the withholding (`rent_tax_treatment`; review 1): 2200 only when P17 accrued the amount withheld to 2200, else 1160; never the owner's flag at confirmation. |
+| P21 | Reversal | (a) correction: each original line, sign flipped<br>(b) payment reversal: 1100 for started lines, 2010 for lines not started and surplus, 2100 for deposit lines | (a) each original line, sign flipped<br>(b) where the money now sits: 1050 if unsettled or to be deducted from a settlement, 1060 if not banked, 1010 or 1070 if banked (a provider payment once P22 has paid it out) | (a) only when nothing has consumed the entry since; otherwise (b) or P27. (b) covers chargebacks, bounced cheques and wrong matches. It is built from the current state of the payment's allocations, adds negative allocation rows, and mirrors the payment's P17 and P14 entries. A reversal is never itself reversed. |
 | P22 | Provider settlement | 1010 or 1070: net received<br>5200: fees<br>1050: chargebacks and refunds deducted<br>2300: agent's share, when split at source | 1050: gross of the payments settled | One entry per settlement per book; lines carry the settlement id. Any difference from the provider's report raises a reconciliation exception. |
 | P23 | Unmatched receipt, then matched (BC-12) | on receipt: 1050, or 1010 or 1070 for a direct transfer (P28)<br>on match: 2090 | on receipt: 2090<br>on match: as P03 | Suspense sits in the book of whoever received the money: the owner's book when the account is theirs, otherwise the company book. When a match moves money from the company book to an owner book, the company book credits the asset now holding it (1050, or net cash and 5200 if already settled) and the owner book debits the same, so each book balances. A person confirms every match. |
 | P24 | Write-off (AD-05) | 5900 | 1100 (allocation source: write-off), or 1150 for unrecoverable withholding | Two-person approval. |
@@ -556,10 +603,10 @@ Sign convention: debits positive, credits negative. Lines carry dimensions (leas
 | P26 | Platform subscription (M10, platform book) | invoice: 1100<br>payment: 1050<br>settlement: 1010 and 5200<br>annual release: 2020 | invoice: 4600, or 2020 when prepaid annually<br>payment: 1100<br>settlement: 1050<br>annual release: 4600 | Same mechanics as rent, in the platform's own book. |
 | P27 | Credit note: void, correction or early-termination proration | 4000, 4100 or 4200 | 1100 if the line was accrued and unpaid<br>2010 if accrued and paid (its allocations return to surplus) | Approval required. A line not yet accrued is cancelled with no entry; any allocations released stay in 2010. A replacement line accrues under its own key. Allocation source: credit note. |
 | P28 | Direct receipt into an owner or agency account | 1010 or 1070 | as P03, or 2090 until matched (P23) | Bank transfers and MoMo sent straight to the landlord or agency, outside the provider. Recorded with proof and second-user approval; statement import comes in Phase 2. P17 and P14 follow. |
-| P29 | Balances carried to a renewal lease | 2010 (old lease)<br>2100 (old lease) | 2010 (new lease)<br>2100 (new lease) | A change of lease dimension within the owner book. Arrears stay on the old lease's invoices. |
+| P29 | Balances carried to a renewal lease | 2010 (old lease)<br>2100 (old lease) | 2010 (new lease)<br>2100 (new lease) | A change of lease dimension within the owner book. Arrears stay on the old lease's invoices. Credit and the deposit move payment by payment. Credit that appears on the old lease after the renewal started (a late payment) moves at once under `P29:<renewal>:<payment>`; money a credit note releases returns to the lease the payment's credit sits on. A reversal takes a carried deposit back from the lease holding it (review 9, 11). |
 | P30 | Owner funds the agent | 1070 | 1010 | So the agent can pay expenses on the owner's behalf. |
 | P31 | Unmatched receipt refunded to the payer | 2090 | 1050 for a provider refund, or 1010 or 1070 | In the book holding the suspense. Approval required. |
-| P32 | VAT and levies on a commercial invoice (CT-04) | 1100: the invoice's VAT lines | 2210 | VAT-registered owners only; dwellings are exempt. Posted at the tax point, the invoice or the payment, whichever comes first (GRA guidance AG/26/001); an advance paid before its invoice exists creates the tax point at payment, which the tax adviser confirms (OQ-20). Rates come from `vat.commercial_rent` (unverified). VAT lines are allocated like any other line. |
+| P32 | VAT and levies on a commercial invoice (CT-04) | 1100: the invoice's VAT lines | 2210 | VAT-registered owners only; dwellings are exempt. Posted at the tax point, the invoice or the payment, whichever comes first (GRA guidance AG/26/001); an advance paid before its invoice exists creates the tax point at payment, which the tax adviser confirms (OQ-20). Rates come from `vat.commercial_rent` (unverified). VAT lines are allocated like any other line. Invoices a payment makes issue are charged at that payment's value date (second review A). |
 | P33 | VAT paid to GRA | 2210 | 1010 or 1070 | With the VAT return; GRA receipt attached. |
 
 ### Worked example A: two-year residential advance
@@ -609,14 +656,15 @@ Result: income GH₵10,000; rent tax GH₵1,500, settled by the withholding; fee
 
 **Allocation (BC-07).**
 1. Allocation sources are payments (provider, cash, direct transfer, opening balance), deposits, withholding, credit notes and write-offs. Each row records its source, the line, the amount, a value date and an accounting date. Reversals add negative rows; nothing is updated.
-2. Withholding is pinned to the lines it was withheld on. Everything else is allocated oldest debt first: open lines ordered by due date, then type (deposit, rent, service charge, one-off), then period start. A pay link for a particular invoice does not change the order.
+2. Withholding is pinned to the lines it was withheld on, started or not (a month not yet started holds it as its advance, M5 decision 8). Everything else is allocated oldest debt first: open lines ordered by due date, so across invoices the oldest goes first. Within one due date (one invoice) the order is the deposit, then the charge periods month by month (each month's rent, then that month's service charge), then one-off charges, with each VAT or levy line straight after the line it is charged on (M4b decision 9). A pay link for a particular invoice does not change the order.
 3. Deposit lines are raised when the lease is signed, so an early deposit always finds its line and never becomes surplus.
 4. Whatever a payment does not allocate stays as that payment's unallocated remainder (surplus) in 2010.
+5. A correction never leaves credit beside reopened debt (M4b review F4). After a reversal or a credit note, spare credit, oldest payment first, pays any accrued rent or service-charge period left owing, by a P02 credit draw dated that day. Deposits and one-off charges are not drawn.
 
 **Accrual (daily, after invoice generation).**
 1. Charge periods are monthly, anchored on the lease start date, whatever the billing cycle; an annual invoice bundles twelve of them.
 2. Each run takes, per lease, every rent and service-charge line whose period has started and is not yet accrued, so a missed day catches up. Lines go in accrual order (period start, then rent before service charge), in one transaction per lease.
-3. For each line, surplus is applied first in, first out by payment, up to the line's outstanding amount. P02 then debits 2010 for the line's advance allocations plus the surplus just applied, and 1100 for the rest.
+3. For each line, surplus is applied first in, first out by payment, up to the line's outstanding amount. P02 then debits 2010 for the line's advance allocations plus the surplus just applied, and 1100 for the rest. Withholding held as the line's advance (M5 decision 8) is then drawn on its own key: Dr 2010, Cr 1100. Paid-until, reminders, ageing and the invoice list count withheld tax as covering its line.
 
 **Paid-until (AR-02) and the forward walk.**
 1. Walk the lease's recurring lines (rent and service charge) in accrual order. A started line is covered if its allocations equal its amount. A future line is covered by its advance allocations plus surplus applied forward, in the order P02 will use.
@@ -890,9 +938,21 @@ sequenceDiagram
 | Webhook never arrives | `payments.verify-pending` checks intents pending over 5 minutes; reconciliation catches the rest the next day. |
 | Provider down when creating the charge | Fail over to the second provider only if it settles directly (D1). Otherwise show "try again shortly" plus the landlord's manual payment instructions, and raise an incident alert. |
 | Receipt send fails | Retried, then the next channel. The receipt stays available in the app and on the link. |
-| Chargeback or provider reversal | P21(b) payment reversal, built from the current state of its allocations; a credit receipt and a manager alert. |
+| Chargeback or provider reversal | P21(b) payment reversal, built from the current state of its allocations, when the money taken back equals the payment (a part is an exception). A credit receipt is issued, and an alert goes to the people who see that property. It needs no approval: the provider has already taken the money back. The money sits in 1050 until the next settlement deducts it (M4b). |
 
-**Daily reconciliation** (02:00 Africa/Accra). List the provider's transactions for the previous day. Each one missing locally goes through the normal processing path. Each local payment the provider does not list is flagged. Then match settlement reports to payments, post P22, and raise any difference as an exception on the manager dashboard.
+**Daily reconciliation** (02:00 Africa/Accra). List the provider's transactions for the previous day. Each one missing locally goes through the normal processing path. Each local payment the provider does not list is flagged. Charges listed as reversed, and the day's refunds and disputes, go through the chargeback path. Then match settlement reports to payments and post P22, and raise any difference as an exception on the manager dashboard. A payment posted after its settlement was reconciled is settled when it appears. Last, provider clearing (1050) per settlement account is compared with what the provider still holds unsettled (invariant 11).
+
+**As built in M4b, after review:**
+- **Money:**
+    - only cedis are posted: a charge in another currency is an exception on every path;
+    - a refund posts P31 only once the provider says it is processed, and a retry always asks the provider first;
+    - a reversal equal to the payment reverses it; a part refund or chargeback is an exception.
+- **Failover:** only a clear "down" (503, 429) moves to the next provider. After a timeout or any other unclear answer, the same provider is asked about the charge first.
+- **Card return page:** the checkout returns the payer to `${LINKS_ORIGIN}/p/return?reference=…`, which carries the charge reference, never a pay-link token.
+- **Webhook intake:**
+    - bodies over 64 KB are refused;
+    - bad-signature requests are rate-limited per address and keep no body;
+    - their alert goes at most once per provider in 15 minutes.
 
 ## 9. Secure links and e-signature
 
@@ -966,16 +1026,23 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `documents.rendered` | event: a PDF is recorded with its SHA-256 (emitted by `documents.render-pdf`); opens the signing request and queues its links | render request id | 5 | M3 |
 | `signing.completed` | event: a signing request finalised; marks the lease signed (`LeaseLifecycleService.onSigningCompleted`) | signing request id | 5 | M3 |
 | `signing.declined` | event: a signer declined; returns the lease to draft (`onSigningDeclined`) | signing request id | 5 | M3 |
-| `billing.generate-invoices` | daily 00:10 | lease id + cycle start | 5 | M4a |
-| `billing.accrue-periods` | daily 00:20, after invoices; catches up any missed day | invoice line id | 5, alert | M4a |
-| `billing.subledger-check` | nightly 03:00 | company + date | 3, alert on mismatch | M4a |
-| `billing.rent-reminders` | daily 08:00 | invoice id + ladder step | 3 | M4b |
-| `payments.process-webhook` | event: inbox row stored | provider + event id | 10, 1 min to 1 h, then dead letter | M4b |
-| `payments.verify-pending` | every 5 min | intent id + 5-minute window | 3 per run | M4b |
-| `payments.issue-receipt` | event: payment posted | payment id | 5; SLA alert at 60 s | M4b |
-| `payments.reconcile-transactions` | daily 02:00 | provider + date | 5 | M4b |
-| `payments.reconcile-settlements` | daily 02:30 | provider + settlement id | 5 | M4b |
+| `billing.generate-invoices` | daily 00:10; fans out one `billing.generate-invoices.company` job per company | lease id + cycle start | 5 | M4a |
+| `billing.accrue-periods` | daily 00:20, after invoices; catches up any missed day; fans out per company | invoice line id | 5, alert | M4a |
+| `billing.subledger-check` | nightly 03:00; fans out per company | company + date | 3, alert on mismatch | M4a |
+| `lease.signed` | event (tenancy): issues the payment reference, the deposit invoice and any cycle already due, then accrues | event id; invoice per lease + cycle start | 5 | M4a |
+| `lease.activated` | event (tenancy): a renewal starts, so prepayments and the deposit carry over (P29) | event id; `P29:<new lease>` | 5 | M4a |
+| `lease.ended` | event (tenancy): a system credit note cancels lines for periods after the end | event id; one credit note per line | 5 | M4a |
+| `lease.cancelled` | event (tenancy): a signed lease cancelled before it starts; its lines are credited | event id; one credit note per line | 5 | M4a |
+| `billing.rent-reminders` | daily 08:00; fans out one `billing.rent-reminders.company` job per company | invoice id + ladder step (a reminder row per step) | 3 | M4b |
+| `payments.process-webhook` | a stored `webhook_inbox` row, published by the inbox relay in the worker (LISTEN `webhook_inbox`, 1-second poll; claim and enqueue in one transaction) | inbox id; unique (provider, event id) | 10, 1 min to 1 h, then dead letter: the row is marked failed | M4b |
+| `payments.verify-pending` | every 5 min; fans out one `payments.verify-pending.company` job per company with intents pending over 5 minutes | company + 5-minute window; a confirmed intent is final | 3 | M4b |
+| `payment.posted` | event (payments): the receipt delivery, on the tenant's consented channels with a receipt link; the latency from confirmation is recorded per receipt, with an alert past 60 s | receipt id; one delivery per receipt | 5, from 5 s | M4b |
+| `payments.reconcile-transactions` | daily 02:00, each configured provider, the previous day | provider + date; each missing payment through the normal path | 5 | M4b |
+| `payments.reconcile-settlements` | daily 02:30, each configured provider | provider + settlement id; P22 key per settlement and book | 5 | M4b |
+| `settlement_account.approved` | event (payments): an approved settlement account becomes active once its 24 hours have passed (re-queued for then), and gets a subaccount with each provider that settles directly | account id | 5 | M4b |
+| `payments.refund-unmatched` | event (payments): an approved refund of unmatched money (P31) is sent to the provider, after asking it for any refund already made. While the provider is still making it, the job runs again every 10 minutes until the provider or its webhook says processed or failed | refund id | 5 | M4b |
 | `billing.paid-until-prompt` | daily 08:00 | lease id + paid-until date | 3 | M5 |
+| `tax.assess-pending` | daily 07:30 | the event's P17 key (`rent_tax.assessed` in the audit log) | 3 | M5 review 7 |
 | `tax.rent-tax-alerts` | daily 08:00 | tax item id + alert day (21, 28) | 3 | M5 |
 | `messaging.send` | event: message queued | message id | 5 per provider, then next channel | M3 (SMS and email, M3 decision 1); WhatsApp and push in M6 |
 | `messaging.process-inbound` | event: inbound webhook | provider + message id | 10 | M6 |
@@ -1022,7 +1089,17 @@ Sign-in codes are not a job: the auth request sends them straight to the SMS por
     - **Schedulers** call a `SECURITY DEFINER` function that returns company ids only.
     - **Platform admin aggregates** read `SECURITY DEFINER` views that return counts and totals, never rows.
     - **Support access** sets a company context only when an active, consented, time-boxed grant exists. Every query under it is audited.
-- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. M3 adds the same property policy to every tenancy, e-signing and messaging table with `property_id`, and tenant scope: a tenant-app transaction sets `app.tenant_scope` to the person's tenant records in that company, every table with `tenant_id` filters on it, a tenant session sees issued leases only and never templates, links or codes, and its property scope is the properties of its own leases (no owner records). Scoped staff see a tenant through its leases on in-scope properties, or as its creator before it has any lease. Journal lines follow in M4a.
+- Defence in depth: a second, restrictive RLS policy limits scoped sessions to their scope. M2 applies it to the register: the request transaction sets `app.property_scope` (the properties a person's owners hold today, plus those assigned to them) and `app.owner_scope`, and every register table filters on them; NULL means the whole company. M3 adds the same property policy to every tenancy, e-signing and messaging table with `property_id`, and tenant scope: a tenant-app transaction sets `app.tenant_scope` to the person's tenant records in that company, every table with `tenant_id` filters on it, a tenant session sees issued leases only and never templates, links or codes, and its property scope is the properties of its own leases (no owner records). Scoped staff see a tenant through its leases on in-scope properties, or as its creator before it has any lease.
+
+  M4a extends the policies to the ledger and billing:
+    - **Property scope:** journal lines and every billing table with `property_id`.
+    - **Payments:** follow the property or owner they belong to, or a match to an in-scope lease.
+    - **Books:** visible within the owner scope.
+    - **Banking:** visible to its collector and within the owner scope.
+    - **Idempotency keys:** each person sees only their own requests.
+    - **Tenant sessions:** read their own invoices, lines, allocations, payments and receipts. They read no journal row, book, cash record or correction.
+
+  Journal writes need `SET LOCAL ROLE ledger_writer`. `rent_app` is a member with `INHERIT FALSE`, so it gains no privilege from the role without switching to it.
 
 ### Data protection
 

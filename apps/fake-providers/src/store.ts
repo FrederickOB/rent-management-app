@@ -38,12 +38,21 @@ export interface FakeTransaction {
   readonly subaccount: string;
   readonly metadata: Record<string, string>;
   readonly createdAt: string;
-  status: 'pending' | 'success' | 'failed' | 'abandoned';
+  status: 'pending' | 'success' | 'failed' | 'abandoned' | 'reversed';
   /** Pesewas: the amount asked until paid, then the amount paid. */
   amount: number;
   fees: number;
   paidAt?: string;
   settlementId?: number;
+  /** Refunded or charged back: deducted from the next settlement to its subaccount, once. */
+  chargedBack?: { readonly amount: number; deductedIn?: number };
+  /** Its refunds and disputes, as Paystack's refund and dispute APIs list them (M4b review). */
+  reversals?: {
+    readonly kind: 'refund' | 'dispute';
+    readonly id: number;
+    readonly amount: number;
+    readonly createdAt: string;
+  }[];
 }
 
 export interface FakeSettlement {
@@ -51,9 +60,11 @@ export interface FakeSettlement {
   readonly subaccount: string;
   readonly totalAmount: number;
   readonly totalFees: number;
+  readonly deductions: number;
   readonly effectiveAmount: number;
   readonly settledAt: string;
   readonly references: readonly string[];
+  readonly deducted: readonly { readonly reference: string; readonly amount: number }[];
 }
 
 export interface FakeIdentityCheck {

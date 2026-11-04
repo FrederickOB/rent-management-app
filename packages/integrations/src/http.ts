@@ -16,6 +16,8 @@ export interface JsonRequest {
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly timeoutMs?: number;
+  /** The transport; the global fetch unless a test replays recorded responses (M4b). */
+  readonly fetch?: typeof fetch;
 }
 
 /** JSON over HTTP with a timeout. 5xx, 429 and network errors are retryable; other 4xx are not. */
@@ -26,7 +28,7 @@ export async function requestJson<T>(
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await (init.fetch ?? fetch)(url, {
       method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
       headers: {
         accept: 'application/json',

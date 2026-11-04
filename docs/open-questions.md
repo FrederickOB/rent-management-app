@@ -1,6 +1,6 @@
 # Open questions
 
-54 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+56 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -45,10 +45,11 @@
 
 | ID | Question | Who answers | Needed by | Recommended default | Decision |
 | --- | --- | --- | --- | --- | --- |
-| OQ-17 | Is rent tax due on advance rent when received, or as it is earned? What rounding does GRA expect? (D9) | Tax adviser | M5 | When received, including advances: individuals are taxed on a cash basis (Act 896 s.19(2), s.20). GRA's 30-day payment rule is published guidance, not statute. No rounding rule found, so half up per receipt. | |
+| OQ-17 | Is rent tax due on advance rent when received, or as it is earned? What rounding does GRA expect? (D9) And when one month is paid by several receipts, which wins: one half-up rounding per receipt, or a month never taxed above the rate on its amount (half up)? (`rent_tax.rounding`; M5 review 6) | Tax adviser | M5 | When received, including advances: individuals are taxed on a cash basis (Act 896 s.19(2), s.20). GRA's 30-day payment rule is published guidance, not statute. No rounding rule found, so half up per receipt. Where the two conflict the per-month cap wins: a receipt's tax is half up of its base × rate, except where earlier receipts on the same months were rounded up and the months' rounded caps leave less room; then it is that room. Measured on random receipts: at most one pesewa per month the receipt pays, and only where the rounded caps bind. | |
 | OQ-18 | Does per-receipt rent tax apply to corporate owners? When a corporate tenant withholds tax, does it settle the owner's rent tax, or is it a credit? (prd-issues 12, 13) | Tax adviser | M5 | Withholding on rent is final for individuals and for companies not in the business of letting (Act 896 s.119(1)); for a letting business it is a credit (s.120). Owners carry a `letting_business` flag, and rent tax per receipt applies to the rest (P17, P20). | |
 | OQ-19 | Does rent tax apply to service charge? Does refunding an advance reduce rent tax already accrued or paid? (prd-issues 14) | Tax adviser | M5 | Service charge may count as rent (Act 896 defines rent to include payment for "assistance ancillary to a use"), so it is taxed by default, switchable in the rules table. No automatic adjustment on refunds. | |
 | OQ-20 | How do VAT and levies apply to commercial rent: rates, tax point, service charge, VAT withholding by designated agents, and GRA's E-VAT invoicing? | Tax adviser | M4a | VAT-registered commercial owners charge 15% VAT plus 2.5% NHIL and 2.5% GETFund on commercial rent (Act 1151, GRA guidance AG/26/001), at the invoice or the payment, whichever comes first (P32). Dwellings are exempt. | Decided 2026-10-28: commercial landlords are in the pilot, so VAT lines on commercial invoices are built in M4a. |
+| OQ-56 | When rent on a month is credited back (a correction, or the unused days of an early end), how is tax the tenant withheld on that month treated: does the owner reclaim it from GRA, carry it as a credit, or return it to the tenant? And when a tenant withholds less than the rate on a month, does the amount withheld replace the month's rent tax? (M5 decision 9; review N4 and N7) | Tax adviser | Before the commercial pilot | A credit note that would take back withheld tax is refused (`credit_note_withheld`); staff settle it by hand, and the withheld tax stays on the month. There is no tool yet for withheld tax on months after an early end (review N4). The amount withheld replaces the month's tax, whatever it is (N7). | |
 | OQ-48 | Services carry VAT with no registration threshold. Must the platform register for VAT, and charge VAT and levies on subscription invoices? | Tax adviser | M10 | Register, and show VAT and levies on subscription invoices. | |
 
 ## Platform and providers
@@ -82,6 +83,7 @@
 | OQ-37 | Rates per tier and billing band? (PRD section 21) | Founder, from pricing research | M10 | Placeholder rates, editable in the admin console. | |
 | OQ-38 | How long is the free trial or guided onboarding period? (PB-08) | Founder | M10 | 30 days, configurable. | Decided 2026-10-28: as recommended. |
 | OQ-54 | Consent (CM-09) is recorded per channel, not per phone number or email. When staff change a tenant's or contact's phone or email, should the consent on record carry over to the new one, or must it be recorded again? (M3 review) | Founder, with counsel if needed | M6 (WhatsApp and broadcasts) | Ask again: a changed phone or email starts with no consent on that channel, and staff record the person's agreement for the new one. Until then, the edit forms say that consent stays with the new value and ask staff to check (M3). | |
+| OQ-55 | ADR-008 sends the owner an SMS and email alert when a settlement account is added, changed or retired. CM-09 sends a business-initiated message only on a channel with consent recorded. Is this security alert exempt, like a one-time code the person asked for? (M4b) | Founder, with counsel if needed | M4b report | Exempt: the alert goes to the phone and email on record whatever consent says, carries no marketing and no link, and is recorded as a message like any other. Built this way (`settlement_alert` purpose). | |
 
 ## Research findings, 28 Oct 2026
 
@@ -96,6 +98,15 @@ Claude researched these from the pages linked. They are background for your lawy
     - **Reconciliation:** the settlements API lists settlements and their transactions per subaccount.
     - **MoMo charges:** MTN, Telecel and AT. The payer has 180 seconds to approve, and every payment needs a fresh approval: there is no MoMo autopay.
     - Sources: [split payments](https://docs-v2.production.paystack.co/docs/payments/split-payments), [subaccounts](https://docs-v2.production.paystack.co/docs/api/subaccount), [settlements](https://docs-v2.production.paystack.co/docs/api/settlement), [charge](https://docs-v2.production.paystack.co/docs/api/charge), [payout schedule](https://support.paystack.com/en/articles/2123586), [subaccount verification](https://support.paystack.com/hc/en-us/articles/360009973199).
+    - **Assumed by the M4b adapter, to confirm with Paystack in writing** (`packages/integrations/src/payments/paystack.ts`; its tests run on fixtures built from the documentation, not recorded from a live account):
+        - Ghana's MoMo provider codes are `mtn`, `vod` (Telecel) and `atl` (AT). These come from third-party sources only, not from Paystack's own documentation.
+        - The charge endpoint takes `subaccount` and `bearer` as transaction initialisation does, so a MoMo charge settles to the subaccount and the subaccount bears the fee.
+        - A settlement names its subaccount, and its `deductions` field carries the chargebacks and refunds taken out of the payout.
+        - Account-name checks (`/bank/resolve`) may not work for Ghanaian banks; a 422 is read as "cannot check", and the approver sees that the name was not confirmed.
+        - **Settlement deductions (M4b review):** Paystack documents `deductions` on a settlement, and `settlement`, `deducted_amount`, `fully_deducted` and `dispute` on each refund. We read a settlement's deductions from the refunds that name it. We assume a dispute the payer won is deducted the same way, as a refund with `dispute` set, because Paystack does not document how chargebacks appear in settlements.
+        - **Disputes:** a dispute takes money only once resolved `merchant-accepted` with a refund amount; one resolved `declined` (the merchant won) took nothing.
+        - **Refund and dispute lists** take the charge's transaction id in their `transaction` filter, and list the transaction itself or its id.
+        - **MoMo next steps:** a charge answered `pay_offline` waits for approval on the phone, which we support. Any other next step (`send_otp`, `send_pin`, `send_birthday`, `send_phone`, `open_url`) fails the payment with "this network needs a step we don't support yet". Which Ghanaian networks ask for an OTP needs confirming before launch.
 - **OQ-02 Second provider:**
     - **Flutterwave** documents splits to Ghanaian bank accounts; MoMo destinations are not documented.
     - **Hubtel**'s checkout has no split field, so it would collect into a platform balance, which D1 rules out.
@@ -216,3 +227,13 @@ Statutes were read from the Parliament repository, GRA, the Data Protection Comm
     - **Tax point:** the earliest of invoice, payment or supply. Dwellings stay exempt.
     - **Services:** no registration threshold.
     - Sources: [Act 1151](https://repository.parliament.gh/items/c2c7d45e-a150-4721-bca7-4f8b5980a737), [levies](https://repository.parliament.gh/items/562fcdd8-f035-46ee-929a-58ace152dfb6), [GRA AG/26/001](https://gra.gov.gh/wp-content/uploads/2026/08/Guidelines-On-Rental-Of-Commercial-Premises.pdf).
+    - **What M4a builds on, for the tax adviser to confirm (2026-10-30):**
+        1. **Base:** each rate (VAT 15%, NHIL 2.5%, GETFund 2.5%) applies to the line's net amount, with no levy inside the VAT base, rounded half up once per line.
+        2. **Service charge:** VAT and levies apply to service charge as well as rent (`vat.applies_to_service_charge`, on, unverified).
+        3. **Advances:** a payment made before its invoices exist issues them at once, so the payment is the tax point (M4a decision 4).
+        4. **Corrections:** a credit note on a line reduces the VAT and levies charged on it; a write-off leaves the VAT already charged payable. Is bad-debt relief available?
+        5. **Invoices:** numbered per company (`INV-000123`). Must they also go through GRA's E-VAT system?
+        6. **TINs on invoices:** M4a prints the owner's and the commercial tenant's TINs masked, as M3 stores them for display; the full numbers stay encrypted.
+            - Must a VAT invoice or receipt carry both TINs in full?
+            - If so, issuing the invoice would decrypt them as an audited reveal and keep them in the frozen PDF.
+        7. **Tax point of money that came first:** when a payment, or unmatched money later matched, makes invoices issue (decision 4), their VAT is charged at the day the money arrived, not the day they were issued. VAT returns (P33, M5) must report it in that period. Is the arrival date the right tax point for money matched days later?

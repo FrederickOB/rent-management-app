@@ -17,7 +17,7 @@
     "format:check": "prettier --check .",
     "test": "pnpm services:up && turbo run test",
     "test:unit": "turbo run test:unit",
-    "test:e2e": "pnpm services:up && turbo run test:e2e --concurrency=1",
+    "test:e2e": "docker compose up -d --wait --no-recreate && turbo run test:e2e --concurrency=1 --continue",
     "db:migrate": "pnpm --filter @rent/db migrate && pnpm --filter @rent/server jobs:migrate",
     "db:seed": "pnpm --filter @rent/server seed",
     "db:backup": "bash scripts/db-backup.sh",

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CYCLE_OPTIONS,
+  cycleLabel,
   daysLeftLabel,
   endedLabel,
   formatMinor,
@@ -85,5 +87,24 @@ describe('TL-06 and TL-09 how a lease ended', () => {
       '31 Oct 2027, when the next lease on the unit started',
     );
     expect(endedLabel('2027-10-31', null)).toBe('31 Oct 2027');
+  });
+});
+
+describe('M4b decision 9 and TL-06 rent cycles, the two-yearly one included', () => {
+  it('offers monthly, quarterly, six-monthly, annual and two-yearly cycles on the lease forms', () => {
+    expect(CYCLE_OPTIONS.map((o) => o.value)).toEqual([
+      'monthly',
+      'quarterly',
+      'six_monthly',
+      'annual',
+      'two_yearly',
+    ]);
+    for (const option of CYCLE_OPTIONS) expect(option.label).not.toMatch(/_/);
+  });
+
+  it('names the two-yearly cycle wherever a lease’s rent is shown', () => {
+    expect(cycleLabel('two_yearly')).toBe('Every two years');
+    expect(rentLabel(150_000, 'two_yearly')).toBe('GH₵1,500.00 a month, billed every two years');
+    expect(rentLabel(150_000, 'six_monthly')).toBe('GH₵1,500.00 a month, billed every six months');
   });
 });

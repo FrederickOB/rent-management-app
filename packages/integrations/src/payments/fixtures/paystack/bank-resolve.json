@@ -1,0 +1,9 @@
+{
+  "status": true,
+  "message": "Account number resolved",
+  "data": {
+    "account_number": "0123456789",
+    "account_name": "TEST LANDLORD LIMITED",
+    "bank_id": 900
+  }
+}

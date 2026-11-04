@@ -292,6 +292,7 @@ export class MessagingService {
         tenantContactId: subject?.contactId ?? null,
         staffPersonId: staffPersonOf(r),
         signerId: signerOf(r),
+        ownerId: 'ownerId' in r ? r.ownerId : null,
         purpose: request.purpose,
         subject: request.subject,
         body: storedBody(request.body),

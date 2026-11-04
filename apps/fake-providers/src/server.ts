@@ -75,8 +75,15 @@ export function buildServer(
     );
   });
 
-  // Resets every store, not only messages.
+  // Clears the captured messages only: subaccounts, charges and the rest stay, so a test that
+  // clears its inbox does not lose the payments the seed set up (M4b links and tenant e2e).
   app.delete('/messages', async (_request, reply) => {
+    store.messages.length = 0;
+    return reply.code(204).send();
+  });
+
+  // Resets every store, payments included: a clean fake.
+  app.delete('/_reset', async (_request, reply) => {
     resetStore(store);
     return reply.code(204).send();
   });

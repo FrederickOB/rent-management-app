@@ -42,6 +42,8 @@ export const message = pgTable(
     tenantContactId: uuid(),
     staffPersonId: uuid().references(() => person.id),
     signerId: uuid(),
+    /** An owner of the register (M4b: settlement-account alerts, ADR-008). */
+    ownerId: uuid(),
     purpose: text().notNull(),
     subject: text(),
     /** As composed, with the link shown as [link] and any secure-link token redacted. */
@@ -80,15 +82,15 @@ export const message = pgTable(
     index('message_related_idx').on(t.companyId, t.relatedType, t.relatedId),
     check(
       'message_recipient_check',
-      sql`${t.recipientType} in ('tenant', 'tenant_contact', 'staff', 'signer') and (${t.recipientType} <> 'tenant' or ${t.tenantId} is not null) and (${t.recipientType} <> 'tenant_contact' or ${t.tenantContactId} is not null) and (${t.recipientType} <> 'staff' or ${t.staffPersonId} is not null) and (${t.recipientType} <> 'signer' or ${t.signerId} is not null)`,
+      sql`${t.recipientType} in ('tenant', 'tenant_contact', 'staff', 'signer', 'owner') and (${t.recipientType} <> 'tenant' or ${t.tenantId} is not null) and (${t.recipientType} <> 'tenant_contact' or ${t.tenantContactId} is not null) and (${t.recipientType} <> 'staff' or ${t.staffPersonId} is not null) and (${t.recipientType} <> 'signer' or ${t.signerId} is not null) and (${t.recipientType} <> 'owner' or ${t.ownerId} is not null)`,
     ),
     check(
       'message_purpose_check',
-      sql`${t.purpose} in ('signing_link', 'signing_reminder', 'signed_copy', 'id_check_link', 'staff_notice')`,
+      sql`${t.purpose} in ('signing_link', 'signing_reminder', 'signed_copy', 'id_check_link', 'staff_notice', 'pay_link', 'rent_reminder', 'receipt', 'settlement_alert')`,
     ),
     check(
       'message_link_check',
-      sql`(${t.linkPurpose} is null or ${t.linkPurpose} in ('sign', 'signed_copy', 'id_capture')) and (${t.linkPurpose} is null) = (${t.linkTargetId} is null)`,
+      sql`(${t.linkPurpose} is null or ${t.linkPurpose} in ('sign', 'signed_copy', 'id_capture', 'pay', 'receipt')) and (${t.linkPurpose} is null) = (${t.linkTargetId} is null)`,
     ),
     check(
       'message_channels_check',

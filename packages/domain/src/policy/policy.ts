@@ -65,15 +65,56 @@ export const POLICY_ACTIONS = [
   'lease.cancel_signed',
   'lease_template.manage',
   'tenancy.view_own',
+  // M4a: the ledger and billing (plan section 4.17).
+  'billing.view',
+  'billing.manage',
+  'payment.record',
+  'payment.record_transfer',
+  'cash.bank',
+  'cash.bank_others',
+  'cash.view_own',
+  // M4b: provider payments (plan section 4.11).
+  'payments.view',
+  'payments.match',
+  'settlement_account.change',
+  'payment.refund_unmatched',
+  // M4b: an account number shown in full, with a reason, audited (CLAUDE.md section 10).
+  'settlement_account.reveal',
+  // M5: rent tax and VAT paid to GRA, and the rent tax alerts (plan decision 5).
+  'tax.manage',
+  // M5: a withholding certificate confirmed by a user for its owner (plan decision 3).
+  'withholding.confirm',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
 /** Resource facts the policy needs for approval decisions. */
 export interface ApprovalResource {
+  readonly kind?: 'approval';
   readonly initiatorPersonId: string;
   /** Roles the action type lets approve, declared by its handler. */
   readonly eligibleRoles: readonly StaffRole[];
+  /**
+   * The property the request's subject belongs to; null for a company-level request (AD-02).
+   * Left out, the scope is not judged here.
+   */
+  readonly propertyId?: string | null;
+  /** The properties the deciding session covers (its resolved scope), or null when unscoped. */
+  readonly scopeProperties?: readonly string[] | null;
 }
+
+/**
+ * A withholding certificate to confirm (TX-04; M5 decision 3): a user for its owner confirms it,
+ * or an agency admin when the owner has none; never the person who uploaded it.
+ */
+export interface CertificateResource {
+  readonly kind: 'certificate';
+  readonly ownerId: string;
+  readonly uploadedBy: string;
+  /** Whether the owner has a user of their own in the company (see `actsForOwner`). */
+  readonly ownerHasUser: boolean;
+}
+
+export type PolicyResource = ApprovalResource | CertificateResource;
 
 export interface Decision {
   readonly allowed: boolean;
@@ -228,6 +269,57 @@ const STAFF_MATRIX: Record<
   'lease_template.manage': ['owner:own_company', 'agency_admin'],
   // A tenant's own tenancies in the tenant app; staff use lease.view.
   'tenancy.view_own': [],
+  // M4a (plan section 4.17). Caretakers see only their own cash records and cash on hand
+  // (cash.view_own), never invoices, balances or owners' money.
+  'billing.view': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  // Requests credit notes and write-offs, and matches unmatched receipts; a second person decides.
+  'billing.manage': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  // Cash and cheques: caretakers too, on their assigned properties (scope applies).
+  'payment.record': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+  ],
+  // A transfer straight into the owner's or the agency's account (P28), with proof.
+  'payment.record_transfer': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+  ],
+  // Banking one's own cash (P07); cash.bank_others banks anyone's.
+  'cash.bank': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant', 'caretaker'],
+  'cash.bank_others': ['owner:own_company', 'agency_admin', 'accountant'],
+  'cash.view_own': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+  ],
+  // M4b (plan section 4.11). As with billing.manage, a self-managing landlord is in every row:
+  // they are their own company's admin.
+  'payments.view': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'payments.match': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  // Redirecting rent is the likeliest fraud (ADR-008): a request, then a second person and 24 hours.
+  'settlement_account.change': ['owner:own_company', 'agency_admin'],
+  'payment.refund_unmatched': ['owner:own_company', 'agency_admin', 'accountant'],
+  'settlement_account.reveal': ['owner:own_company', 'agency_admin'],
+  // M5. Paying GRA and the rent tax alerts: "accountants and admins" (plan decision 5); a
+  // self-managing landlord is their own company's admin.
+  'tax.manage': ['owner:own_company', 'agency_admin', 'accountant'],
+  // Owners confirm their own certificates; an agency admin only for an owner with no user, which
+  // the certificate resource says (decision 3).
+  'withholding.confirm': ['owner:own_company', 'owner:agency_client', 'agency_admin'],
 };
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
@@ -244,7 +336,40 @@ function eligibleToApprove(
   return resource.eligibleRoles.includes(actor.role);
 }
 
-export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResource): Decision {
+/**
+ * Whether a staff actor is a user for an owner (M5 decision 3): a landlord in their own company
+ * (within any owner scope it has), or an agency's client owner with that owner in scope.
+ */
+export function actsForOwner(actor: Actor, ownerId: string): boolean {
+  if (actor.kind !== 'staff' || actor.role !== 'owner') return false;
+  const owners = actor.scope.owners ?? [];
+  if (actor.companyKind === 'agency') return owners.includes(ownerId);
+  return owners.length === 0 || owners.includes(ownerId);
+}
+
+function certificateDecision(
+  actor: Extract<Actor, { kind: 'staff' }>,
+  resource: CertificateResource,
+): Decision {
+  if (resource.uploadedBy === actor.personId)
+    return deny(
+      'the uploader never confirms (decision 3)',
+      'The person who uploaded a certificate cannot confirm it',
+    );
+  if (actsForOwner(actor, resource.ownerId)) return allow('a user for the owner');
+  // M5 decision 7 (OQ-29): the company's nominated second approver confirms too.
+  if (actor.nominatedApprover) return allow('the nominated approver');
+  if (actor.role === 'agency_admin' && !resource.ownerHasUser)
+    return allow('an agency admin, for an owner with no user');
+  return deny(
+    'not a user for this owner',
+    resource.ownerHasUser
+      ? 'A user for this owner confirms their certificates'
+      : 'Only a user for this owner, or an agency admin, confirms this certificate',
+  );
+}
+
+export function can(actor: Actor, action: PolicyAction, resource?: PolicyResource): Decision {
   switch (actor.kind) {
     case 'system':
       return deny('system actors act through jobs, not the policy layer');
@@ -266,10 +391,20 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
         action === 'approval.self_confirm' ||
         action === 'approval.cancel'
       ) {
-        if (!resource) return deny('approval decisions need the request');
+        if (!resource || resource.kind === 'certificate')
+          return deny('approval decisions need the request');
         const isInitiator = resource.initiatorPersonId === actor.personId;
         if (action === 'approval.decide') {
           if (isInitiator) return deny('the initiator can never approve (AD-05)');
+          // A scoped person decides only requests about their properties; a company-level
+          // request is for people who see the whole company (AD-02; M4a review 8).
+          // Checked when the caller says where the request belongs (the approvals engine does).
+          if (
+            resource.propertyId !== undefined &&
+            scopeOf(actor) !== null &&
+            !(resource.propertyId && resource.scopeProperties?.includes(resource.propertyId))
+          )
+            return deny('the request is outside this person’s properties');
           return eligibleToApprove(actor, resource)
             ? allow('eligible approver')
             : deny('not an eligible approver for this action');
@@ -279,11 +414,20 @@ export function can(actor: Actor, action: PolicyAction, resource?: ApprovalResou
         return isInitiator ? allow('the initiator') : deny('only the initiator can do this');
       }
       if (action === 'approval.view' && actor.nominatedApprover) return allow('nominated approver');
+      // M5 decision 7: a nominated approver confirms certificates whatever their role.
+      if (
+        action === 'withholding.confirm' &&
+        actor.nominatedApprover &&
+        resource?.kind === 'certificate'
+      )
+        return certificateDecision(actor, resource);
       const allowed = STAFF_MATRIX[action];
       if (!allowed.includes(staffKey(actor.role, actor.companyKind)))
         return deny(`${actor.role} may not ${action}`);
       if (action === 'audit.search' && scopeOf(actor) !== null)
         return deny('the audit log needs access to the whole company', AUDIT_NEEDS_WHOLE_COMPANY);
+      if (action === 'withholding.confirm' && resource?.kind === 'certificate')
+        return certificateDecision(actor, resource);
       return allow(`${actor.role} may ${action}`);
     }
   }

@@ -1,0 +1,32 @@
+{
+  "status": true,
+  "message": "Banks retrieved",
+  "data": [
+    {
+      "name": "Test Bank One",
+      "slug": "test-bank-one",
+      "code": "FAKEBANK1",
+      "longcode": "",
+      "gateway": null,
+      "pay_with_bank": false,
+      "active": true,
+      "country": "Ghana",
+      "currency": "GHS",
+      "type": "ghipss",
+      "id": 900
+    },
+    {
+      "name": "Test Bank Two",
+      "slug": "test-bank-two",
+      "code": "FAKEBANK2",
+      "longcode": "",
+      "gateway": null,
+      "pay_with_bank": false,
+      "active": true,
+      "country": "Ghana",
+      "currency": "GHS",
+      "type": "ghipss",
+      "id": 901
+    }
+  ]
+}

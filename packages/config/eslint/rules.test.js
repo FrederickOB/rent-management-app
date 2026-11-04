@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { RuleTester } from 'eslint';
 import { describe, it } from 'vitest';
+import ledgerWrites from './rules/ledger-writes.js';
 import moduleLayers from './rules/module-layers.js';
 import noRoleChecks from './rules/no-role-checks.js';
 
@@ -72,6 +73,35 @@ describe('PLATFORM module layers', () => {
         filename: path.join(root, 'policy/policy.service.ts'),
         options,
         errors: [{ messageId: 'unknown' }],
+      },
+    ],
+  });
+});
+
+describe('AC-01 only the posting service writes the journal', () => {
+  tester.run('ledger-writes', ledgerWrites, {
+    valid: [
+      { code: 'await tx.insert(schema.allocation).values(rows);' },
+      { code: 'await tx.select().from(schema.journalLine);' },
+      { code: "const q = 'select * from journal_line where lease_id = $1';" },
+      { code: 'const q = `select sum(amount_minor) from journal_entry`;' },
+    ],
+    invalid: [
+      {
+        code: 'await tx.insert(schema.journalLine).values(lines);',
+        errors: [{ messageId: 'ledgerWrite' }],
+      },
+      {
+        code: 'await db.insert(journalEntry).values(entry);',
+        errors: [{ messageId: 'ledgerWrite' }],
+      },
+      {
+        code: "await client.query('INSERT INTO journal_line (id) VALUES ($1)', [id]);",
+        errors: [{ messageId: 'ledgerWrite' }],
+      },
+      {
+        code: 'await tx.execute(sql`insert into "public"."journal_entry" (id) values (${id})`);',
+        errors: [{ messageId: 'ledgerWrite' }],
       },
     ],
   });

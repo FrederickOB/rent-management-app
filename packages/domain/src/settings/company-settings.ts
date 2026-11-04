@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_INVOICE_LEAD_DAYS } from '../billing/invoicing';
 import { DEFAULT_SIGNING_REMINDER_HOURS } from '../esign/signing';
 
 /**
@@ -52,8 +53,30 @@ export const companySettingsSchema = z
       .min(1)
       .max(12)
       .optional(),
+    // M4a billing settings (plan decision 2), optional so stored settings stay valid.
+    /** BC-01: days before the due date that an invoice is issued. */
+    invoiceLeadDays: z.number().int().min(0).max(60).optional(),
+    // M4b payment settings (plan 4.9 and 4.3), optional so stored settings stay valid.
+    /** BC-02: the providers to try for a charge, in order; the deployment's own when unset. */
+    paymentProviderOrder: z
+      .array(z.string().regex(/^[a-z][a-z0-9_-]{1,30}$/))
+      .min(1)
+      .max(5)
+      .optional(),
+    /** BC-04: the landlord's own payment instructions, shown when online payment is unavailable. */
+    manualPaymentInstructions: z.string().trim().max(500).nullable().optional(),
+    // M5 (plan 5.5), optional so stored settings stay valid.
+    /** AR-06: days before paid-until that the renewal prompt goes; 90 when unset. */
+    paidUntilPromptDays: z.number().int().min(7).max(366).optional(),
   })
   .strict();
+
+/** AR-06: the renewal prompt goes when paid-until is this many days away (the PRD's 90). */
+export const DEFAULT_PAID_UNTIL_PROMPT_DAYS = 90;
+
+/** The AR-06 prompt's lead, with its default applied. */
+export const paidUntilPromptDaysOf = (settings: CompanySettings): number =>
+  settings.paidUntilPromptDays ?? DEFAULT_PAID_UNTIL_PROMPT_DAYS;
 
 export type CompanySettings = z.infer<typeof companySettingsSchema>;
 
@@ -86,6 +109,32 @@ export function tenancySettingsOf(settings: CompanySettings): TenancySettings {
 /** Signing reminders (TL-07; M3 plan 4.8): 24 hours, 3 days and 7 days unless the company says otherwise. */
 export function signingReminderHoursOf(settings: CompanySettings): readonly number[] {
   return settings.signingReminderHours ?? DEFAULT_SIGNING_REMINDER_HOURS;
+}
+
+/** The M4a billing settings with their defaults applied (decision 2: 14 days). */
+export interface BillingSettings {
+  readonly invoiceLeadDays: number;
+}
+
+export function billingSettingsOf(settings: CompanySettings): BillingSettings {
+  return { invoiceLeadDays: settings.invoiceLeadDays ?? DEFAULT_INVOICE_LEAD_DAYS };
+}
+
+/** The M4b payment settings with their defaults (plan 4.9): product choices, not law. */
+export interface PaymentSettings {
+  /** Null: the deployment's own order. */
+  readonly providerOrder: readonly string[] | null;
+  readonly manualPaymentInstructions: string | null;
+  /** BC-09: the reminder ladder, in days from the due date. */
+  readonly reminderOffsetsDays: readonly number[];
+}
+
+export function paymentSettingsOf(settings: CompanySettings): PaymentSettings {
+  return {
+    providerOrder: settings.paymentProviderOrder ?? null,
+    manualPaymentInstructions: settings.manualPaymentInstructions ?? null,
+    reminderOffsetsDays: settings.rentReminderOffsetsDays,
+  };
 }
 
 export const parseCompanySettings = (value: unknown): CompanySettings =>

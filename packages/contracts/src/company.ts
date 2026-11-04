@@ -35,6 +35,18 @@ export const companySettingsSchema = z.object({
     .min(1)
     .max(12)
     .optional(),
+  // M4b (plan 4.3 and 4.9), optional so clients written before M4b keep their types.
+  /** The landlord's own payment instructions, shown on the pay page when online payment is unavailable. */
+  manualPaymentInstructions: z.string().trim().max(500).nullable().optional(),
+  /** The payment providers to try for a charge, in order; the deployment's own when unset. */
+  paymentProviderOrder: z
+    .array(z.string().regex(/^[a-z][a-z0-9_-]{1,30}$/))
+    .min(1)
+    .max(5)
+    .optional(),
+  // M5 (plan 5.5), optional so clients written before M5 keep their types.
+  /** AR-06: days before paid-until that the renewal prompt goes; GET returns 90 when unset. */
+  paidUntilPromptDays: z.number().int().min(7).max(366).optional(),
 });
 
 export const companyProfileSchema = z.object({

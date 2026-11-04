@@ -797,6 +797,12 @@ export const leasesContract = {
         parties: z.array(partyInputSchema).min(1).max(20),
         scanUploadId: uuid,
         signedOn: isoDate,
+        /**
+         * The first rent period to bill (M4a decision 1): by default the first that starts on or
+         * after today. An earlier period start brings recent arrears in; a later one leaves out
+         * months the tenant paid before the platform.
+         */
+        billingStartDate: isoDate.optional(),
       }),
     )
     .output(leaseSchema),

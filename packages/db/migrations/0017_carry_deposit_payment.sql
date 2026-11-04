@@ -1,0 +1,2 @@
+ALTER TABLE "credit_carry_over" DROP CONSTRAINT "credit_carry_over_payment_check";--> statement-breakpoint
+ALTER TABLE "credit_carry_over" ADD CONSTRAINT "credit_carry_over_payment_check" CHECK ("credit_carry_over"."kind" = 'deposit' or "credit_carry_over"."payment_id" is not null);

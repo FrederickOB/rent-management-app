@@ -1,0 +1,21 @@
+{
+  "status": true,
+  "message": "Transactions retrieved",
+  "data": [
+    {
+      "id": 4099260517,
+      "status": "abandoned",
+      "reference": "pi-0192f5a8111172228333444455558888",
+      "amount": 80050,
+      "paid_at": null,
+      "created_at": "2026-11-03T09:20:01.000Z",
+      "channel": "card",
+      "currency": "GHS",
+      "metadata": null,
+      "fees": null,
+      "customer": { "email": "tenant@example.test", "phone": null },
+      "subaccount": { "subaccount_code": "ACCT_fake0001" }
+    }
+  ],
+  "meta": { "total": 2, "skipped": 1, "perPage": 1, "page": 2, "pageCount": 2 }
+}

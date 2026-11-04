@@ -45,6 +45,17 @@ const configSchema = z.object({
    * elsewhere a shared development key stands in (DEV_LINKS_API_KEY).
    */
   LINKS_API_KEY: z.string().min(32).optional(),
+  // M4b payments (plan decisions 3 to 5). Secrets come from the secrets manager, never the repo.
+  /** Paystack's secret key: a test key everywhere until live collection is enabled (OQ-03). */
+  PAYSTACK_SECRET_KEY: z.string().min(1).optional(),
+  /** Live rent collection waits for counsel's opinion on Bank of Ghana licensing (OQ-03). */
+  LIVE_RENT_COLLECTION: z.enum(['enabled', 'disabled']).default('disabled'),
+  /** Who enabled live collection, from the deployment's configuration; the startup log names them. */
+  LIVE_RENT_COLLECTION_ENABLED_BY: z.string().min(1).max(200).optional(),
+  /** The platform-owned domain for the per-tenant customer email Paystack requires (OQ-06). */
+  PAYMENTS_CUSTOMER_EMAIL_DOMAIN: z.string().min(3).max(253).optional(),
+  /** The fake provider's secret key (apps/fake-providers), for its API and its webhooks. */
+  FAKE_PAYMENTS_SECRET_KEY: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -68,7 +79,28 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   ) {
     throw new Error('LINKS_API_KEY must be set to a secret of its own in production');
   }
+  // Decision 3 (OQ-03): no live rent collection until counsel's written opinion is in hand.
+  if (
+    config.PAYSTACK_SECRET_KEY?.startsWith('sk_live_') &&
+    config.LIVE_RENT_COLLECTION !== 'enabled'
+  )
+    throw new Error(
+      'A live Paystack key is set but LIVE_RENT_COLLECTION is not enabled: live rent collection waits for counsel (OQ-03)',
+    );
+  if (config.LIVE_RENT_COLLECTION === 'enabled' && !config.LIVE_RENT_COLLECTION_ENABLED_BY)
+    throw new Error('LIVE_RENT_COLLECTION_ENABLED_BY must name who enabled live rent collection');
+  if (
+    config.NODE_ENV === 'production' &&
+    config.PAYSTACK_SECRET_KEY &&
+    !config.PAYMENTS_CUSTOMER_EMAIL_DOMAIN
+  )
+    throw new Error('PAYMENTS_CUSTOMER_EMAIL_DOMAIN must be set where payments are taken (OQ-06)');
   return config;
+}
+
+/** The customer-email domain: the configured one, or a reserved test domain outside production. */
+export function customerEmailDomainOf(config: AppConfig): string {
+  return config.PAYMENTS_CUSTOMER_EMAIL_DOMAIN ?? 'pay.rent.invalid';
 }
 
 /**
