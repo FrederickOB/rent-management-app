@@ -1,7 +1,11 @@
 import { clientFrom, declineLink, isToken } from '../../../../lib/links-api';
+import { declineProblem, NOTICE_NOT_DECLINABLE } from '../../../../lib/notice';
 import { backToPage, notFoundResponse } from '../../../../lib/redirect';
 
-/** Declines to sign, with a reason; the lease goes back to the landlord as a draft. */
+/**
+ * Declines to sign, with a reason; the lease goes back to the landlord as a draft. A notice
+ * cannot be declined (M7 plan 4.5): its page offers no decline, and the API refuses one with 409.
+ */
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ token: string }> },
@@ -16,5 +20,10 @@ export async function POST(
     typeof reason === 'string' ? reason : '',
   );
   if (result.ok) return backToPage(token, { done: 'declined' }, '');
-  return backToPage(token, { error: result.code, step: 'decline' });
+  const error = declineProblem(result);
+  // A notice's page has no decline step to go back to.
+  return backToPage(
+    token,
+    error === NOTICE_NOT_DECLINABLE ? { error } : { error, step: 'decline' },
+  );
 }
