@@ -55,6 +55,11 @@ export interface PaymentRecord extends PaymentRef {
   readonly creditLeaseId: string | null;
   readonly matchAccountingDate: string | null;
   readonly reversedAccountingDate: string | null;
+  /**
+   * M5 (AR-04, P13): refunded to the tenant at an early end, out of the payment's credit. Its
+   * `amountMinor` is what is left for allocation: the amount received less this.
+   */
+  readonly refundedMinor: number;
 }
 
 export const isoNow = (clock: Clock, timeZone: string): string =>
@@ -173,6 +178,8 @@ export async function paymentsByIds(tx: Tx, ids: readonly string[]): Promise<Pay
       carriedTo: sql<string | null>`(select c.lease_id from credit_carry_over c
         where c.company_id = ${schema.payment.companyId} and c.payment_id = ${schema.payment.id}
           and c.kind = 'credit' order by c.created_at desc, c.id desc limit 1)`,
+      refunded: sql<string>`(select coalesce(sum(r.amount_minor), 0)::bigint from early_termination_refund_part r
+        where r.company_id = ${schema.payment.companyId} and r.payment_id = ${schema.payment.id})`,
     })
     .from(schema.payment)
     .leftJoin(
@@ -193,9 +200,11 @@ export async function paymentsByIds(tx: Tx, ids: readonly string[]): Promise<Pay
   return rows
     .map((r) => {
       const leaseId = r.payment.leaseId ?? r.matchLeaseId ?? null;
+      const refunded = Number(r.refunded ?? 0);
       return {
         id: r.payment.id,
-        amountMinor: r.payment.amountMinor,
+        amountMinor: r.payment.amountMinor - refunded,
+        refundedMinor: refunded,
         order: paymentOrder(r.payment.receivedOn, r.payment.id),
         row: r.payment,
         leaseId,

@@ -5,7 +5,12 @@ import type { Database } from '@rent/db';
 import type { AlertPort, StoragePort } from '@rent/integrations';
 import { ApprovalsModule, ApprovalsService } from '@rent/server/approvals';
 import { AuditModule, AuditService } from '@rent/server/audit';
-import { BillingModule, InvoicingService, SubledgerCheckService } from '@rent/server/billing';
+import {
+  AdvanceService,
+  BillingModule,
+  InvoicingService,
+  SubledgerCheckService,
+} from '@rent/server/billing';
 import {
   ALERT_PORT,
   CLOCK,
@@ -42,6 +47,7 @@ import {
   PropertyFilesService,
   RegisterImportService,
 } from '@rent/server/portfolio';
+import { TaxAlertsService, TaxAssessmentService, TaxModule } from '@rent/server/tax';
 import {
   IdChecksService,
   LeaseLifecycleService,
@@ -54,6 +60,7 @@ import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
+import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
 const config = loadConfig();
@@ -72,6 +79,8 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     LedgerModule,
     BillingModule,
     PaymentsModule,
+    // M5: rent tax is assessed in every receipt's posting transaction once this module starts.
+    TaxModule,
   ],
 })
 class WorkerModule {}
@@ -135,6 +144,12 @@ const definitions = [
     reconciliation: app.get(ReconciliationService),
     accounts: app.get(SettlementAccountsService),
     queue: app.get(QueueService),
+  }),
+  ...taxJobs({
+    ...deps,
+    taxAlerts: app.get(TaxAlertsService),
+    taxAssessment: app.get(TaxAssessmentService),
+    advance: app.get(AdvanceService),
   }),
 ];
 for (const definition of definitions) await jobs.register(definition);

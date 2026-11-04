@@ -99,6 +99,28 @@ const ITEMS: readonly NavItem[] = [
     description: 'Every receipt issued, with its PDF.',
     needs: 'billing.view',
   },
+  // M5: rent tax, VAT and the advance rent report (plan 5.8). People who see billing read them;
+  // recording a GRA payment needs tax.manage, which the pages check.
+  {
+    href: '/tax/rent',
+    label: 'Rent tax',
+    description:
+      'Rent tax on each receipt by owner and period, what is due to GRA with its alerts, and GRA payments.',
+    needs: 'billing.view',
+  },
+  {
+    href: '/tax/vat',
+    label: 'VAT returns',
+    description: 'VAT, NHIL and GETFund charged by owner and month, and VAT paid to GRA.',
+    needs: 'billing.view',
+  },
+  {
+    href: '/compliance/advance-rent',
+    label: 'Advance rent report',
+    description:
+      'Leases paid further ahead than the advance rent limit, when your company checks it.',
+    needs: 'billing.view',
+  },
   {
     href: '/approvals',
     label: 'Approvals',

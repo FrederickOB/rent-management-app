@@ -1,7 +1,14 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
-import { renderTemplateHtml, sha256Hex, verifyFingerprint, type Branding } from '@rent/documents';
+import {
+  renderTemplateHtml,
+  sha256Hex,
+  templates,
+  verifyFingerprint,
+  withFixedPdfDates,
+  type Branding,
+} from '@rent/documents';
 import { businessDateOf, instantFrom } from '@rent/domain/dates';
 import { StorageError, type ObjectInfo, type StoragePort } from '@rent/integrations';
 import sharp from 'sharp';
@@ -70,7 +77,10 @@ export interface UploadPurpose {
     | 'lease_file'
     | 'cash_photo'
     | 'transfer_proof'
-    | 'banking_slip';
+    | 'banking_slip'
+    | 'gra_receipt'
+    | 'withholding_certificate'
+    | 'refund_proof';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }
@@ -96,6 +106,16 @@ const MONEY_PROOF = {
 export const CASH_PHOTO_UPLOAD: UploadPurpose = { purpose: 'cash_photo', ...MONEY_PROOF };
 export const TRANSFER_PROOF_UPLOAD: UploadPurpose = { purpose: 'transfer_proof', ...MONEY_PROOF };
 export const BANKING_SLIP_UPLOAD: UploadPurpose = { purpose: 'banking_slip', ...MONEY_PROOF };
+/**
+ * M5: GRA's receipt for rent tax or VAT paid (P18, P33), a withholding certificate (P20) and the
+ * proof a refund was paid (P13). Evidence, stored write-once like the money proofs.
+ */
+export const GRA_RECEIPT_UPLOAD: UploadPurpose = { purpose: 'gra_receipt', ...MONEY_PROOF };
+export const WITHHOLDING_CERTIFICATE_UPLOAD: UploadPurpose = {
+  purpose: 'withholding_certificate',
+  ...MONEY_PROOF,
+};
+export const REFUND_PROOF_UPLOAD: UploadPurpose = { purpose: 'refund_proof', ...MONEY_PROOF };
 
 /** An upload checked and copied to write-once storage, waiting to be recorded as a document. */
 export interface StagedEvidence {
@@ -326,7 +346,12 @@ export class DocumentsService {
       request.data,
       branding,
     );
-    const pdf = await render(html);
+    const rendered = await render(html);
+    // A report that must regenerate identically carries its own date, not the render's (M5).
+    const fixedDate = templates
+      .get(request.templateKey, request.templateVersion)
+      .pdfDate(request.data);
+    const pdf = fixedDate ? Buffer.from(await withFixedPdfDates(rendered, fixedDate)) : rendered;
     const file = await this.storeWriteOnce({
       companyId,
       countryCode: company.countryCode,

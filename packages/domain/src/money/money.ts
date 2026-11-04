@@ -158,6 +158,17 @@ export function format(amount: Money): string {
   return `${negative ? '-' : ''}${SYMBOLS[amount.currency]}${whole}.${minor}`;
 }
 
+/**
+ * A plain decimal for exports (CSV): `1500.00`, `-0.07`; no symbol, no grouping, exact. Display
+ * only, at the edge, like `format`.
+ */
+export function toDecimal(amount: Money): string {
+  const negative = amount.amountMinor < 0;
+  const magnitude = BigInt(Math.abs(amount.amountMinor));
+  const minor = (magnitude % 100n).toString().padStart(2, '0');
+  return `${negative ? '-' : ''}${(magnitude / 100n).toString()}.${minor}`;
+}
+
 /** Parses user input such as `1500`, `1,500.5` or `1500.50` into minor units, exactly. */
 export function parseAmount(input: string, currency: CurrencyCode = 'GHS'): Money {
   const cleaned = input.trim().replace(/,/g, '');

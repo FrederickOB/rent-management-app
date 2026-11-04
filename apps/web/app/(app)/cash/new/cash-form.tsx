@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useRef, useState, type FormEvent } from 'react';
+import { AdvanceCapNote } from '@/components/advance-cap-note';
 import { useApp } from '@/components/app-context';
 import { CancelLink } from '@/components/cancel-link';
 import { FileField } from '@/components/file-field';
@@ -11,6 +12,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextAreaField, TextField } from '@/components/ui/field';
+import { advanceRefusal, type AdvanceRefusal } from '@/lib/advance-refusal';
 import { keyedApi } from '@/lib/api';
 import { todayIn } from '@/lib/business-dates';
 import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
@@ -65,6 +67,8 @@ export function CashForm({
   const [problem, setProblem] = useState<string | null>(null);
   // The first attempt was recorded with other details: offer a fresh form, never a silent retry.
   const [reused, setReused] = useState(false);
+  // AR-05 under `block`: the API refused more months ahead than the limit, and said the most.
+  const [cap, setCap] = useState<AdvanceRefusal | null>(null);
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [done, setDone] = useState<Done | null>(null);
 
@@ -90,6 +94,7 @@ export function CashForm({
     setTried(true);
     setProblem(null);
     setReused(false);
+    setCap(null);
     const file = photo.current?.files?.[0];
     const fileError = file
       ? fileProblem(file, CASH_PHOTO_UPLOAD)
@@ -124,6 +129,12 @@ export function CashForm({
         setProblem(fileAgainMessage('photo'));
         return;
       }
+      const refused = advanceRefusal(failure);
+      if (refused) {
+        setCap(refused);
+        setProblem(refused.text);
+        return;
+      }
       setProblem(moneyProblem(failure));
       setReused(isKeyReused(failure));
     }
@@ -132,6 +143,7 @@ export function CashForm({
   function another() {
     keeper.reset();
     setReused(false);
+    setCap(null);
     setDone(null);
     setTried(false);
     setProblem(null);
@@ -198,8 +210,20 @@ export function CashForm({
             autoComplete="off"
             value={draft.amount}
             error={errors.amount}
-            onChange={(event) => set({ amount: event.target.value })}
+            onChange={(event) => {
+              setCap(null);
+              set({ amount: event.target.value });
+            }}
           />
+          {cap ? (
+            <AdvanceCapNote
+              refusal={cap}
+              onUse={(amount) => {
+                setCap(null);
+                set({ amount });
+              }}
+            />
+          ) : null}
           <TextField
             label="Date received"
             type="date"

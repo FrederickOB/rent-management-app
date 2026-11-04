@@ -909,7 +909,7 @@ export class BillingReadService {
         id: p.id,
         method: p.row.method as PaymentRowView['method'],
         status,
-        amountMinor: p.amountMinor,
+        amountMinor: p.row.amountMinor,
         receivedOn: p.row.receivedOn,
         leaseId: p.leaseId,
         tenantName: label?.tenantName ?? null,

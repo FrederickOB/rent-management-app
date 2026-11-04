@@ -2,4 +2,5 @@
 // importing this package never loads Playwright.
 export * from './fingerprint';
 export * from './pdf/append';
+export * from './pdf/normalise';
 export * from './templates';

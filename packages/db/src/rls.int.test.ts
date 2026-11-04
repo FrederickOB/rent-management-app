@@ -425,6 +425,125 @@ async function seedMoney(
     receiptId: receipts[0]!.id,
     entryId: receiptEntry,
   });
+  await seedTax(companyId, {
+    ...ids,
+    bookId,
+    paymentId,
+    lineId,
+    chargePeriodId: period.id,
+    entryId: receiptEntry,
+  });
+}
+
+/** Rent tax, withholding, advance rent and early termination (M5): one row in each table. */
+async function seedTax(
+  companyId: string,
+  ids: {
+    initiator: string;
+    approver: string;
+    requestId: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+    bookId: string;
+    paymentId: string;
+    lineId: string;
+    chargePeriodId: string;
+    entryId: string;
+  },
+) {
+  const lease = [companyId, ids.propertyId, ids.tenantId, ids.leaseId];
+  const { rows: rules } = await app.query<{ id: string }>(
+    "select id from rule where key = 'rent_tax.rate.residential' limit 1",
+  );
+  const ruleId = rules[0]!.id;
+  const { rows: items } = await app.query<{ id: string }>(
+    `insert into rent_tax_item (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, kind, payment_id,
+       value_date, accounting_date, due_date, base_minor, rate_bps, tax_minor, lease_use, unit_code, tenant_name,
+       rate_rule_id, entry_id)
+     values ($1, $2, $3, $4, $5, $6, $7, 'receipt', $8, current_date, current_date, current_date + 30, 120000, 800, 9600,
+       'residential', 'ACC-LEG-B1-01', 'Tenant', $9, $10) returning id`,
+    [...lease, ids.unitId, ids.ownerId, ids.bookId, ids.paymentId, ruleId, ids.entryId],
+  );
+  const itemId = items[0]!.id;
+  await app.query(
+    `insert into rent_tax_item_line (company_id, item_id, property_id, tenant_id, lease_id, charge_period_id, invoice_line_id,
+       base_minor, tax_minor) values ($1, $5, $2, $3, $4, $6, $7, 120000, 9600)`,
+    [...lease, itemId, ids.chargePeriodId, ids.lineId],
+  );
+  const { rows: withholdings } = await app.query<{ id: string }>(
+    `insert into withholding (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, payment_id,
+       value_date, accounting_date, amount_minor, rate_bps, rate_rule_id, differs_from_rate, entry_id, recorded_by)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, current_date, current_date, 1000, 800, $9, true, $10, $11) returning id`,
+    [
+      ...lease,
+      ids.unitId,
+      ids.ownerId,
+      ids.bookId,
+      ids.paymentId,
+      ruleId,
+      ids.entryId,
+      ids.initiator,
+    ],
+  );
+  const withholdingId = withholdings[0]!.id;
+  await app.query(
+    `insert into withholding_certificate (company_id, withholding_id, property_id, tenant_id, lease_id, owner_id, document_id,
+       amount_minor, uploaded_by) values ($1, $5, $2, $3, $4, $6, $7, 1000, $8)`,
+    [...lease, withholdingId, ids.ownerId, ids.documentId, ids.initiator],
+  );
+  await app.query(
+    `insert into withholding_write_off (company_id, withholding_id, property_id, tenant_id, lease_id, amount_minor, reason,
+       approval_request_id, entry_id, value_date, accounting_date)
+     values ($1, $5, $2, $3, $4, 1000, 'A fixture', $6, $7, current_date, current_date)`,
+    [...lease, withholdingId, ids.requestId, ids.entryId],
+  );
+  const { rows: gra } = await app.query<{ id: string }>(
+    `insert into gra_payment (company_id, owner_id, book_id, paid_on, accounting_date, amount_minor, gra_receipt_number,
+       receipt_document_id, paid_from, entry_id, recorded_by)
+     values ($1, $2, $3, current_date, current_date, 1000, 'GRA-1', $4, 'owner_account', $5, $6) returning id`,
+    [companyId, ids.ownerId, ids.bookId, ids.documentId, ids.entryId, ids.initiator],
+  );
+  await app.query(
+    'insert into gra_payment_item (company_id, gra_payment_id, item_id, amount_minor) values ($1, $2, $3, 1000)',
+    [companyId, gra[0]!.id, itemId],
+  );
+  await app.query(
+    `insert into vat_payment (company_id, owner_id, book_id, period_month, paid_on, accounting_date, amount_minor,
+       gra_receipt_number, receipt_document_id, paid_from, entry_id, recorded_by)
+     values ($1, $2, $3, date_trunc('month', current_date)::date, current_date, current_date, 1000, 'GRA-V1', $4,
+       'owner_account', $5, $6)`,
+    [companyId, ids.ownerId, ids.bookId, ids.documentId, ids.entryId, ids.initiator],
+  );
+  await app.query(
+    `insert into rent_tax_alert (company_id, item_id, owner_id, property_id, alert_day, alert_date, recipients)
+     values ($1, $2, $3, $4, 21, current_date, 1)`,
+    [companyId, itemId, ids.ownerId, ids.propertyId],
+  );
+  await app.query(
+    `insert into payment_advance (company_id, payment_id, property_id, tenant_id, lease_id, value_date, months_ahead, policy,
+       over_limit, flagged) values ($1, $5, $2, $3, $4, current_date, 0, 'off', false, false)`,
+    [...lease, ids.paymentId],
+  );
+  await app.query(
+    `insert into paid_until_prompt (company_id, property_id, tenant_id, lease_id, paid_until, prompted_on, staff_messages)
+     values ($1, $2, $3, $4, current_date + 90, current_date, 1)`,
+    lease,
+  );
+  const { rows: terminations } = await app.query<{ id: string }>(
+    `insert into early_termination (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, last_day,
+       charges, deductions, unused_days_credit_minor, applied_minor, refund_minor, approval_request_id, requested_by)
+     values ($1, $2, $3, $4, $5, $6, $7, current_date, '[]', '[]', 0, 0, 1000, $8, $9) returning id`,
+    [...lease, ids.unitId, ids.ownerId, ids.bookId, ids.requestId, ids.initiator],
+  );
+  await app.query(
+    `insert into early_termination_refund_part (company_id, termination_id, property_id, tenant_id, lease_id, payment_id,
+       amount_minor) values ($1, $5, $2, $3, $4, $6, 1000)`,
+    [...lease, terminations[0]!.id, ids.paymentId],
+  );
 }
 
 /**

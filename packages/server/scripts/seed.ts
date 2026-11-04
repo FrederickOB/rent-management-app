@@ -4,7 +4,11 @@
  * as signed on paper (decision 7), and one lease out for e-signing; M4a adds their money; M4b adds
  * settlement accounts and agreements, provider payments through the fake provider (some through
  * the pay page, some with no intent), a settlement with its P22 entries, and one reconciliation
- * exception, and reports the auto-match rate (M4b done criterion 3). Every
+ * exception, and reports the auto-match rate (M4b done criterion 3). M5 adds rent tax on every
+ * receipt (the tax module's hooks), the commercial tenant's withholding with one certificate
+ * confirmed and one waiting, a GRA payment settling part of an owner's rent tax, a VAT payment,
+ * one early termination with its refund waiting for approval, and a second landlord company under
+ * `advance_rent_policy = warn` with a flagged advance (plan 5.10). Every
  * person is fictional and flagged as a test contact, and only fake providers are configured
  * locally, so nothing is ever sent.
  *
@@ -22,7 +26,8 @@ import {
   parseBusinessDate,
   toIsoDate,
 } from '@rent/domain/dates';
-import { defaultCompanySettings } from '@rent/domain/settings';
+import { allocate, format, money as moneyOf, multiplyBps } from '@rent/domain/money';
+import { defaultCompanySettings, type CompanySettings } from '@rent/domain/settings';
 import type { StoragePort } from '@rent/integrations';
 import type { Actor, CompanyKind, MembershipRole } from '@rent/domain/policy';
 import type { Availability } from '@rent/domain/portfolio';
@@ -45,6 +50,7 @@ import {
   type NewProperty,
 } from '../src/portfolio';
 import {
+  LeaseLifecycleService,
   LeaseSigningService,
   LeasesService,
   TenancyModule,
@@ -58,7 +64,10 @@ import {
   InvoicingService,
   MoneyService,
   SubledgerCheckService,
+  TerminationService,
 } from '../src/billing';
+import { RulesService } from '../src/rules';
+import { GraService, TaxModule, TaxReportService, WithholdingService } from '../src/tax';
 import { LedgerModule } from '../src/ledger';
 import {
   PayLinksService,
@@ -86,7 +95,14 @@ if (config.NODE_ENV === 'production' || !['localhost', '127.0.0.1', 'postgres'].
 export const DEMO_TOTP_SECRET = 'rent-demo-totp-secret-2026-local';
 export const DEMO_PASSWORD = 'demo-password-2026';
 
-const COMPANIES: { id: string; kind: CompanyKind; legalName: string; displayName: string }[] = [
+const COMPANIES: {
+  id: string;
+  kind: CompanyKind;
+  legalName: string;
+  displayName: string;
+  /** Settings other than the PRD defaults (M5: one company with advance warnings on). */
+  settings?: Partial<CompanySettings>;
+}[] = [
   {
     id: '019a3000-0000-7000-8000-000000000001',
     kind: 'platform',
@@ -105,8 +121,24 @@ const COMPANIES: { id: string; kind: CompanyKind; legalName: string; displayName
     legalName: 'Kwabena Owusu-Demo (demo landlord)',
     displayName: 'Kwabena Owusu-Demo',
   },
+  // M5 (plan 5.10): a landlord whose company flags advances over the limit (AR-05, OQ-28), so the
+  // compliance report has data while the main companies stay `off`.
+  {
+    id: '019a3000-0000-7000-8000-000000000004',
+    kind: 'landlord',
+    legalName: 'Abokobi Homes (demo, advance warnings on)',
+    displayName: 'Abokobi Homes',
+    settings: { advanceRentPolicy: 'warn' },
+  },
 ];
-const [PLATFORM, AGENCY, LANDLORD] = COMPANIES.map((c) => c.id) as [string, string, string];
+const [PLATFORM, AGENCY, LANDLORD, ABOKOBI] = COMPANIES.map((c) => c.id) as [
+  string,
+  string,
+  string,
+  string,
+];
+/** The companies that bill rent (every one but the platform). */
+const BILLING_COMPANIES = [AGENCY, LANDLORD, ABOKOBI];
 
 interface DemoPerson {
   readonly name: string;
@@ -205,6 +237,19 @@ const PEOPLE: DemoPerson[] = [
   },
   // A tenant for the Expo app sign-in. In M3 she rents from both the agency and the landlord.
   { name: 'Ama Tenant (demo)', phone: '+233200000021', staff: false, memberships: [] },
+  // M5: the landlord with advance warnings on, and her manager (a second person for cash).
+  {
+    name: 'Akua Abokobi-Landlord (demo)',
+    email: 'abokobi.landlord@demo.invalid',
+    staff: true,
+    memberships: [{ companyId: ABOKOBI, role: 'owner' }],
+  },
+  {
+    name: 'Fiifi Abokobi-Manager (demo)',
+    email: 'abokobi.manager@demo.invalid',
+    staff: true,
+    memberships: [{ companyId: ABOKOBI, role: 'property_manager' }],
+  },
 ];
 
 /**
@@ -227,6 +272,8 @@ const seedClock: Clock & { offsetMs: number } = {
     LedgerModule,
     BillingModule,
     PaymentsModule,
+    // M5: rent tax is assessed on every receipt once this module starts (its billing hooks).
+    TaxModule,
   ],
 })
 class SeedModule {}
@@ -237,9 +284,10 @@ async function ensureCompanies(database: Database) {
       tx.select({ id: schema.company.id }).from(schema.company).where(eq(schema.company.id, c.id)),
     );
     if (existing.length > 0) continue;
+    const settings = { ...defaultCompanySettings(), ...(c.settings ?? {}) };
     await withSystem(database, { actorKind: 'system' }, (tx) =>
       tx.execute(
-        sql`select app.create_company(${c.id}::uuid, ${c.kind}, ${c.legalName}, ${c.displayName}, 'GH', 'Africa/Accra', ${c.displayName}, ${JSON.stringify(defaultCompanySettings())}::jsonb)`,
+        sql`select app.create_company(${c.id}::uuid, ${c.kind}, ${c.legalName}, ${c.displayName}, 'GH', 'Africa/Accra', ${c.displayName}, ${JSON.stringify(settings)}::jsonb)`,
       ),
     );
   }
@@ -534,6 +582,24 @@ const LANDLORD_PROPERTIES: DemoProperty[] = [
   },
 ];
 
+/** M5: the warn landlord's one house (Abokobi, a code no other demo property uses). */
+const ABOKOBI_PROPERTIES: DemoProperty[] = [
+  {
+    areaCode: 'ACC',
+    propertyPart: 'ABK',
+    name: 'Abokobi family house (demo)',
+    propertyType: 'house',
+    use: 'residential',
+    address: {
+      region: 'Greater Accra',
+      town: 'Abokobi',
+      latitude: '5.7366',
+      longitude: '-0.2008',
+    },
+    units: [{ unitType: 'detached_house', count: 1, bedrooms: 3, amenities: ['parking'] }],
+  },
+];
+
 /** Owners, properties, units, statuses and meters (M2), created once through the services. */
 async function ensureRegister(
   database: Database,
@@ -546,6 +612,7 @@ async function ensureRegister(
 ): Promise<number> {
   const admin = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
   const landlord = await actorFor(database, LANDLORD, 'landlord@demo.invalid');
+  const abokobi = await actorFor(database, ABOKOBI, 'abokobi.landlord@demo.invalid');
   const existing = new Set(
     (await services.owners.list(admin, { includeArchived: true })).map((o) => o.reference),
   );
@@ -575,6 +642,7 @@ async function ensureRegister(
   for (const [actor, properties] of [
     [admin, AGENCY_PROPERTIES(owners.get('OWN-01')!, owners.get('OWN-02')!)],
     [landlord, LANDLORD_PROPERTIES],
+    [abokobi, ABOKOBI_PROPERTIES],
   ] as const) {
     const codes = new Set(
       (await services.read.listProperties(actor, { includeArchived: true })).rows.map(
@@ -603,7 +671,7 @@ async function ensureRegister(
     }
   }
   // Every demo contact is a test contact (CLAUDE.md section 14).
-  for (const companyId of [AGENCY, LANDLORD])
+  for (const companyId of BILLING_COMPANIES)
     await withCompany(database, { companyId, actorKind: 'system' }, (tx) =>
       tx
         .update(schema.owner)
@@ -687,6 +755,8 @@ interface DemoTenancy {
   readonly initialAdvanceMonths?: number;
   readonly depositMinor?: number;
   readonly serviceChargeMonthlyMinor?: number;
+  /** M5: a break clause from the lease start that credits the unused days (AR-04). */
+  readonly breakClauseCreditsUnusedDays?: boolean;
 }
 
 const smsConsent = { sms: true };
@@ -969,6 +1039,48 @@ const TENANCIES: DemoTenancy[] = [
     depositMinor: 900_000,
     billFromStart: true,
   },
+  // M5 (plan 5.10): an early termination. Six months paid ahead at the start; the tenant moved out
+  // ten days ago, in the month that started 15 days ago, under a break clause that credits the
+  // unused days. Its settlement and refund wait for a second person (ensureTax).
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'an early termination: six months paid ahead, moved out ten days ago (AR-04)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Kweku Early-End (demo)',
+      phone: '+233200000043',
+      occupation: 'Banker',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B1-03',
+    startedMonthsAgo: 3,
+    anchorDaysAgo: 15,
+    months: 12,
+    monthlyRentMinor: 60_000,
+    cycle: 'monthly',
+    billFromStart: true,
+    breakClauseCreditsUnusedDays: true,
+  },
+  // M5: the warn landlord's tenant, who pays the whole year ahead in cash (flagged, AR-05).
+  {
+    companyId: ABOKOBI,
+    actorEmail: 'abokobi.manager@demo.invalid',
+    what: 'a year paid ahead in a company with advance warnings on (flagged over the limit)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Yaa Year-Ahead (demo)',
+      phone: '+233200000044',
+      occupation: 'Lecturer',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-ABK-B1-01',
+    startedMonthsAgo: 0,
+    months: 12,
+    monthlyRentMinor: 100_000,
+    cycle: 'monthly',
+    billFromStart: true,
+  },
 ];
 
 const PAPER_SCAN = Buffer.from(
@@ -1049,6 +1161,15 @@ async function ensureTenancies(
       initialAdvanceMonths: t.initialAdvanceMonths ?? null,
       depositMinor: t.depositMinor ?? null,
       serviceChargeMonthlyMinor: t.serviceChargeMonthlyMinor ?? null,
+      // A break the tenant may use from the second month, crediting the unused days (AR-04).
+      breakClause: t.breakClauseCreditsUnusedDays
+        ? {
+            fromDate: toIsoDate(addMonths(parseBusinessDate(start), 1)),
+            party: 'tenant',
+            noticeDays: 30,
+            creditUnusedDays: true,
+          }
+        : null,
       noticeDays: t.tenant.kind === 'company' ? 90 : 30,
       parties: [{ ...signer, paperSignedOn: signedOn }],
       scanUploadId: upload.uploadId,
@@ -1176,6 +1297,11 @@ type MoneyStep =
 interface DemoMoney {
   readonly companyId: string;
   readonly unitCode: string;
+  /**
+   * M5 (TX-04): the tenant withheld tax on the rent of this many of its first started months,
+   * at the rule's rate, recorded before its money so the money pays the rest (BC-07).
+   */
+  readonly withholdMonths?: number;
   readonly steps: readonly MoneyStep[];
 }
 
@@ -1253,9 +1379,11 @@ const MONEY: DemoMoney[] = [
     ],
   },
   {
-    // The commercial company tenant: its deposit and both quarters with VAT, into the agency's account.
+    // The commercial company tenant: its deposit and both quarters with VAT, into the agency's
+    // account, net of the 15% it withheld on its first two months' rent (M5, TX-04).
     companyId: AGENCY,
     unitCode: 'ACC-OSU-G-01',
+    withholdMonths: 2,
     steps: [
       {
         kind: 'transfer',
@@ -1341,6 +1469,34 @@ const MONEY: DemoMoney[] = [
     ],
   },
   {
+    // M5: the early termination's six months ahead, in cash at the start.
+    companyId: AGENCY,
+    unitCode: 'ACC-LEG-B1-03',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.one@demo.invalid',
+        approver: 'manager.two@demo.invalid',
+        amountMinor: 6 * 60_000,
+        receivedOn: 0,
+      },
+    ],
+  },
+  {
+    // M5: twelve months ahead in cash, over the six-month limit, in the company under `warn`.
+    companyId: ABOKOBI,
+    unitCode: 'ACC-ABK-B1-01',
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'abokobi.manager@demo.invalid',
+        approver: 'abokobi.landlord@demo.invalid',
+        amountMinor: 12 * 100_000,
+        receivedOn: 0,
+      },
+    ],
+  },
+  {
     // The demo tenant's house: the deposit and the first six months in cash, approved by the
     // landlord's nominated approver; the next six months are due today.
     companyId: LANDLORD,
@@ -1378,6 +1534,60 @@ async function moneyUpload(
 }
 
 /**
+ * M5 (TX-04, P19): a corporate tenant's withholding on the rent of its first started months, at
+ * the rate the rules table gives for the lease's use as of today (`withholding_tax.rate.*`,
+ * unverified), recorded by a manager before its money so the money pays everything else. Once:
+ * a lease with withholding already is left alone.
+ */
+async function withholdFirstMonths(
+  database: Database,
+  services: { withholding: WithholdingService; rules: RulesService },
+  demo: DemoMoney,
+  leaseId: string,
+  today: string,
+): Promise<void> {
+  const facts = await withCompany(
+    database,
+    { companyId: demo.companyId, actorKind: 'system' },
+    async (tx) => {
+      const done = await tx.execute<{ n: number }>(
+        sql`select count(*)::int as n from withholding where lease_id = ${leaseId}`,
+      );
+      const lines = await tx.execute<{ id: string; amount_minor: string }>(
+        sql`select il.id, il.amount_minor from invoice_line il
+            join invoice_line_accrual a on a.company_id = il.company_id and a.invoice_line_id = il.id
+            where il.lease_id = ${leaseId} and il.kind = 'rent' order by il.period_start limit ${demo.withholdMonths ?? 0}`,
+      );
+      const [lease] = await tx
+        .select({ use: schema.lease.use })
+        .from(schema.lease)
+        .where(eq(schema.lease.id, leaseId));
+      return { done: done.rows[0]!.n > 0, lines: lines.rows, use: lease?.use ?? 'commercial' };
+    },
+  );
+  if (facts.done) return;
+  const rule = await services.rules.resolve(
+    'GH',
+    `withholding_tax.rate.${facts.use}`,
+    parseBusinessDate(today),
+  );
+  const bps = (rule.value as { bps: number }).bps;
+  const manager = await actorFor(database, demo.companyId, 'manager.two@demo.invalid');
+  for (const line of facts.lines)
+    await services.withholding.record(manager, {
+      leaseId,
+      valueDate: today,
+      lines: [
+        {
+          lineId: line.id,
+          amountMinor: multiplyBps(moneyOf(Number(line.amount_minor)), bps).amountMinor,
+        },
+      ],
+      note: 'Withheld by the tenant on this month’s rent (demo)',
+    });
+}
+
+/**
  * The demo money (M4a plan 4.21), once: billing's reaction to each signed lease (the worker would
  * run it too; both are idempotent), then each lease's payments, the caretaker's banking and one
  * transfer nobody has matched. A lease that already has money is left alone.
@@ -1390,6 +1600,8 @@ async function ensureMoney(
     approvals: ApprovalsService;
     read: BillingReadService;
     subledger: SubledgerCheckService;
+    withholding: WithholdingService;
+    rules: RulesService;
     storage: StoragePort;
     cfg: AppConfig;
   },
@@ -1406,7 +1618,7 @@ async function ensureMoney(
       );
       return rows.rows[0] ?? null;
     });
-  for (const companyId of [AGENCY, LANDLORD]) {
+  for (const companyId of BILLING_COMPANIES) {
     const signed = await withCompany(database, { companyId, actorKind: 'system' }, (tx) =>
       tx.execute<{ id: string }>(
         sql`select id from lease where status in ('signed', 'active', 'ending', 'holding_over') order by start_date`,
@@ -1418,6 +1630,7 @@ async function ensureMoney(
   for (const demo of MONEY) {
     const lease = await leaseOf(demo.companyId, demo.unitCode);
     if (!lease || lease.paid) continue;
+    if (demo.withholdMonths) await withholdFirstMonths(database, services, demo, lease.id, today);
     for (const step of demo.steps) {
       const receivedOn =
         step.receivedOn === 'today'
@@ -1509,7 +1722,7 @@ async function ensureMoney(
     await services.approvals.decide(admin, recorded.approvalId, { decision: 'approve' });
   }
   let problems = 0;
-  for (const companyId of [AGENCY, LANDLORD]) {
+  for (const companyId of BILLING_COMPANIES) {
     await services.invoicing.generateAll(companyId, today);
     await services.invoicing.accrueAll(companyId, today);
     problems += (await services.subledger.check(companyId)).mismatches.length;
@@ -1865,6 +2078,224 @@ async function ensureProviderPayments(
   };
 }
 
+/** A file where the browser's presigned upload would put it (M5 evidence). */
+async function evidenceUpload(
+  services: { storage: StoragePort; cfg: AppConfig },
+  create: (input: { contentType: string; sizeBytes: number }) => Promise<{
+    uploadId: string;
+    fields: Record<string, string>;
+  }>,
+): Promise<string> {
+  const upload = await create({ contentType: 'application/pdf', sizeBytes: PAPER_SCAN.length });
+  await services.storage.put({
+    bucket: services.cfg.S3_BUCKET_FILES,
+    key: upload.fields.key!,
+    body: PAPER_SCAN,
+    contentType: 'application/pdf',
+  });
+  return upload.uploadId;
+}
+
+/**
+ * M5 (plan 5.10), once each: the commercial tenant's withholding certificates (one confirmed by a
+ * user for its owner, never its uploader; one waiting), a GRA payment settling the oldest of owner
+ * A's open rent tax items, a VAT payment for the VAT-registered owner's first month, and the early
+ * termination: the move-out recorded, billing's end of lease run, and its settlement and refund
+ * asked for, waiting for a second person.
+ */
+async function ensureTax(
+  database: Database,
+  services: {
+    withholding: WithholdingService;
+    gra: GraService;
+    reports: TaxReportService;
+    termination: TerminationService;
+    lifecycle: LeaseLifecycleService;
+    invoicing: InvoicingService;
+    storage: StoragePort;
+    cfg: AppConfig;
+  },
+): Promise<void> {
+  const today = toIsoDate(businessDateOf(instantFrom(new Date()), 'Africa/Accra'));
+  const sys = { companyId: AGENCY, actorKind: 'system' as const };
+  const manager = await actorFor(database, AGENCY, 'manager.two@demo.invalid');
+  const accountant = await actorFor(database, AGENCY, 'accountant@demo.invalid');
+  const owners = new Map(
+    (
+      await withCompany(database, sys, (tx) =>
+        tx.select({ id: schema.owner.id, reference: schema.owner.reference }).from(schema.owner),
+      )
+    ).map((o) => [o.reference, o.id]),
+  );
+
+  // 1. Certificates for the commercial tenant's withholding (TX-04, decision 3).
+  const withheld = await withCompany(database, sys, (tx) =>
+    tx.execute<{ id: string; owner_id: string; certificates: number }>(
+      sql`select w.id, w.owner_id,
+            (select count(*)::int from withholding_certificate c where c.withholding_id = w.id) as certificates
+          from withholding w order by w.value_date, w.created_at, w.id`,
+    ),
+  );
+  for (const [i, w] of withheld.rows.entries()) {
+    if (w.certificates > 0) continue;
+    await services.withholding.uploadCertificate(manager, w.id, {
+      uploadId: await evidenceUpload(services, (input) =>
+        services.withholding.createUpload(manager, input),
+      ),
+      certificateNumber: `WHT-DEMO-${String(i + 1).padStart(4, '0')}`,
+      issuedOn: today,
+    });
+  }
+  const first = withheld.rows[0];
+  if (first) {
+    const [waiting] = (
+      await withCompany(database, sys, (tx) =>
+        tx.execute<{ id: string; confirmed: number }>(
+          sql`select c.id, (select count(*)::int from withholding_certificate x
+                where x.status = 'confirmed' and x.company_id = c.company_id) as confirmed
+              from withholding_certificate c
+              where c.withholding_id = ${first.id} and c.status = 'awaiting_confirmation'`,
+        ),
+      )
+    ).rows;
+    if (waiting && waiting.confirmed === 0) {
+      // A user for that owner confirms it; the agency admin only for an owner with no user.
+      let confirmer = await actorFor(database, AGENCY, 'agency.admin@demo.invalid');
+      for (const signIn of ['owner.accra@demo.invalid', 'owner.london@demo.invalid']) {
+        const candidate = await actorFor(database, AGENCY, signIn);
+        if (candidate.kind === 'staff' && candidate.scope.owners?.includes(first.owner_id))
+          confirmer = candidate;
+      }
+      await services.withholding.confirmCertificate(confirmer, waiting.id);
+    }
+  }
+
+  // 2. Rent tax paid to GRA for owner A's oldest open item; the rest stays on the due list.
+  const graDone = await withCompany(database, sys, (tx) =>
+    tx.execute<{ n: number }>(sql`select count(*)::int as n from gra_payment`),
+  );
+  const ownerA = owners.get('OWN-01');
+  if (graDone.rows[0]!.n === 0 && ownerA) {
+    const [oldest] = await services.reports.dueList(accountant, { ownerId: ownerA });
+    if (oldest)
+      await services.gra.recordGraPayment(accountant, {
+        ownerId: ownerA,
+        paidOn: today,
+        amountMinor: oldest.outstandingMinor,
+        graReceiptNumber: 'GRA-DEMO-0001',
+        receiptUploadId: await evidenceUpload(services, (input) =>
+          services.gra.createUpload(accountant, input),
+        ),
+        paidFrom: 'owner_account',
+        items: [{ itemId: oldest.id, amountMinor: oldest.outstandingMinor }],
+        note: 'Rent tax on the oldest receipt (demo)',
+      });
+  }
+
+  // 3. VAT and levies paid with the return for the VAT-registered owner's first VAT month (P33):
+  // half of what it owes, so the VAT screens have a payment and a balance still to pay.
+  const vatDone = await withCompany(database, sys, (tx) =>
+    tx.execute<{ n: number }>(sql`select count(*)::int as n from vat_payment`),
+  );
+  const ownerB = owners.get('OWN-02');
+  if (vatDone.rows[0]!.n === 0 && ownerB) {
+    const firstVat = await withCompany(database, sys, (tx) =>
+      tx.execute<{ month: string | null }>(
+        sql`select to_char(min(e.value_date), 'YYYY-MM') as month from journal_entry e
+            join journal_line l on l.company_id = e.company_id and l.entry_id = e.id
+            join book b on b.company_id = l.company_id and b.id = l.book_id
+            where e.rule = 'P32' and l.account_code = '2210' and b.owner_id = ${ownerB}`,
+      ),
+    );
+    const month = firstVat.rows[0]?.month;
+    if (month) {
+      const report = await services.gra.vatReport(accountant, { ownerId: ownerB, month });
+      const [half] = allocate(moneyOf(report.totals.outstandingMinor), [1, 1]);
+      if (half && half.amountMinor > 0)
+        await services.gra.recordVatPayment(accountant, {
+          ownerId: ownerB,
+          periodMonth: month,
+          paidOn: today,
+          amountMinor: half.amountMinor,
+          graReceiptNumber: 'GRA-VAT-DEMO-0001',
+          receiptUploadId: await evidenceUpload(services, (input) =>
+            services.gra.createUpload(accountant, input),
+          ),
+          paidFrom: 'agency_account',
+          note: 'VAT, NHIL and GETFund with the return (demo)',
+        });
+    }
+  }
+
+  // 4. The early termination (AR-04): moved out ten days ago; its refund waits for approval.
+  const [early] = (
+    await withCompany(database, sys, (tx) =>
+      tx.execute<{ id: string; status: string; asked: number }>(
+        sql`select l.id, l.status,
+              (select count(*)::int from early_termination t where t.lease_id = l.id) as asked
+            from lease l join unit u on u.id = l.unit_id
+            where u.code = 'ACC-LEG-B1-03' and l.status <> 'cancelled'
+            order by l.start_date desc limit 1`,
+      ),
+    )
+  ).rows;
+  if (early && early.asked === 0) {
+    const leaseManager = await actorFor(database, AGENCY, 'manager.one@demo.invalid');
+    if (['active', 'holding_over', 'ending'].includes(early.status))
+      await services.lifecycle.recordMoveOut(leaseManager, early.id, {
+        moveOutDate: toIsoDate(addDays(parseBusinessDate(today), -10)),
+        note: 'Left early under the break clause (demo)',
+      });
+    await services.invoicing.onLeaseEnded(AGENCY, early.id);
+    // Asked by manager.one; it waits for a second person's approval (`lease.refund`).
+    await services.termination.request(leaseManager, early.id, {
+      charges: [{ description: 'Agreed early termination charge (demo)', amountMinor: 50_000 }],
+      deductions: [],
+      note: 'The tenant gave notice under the break clause (demo)',
+    });
+  }
+}
+
+/** What M5 seeded, per billing company, for the summary. */
+async function taxSummary(database: Database) {
+  const out: string[] = [];
+  for (const companyId of BILLING_COMPANIES) {
+    const name = COMPANIES.find((c) => c.id === companyId)!.displayName;
+    const row = (
+      await withCompany(database, { companyId, actorKind: 'system' }, (tx) =>
+        tx.execute<{
+          items: number;
+          tax: string;
+          gra: number;
+          gra_total: string;
+          withholdings: number;
+          confirmed: number;
+          waiting: number;
+          vat: number;
+          terminations: string | null;
+          flagged: number;
+        }>(
+          sql`select
+                (select count(*)::int from rent_tax_item) as items,
+                (select coalesce(sum(tax_minor), 0)::bigint from rent_tax_item) as tax,
+                (select count(*)::int from gra_payment) as gra,
+                (select coalesce(sum(amount_minor), 0)::bigint from gra_payment) as gra_total,
+                (select count(*)::int from withholding) as withholdings,
+                (select count(*)::int from withholding_certificate where status = 'confirmed') as confirmed,
+                (select count(*)::int from withholding_certificate where status = 'awaiting_confirmation') as waiting,
+                (select count(*)::int from vat_payment) as vat,
+                (select string_agg(status || ' (refund ' || refund_minor || ')', ', ') from early_termination) as terminations,
+                (select count(*)::int from payment_advance where flagged) as flagged`,
+        ),
+      )
+    ).rows[0]!;
+    out.push(
+      `  ${name}: ${row.items} rent tax items (${format(moneyOf(Number(row.tax)))} net); ${row.gra} GRA payments (${format(moneyOf(Number(row.gra_total)))}); ${row.withholdings} withholdings, certificates ${row.confirmed} confirmed and ${row.waiting} waiting; ${row.vat} VAT payments; early terminations: ${row.terminations ?? 'none'}; ${row.flagged} advances flagged over the limit.`,
+    );
+  }
+  return out;
+}
+
 /** RFC 4648 base32 without padding, for the otpauth URI people add to an authenticator app. */
 function base32(text: string): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -1909,6 +2340,8 @@ try {
     approvals: app.get(ApprovalsService),
     read: app.get(BillingReadService),
     subledger: app.get(SubledgerCheckService),
+    withholding: app.get(WithholdingService),
+    rules: app.get(RulesService),
     storage,
     cfg,
   });
@@ -1924,12 +2357,22 @@ try {
     reconciliation: app.get(ReconciliationService),
     read: app.get(BillingReadService),
   });
+  await ensureTax(database, {
+    withholding: app.get(WithholdingService),
+    gra: app.get(GraService),
+    reports: app.get(TaxReportService),
+    termination: app.get(TerminationService),
+    lifecycle: app.get(LeaseLifecycleService),
+    invoicing: app.get(InvoicingService),
+    storage,
+    cfg,
+  });
   let checkProblems = 0;
-  for (const companyId of [AGENCY, LANDLORD])
+  for (const companyId of BILLING_COMPANIES)
     checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
   console.log(`Seeded ${COMPANIES.length} companies and ${PEOPLE.length} people.`);
   console.log(
-    `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST).`,
+    `Register: ${created} new properties (agency: ACC-LEG, ACC-ELG, ACC-OSU; landlord: TEM-EST; Abokobi Homes: ACC-ABK).`,
   );
   console.log(
     `Tenancies: ${leases} new paper leases of ${TENANCIES.length}; +233 20 000 0021 rents from both companies.`,
@@ -1950,11 +2393,18 @@ try {
   console.log(
     `Auto-match rate (M4b done criterion 3): provider payments ${rate(provider.provider.auto, provider.provider.total)}; direct transfers recorded against a lease ${rate(provider.transfers.withLease, provider.transfers.total)}, counted separately.`,
   );
+  console.log('Rent tax and advance rent (M5):');
+  for (const line of await taxSummary(database)) console.log(line);
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(
     `TOTP for every demo staff member: otpauth://totp/Rent%20Platform:demo?secret=${base32(DEMO_TOTP_SECRET)}&issuer=Rent%20Platform`,
   );
   console.log('Tenant sign-in: +233 20 000 0021; read the code at http://localhost:4010');
+  // A ledger that disagrees with its sub-ledgers is never a usable demo: fail loudly.
+  if (money.problems + checkProblems > 0)
+    throw new Error(
+      `The sub-ledger check found ${money.problems + checkProblems} mismatches; the demo data is not consistent`,
+    );
 } finally {
   await app.close();
 }

@@ -57,6 +57,12 @@ export default async function LeasePage({
           recordTransfer: allowed(me, 'payment.record_transfer'),
           sendPayLink: allowed(me, 'billing.manage'),
         },
+        tax: {
+          manage: allowed(me, 'billing.manage'),
+          confirm: allowed(me, 'withholding.confirm'),
+        },
+        agency:
+          me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind === 'agency',
       }}
     />
   );

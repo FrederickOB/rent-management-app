@@ -20,6 +20,7 @@
     "./billing": "./src/billing/index.ts",
     "./billing/testing": "./src/billing/testing/index.ts",
     "./payments": "./src/payments/index.ts",
+    "./tax": "./src/tax/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

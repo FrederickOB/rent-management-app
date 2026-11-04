@@ -162,6 +162,55 @@
       "when": 1793711935229,
       "tag": "0022_tenant_receipt_documents",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793719553458,
+      "tag": "0023_tax",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793719625742,
+      "tag": "0024_tax_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793722261784,
+      "tag": "0025_termination_figures",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793723641110,
+      "tag": "0026_certificate_self_confirm",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1793723659787,
+      "tag": "0027_certificate_self_confirm_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1793729858594,
+      "tag": "0028_withholding_treatment",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1793729859375,
+      "tag": "0029_certificate_self_decisions",
+      "breakpoints": true
     }
   ]
 }

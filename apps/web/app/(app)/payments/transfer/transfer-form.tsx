@@ -3,6 +3,7 @@
 import { RECEIVING_ACCOUNTS } from '@rent/contracts';
 import Link from 'next/link';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { AdvanceCapNote } from '@/components/advance-cap-note';
 import { useApp } from '@/components/app-context';
 import { CancelLink } from '@/components/cancel-link';
 import { FileField } from '@/components/file-field';
@@ -12,6 +13,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextAreaField, TextField } from '@/components/ui/field';
+import { advanceRefusal, type AdvanceRefusal } from '@/lib/advance-refusal';
 import { api, keyedApi } from '@/lib/api';
 import { RECEIVING_ACCOUNT_LABELS, type ReceivingAccount } from '@/lib/billing-format';
 import { todayIn } from '@/lib/business-dates';
@@ -69,6 +71,8 @@ export function TransferForm({
   const [problem, setProblem] = useState<string | null>(null);
   // The first attempt was recorded with other details: offer a fresh form, never a silent retry.
   const [reused, setReused] = useState(false);
+  // AR-05 under `block`: the API refused more months ahead than the limit, and said the most.
+  const [cap, setCap] = useState<AdvanceRefusal | null>(null);
   const [proofError, setProofError] = useState<string | null>(null);
   const [done, setDone] = useState<Done | null>(null);
 
@@ -102,6 +106,7 @@ export function TransferForm({
     setTried(true);
     setProblem(null);
     setReused(false);
+    setCap(null);
     const file = proof.current?.files?.[0];
     const fileError = file
       ? fileProblem(file, PAYMENT_PROOF_UPLOAD)
@@ -138,6 +143,12 @@ export function TransferForm({
         setProblem(fileAgainMessage('proof'));
         return;
       }
+      const refused = advanceRefusal(failure);
+      if (refused) {
+        setCap(refused);
+        setProblem(refused.text);
+        return;
+      }
       setProblem(moneyProblem(failure));
       setReused(isKeyReused(failure));
     }
@@ -146,6 +157,7 @@ export function TransferForm({
   function another() {
     keeper.reset();
     setReused(false);
+    setCap(null);
     setDone(null);
     setTried(false);
     setProblem(null);
@@ -247,8 +259,20 @@ export function TransferForm({
             autoComplete="off"
             value={draft.amount}
             error={errors.amount}
-            onChange={(event) => set({ amount: event.target.value })}
+            onChange={(event) => {
+              setCap(null);
+              set({ amount: event.target.value });
+            }}
           />
+          {cap ? (
+            <AdvanceCapNote
+              refusal={cap}
+              onUse={(amount) => {
+                setCap(null);
+                set({ amount });
+              }}
+            />
+          ) : null}
           <TextField
             label="Date it arrived"
             type="date"

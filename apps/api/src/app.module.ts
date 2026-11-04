@@ -15,7 +15,9 @@ import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
 import { PortfolioModule } from '@rent/server/portfolio';
 import { RulesModule } from '@rent/server/rules';
+import { TaxModule } from '@rent/server/tax';
 import { TenancyModule } from '@rent/server/tenancy';
+import { AdvanceController } from './billing/advance.controller';
 import { BillingController } from './billing/billing.controller';
 import { CompanyController } from './company/company.controller';
 import { GovernanceController } from './governance/governance.controller';
@@ -29,6 +31,7 @@ import { PayLinksController } from './payments/pay-links.controller';
 import { PaymentsController } from './payments/payments.controller';
 import { WebhooksController } from './payments/webhooks.controller';
 import { RegisterController } from './register/register.controller';
+import { TaxController } from './tax/tax.controller';
 import {
   SigningRequestsController,
   TenancyController,
@@ -56,6 +59,7 @@ export class AppModule {
         LedgerModule,
         BillingModule,
         PaymentsModule,
+        TaxModule,
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -83,6 +87,8 @@ export class AppModule {
         PaymentsController,
         PayLinksController,
         WebhooksController,
+        TaxController,
+        AdvanceController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

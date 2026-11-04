@@ -1,6 +1,6 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { sql, withCompany, type Database, type Tx } from '@rent/db';
-import { isTax, lineBalance, linesAfterEnd } from '@rent/domain/billing';
+import { isTax, lineBalance, linesAfterEnd, withheldOn } from '@rent/domain/billing';
 import { formatBusinessDate } from '@rent/domain/dates';
 import type { AlertPort } from '@rent/integrations';
 import type { Clock } from '../core/clock';
@@ -222,8 +222,12 @@ export class InvoicingService {
     for (const line of lines) {
       const current = state.lines.find((l) => l.id === line.id)!;
       const b = lineBalance(current, state.allocations);
+      // Tax the tenant withheld on a month after the end stays on it: a credit note cannot take
+      // it back (M5 decision 9); staff settle it by hand, and the termination's preview says so.
       const amount =
-        current.kind === 'deposit' ? b.outstandingMinor : b.netMinor - b.writtenOffMinor;
+        current.kind === 'deposit'
+          ? b.outstandingMinor
+          : b.netMinor - b.writtenOffMinor - withheldOn(current.id, state.allocations);
       if (amount <= 0) continue;
       await this.engine.credit(tx, state, {
         lineId: current.id,

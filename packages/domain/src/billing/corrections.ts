@@ -170,6 +170,115 @@ export function planCreditNote(input: {
   return result;
 }
 
+/** One line of a withholding as P19 posts it. */
+export interface WithholdingLinePlan {
+  readonly line: BillingLine;
+  readonly amountMinor: number;
+  /** M5 decision 8: the month has not started, so the withholding is held as its advance. */
+  readonly prepaid: boolean;
+  /**
+   * Payments' cash moved off the line back to their credit so the withholding fits (M5 review 2):
+   * the tenant paid the line before the withholding was recorded.
+   */
+  readonly released: readonly PaymentAmount[];
+}
+
+export interface WithholdingPlan {
+  readonly lines: readonly WithholdingLinePlan[];
+  /** New allocation rows: each line's releases (negative, source payment), then its withholding. */
+  readonly rows: readonly {
+    readonly lineId: string;
+    readonly source: 'payment' | 'withholding';
+    readonly paymentId: string | null;
+    readonly amountMinor: number;
+  }[];
+  /** Cash returned to credit, by payment, across the lines (each payment once). */
+  readonly released: readonly PaymentAmount[];
+}
+
+/**
+ * P19's allocations (TX-04; M5 decision 8 and review 2). Withholding is pinned to the rent and
+ * service-charge lines it was withheld on, started or not. Where the tenant's cash already paid
+ * the line, as much of that cash as the withholding needs returns to its payment's credit, the
+ * way a credit note releases money: the payment the tenant paid net with first, then the latest
+ * payment first. The freed credit then pays later lines in the usual order (the caller draws it
+ * to open lines; months not yet started take it as the walk applies credit forward).
+ */
+export function planWithholding(input: {
+  readonly lines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly payments: readonly PaymentRef[];
+  readonly withheld: readonly { readonly lineId: string; readonly amountMinor: number }[];
+  /** The payment the tenant paid net with, when there is one. */
+  readonly paymentId: string | null;
+}): WithholdingPlan {
+  if (input.withheld.length === 0)
+    throw new DomainError('withholding.no_lines', 'Say which lines the tax was withheld on');
+  const order = new Map(input.payments.map((p) => [p.id, p.order]));
+  const seen = new Set<string>();
+  const lines: WithholdingLinePlan[] = [];
+  const rows: WithholdingPlan['rows'][number][] = [];
+  const released = new Map<string, number>();
+  for (const w of input.withheld) {
+    const line = input.lines.find((l) => l.id === w.lineId);
+    if (!line)
+      throw new DomainError('withholding.line_not_found', 'That line is not on this lease');
+    if (!isRecurring(line.kind) || line.baseLineId !== null)
+      throw new DomainError('withholding.line', 'Tax is withheld on rent and service charge only');
+    if (seen.has(line.id))
+      throw new DomainError('withholding.repeated_line', 'Each line is listed once');
+    seen.add(line.id);
+    if (!Number.isSafeInteger(w.amountMinor) || w.amountMinor <= 0)
+      throw new DomainError('withholding.bad_amount', 'Withholding is an amount above zero');
+    const { outstandingMinor } = lineBalance(line, input.allocations);
+    let toRelease = Math.max(0, w.amountMinor - outstandingMinor);
+    const shares = [...paymentShares(line.id, input.allocations)].sort(([a], [b]) => {
+      if (a === input.paymentId) return -1;
+      if (b === input.paymentId) return 1;
+      const x = order.get(a) ?? '';
+      const y = order.get(b) ?? '';
+      return x < y ? 1 : x > y ? -1 : 0;
+    });
+    const fromLine: PaymentAmount[] = [];
+    for (const [paymentId, share] of shares) {
+      if (toRelease === 0) break;
+      const amount = Math.min(share, toRelease);
+      fromLine.push({ paymentId, amountMinor: amount });
+      released.set(paymentId, (released.get(paymentId) ?? 0) + amount);
+      toRelease -= amount;
+    }
+    if (toRelease > 0)
+      throw new DomainError(
+        'withholding.too_large',
+        'Withholding cannot exceed what is still owed on the line, plus the cash paid on it',
+      );
+    lines.push({
+      line,
+      amountMinor: w.amountMinor,
+      prepaid: postingClassOf(line) === 'prepayment',
+      released: fromLine,
+    });
+    for (const r of fromLine)
+      rows.push({
+        lineId: line.id,
+        source: 'payment',
+        paymentId: r.paymentId,
+        amountMinor: -r.amountMinor,
+      });
+    rows.push({
+      lineId: line.id,
+      source: 'withholding',
+      paymentId: null,
+      amountMinor: w.amountMinor,
+    });
+  }
+  return {
+    lines,
+    rows,
+    released: [...released].map(([paymentId, amountMinor]) => ({ paymentId, amountMinor })),
+  };
+}
+
 /**
  * The most a credit note may take off a line now: exactly what planCreditNote accepts. A tax line
  * is never credited alone (it follows its base line); a deposit only where it is unpaid; any other

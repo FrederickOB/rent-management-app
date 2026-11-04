@@ -655,3 +655,277 @@ export const arrearsContract = {
     )
     .output(arrearsSchema),
 };
+
+// M5: early termination (AR-04), advance rent (AR-05) and the paid-until prompt (AR-06) -------------
+
+const termAmount = z.object({
+  description: z.string().trim().min(2).max(120),
+  amountMinor: positiveMinor,
+});
+
+/** The settlement step by step (plan 5.4): what staff see before asking, and the approver decides. */
+export const earlyTerminationFiguresSchema = z.object({
+  leaseId: uuid,
+  lastDay: isoDate,
+  endDate: isoDate,
+  /** The break clause credits the unused days of the last month (prd-issues 36). */
+  breakClauseCreditsUnusedDays: z.boolean(),
+  creditBeforeMinor: minor,
+  chargesMinor: minor,
+  unusedDays: z.array(
+    z.object({
+      lineId: uuid,
+      periodStart: isoDate.nullable(),
+      periodEnd: isoDate.nullable(),
+      unusedDays: z.number().int(),
+      periodDays: z.number().int(),
+      creditMinor: minor,
+    }),
+  ),
+  unusedDaysCreditMinor: minor,
+  /** The lease's credit applied to open lines, oldest first (P13). */
+  appliedMinor: minor,
+  /** What the credit paid on each open line, oldest first; deductions included. */
+  appliedLines: z.array(
+    z.object({
+      lineId: uuid,
+      invoiceNumber: z.string(),
+      label: z.string(),
+      periodStart: isoDate.nullable(),
+      periodEnd: isoDate.nullable(),
+      amountMinor: minor,
+    }),
+  ),
+  /** Credit left after the open lines, before deductions. */
+  creditLeftMinor: minor,
+  deductionsMinor: minor,
+  /** Refunded with two-person approval (P13), paid outside the platform. */
+  refundMinor: minor,
+  /** Still owed after the credit: arrears that stay on the lease (deposit at move-out, P24). */
+  arrearsMinor: minor,
+});
+
+export const EARLY_TERMINATION_STATUSES = [
+  'awaiting_approval',
+  'settled',
+  'refund_paid',
+  'rejected',
+] as const;
+
+/**
+ * An early termination asked for, with its settlement step by step as the request showed it (the
+ * figures the approver decides on): charges, unused-day credit per line, the credit applied per
+ * line, deductions, the refund and what is still owed.
+ */
+export const earlyTerminationSchema = earlyTerminationFiguresSchema.extend({
+  id: uuid,
+  status: z.enum(EARLY_TERMINATION_STATUSES),
+  approvalId: uuid,
+  charges: z.array(termAmount),
+  deductions: z.array(termAmount),
+  note: z.string().nullable(),
+  settledOn: isoDate.nullable(),
+  paid: z
+    .object({
+      paidOn: isoDate,
+      paidFrom: z.enum(RECEIVING_ACCOUNTS),
+      reference: z.string(),
+      proofDocumentId: uuid,
+    })
+    .nullable(),
+  createdAt: iso,
+});
+
+export const earlyTerminationContract = {
+  preview: oc
+    .route({
+      method: 'POST',
+      path: '/leases/{leaseId}/early-termination/preview',
+      summary:
+        'The early-termination settlement step by step, as it would be done now; nothing is kept (AR-04)',
+    })
+    .input(
+      z.object({
+        leaseId: uuid,
+        charges: z.array(termAmount).max(20).default([]),
+        deductions: z.array(termAmount).max(20).default([]),
+      }),
+    )
+    .output(earlyTerminationFiguresSchema),
+  request: oc
+    .route({
+      method: 'POST',
+      path: '/leases/{leaseId}/early-termination',
+      summary:
+        'Ask for the settlement and its refund (lease.refund); a second person approves, and it is done then (P13)',
+    })
+    .input(
+      z.object({
+        leaseId: uuid,
+        charges: z.array(termAmount).max(20).default([]),
+        deductions: z.array(termAmount).max(20).default([]),
+        note: optionalText(500),
+      }),
+    )
+    .output(z.object({ termination: earlyTerminationSchema, approval: approvalSchema })),
+  list: oc
+    .route({ method: 'GET', path: '/early-terminations', summary: 'Early terminations (AR-04)' })
+    .input(z.object({ leaseId: uuid.optional() }))
+    .output(z.array(earlyTerminationSchema)),
+  get: oc
+    .route({
+      method: 'GET',
+      path: '/early-terminations/{terminationId}',
+      summary: 'An early termination with its settlement step by step (AR-04)',
+    })
+    .input(z.object({ terminationId: uuid }))
+    .output(earlyTerminationSchema),
+  createUpload: oc
+    .route({
+      method: 'POST',
+      path: '/refund-uploads',
+      summary: 'Upload the proof a refund was paid (PDF or image)',
+    })
+    .input(
+      z.object({
+        contentType: z.enum(['image/jpeg', 'image/png', 'application/pdf']),
+        sizeBytes: z.number().int().min(1).max(10_000_000),
+      }),
+    )
+    .output(presignedUpload),
+  recordRefundPaid: oc
+    .route({
+      method: 'POST',
+      path: '/early-terminations/{terminationId}/refund-paid',
+      summary:
+        'Record the approved refund as paid outside the platform, with a reference and proof (P13)',
+    })
+    .input(
+      z.object({
+        terminationId: uuid,
+        paidOn: isoDate,
+        paidFrom: z.enum(RECEIVING_ACCOUNTS),
+        reference: z.string().trim().min(2).max(120),
+        proofUploadId: uuid,
+      }),
+    )
+    .output(earlyTerminationSchema),
+};
+
+const advanceRule = z.object({
+  ruleId: uuid,
+  key: z.string(),
+  verificationStatus: z.enum(['verified', 'from_prd', 'unverified']),
+});
+
+const paymentAdvanceRow = z.object({
+  paymentId: uuid,
+  valueDate: isoDate,
+  monthsAhead: z.number().int(),
+  limitMonths: z.number().int().nullable(),
+  ruleId: uuid.nullable(),
+  policy: z.enum(['off', 'warn', 'block']),
+  /** Over the limit for the lease's term (recorded under every policy). */
+  overLimit: z.boolean(),
+  /** Flagged for a person: over the limit under warn or block. */
+  flagged: z.boolean(),
+});
+
+export const leaseAdvanceSchema = z.object({
+  leaseId: uuid,
+  /** The company's `advance_rent_policy`: off records only; warn flags; block refuses on forms. */
+  policy: z.enum(['off', 'warn', 'block']),
+  /** Whole months paid beyond the current one today, from the forward walk. */
+  monthsAheadNow: z.number().int(),
+  /** The limit for the lease's term (Act 220 s.25(5), unverified); null where none applies. */
+  limitMonths: z.number().int().nullable(),
+  rule: advanceRule.nullable(),
+  overLimitNow: z.boolean(),
+  /** Payments flagged over the limit under warn or block (AR-05). Never "compliant". */
+  flaggedPayments: z.array(paymentAdvanceRow),
+  /** Every payment's months paid ahead, as recorded when it was received (AR-05). */
+  payments: z.array(paymentAdvanceRow),
+});
+
+/** AR-05 for one payment, as recorded when it arrived; null for money with no lease yet. */
+export const paymentAdvanceSchema = z
+  .object({
+    paymentId: uuid,
+    leaseId: uuid,
+    valueDate: isoDate,
+    monthsAhead: z.number().int(),
+    policy: z.enum(['off', 'warn', 'block']),
+    limitMonths: z.number().int().nullable(),
+    overLimit: z.boolean(),
+    flagged: z.boolean(),
+    rule: advanceRule.nullable(),
+  })
+  .nullable();
+
+export const advanceComplianceSchema = z.object({
+  policy: z.enum(['off', 'warn', 'block']),
+  rows: z.array(
+    z.object({
+      leaseId: uuid,
+      unitCode: z.string(),
+      propertyName: z.string(),
+      tenantName: z.string(),
+      paymentId: uuid,
+      receivedOn: isoDate,
+      monthsAhead: z.number().int(),
+      limitMonths: z.number().int(),
+      policy: z.enum(['warn', 'block']),
+      rule: advanceRule.nullable(),
+      createdAt: iso,
+    }),
+  ),
+});
+
+export const paidUntilEndingSchema = z.object({
+  leaseId: uuid,
+  unitCode: z.string(),
+  propertyName: z.string(),
+  tenantName: z.string(),
+  endDate: isoDate,
+  paidUntil: isoDate,
+  daysLeft: z.number().int(),
+  /** When AR-06's prompt went for this paid-until date; null if it has not. */
+  promptedOn: isoDate.nullable(),
+});
+
+export const advanceRentContract = {
+  compliance: oc
+    .route({
+      method: 'GET',
+      path: '/compliance/advance-rent',
+      summary:
+        'Payments over the advance rent limit, flagged under warn or block, with the rule version (AR-05)',
+    })
+    .output(advanceComplianceSchema),
+  payment: oc
+    .route({
+      method: 'GET',
+      path: '/payments/{paymentId}/advance',
+      summary:
+        'Months a payment paid ahead, against the limit, as recorded when it arrived (AR-05)',
+    })
+    .input(z.object({ paymentId: uuid }))
+    .output(paymentAdvanceSchema),
+  lease: oc
+    .route({
+      method: 'GET',
+      path: '/leases/{leaseId}/advance',
+      summary: 'Months paid ahead, the limit and flagged payments for a lease (AR-05)',
+    })
+    .input(z.object({ leaseId: uuid }))
+    .output(leaseAdvanceSchema),
+  paidUntilEnding: oc
+    .route({
+      method: 'GET',
+      path: '/leases/paid-until-ending',
+      summary:
+        'Leases whose paid-until is within the renewal-prompt lead (90 days), with the prompt sent (AR-06)',
+    })
+    .input(z.object({ days: z.coerce.number().int().min(1).max(366).optional() }))
+    .output(z.array(paidUntilEndingSchema)),
+};

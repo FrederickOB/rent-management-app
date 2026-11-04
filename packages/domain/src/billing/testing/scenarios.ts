@@ -170,6 +170,8 @@ export class ScenarioRunner {
   private readonly cycles: InvoiceCycle[];
   private readonly issued = new Set<string>();
   private corrections = 0;
+  /** The charge period behind each invoice line, for rules keyed on periods (M5 rent tax). */
+  readonly periodOf = new Map<string, string>();
 
   /** The signing day: no payment is received before it. */
   readonly signedOn: string;
@@ -227,7 +229,12 @@ export class ScenarioRunner {
     const last = this.model.lastDay;
     const cycles = last === null ? this.cycles : this.cycles.filter((c) => c.cycleStart <= last);
     for (const cycle of cyclesToIssue(cycles, this.model.today, this.issued)) {
-      this.model.issue(invoiceLinesFor(cycle, this.lease.vat), cycle.dueDate, cycle.cycleStart);
+      const drafts = invoiceLinesFor(cycle, this.lease.vat);
+      const added = this.model.issue(drafts, cycle.dueDate, cycle.cycleStart);
+      drafts.forEach((d, i) => {
+        const line = added[i];
+        if (d.chargePeriodId && line) this.periodOf.set(line.id, d.chargePeriodId);
+      });
       this.issued.add(cycle.cycleStart);
     }
     this.model.accrueTo(this.model.today);

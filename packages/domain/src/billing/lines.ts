@@ -76,6 +76,8 @@ export interface AllocationRow {
   readonly paymentId: string | null;
   /** Signed: a reversal or a release is a negative row; nothing is ever updated. */
   readonly amountMinor: number;
+  /** The record that wrote it (a withholding's id for source `withholding`), when known. */
+  readonly recordId?: string | null;
 }
 
 /** A payment as allocation sees it. `order` sorts payments first in, first out. */

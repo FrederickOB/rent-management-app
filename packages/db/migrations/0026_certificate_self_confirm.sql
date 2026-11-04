@@ -1,0 +1,4 @@
+ALTER TABLE "withholding_certificate" DROP CONSTRAINT "withholding_certificate_two_people_check";--> statement-breakpoint
+ALTER TABLE "withholding_certificate" ADD COLUMN "self_confirm_request_id" uuid;--> statement-breakpoint
+ALTER TABLE "withholding_certificate" ADD CONSTRAINT "withholding_certificate_self_confirm_fk" FOREIGN KEY ("company_id","self_confirm_request_id") REFERENCES "public"."approval_request"("company_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "withholding_certificate" ADD CONSTRAINT "withholding_certificate_two_people_check" CHECK ("withholding_certificate"."decided_by" is null or "withholding_certificate"."decided_by" <> "withholding_certificate"."uploaded_by" or "withholding_certificate"."self_confirm_request_id" is not null);
