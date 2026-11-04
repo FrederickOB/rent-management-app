@@ -164,6 +164,22 @@ const ITEMS: readonly NavItem[] = [
     needs: 'maintenance.view',
     feature: 'maintenance',
   },
+  // M7: legal notices and the tasks they create (plan 4.10). Growth only (decision 14).
+  {
+    href: '/notices',
+    label: 'Notices',
+    description:
+      'Legal notices to tenants: composing, issuing, tracking acknowledgement, reminders and physical service.',
+    needs: 'notices.read',
+    feature: 'notices',
+  },
+  {
+    href: '/tasks',
+    label: 'Tasks',
+    description: 'Reminders in person, posting notices on the premises and serving them.',
+    needs: 'tasks.read',
+    feature: 'notices',
+  },
   {
     href: '/approvals',
     label: 'Approvals',
@@ -182,6 +198,14 @@ const ITEMS: readonly NavItem[] = [
     label: 'Messaging settings',
     description: 'The response target, the conversation tags and your WhatsApp number.',
     needs: ['company.update', 'messaging.templates.read'],
+  },
+  {
+    href: '/settings/notices',
+    label: 'Notice settings',
+    description:
+      'Turning notices to quit on (the risk acknowledgement), the reminder ladder per notice type, quiet hours and link expiry.',
+    needs: ['company.update', 'notices.quit.acknowledge'],
+    feature: 'notices',
   },
   {
     href: '/settings/settlement',

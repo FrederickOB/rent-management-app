@@ -38,6 +38,10 @@ const ACTION_LABELS: Record<string, string> = {
   // termination's settlement and refund (P13).
   'withholding.write_off': 'Write off withholding tax whose certificate never came',
   'lease.refund': 'Settle an early termination and refund the tenant',
+  // M7 (decision 8): a notice to quit always needs a second person, and it issues itself on
+  // approval; another notice submitted by someone without notice authority needs one issuer.
+  'notice.issue_quit': 'Issue a notice to quit',
+  'notice.issue': 'Issue a notice',
 };
 
 const WITHHOLDING_WRITE_OFF = 'withholding.write_off';
@@ -392,6 +396,9 @@ export function subjectHref(
     case 'owner':
       // Where an owner's rent goes is kept with the settlement accounts.
       return data && 'destination' in data ? '/settings/settlement' : '/owners';
+    // M7: the notice, with its preview, warnings and the checks run again at issue.
+    case 'notice':
+      return `/notices/${row.subjectId}`;
     default: {
       const invoiceId = id('invoiceId');
       if (invoiceId) return `/invoices/${invoiceId}`;

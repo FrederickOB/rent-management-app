@@ -119,6 +119,8 @@ const RECORD_LINKS: Record<string, string> = {
   // M5: withholding and early terminations are shown on their lease's page.
   withholding: 'Open the lease',
   early_termination: 'Open the lease',
+  // M7: read the notice and its preview before approving it.
+  notice: 'Open the notice',
 };
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */

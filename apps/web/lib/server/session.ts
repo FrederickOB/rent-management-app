@@ -151,3 +151,11 @@ export function loadInvoice(invoiceId: string): Promise<Loaded<InvoiceView>> {
 export function loadPayment(paymentId: string): Promise<Loaded<PaymentView>> {
   return load((api) => api.payments.get({ paymentId }));
 }
+
+// M7: legal notices (plan 4.10). A refusal or a missing record is returned, not thrown.
+
+type NoticeView = Awaited<ReturnType<ApiClient['notices']['get']>>;
+
+export function loadNotice(noticeId: string): Promise<Loaded<NoticeView>> {
+  return load((api) => api.notices.get({ noticeId }));
+}

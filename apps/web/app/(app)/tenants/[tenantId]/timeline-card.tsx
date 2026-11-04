@@ -1,6 +1,7 @@
 'use client';
 
 import type { InboxStreamEvent } from '@rent/contracts';
+import { NOTICE_OUTCOME_LABELS } from '@rent/domain/notices';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -13,6 +14,7 @@ import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import { eventTouches } from '@/lib/inbox';
+import { noticeOfTimelineEvent, timelineNoticeText, type TimelineNotice } from '@/lib/notices';
 import { useCoalesced, useInboxStream } from '@/lib/inbox-stream';
 import { timelineDetail, timelineLabel } from '@/lib/tenancy-format';
 import {
@@ -135,6 +137,9 @@ export function TimelineCard({
           <ol className="divide-y divide-slate-100" aria-label="Timeline">
             {events.map((event, index) => {
               const key = `${event.at}-${event.action}-${event.recordId ?? index}`;
+              const notice = noticeOfTimelineEvent(event, NOTICE_OUTCOME_LABELS);
+              if (notice)
+                return <NoticeItem key={key} at={event.at} notice={notice} timeZone={timeZone} />;
               const message = messageOfEvent(event);
               return message ? (
                 <MessageItem key={key} at={event.at} message={message} timeZone={timeZone} />
@@ -146,6 +151,35 @@ export function TimelineCard({
         )}
       </CardBody>
     </Card>
+  );
+}
+
+/** A notice's status change (M7 plan 4.8): every one is on the tenant's timeline. */
+function NoticeItem({
+  at,
+  notice,
+  timeZone,
+}: {
+  readonly at: string;
+  readonly notice: TimelineNotice;
+  readonly timeZone: string;
+}) {
+  const text = timelineNoticeText(notice);
+  return (
+    <li data-testid="timeline-notice" data-kind={notice.kind} className="space-y-1 py-3 text-sm">
+      <p className="font-medium text-slate-900">
+        {notice.noticeId ? (
+          <Link href={`/notices/${notice.noticeId}`} className="underline underline-offset-2">
+            {text}
+          </Link>
+        ) : (
+          text
+        )}
+      </p>
+      <p className="text-slate-700">
+        <time dateTime={at}>{formatTime(at, timeZone)}</time>
+      </p>
+    </li>
   );
 }
 

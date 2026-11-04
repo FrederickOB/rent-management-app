@@ -36,6 +36,7 @@ import {
 import { ConsentCard } from './consent-card';
 import { ContactsCard } from './contacts-card';
 import { IdentityCard } from './identity-card';
+import { NoticesCard } from './notices-card';
 import { TimelineCard } from './timeline-card';
 
 type Notice = { readonly tone: 'success' | 'error'; readonly text: string } | null;
@@ -53,6 +54,9 @@ export interface TenantPermissions {
   readonly messages?: boolean;
   /** M6: may write to the tenant (messaging.reply), starting the conversation if need be. */
   readonly write?: boolean;
+  /** M7: the tenant's notices (notices.read on a plan with notices), and drafting one. */
+  readonly notices?: boolean;
+  readonly draftNotice?: boolean;
 }
 
 /** What a caretaker sees (plan 4.14): the name, the phone and the units, nothing else. */
@@ -363,6 +367,10 @@ export function TenantProfile({
           )}
         </CardBody>
       </Card>
+
+      {can.notices ? (
+        <NoticesCard tenant={tenant} canDraft={Boolean(can.draftNotice) && live} />
+      ) : null}
 
       <TimelineCard
         tenantId={tenant.id}
