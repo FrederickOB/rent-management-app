@@ -233,6 +233,15 @@ async function seedCompany(companyId: string) {
       tenantId,
       leaseId: leases[0]!.id,
     });
+    await seedMessaging(companyId, {
+      initiator,
+      documentId: docs[0]!.id,
+      messageId: messages[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
   });
 }
 
@@ -647,6 +656,98 @@ async function seedPayments(
     `insert into unmatched_refund (company_id, payment_id, owner_id, amount_minor, reason, approval_request_id, requested_by)
      values ($1, $2, $3, 1000, 'A fixture', $4, $5)`,
     [companyId, unmatched, ids.ownerId, ids.requestId, ids.initiator],
+  );
+}
+
+/**
+ * Messaging and the maintenance stub (M6): one row in each of their company tables, around one
+ * conversation with an inbound SMS that carried a photo and became a repair ticket.
+ */
+async function seedMessaging(
+  companyId: string,
+  ids: {
+    initiator: string;
+    documentId: string;
+    messageId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const token = () => randomBytes(32).toString('hex');
+  const { rows: conversations } = await app.query<{ id: string }>(
+    "insert into conversation (company_id, tenant_id, state, last_message_at) values ($1, $2, 'open', now()) returning id",
+    [companyId, ids.tenantId],
+  );
+  const conversationId = conversations[0]!.id;
+  await app.query(
+    "insert into conversation_channel (company_id, conversation_id, channel, address, last_inbound_at) values ($1, $2, 'sms', '+233200000099', now())",
+    [companyId, conversationId],
+  );
+  const { rows: inbound } = await app.query<{ id: string }>(
+    `insert into message (id, company_id, property_id, tenant_id, purpose, body, channels, direction, conversation_id,
+       author_type, channel, provider, provider_message_id, attachment_count)
+     values (gen_random_uuid(), $1, $2, $3, 'inbound', 'The tap leaks', '{sms}', 'inbound', $4, 'tenant', 'sms', 'memory', $5, 1)
+     returning id`,
+    [companyId, ids.propertyId, ids.tenantId, conversationId, randomUUID()],
+  );
+  await app.query(
+    "insert into message_attachment (company_id, message_id, kind, content_type, size_bytes, document_id, status) values ($1, $2, 'image', 'image/jpeg', 1, $3, 'stored')",
+    [companyId, inbound[0]!.id, ids.documentId],
+  );
+  await app.query(
+    "insert into channel_identity (company_id, channel, address, tenant_id, linked_by) values ($1, 'whatsapp', '+233200000098', $2, $3)",
+    [companyId, ids.tenantId, ids.initiator],
+  );
+  await app.query(
+    "insert into bot_session (company_id, conversation_id, state, context, expires_at) values ($1, $2, 'menu', '{}', now() + interval '30 minutes')",
+    [companyId, conversationId],
+  );
+  await app.query(
+    'insert into reply_address (company_id, conversation_id, token_hash) values ($1, $2, $3)',
+    [companyId, conversationId, token()],
+  );
+  await app.query(
+    "insert into unsubscribe_token (company_id, tenant_id, token_hash, expires_at) values ($1, $2, $3, now() + interval '1 year')",
+    [companyId, ids.tenantId, token()],
+  );
+  const { rows: groups } = await app.query<{ id: string }>(
+    "insert into tenant_group (company_id, name, created_by) values ($1, 'Ground floor', $2) returning id",
+    [companyId, ids.initiator],
+  );
+  await app.query(
+    'insert into tenant_group_member (company_id, group_id, tenant_id, added_by) values ($1, $2, $3, $4)',
+    [companyId, groups[0]!.id, ids.tenantId, ids.initiator],
+  );
+  const { rows: broadcasts } = await app.query<{ id: string }>(
+    `insert into broadcast (company_id, audience_kind, property_id, topic, body, status, audience_count, queued_count,
+       batches, created_by)
+     values ($1, 'property', $2, 'water supply', 'No water on Saturday', 'sending', 1, 1, 1, $3) returning id`,
+    [companyId, ids.propertyId, ids.initiator],
+  );
+  await app.query(
+    `insert into broadcast_recipient (company_id, broadcast_id, property_id, tenant_id, message_id, planned_channel, outcome, batch)
+     values ($1, $2, $3, $4, $5, 'sms', 'queued', 0)`,
+    [companyId, broadcasts[0]!.id, ids.propertyId, ids.tenantId, ids.messageId],
+  );
+  const { rows: jobs } = await app.query<{ id: string }>(
+    `insert into maintenance_job (company_id, property_id, unit_id, lease_id, tenant_id, source, description, conversation_id,
+       source_message_id)
+     values ($1, $2, $3, $4, $5, 'sms', 'The tap leaks', $6, $7) returning id`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.unitId,
+      ids.leaseId,
+      ids.tenantId,
+      conversationId,
+      inbound[0]!.id,
+    ],
+  );
+  await app.query(
+    "insert into maintenance_job_attachment (company_id, property_id, job_id, document_id, kind) values ($1, $2, $3, $4, 'image')",
+    [companyId, ids.propertyId, jobs[0]!.id, ids.documentId],
   );
 }
 

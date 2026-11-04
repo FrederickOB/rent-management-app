@@ -1,4 +1,11 @@
-import type { MessageChannel } from '@rent/domain/messaging';
+import { instantFrom } from '@rent/domain/dates';
+import {
+  CONSENT_CHANNELS,
+  NO_CONSENT,
+  type ConsentChannel,
+  type ConsentFacts,
+  type MessageChannel,
+} from '@rent/domain/messaging';
 import type { EsignService } from '../esign/esign.service';
 import type { TenantsService } from '../tenancy/tenants.service';
 import type { MessagingService, Reach } from './messaging.service';
@@ -21,30 +28,52 @@ export function registerSigningRecipients(
       if (recipient.type !== 'signer') return null;
       const signer = await esign.signerContact(tx, recipient.signerId);
       if (!signer) return null;
-      const addresses: Partial<Record<MessageChannel, string>> = {
+      const addresses: Partial<Record<ConsentChannel, string>> = {
         ...(signer.phone ? { sms: signer.phone } : {}),
         ...(signer.email ? { email: signer.email } : {}),
       };
-      let consented: ReadonlySet<MessageChannel> = new Set();
+      let consented: ReadonlySet<ConsentChannel> = new Set();
+      let consent: Partial<Record<ConsentChannel, ConsentFacts>> | undefined;
+      let subject: Reach['subject'] = null;
       switch (signer.subject.type) {
         case 'staff':
           consented = new Set(Object.keys(addresses) as MessageChannel[]);
           break;
         case 'tenant':
-          if (signer.tenantId)
-            consented =
-              (await tenants.reach(tx, { tenantId: signer.tenantId }))?.consented ?? consented;
+        case 'tenant_contact': {
+          if (!signer.tenantId) break;
+          const contactId =
+            signer.subject.type === 'tenant_contact' ? signer.subject.contactId : null;
+          consented =
+            (await tenants.reach(tx, { tenantId: signer.tenantId, contactId }))?.consented ??
+            consented;
+          // M6 (plan 4.9; review S7): the tenant's WhatsApp and the app too, where the signer is
+          // the tenant or their contact and the phone is still the one on record (decision 8).
+          const point = await tenants.messagingPoint(tx, { tenantId: signer.tenantId, contactId });
+          if (point) {
+            if (
+              signer.phone &&
+              (point.whatsappPhone === signer.phone || point.phone === signer.phone)
+            )
+              addresses.whatsapp = signer.phone;
+            if (!contactId && point.personId) addresses.push = point.personId;
+            consent = {};
+            for (const channel of CONSENT_CHANNELS) {
+              const latest = point.consent[channel];
+              consent[channel] = latest
+                ? { latest: { action: latest.action, at: instantFrom(latest.at) } }
+                : NO_CONSENT;
+            }
+            consented = new Set([
+              ...consented,
+              ...CONSENT_CHANNELS.filter((c) => point.consent[c]?.action === 'grant'),
+            ]);
+          }
+          // Emails to the tenant get their reply address and, outside a reply, the unsubscribe
+          // link (decision 7; review L1).
+          subject = { tenantId: signer.tenantId, contactId };
           break;
-        case 'tenant_contact':
-          if (signer.tenantId)
-            consented =
-              (
-                await tenants.reach(tx, {
-                  tenantId: signer.tenantId,
-                  contactId: signer.subject.contactId,
-                })
-              )?.consented ?? consented;
-          break;
+        }
         default:
           break;
       }
@@ -52,9 +81,11 @@ export function registerSigningRecipients(
         name: signer.name,
         addresses,
         consented,
+        ...(consent ? { consent } : {}),
         isTestContact: signer.isTestContact,
         tenantId: signer.tenantId,
         propertyId: signer.propertyId,
+        subject,
       };
     },
   });

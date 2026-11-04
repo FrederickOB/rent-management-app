@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAddressLookup } from './address-lookup';
+import { registerChat } from './chat';
+import { registerEmail } from './email';
 import { registerIdentity } from './identity';
 import { renderInbox } from './inbox';
 import { registerPayments } from './payments';
@@ -25,7 +27,13 @@ export interface FakeProvidersOptions {
   /** Meta-style app secret that signs WhatsApp webhooks. */
   readonly whatsappAppSecret?: string;
   readonly whatsappWebhookUrl?: string;
+  readonly whatsappPhoneNumberId?: string;
   readonly identityWebhookUrl?: string;
+  /** M6: where simulated SMS replies, SMS delivery reports, email replies and email events go. */
+  readonly smsInboundUrl?: string;
+  readonly smsStatusUrl?: string;
+  readonly emailInboundUrl?: string;
+  readonly emailEventsUrl?: string;
 }
 
 /** Dev-only defaults; the platform's dev config must use the same values to verify webhooks. */
@@ -51,11 +59,20 @@ export function buildServer(
 
   app.get('/health', () => ({ ok: true }));
 
-  registerSms(app, store, ids);
+  registerSms(app, store, ids, {
+    inboundUrl: options.smsInboundUrl,
+    statusUrl: options.smsStatusUrl,
+  });
   registerWhatsApp(app, store, ids, {
     appSecret: options.whatsappAppSecret ?? DEFAULT_WHATSAPP_APP_SECRET,
     webhookUrl: options.whatsappWebhookUrl,
+    phoneNumberId: options.whatsappPhoneNumberId,
   });
+  registerEmail(app, store, ids, {
+    inboundUrl: options.emailInboundUrl,
+    eventsUrl: options.emailEventsUrl,
+  });
+  registerChat(app, store);
   registerPush(app, store, ids);
   registerPayments(app, store, ids, {
     secretKey: options.paymentsSecretKey ?? DEFAULT_PAYMENTS_SECRET_KEY,

@@ -1,0 +1,15 @@
+{
+  "RecordType": "Bounce",
+  "ID": 4323372036854775807,
+  "Type": "HardBounce",
+  "TypeCode": 1,
+  "Name": "Hard bounce",
+  "MessageID": "883953f4-6105-42a2-a16a-77a8eac79483",
+  "Description": "The server was unable to deliver your message.",
+  "Email": "tenant@example.test",
+  "From": "no-reply@rent.test",
+  "BouncedAt": "2026-11-04T09:01:00Z",
+  "Inactive": true,
+  "CanActivate": true,
+  "Subject": "Receipt"
+}

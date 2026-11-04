@@ -58,6 +58,13 @@ export const compareDates = (a: BusinessDate, b: BusinessDate): -1 | 0 | 1 =>
 
 export const addHours = (instant: Instant, hours: number): Instant => instant.add({ hours });
 
+/** Clock minutes after an instant (M6: the inbox's response target, bot timeouts). */
+export const addMinutes = (instant: Instant, minutes: number): Instant => instant.add({ minutes });
+
+/** Whole minutes from one instant to another, rounded towards zero; negative when `to` is earlier. */
+export const minutesBetween = (from: Instant, to: Instant): number =>
+  Math.trunc((to.epochMilliseconds - from.epochMilliseconds) / 60_000);
+
 /**
  * Formats an instant for people, always naming the time zone (DO-04), for example
  * `28 Oct 2026, 14:05 GMT (Africa/Accra)`.

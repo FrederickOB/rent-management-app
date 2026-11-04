@@ -16,7 +16,12 @@ const app = buildServer(undefined, {
   paymentsWebhookUrl: env('FAKE_PAYMENTS_WEBHOOK_URL'),
   whatsappAppSecret: env('FAKE_WHATSAPP_APP_SECRET'),
   whatsappWebhookUrl: env('FAKE_WHATSAPP_WEBHOOK_URL'),
+  whatsappPhoneNumberId: env('FAKE_WHATSAPP_PHONE_NUMBER_ID'),
   identityWebhookUrl: env('FAKE_IDENTITY_WEBHOOK_URL'),
+  smsInboundUrl: env('FAKE_SMS_INBOUND_URL'),
+  smsStatusUrl: env('FAKE_SMS_STATUS_URL'),
+  emailInboundUrl: env('FAKE_EMAIL_INBOUND_URL'),
+  emailEventsUrl: env('FAKE_EMAIL_EVENTS_URL'),
 });
 await app.listen({ port, host });
 // PORT=0 picks a free port; print the one actually bound.

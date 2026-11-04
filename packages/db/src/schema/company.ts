@@ -60,12 +60,18 @@ export const company = pgTable(
     senderName: text().notNull(),
     settings: jsonb().notNull().default({}),
     status: text().notNull().default('active'),
+    /**
+     * M6 decision 9: the interim plan until subscriptions (M10). Set only by a platform admin,
+     * through app.set_company_plan(): the application role has no UPDATE on this column.
+     */
+    interimPlan: text().notNull().default('growth'),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check('company_kind_check', sql`${t.kind} in ('landlord', 'agency', 'platform')`),
     check('company_status_check', sql`${t.status} in ('active', 'suspended', 'archived')`),
+    check('company_interim_plan_check', sql`${t.interimPlan} in ('starter', 'growth')`),
   ],
 );
 

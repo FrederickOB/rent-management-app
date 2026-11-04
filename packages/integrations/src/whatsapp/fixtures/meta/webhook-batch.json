@@ -1,0 +1,62 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "102290129340398",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550783881",
+              "phone_number_id": "106540352242922"
+            },
+            "contacts": [{ "profile": { "name": "Ama" }, "wa_id": "233200000101" }],
+            "messages": [
+              {
+                "from": "233200000101",
+                "id": "wamid.in-1",
+                "timestamp": "1798448400",
+                "type": "text",
+                "text": { "body": "1" }
+              },
+              {
+                "from": "233200000101",
+                "id": "wamid.in-2",
+                "timestamp": "1798448401",
+                "type": "image",
+                "image": {
+                  "id": "1037543291543636",
+                  "mime_type": "image/jpeg",
+                  "sha256": "abc",
+                  "caption": "The leak"
+                }
+              },
+              {
+                "from": "233200000101",
+                "id": "wamid.in-3",
+                "timestamp": "1798448402",
+                "type": "interactive",
+                "interactive": {
+                  "type": "list_reply",
+                  "list_reply": { "id": "receipt", "title": "Receipt" }
+                }
+              }
+            ],
+            "statuses": [
+              {
+                "id": "wamid.out-1",
+                "status": "delivered",
+                "timestamp": "1798448403",
+                "recipient_id": "233200000101",
+                "conversation": { "id": "c1", "origin": { "type": "utility" } },
+                "pricing": { "billable": true, "pricing_model": "PMP", "category": "utility" }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

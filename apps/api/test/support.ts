@@ -108,6 +108,11 @@ export class Device {
     };
   }
 
+  /** The Cookie header this device would send, for requests made without `call` (a stream). */
+  cookieHeader(): string {
+    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+
   sessionToken(): string | undefined {
     const raw = [...this.cookies].find(([k]) => k.endsWith('session_token'))?.[1];
     return raw ? decodeURIComponent(raw).split('.')[0] : undefined;

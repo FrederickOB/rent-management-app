@@ -241,7 +241,7 @@ export interface ReceiptView {
   /** M4b (BC-06): the receipt on its way to the tenant. */
   readonly delivery: {
     readonly status: 'queued' | 'sent' | 'not_sent' | 'failed';
-    readonly channel: 'sms' | 'email' | null;
+    readonly channel: 'push' | 'whatsapp' | 'sms' | 'email' | null;
     readonly sentAt: Date | null;
     readonly latencyMs: number | null;
   } | null;
@@ -715,6 +715,100 @@ export class BillingReadService {
   }
 
   /**
+   * M6 decision 11: a tenant account statement for one lease, for the bot's "statement" (CM-03).
+   * Invoices, payments received and credit notes from `from` (ISO date), with the balance and
+   * paid-until from the money card. Every figure comes from the billing records and the engine.
+   */
+  async statementIn(
+    tx: Tx,
+    companyId: string,
+    leaseId: string,
+    from: string,
+  ): Promise<{
+    lines: {
+      date: string;
+      kind: 'invoice' | 'payment' | 'credit';
+      reference: string;
+      description: string;
+      amountMinor: number;
+    }[];
+    dueNowMinor: number;
+    paidUntil: string | null;
+    creditMinor: number;
+    nextDueDate: string | null;
+    today: string;
+  }> {
+    const money = await this.leaseBillingIn(tx, companyId, leaseId);
+    const state = await this.engine.load(tx, companyId, leaseId);
+    const today = this.engine.today(state);
+    const invoices = await tx.execute<{
+      number: number;
+      issue_date: string;
+      total: string;
+      kind: string;
+    }>(
+      sql`select i.number, i.issue_date::text as issue_date, i.kind, coalesce(sum(l.amount_minor), 0)::text as total
+          from invoice i left join invoice_line l on l.company_id = i.company_id and l.invoice_id = i.id
+          where i.lease_id = ${leaseId} and i.issue_date >= ${from}::date
+          group by i.id order by i.issue_date, i.number`,
+    );
+    const receipts = await tx.execute<{
+      number: number;
+      received_on: string;
+      amount: string;
+      kind: string;
+      method: string;
+    }>(
+      sql`select r.number, p.received_on::text as received_on, p.amount_minor::text as amount, r.kind, p.method
+          from receipt r join payment p on p.company_id = r.company_id and p.id = r.payment_id
+          where r.lease_id = ${leaseId} and p.received_on >= ${from}::date
+          order by p.received_on, r.number`,
+    );
+    const credits = await tx.execute<{ created: string; amount: string; reason: string }>(
+      sql`select created_at::date::text as created, amount_minor::text as amount, reason
+          from credit_note where lease_id = ${leaseId} and created_at::date >= ${from}::date
+          order by created_at`,
+    );
+    const [next] = (
+      await tx.execute<{ due_date: string }>(
+        sql`select due_date::text as due_date from invoice where lease_id = ${leaseId} and due_date > ${today}::date
+            order by due_date limit 1`,
+      )
+    ).rows;
+    const lines = [
+      ...invoices.rows.map((i) => ({
+        date: i.issue_date,
+        kind: 'invoice' as const,
+        reference: formatInvoiceNumber(i.number),
+        description: i.kind === 'deposit' ? 'Deposit invoice' : 'Invoice',
+        amountMinor: Number(i.total),
+      })),
+      ...receipts.rows.map((r) => ({
+        date: r.received_on,
+        kind: 'payment' as const,
+        reference: formatReceiptNumber(r.number),
+        description: r.kind === 'credit_receipt' ? 'Payment reversed' : 'Payment received',
+        amountMinor: r.kind === 'credit_receipt' ? Number(r.amount) : -Number(r.amount),
+      })),
+      ...credits.rows.map((c) => ({
+        date: c.created,
+        kind: 'credit' as const,
+        reference: 'Credit note',
+        description: c.reason.slice(0, 120),
+        amountMinor: -Number(c.amount),
+      })),
+    ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    return {
+      lines,
+      dueNowMinor: money.dueNowMinor,
+      paidUntil: money.paidUntil,
+      creditMinor: money.creditMinor,
+      nextDueDate: next?.due_date ?? null,
+      today,
+    };
+  }
+
+  /**
    * Whether a pay link can be sent for the lease now (BC-04; plan 4.2), for its oldest invoice
    * with something left to pay: the owner's rent needs somewhere to settle, and the tenant a
    * channel with consent.
@@ -754,18 +848,21 @@ export class BillingReadService {
     const destination = await destinationForOwner(tx, state.company, state.book.ownerId, today);
     if (destination.kind === 'problem') return no(destination.problem, destination.text, invoiceId);
     if (!invoiceId) return no('nothing_due', 'Nothing is left to pay on this lease now');
+    // M6 (review C2): any channel the send job can use, push and WhatsApp included.
     const consent = await tx.execute<{ channel: string; action: string }>(
       sql`select distinct on (c.channel) c.channel, c.action from consent_event c
           join tenant t on t.company_id = c.company_id and t.id = c.tenant_id
           where c.tenant_id = ${state.lease.tenantId} and c.tenant_contact_id is null
-            and c.channel in ('sms', 'email')
-            and ((c.channel = 'sms' and t.phone is not null) or (c.channel = 'email' and t.email is not null))
+            and c.channel in ('push', 'whatsapp', 'sms', 'email')
+            and ((c.channel = 'sms' and t.phone is not null) or (c.channel = 'email' and t.email is not null)
+              or (c.channel = 'whatsapp' and coalesce(t.whatsapp_phone, t.phone) is not null)
+              or (c.channel = 'push' and app.tenant_has_app(t.id)))
           order by c.channel, c.recorded_at desc, c.id desc`,
     );
     if (!consent.rows.some((c) => c.action === 'grant'))
       return no(
         'no_consent',
-        'The tenant has not agreed to messages by SMS or email; hand them the link in person',
+        'The tenant has not agreed to messages on any channel we have for them; hand them the link in person',
         invoiceId,
       );
     return { available: true, reason: null, text: null, invoiceId };
@@ -1067,7 +1164,7 @@ export class BillingReadService {
       delivery: delivery
         ? {
             status: delivery.status as NonNullable<ReceiptView['delivery']>['status'],
-            channel: delivery.channel as 'sms' | 'email' | null,
+            channel: delivery.channel as 'push' | 'whatsapp' | 'sms' | 'email' | null,
             sentAt: delivery.sentAt,
             latencyMs: delivery.latencyMs,
           }

@@ -236,7 +236,9 @@ export const consentEvent = pgTable(
     check('consent_event_action_check', sql`${t.action} in ('grant', 'withdraw')`),
     check(
       'consent_event_source_check',
-      sql`${t.source} in ('staff', 'reply', 'stop', 'tenant_app')`,
+      // M6 (plan 4.2): the sources tenants give and withdraw consent through. 'reply' and 'stop'
+      // were reserved in M3 and never written; they stay valid so no stored row could break.
+      sql`${t.source} in ('staff', 'reply', 'stop', 'tenant_app', 'tenant_reply', 'stop_keyword', 'start_keyword', 'email_unsubscribe')`,
     ),
     check('consent_event_sha_check', sql`${t.textSha256} ~ '^[0-9a-f]{64}$'`),
   ],

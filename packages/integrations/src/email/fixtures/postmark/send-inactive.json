@@ -1,0 +1,4 @@
+{
+  "ErrorCode": 406,
+  "Message": "You tried to send to recipient(s) that have been marked as inactive."
+}

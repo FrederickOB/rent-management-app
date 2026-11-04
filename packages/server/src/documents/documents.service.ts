@@ -80,7 +80,8 @@ export interface UploadPurpose {
     | 'banking_slip'
     | 'gra_receipt'
     | 'withholding_certificate'
-    | 'refund_proof';
+    | 'refund_proof'
+    | 'message_photo';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }
@@ -117,6 +118,16 @@ export const WITHHOLDING_CERTIFICATE_UPLOAD: UploadPurpose = {
 };
 export const REFUND_PROOF_UPLOAD: UploadPurpose = { purpose: 'refund_proof', ...MONEY_PROOF };
 
+/**
+ * M6 (plan 4.10): a photo a tenant sends in the app's conversation, checked against its real bytes
+ * and kept write-once like the media copied from WhatsApp.
+ */
+export const MESSAGE_PHOTO_UPLOAD: UploadPurpose = {
+  purpose: 'message_photo',
+  contentTypes: ['image/jpeg', 'image/png', 'image/webp'],
+  maxBytes: 10_000_000,
+};
+
 /** An upload checked and copied to write-once storage, waiting to be recorded as a document. */
 export interface StagedEvidence {
   readonly companyId: string;
@@ -145,6 +156,11 @@ function sniffContentType(bytes: Buffer): string | null {
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
   if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])))
     return 'image/png';
+  if (
+    bytes.subarray(0, 4).toString('latin1') === 'RIFF' &&
+    bytes.subarray(8, 12).toString('latin1') === 'WEBP'
+  )
+    return 'image/webp';
   return null;
 }
 
@@ -393,7 +409,7 @@ export class DocumentsService {
 
   /** A presigned POST that only accepts the declared type, up to the purpose's size limit. */
   async createUpload(
-    ctx: { companyId: string; personId: string },
+    ctx: { companyId: string; personId: string; actorKind?: 'staff' | 'system' },
     purpose: UploadPurpose,
     contentType: string,
     sizeBytes: number,
@@ -404,7 +420,7 @@ export class DocumentsService {
     const id = uuidv7();
     const key = `uploads/${ctx.companyId}/${purpose.purpose}/${id}`;
     const expiresAt = new Date(this.clock.now().getTime() + UPLOAD_SECONDS * 1_000);
-    await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+    await withCompany(this.database, { actorKind: 'staff', ...ctx }, (tx) =>
       tx.insert(schema.uploadIntent).values({
         id,
         companyId: ctx.companyId,
@@ -514,11 +530,11 @@ export class DocumentsService {
    * instead of storing a second one, and the plain copy stays until the write has committed.
    */
   async stageEvidenceUpload(
-    ctx: { companyId: string; personId: string },
+    ctx: { companyId: string; personId: string; actorKind?: 'staff' | 'system' },
     uploadId: string,
     purpose: UploadPurpose,
   ): Promise<StagedEvidence> {
-    const [intent] = await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+    const [intent] = await withCompany(this.database, { actorKind: 'staff', ...ctx }, (tx) =>
       tx
         .select()
         .from(schema.uploadIntent)
@@ -533,7 +549,7 @@ export class DocumentsService {
       throw notFound('Upload');
     if (intent.status !== 'pending' || intent.expiresAt.getTime() < this.clock.now().getTime())
       throw invalid('upload_expired', 'That upload has expired; upload the file again');
-    const [company] = await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+    const [company] = await withCompany(this.database, { actorKind: 'staff', ...ctx }, (tx) =>
       tx
         .select({ countryCode: schema.company.countryCode })
         .from(schema.company)
@@ -775,11 +791,11 @@ export class DocumentsService {
   }
 
   private async rejectUpload(
-    ctx: { companyId: string; personId: string },
+    ctx: { companyId: string; personId: string; actorKind?: 'staff' | 'system' },
     uploadId: string,
     reason: string,
   ): Promise<void> {
-    await withCompany(this.database, { ...ctx, actorKind: 'staff' }, (tx) =>
+    await withCompany(this.database, { actorKind: 'staff', ...ctx }, (tx) =>
       tx
         .update(schema.uploadIntent)
         .set({ status: 'rejected', rejectReason: reason })

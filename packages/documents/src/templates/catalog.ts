@@ -3,6 +3,7 @@ import { leaseV1 } from './lease';
 import { signingCertificateV1 } from './signing-certificate';
 import { TemplateRegistry } from './registry';
 import { systemSampleV1 } from './system-sample';
+import { statementV1 } from './statement';
 import { rentTaxReportV1, rentTaxReportV2 } from './tax';
 
 /** Every template the product renders. Old versions stay, so stored documents keep theirs. */
@@ -14,4 +15,5 @@ export const templates = new TemplateRegistry([
   receiptV1,
   rentTaxReportV1,
   rentTaxReportV2,
+  statementV1,
 ]);

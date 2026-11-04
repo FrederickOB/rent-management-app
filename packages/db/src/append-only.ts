@@ -46,6 +46,11 @@ export const APPEND_ONLY_TABLES = [
   'management_agreement',
   'provider_settlement',
   'reminder_sent',
+  // M6: attachments, broadcast recipients, repair media and the template registry.
+  'message_attachment',
+  'broadcast_recipient',
+  'maintenance_job_attachment',
+  'message_template',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */
@@ -62,4 +67,10 @@ export const GLOBAL_TABLES = [
   'ledger_account',
   // M4b: every provider webhook, stored before its company is known (plan 4.4).
   'webhook_inbox',
+  // M6: WhatsApp numbers and templates (platform data, read through system functions) and push
+  // devices (a person's, across companies; read through a narrow function).
+  'whatsapp_account',
+  'message_template',
+  'whatsapp_template_status',
+  'push_device',
 ] as const;

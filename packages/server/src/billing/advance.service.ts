@@ -240,13 +240,15 @@ export class AdvanceService {
         related: { type: 'lease', id: leaseId },
         requestedBy: null,
       });
-    // The tenant, by SMS or email where consent is recorded (the messaging core checks it).
+    // The tenant, on every channel in the business order where consent is recorded (the
+    // messaging core checks it); M6 gives it its own purpose and WhatsApp template (plan 4.9).
     const tenantMessageId = await queueMessage(tx, companyId, {
       recipient: { type: 'tenant', tenantId: state.lease.tenantId },
-      purpose: 'rent_reminder',
+      purpose: 'paid_until_prompt',
       subject: `Your rent is paid until ${until}`,
       body: `${company.displayName}: your rent for ${state.lease.unitCode} is paid until ${until}. Contact us to renew or to pay the next period.`,
-      channels: ['sms', 'email'],
+      channels: ['push', 'whatsapp', 'sms', 'email'],
+      templateParams: { paid_until: until },
       propertyId: state.lease.propertyId,
       related: { type: 'lease', id: leaseId },
       requestedBy: null,

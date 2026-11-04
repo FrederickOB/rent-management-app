@@ -20,6 +20,7 @@
     "./ledger": "./src/ledger/index.ts",
     "./billing": "./src/billing/index.ts",
     "./messaging": "./src/messaging/index.ts",
+    "./maintenance": "./src/maintenance/index.ts",
     "./payments": "./src/payments/index.ts",
     "./tax": "./src/tax/index.ts",
     "./testing": "./test/support/index.ts"

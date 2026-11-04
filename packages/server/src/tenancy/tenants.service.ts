@@ -56,6 +56,13 @@ import type {
 } from './tenancy.types';
 
 type TenantRow = typeof schema.tenant.$inferSelect;
+
+/** Events another module adds to a tenant's timeline, read in the caller's transaction. */
+export type TimelineSource = (
+  tx: Tx,
+  tenantId: string,
+  options: { readonly detailed: boolean },
+) => Promise<TimelineEvent[]>;
 type ContactRow = typeof schema.tenantContact.$inferSelect;
 
 /** A person's addresses and consent, for the messaging core (CM-09). */
@@ -66,6 +73,27 @@ export interface ContactPoint {
   readonly consented: ReadonlySet<MessageChannel>;
   readonly isTestContact: boolean;
   readonly propertyId: string | null;
+}
+
+/** M6: the same, on every channel, with each channel's latest consent event. */
+export interface MessagingPoint extends ContactPoint {
+  readonly whatsappPhone: string | null;
+  /** The tenant's person, for push and the app; null for a contact. */
+  readonly personId: string | null;
+  /** The contact's kind (signatory, finance, guarantor…); null for the tenant. */
+  readonly contactKind: string | null;
+  readonly consent: Readonly<
+    Record<
+      string,
+      {
+        readonly action: 'grant' | 'withdraw';
+        readonly at: Date;
+        readonly source: string;
+        /** The consent text's version: `address_changed.v1` for the decision 8 reset. */
+        readonly textVersion: string;
+      }
+    >
+  >;
 }
 
 /** Leases in these states put the tenant in a unit (the units shown with a tenant). */
@@ -342,6 +370,18 @@ export class TenantsService {
               )
             : null
           : undefined;
+      // Decision 8 (OQ-54): a changed phone or email starts with no consent on its channels.
+      const whatsappChanged =
+        values.whatsappPhone !== undefined && (values.whatsappPhone ?? null) !== row.whatsappPhone;
+      const emailChanged = values.email !== undefined && (values.email ?? null) !== row.email;
+      const phoneServesWhatsApp = !row.whatsappPhone && values.whatsappPhone === undefined;
+      await this.withdrawForChangedAddress(tx, staff, tenantId, null, [
+        ...(phoneChanged ? (['sms'] as const) : []),
+        ...(whatsappChanged || (phoneChanged && phoneServesWhatsApp)
+          ? (['whatsapp'] as const)
+          : []),
+        ...(emailChanged ? (['email'] as const) : []),
+      ]);
       if (idChanged)
         await tx
           .update(schema.idCheck)
@@ -431,6 +471,24 @@ export class TenantsService {
         { kind: 'guarantor', name: patch.name ?? 'unchanged', ...patch },
         patch,
       );
+      // Decision 8 (OQ-54): a contact's changed phone or email starts with no consent there.
+      const [before] = await tx
+        .select({ phone: schema.tenantContact.phone, email: schema.tenantContact.email })
+        .from(schema.tenantContact)
+        .where(
+          and(eq(schema.tenantContact.id, contactId), eq(schema.tenantContact.tenantId, tenantId)),
+        );
+      if (before) {
+        const changed = values as { phone?: string | null; email?: string | null };
+        const phoneChanged =
+          changed.phone !== undefined && (changed.phone ?? null) !== before.phone;
+        const emailChanged =
+          changed.email !== undefined && (changed.email ?? null) !== before.email;
+        await this.withdrawForChangedAddress(tx, staff, tenantId, contactId, [
+          ...(phoneChanged ? (['sms', 'whatsapp'] as const) : []),
+          ...(emailChanged ? (['email'] as const) : []),
+        ]);
+      }
       const rows = await tx
         .update(schema.tenantContact)
         .set({ ...values, updatedAt: new Date() })
@@ -568,9 +626,19 @@ export class TenantsService {
     };
   }
 
+  private readonly timelineSources: TimelineSource[] = [];
+
+  /**
+   * M6: another module adds its events to the timeline (messaging adds the tenant's messages, on
+   * every plan, decision 9). It reads in the staff member's own transaction, so their scope holds.
+   */
+  useTimelineSource(source: TimelineSource): void {
+    this.timelineSources.push(source);
+  }
+
   /**
    * The tenant's timeline from the audit log: the record, its contacts, ID checks, consent and
-   * leases. Payments join in M4 and messages in M6. Without tenant.view_details, actions only.
+   * leases, and from M6 the tenant's messages. Without tenant.view_details, actions only.
    */
   async timeline(actor: Actor | null, tenantId: string): Promise<TimelineEvent[]> {
     const staff = staffActor(actor);
@@ -593,7 +661,7 @@ export class TenantsService {
         ...related.rows.map((r) => ({ type: r.record_type, id: r.id })),
       ];
       const events = await this.audit.forRecords(tx, records, 200);
-      return events.map((e) => ({
+      const timeline: TimelineEvent[] = events.map((e) => ({
         at: e.occurredAt,
         action: e.action,
         recordType: e.recordType,
@@ -601,6 +669,12 @@ export class TenantsService {
         actorName: e.actorName,
         data: detailed ? e.data : null,
       }));
+      if (this.timelineSources.length === 0) return timeline;
+      for (const source of this.timelineSources)
+        timeline.push(...(await source(tx, tenantId, { detailed })));
+      // Review note: each source keeps its own cap, so messages never crowd out the record's
+      // own history (the audit events above, at most 200).
+      return timeline.sort((a, b) => b.at.getTime() - a.at.getTime());
     });
   }
 
@@ -622,10 +696,11 @@ export class TenantsService {
     const consented = new Set(
       MESSAGE_CHANNELS.filter((c) => consent?.[c] === true),
     ) as ReadonlySet<MessageChannel>;
+    // M6 review MF-2: a tenant between leases keeps the property of their latest issued one.
     const property = await tx.execute<{ property_id: string }>(
-      sql`select property_id from lease where tenant_id = ${tenant.id}
-          and status in ('pending_signatures', 'signed', 'active', 'ending', 'holding_over')
-          order by start_date desc limit 1`,
+      sql`select property_id from lease where tenant_id = ${tenant.id} and status <> 'draft'
+          order by (status in ('pending_signatures', 'signed', 'active', 'ending', 'holding_over')) desc,
+            start_date desc limit 1`,
     );
     const propertyId = property.rows[0]?.property_id ?? null;
     if (!subject.contactId)
@@ -656,6 +731,150 @@ export class TenantsService {
       isTestContact: contact.isTestContact,
       propertyId,
     };
+  }
+
+  /**
+   * M6 (CM-09; plan 4.3): a tenant's or contact's addresses on every channel, and the latest
+   * consent event on each, with its time and source, for the send job, the bot and the inbox.
+   */
+  async messagingPoint(
+    tx: Tx,
+    subject: { readonly tenantId: string; readonly contactId?: string | null },
+  ): Promise<MessagingPoint | null> {
+    const point = await this.reach(tx, subject);
+    if (!point) return null;
+    const [tenant] = await tx
+      .select({
+        whatsappPhone: schema.tenant.whatsappPhone,
+        personId: schema.tenant.personId,
+        archivedAt: schema.tenant.archivedAt,
+      })
+      .from(schema.tenant)
+      .where(eq(schema.tenant.id, subject.tenantId));
+    const contactKind = subject.contactId
+      ? ((
+          await tx
+            .select({ kind: schema.tenantContact.kind })
+            .from(schema.tenantContact)
+            .where(eq(schema.tenantContact.id, subject.contactId))
+        )[0]?.kind ?? null)
+      : null;
+    const rows = await tx.execute<{
+      channel: string;
+      action: 'grant' | 'withdraw';
+      source: string;
+      recorded_at: Date;
+      text_version: string;
+    }>(
+      sql`select distinct on (channel) channel, action, source, recorded_at, text_version from consent_event
+          where tenant_id = ${subject.tenantId}
+            and tenant_contact_id is not distinct from ${subject.contactId ?? null}::uuid
+          order by channel, recorded_at desc, id desc`,
+    );
+    const consent: Record<
+      string,
+      { action: 'grant' | 'withdraw'; at: Date; source: string; textVersion: string }
+    > = {};
+    for (const r of rows.rows)
+      consent[r.channel] = {
+        action: r.action,
+        at: new Date(r.recorded_at),
+        source: r.source,
+        textVersion: r.text_version,
+      };
+    return {
+      ...point,
+      whatsappPhone: subject.contactId ? point.phone : (tenant?.whatsappPhone ?? point.phone),
+      personId: subject.contactId ? null : (tenant?.personId ?? null),
+      contactKind,
+      consent,
+    };
+  }
+
+  /**
+   * Records consent in the system's name: a tenant's own STOP, START or YES, the app toggle, the
+   * unsubscribe link, or an address that changed (M6 plan 4.8; decisions 7 and 8).
+   */
+  async recordSystemConsent(
+    tx: Tx,
+    companyId: string,
+    input: {
+      readonly tenantId: string;
+      readonly contactId: string | null;
+      readonly channel: 'sms' | 'email' | 'whatsapp' | 'push';
+      readonly action: 'grant' | 'withdraw';
+      readonly source:
+        | 'tenant_reply'
+        | 'stop_keyword'
+        | 'start_keyword'
+        | 'tenant_app'
+        | 'email_unsubscribe'
+        | 'staff';
+      readonly textVersion: string;
+      readonly recordedBy?: string | null;
+      /** M6 review S3: the pipeline's clock, so consent and the reply window compare alike. */
+      readonly recordedAt?: Date;
+    },
+  ): Promise<void> {
+    await tx.insert(schema.consentEvent).values({
+      // A keyword's time is the message's (the pipeline's clock, as the reply window is), and
+      // never before an event already on record for the channel, so the newest stays newest.
+      ...(input.recordedAt
+        ? {
+            recordedAt: sql`greatest(${input.recordedAt}::timestamptz, coalesce((
+              select max(e.recorded_at) + interval '1 millisecond' from consent_event e
+              where e.tenant_id = ${input.tenantId}::uuid
+                and e.tenant_contact_id is not distinct from ${input.contactId}::uuid
+                and e.channel = ${input.channel}), ${input.recordedAt}::timestamptz))`,
+          }
+        : {}),
+      companyId,
+      tenantId: input.tenantId,
+      tenantContactId: input.contactId,
+      channel: input.channel,
+      action: input.action,
+      textVersion: input.textVersion,
+      textSha256: sha256(consentText(input.textVersion, input.channel)),
+      source: input.source,
+      recordedBy: input.recordedBy ?? null,
+    });
+  }
+
+  /**
+   * Decision 8 (OQ-54): consent belongs to the address it was given for. When a phone or email
+   * changes, consent granted on the channels it serves is withdrawn, so staff record the person's
+   * agreement for the new one.
+   */
+  private async withdrawForChangedAddress(
+    tx: Tx,
+    staff: StaffActor,
+    tenantId: string,
+    contactId: string | null,
+    channels: readonly ('sms' | 'email' | 'whatsapp')[],
+  ): Promise<void> {
+    if (channels.length === 0) return;
+    const state = await this.consentFor(tx, [tenantId]);
+    const current = state.get(key(tenantId, contactId));
+    const granted = await tx.execute<{ channel: string; action: string }>(
+      sql`select distinct on (channel) channel, action from consent_event
+          where tenant_id = ${tenantId} and tenant_contact_id is not distinct from ${contactId}::uuid
+          order by channel, recorded_at desc, id desc`,
+    );
+    for (const channel of channels) {
+      const isGranted =
+        granted.rows.find((r) => r.channel === channel)?.action === 'grant' ||
+        (channel !== 'whatsapp' && current?.[channel] === true);
+      if (!isGranted) continue;
+      await this.recordSystemConsent(tx, staff.companyId, {
+        tenantId,
+        contactId,
+        channel,
+        action: 'withdraw',
+        source: 'staff',
+        textVersion: 'address_changed.v1',
+        recordedBy: staff.personId,
+      });
+    }
   }
 
   /** The decrypted ID number of a tenant, for the identity check job only (never logged). */
