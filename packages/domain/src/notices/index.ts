@@ -6,3 +6,5 @@ export * from './links';
 export * from './numbers';
 export * from './settings';
 export * from './issue';
+export * from './records';
+export * from './document';

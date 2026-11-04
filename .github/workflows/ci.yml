@@ -75,9 +75,10 @@ jobs:
       - name: Start every Compose service, fake-providers included
         run: docker compose up -d --wait
       - run: pnpm db:migrate
-      - run: pnpm db:seed
+      # Before the seed, which renders the demo notices' PDFs with Chromium (M7).
       - name: Install Chromium for Playwright
         run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm db:seed
       - name: Build web and links
         run: pnpm exec turbo run build --filter=@rent/web --filter=@rent/links
       - name: Start api, worker, web and links
@@ -142,6 +143,8 @@ jobs:
       # The seed takes its demo payments through the fake payment provider (M4b), so it runs too.
       - run: docker compose up -d --wait postgres seaweedfs mailpit fake-providers
       - run: pnpm db:migrate
+      - name: Install Chromium's headless shell for the seed's notice PDFs
+        run: pnpm exec playwright install --with-deps --only-shell chromium
       - run: pnpm db:seed
       - name: Restore a dump and verify its audit chains
         run: bash scripts/ci-restore-check.sh

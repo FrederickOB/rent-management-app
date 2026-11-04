@@ -16,3 +16,4 @@ export * from './payments';
 export * from './tax';
 export * from './maintenance';
 export * from './notices';
+export * from './tasks';

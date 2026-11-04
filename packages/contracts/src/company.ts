@@ -1,7 +1,14 @@
 import { oc } from '@orpc/contract';
+import { LADDER_NOTICE_TYPES } from '@rent/domain/notices';
 import { inboxTag, INTERIM_PLANS, PLAN_FEATURES } from '@rent/domain/settings';
 import { z } from 'zod';
 
+const ladderHours = z
+  .number()
+  .int()
+  .min(1)
+  .max(24 * 60);
+const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time such as 07:00');
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex colour such as #0F766E');
 
 /** The bounds the domain's company settings use (packages/domain/src/settings). */
@@ -58,6 +65,25 @@ export const companySettingsSchema = z.object({
     .optional(),
   /** The tags staff may put on conversations. */
   inboxTags: z.array(inboxTag).min(1).max(30).optional(),
+  // M7 (plan 4.9), optional so clients written before M7 keep their types. GET returns the values
+  // in force, defaults applied.
+  /** LN-05: the ladder per notice type; a type left out uses its default. */
+  noticeLadders: z
+    .partialRecord(
+      z.enum(LADDER_NOTICE_TYPES),
+      z
+        .object({
+          reminderHours: z.array(ladderHours).max(6),
+          inPersonHours: ladderHours.nullable(),
+          escalationHours: ladderHours.nullable(),
+        })
+        .strict(),
+    )
+    .optional(),
+  /** Decision 11: tenant ladder messages go only inside this window, company time (07:00-20:00). */
+  noticeSendWindow: z.object({ from: timeOfDay, to: timeOfDay }).strict().optional(),
+  /** LN-02 (prd-issues 27): days a notice link works for a type without a notice period (90). */
+  noticeLinkExpiryDays: z.number().int().min(30).max(366).optional(),
 });
 
 export const companyProfileSchema = z.object({

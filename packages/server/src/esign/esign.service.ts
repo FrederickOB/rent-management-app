@@ -25,7 +25,7 @@ import {
   SIGNED_COPY_LINK_DAYS,
   SIGNER_ROLE_LABELS,
   SIGNING_LINK_DAYS,
-  signingComplete,
+  signingCompleteBy,
   verificationLabel,
   type SignerLinkPurpose,
   type SignerRole,
@@ -49,6 +49,8 @@ import type {
   IssuedLink,
   LandlordContact,
   NewLeaseSigningRequest,
+  NewNoticeSigningRequest,
+  NoticeFacts,
   SignerProgress,
   SignerSubject,
   SigningProgressView,
@@ -56,6 +58,8 @@ import type {
 } from './esign.types';
 import {
   companyFacts,
+  completionOf,
+  isNoticeRequest,
   requestRow,
   revokeLinks,
   signedByAll,
@@ -76,6 +80,12 @@ export const SIGNING_DECLINED_EVENT = 'signing.declined';
 export const SIGNING_FINALISE_JOB = 'esign.finalise';
 export const SIGNING_REMINDERS_JOB = 'esign.signing-reminders';
 export const EXPIRE_LINKS_JOB = 'housekeeping.expire-links-and-codes';
+/**
+ * M7 (plan 4.5): what happens on a notice's request, for the notices module: a signer's first
+ * open (with the device), a signature, and completion. Leases keep SIGNING_COMPLETED_EVENT.
+ */
+export const NOTICE_SIGNING_EVENT = 'esign.notice-event';
+export type NoticeSigningEventKind = 'opened' | 'signed' | 'completed';
 
 const DAY_MS = 86_400_000;
 
@@ -130,6 +140,8 @@ const subjectOf = (row: SignerRow): SignerSubject => {
 export class EsignService {
   /** Document HTML is immutable once stored, so a few are kept in memory for the signing page. */
   private readonly htmlCache = new Map<string, string>();
+  /** M7: what the signing page says about a notice, from the notices module (it owns them). */
+  private noticeFacts: ((tx: Tx, noticeId: string) => Promise<NoticeFacts | null>) | null = null;
 
   constructor(
     @Inject(DATABASE) private readonly database: Database,
@@ -138,6 +150,16 @@ export class EsignService {
     @Inject(DocumentsService) private readonly documents: DocumentsService,
     @Inject(AuditService) private readonly audit: AuditService,
   ) {}
+
+  /** M7: the notices module registers how a notice is described on its signing page. */
+  useNoticeFacts(fn: (tx: Tx, noticeId: string) => Promise<NoticeFacts | null>): void {
+    this.noticeFacts = fn;
+  }
+
+  /** M7: a notice's facts for the signing page, in the page's transaction. */
+  async describeNotice(tx: Tx, noticeId: string): Promise<NoticeFacts | null> {
+    return this.noticeFacts ? this.noticeFacts(tx, noticeId) : null;
+  }
 
   // Requests -------------------------------------------------------------------------------------
 
@@ -212,6 +234,138 @@ export class EsignService {
   }
 
   /**
+   * M7 (plan 4.5): opens a notice's request for one party in the caller's transaction (the issue),
+   * with each signer snapshotted. It waits as `preparing` until the notice's PDF is rendered; the
+   * notices module then sends every link itself, on every channel at once (decision 6).
+   */
+  async openNoticeRequest(
+    tx: Tx,
+    input: NewNoticeSigningRequest,
+  ): Promise<{ readonly requestId: string; readonly signerIds: readonly string[] }> {
+    const now = this.clock.now();
+    const [row] = await tx
+      .insert(schema.signingRequest)
+      .values({
+        companyId: input.companyId,
+        propertyId: input.propertyId,
+        tenantId: input.tenantId,
+        subjectType: 'notice',
+        leaseId: input.leaseId,
+        noticeId: input.noticeId,
+        completionRule: input.completionRule,
+        linksExpireAt: input.linksExpireAt,
+        status: 'preparing',
+        renderRequestId: input.renderRequestId,
+        createdBy: input.createdBy,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: schema.signingRequest.id });
+    const id = row!.id;
+    const signers = await tx
+      .insert(schema.signer)
+      .values(
+        input.signers.map((s, i) => ({
+          companyId: input.companyId,
+          propertyId: input.propertyId,
+          tenantId: input.tenantId,
+          signingRequestId: id,
+          leasePartyId: s.leasePartyId,
+          signerRole: s.role,
+          subjectType: s.subject.type,
+          tenantContactId: s.subject.type === 'tenant_contact' ? s.subject.contactId : null,
+          staffPersonId: s.subject.type === 'staff' ? s.subject.personId : null,
+          name: s.name,
+          phone: s.phone,
+          email: s.email,
+          required: s.required,
+          position: i + 1,
+          isTestContact: s.isTestContact,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      )
+      .returning({ id: schema.signer.id, position: schema.signer.position });
+    const request = { ...input, id };
+    await signingEvent(tx, request, 'request.created', now, {
+      data: {
+        signers: input.signers.length,
+        renderRequestId: input.renderRequestId,
+        noticeId: input.noticeId,
+        completionRule: input.completionRule,
+      },
+    });
+    await this.audit.append(tx, {
+      companyId: input.companyId,
+      action: 'signing.requested',
+      recordType: 'signing_request',
+      recordId: id,
+      data: {
+        noticeId: input.noticeId,
+        completionRule: input.completionRule,
+        signers: input.signers.map((s) => s.role),
+      },
+    });
+    return {
+      requestId: id,
+      signerIds: signers.sort((a, b) => a.position - b.position).map((x) => x.id),
+    };
+  }
+
+  /**
+   * M7 (plan 4.8): closes a notice's open requests when the notice closes or is superseded, in the
+   * caller's transaction. Links are not revoked: they still open the notice, read-only.
+   */
+  async closeForNotice(
+    tx: Tx,
+    noticeId: string,
+    input: { readonly reason: string; readonly by: string | null },
+  ): Promise<number> {
+    const open = await tx
+      .select()
+      .from(schema.signingRequest)
+      .where(
+        and(
+          eq(schema.signingRequest.noticeId, noticeId),
+          inArray(schema.signingRequest.status, ['preparing', 'pending']),
+        ),
+      )
+      .for('update');
+    const now = this.clock.now();
+    const reason = input.reason.trim().slice(0, 500) || 'Closed';
+    for (const request of open) {
+      await tx
+        .update(schema.signingRequest)
+        .set({ status: 'cancelled', cancelledAt: now, cancelReason: reason, updatedAt: now })
+        .where(eq(schema.signingRequest.id, request.id));
+      await signingEvent(tx, request, 'request.cancelled', now, { data: { reason, noticeId } });
+      await this.audit.append(tx, {
+        companyId: request.companyId,
+        action: 'signing.cancelled',
+        recordType: 'signing_request',
+        recordId: request.id,
+        data: { noticeId, reason, by: input.by },
+      });
+    }
+    return open.length;
+  }
+
+  /** M7: a notice's requests and their signers, in the caller's transaction. */
+  async noticeRequests(
+    tx: Tx,
+    noticeId: string,
+  ): Promise<{ readonly request: RequestRow; readonly signers: readonly SignerRow[] }[]> {
+    const requests = await tx
+      .select()
+      .from(schema.signingRequest)
+      .where(eq(schema.signingRequest.noticeId, noticeId))
+      .orderBy(asc(schema.signingRequest.createdAt));
+    const out = [];
+    for (const request of requests) out.push({ request, signers: await signersOf(tx, request.id) });
+    return out;
+  }
+
+  /**
    * The frozen PDF exists (documents.rendered): stores the same words as HTML write-once with
    * their own hash, opens the request and queues every signer's link (plan 4.8). A request
    * recalled meanwhile stays closed. Idempotent.
@@ -219,18 +373,24 @@ export class EsignService {
   async onDocumentRendered(companyId: string, renderRequestId: string): Promise<boolean> {
     const ctx = { companyId, actorKind: 'system' as const };
     const found = await withCompany(this.database, ctx, async (tx) => {
-      const [request] = await tx
+      // M7: a notice's parties each have a request on the same render.
+      const requests = await tx
         .select()
         .from(schema.signingRequest)
-        .where(eq(schema.signingRequest.renderRequestId, renderRequestId));
-      if (!request || request.status !== 'preparing') return null;
+        .where(
+          and(
+            eq(schema.signingRequest.renderRequestId, renderRequestId),
+            eq(schema.signingRequest.status, 'preparing'),
+          ),
+        );
+      if (requests.length === 0) return null;
       const rendered = await this.documents.renderedDocument(tx, renderRequestId);
       if (!rendered || rendered.status !== 'rendered' || !rendered.documentId || !rendered.sha256)
         return null;
-      return { request, rendered, company: await companyFacts(tx, companyId) };
+      return { requests, rendered, company: await companyFacts(tx, companyId) };
     });
     if (!found) return false;
-    const { request, rendered, company } = found;
+    const { requests, rendered, company } = found;
     const html = renderTemplateContent(
       rendered.templateKey,
       rendered.templateVersion,
@@ -245,57 +405,64 @@ export class EsignService {
       contentType: 'text/html',
     });
     return withCompany(this.database, ctx, async (tx) => {
-      const current = await requestRow(tx, request.id, { lock: true });
-      if (current.status !== 'preparing') return false;
-      const now = this.clock.now();
-      const htmlDocumentId = await this.documents.recordWriteOnce(tx, file, {
-        kind: 'signing_html',
-        templateKey: rendered.templateKey,
-        templateVersion: rendered.templateVersion,
-        dataSnapshot: rendered.data,
-        createdBy: current.createdBy,
-      });
-      await tx
-        .update(schema.signingRequest)
-        .set({
-          status: 'pending',
-          documentId: rendered.documentId,
-          documentSha256: rendered.sha256,
-          htmlDocumentId,
-          htmlSha256: file.sha256,
-          openedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(schema.signingRequest.id, current.id));
-      await signingEvent(tx, current, 'request.opened', now, {
-        data: { documentSha256: rendered.sha256, htmlSha256: file.sha256 },
-      });
-      await this.audit.append(tx, {
-        companyId,
-        action: 'signing.opened',
-        recordType: 'signing_request',
-        recordId: current.id,
-        data: {
-          documentId: rendered.documentId,
-          documentSha256: rendered.sha256,
-          htmlDocumentId,
-          htmlSha256: file.sha256,
-        },
-      });
-      const facts = documentFactsOf(rendered);
-      for (const signer of await signersOf(tx, current.id))
-        await queueMessage(tx, companyId, {
-          messageId: uuidv7(),
-          recipient: { type: 'signer', signerId: signer.id },
-          purpose: 'signing_link',
-          subject: `Please sign: ${facts.title}`,
-          body: `${company.senderName} has sent you a document to read and sign: ${facts.title}. Open {{link}} to read it and sign. The link works for ${SIGNING_LINK_DAYS} days.`,
-          link: { purpose: 'sign', targetId: signer.id },
-          propertyId: current.propertyId,
-          related: { type: 'signing_request', id: current.id },
-          requestedBy: current.createdBy,
+      let opened = false;
+      let htmlDocumentId: string | null = null;
+      for (const request of requests) {
+        const current = await requestRow(tx, request.id, { lock: true });
+        if (current.status !== 'preparing') continue;
+        const now = this.clock.now();
+        htmlDocumentId ??= await this.documents.recordWriteOnce(tx, file, {
+          kind: 'signing_html',
+          templateKey: rendered.templateKey,
+          templateVersion: rendered.templateVersion,
+          dataSnapshot: rendered.data,
+          createdBy: current.createdBy,
         });
-      return true;
+        await tx
+          .update(schema.signingRequest)
+          .set({
+            status: 'pending',
+            documentId: rendered.documentId,
+            documentSha256: rendered.sha256,
+            htmlDocumentId,
+            htmlSha256: file.sha256,
+            openedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(schema.signingRequest.id, current.id));
+        await signingEvent(tx, current, 'request.opened', now, {
+          data: { documentSha256: rendered.sha256, htmlSha256: file.sha256 },
+        });
+        await this.audit.append(tx, {
+          companyId,
+          action: 'signing.opened',
+          recordType: 'signing_request',
+          recordId: current.id,
+          data: {
+            documentId: rendered.documentId,
+            documentSha256: rendered.sha256,
+            htmlDocumentId,
+            htmlSha256: file.sha256,
+          },
+        });
+        opened = true;
+        // A notice's links go from the notices module, every channel at once (M7 decision 6).
+        if (isNoticeRequest(current)) continue;
+        const facts = documentFactsOf(rendered);
+        for (const signer of await signersOf(tx, current.id))
+          await queueMessage(tx, companyId, {
+            messageId: uuidv7(),
+            recipient: { type: 'signer', signerId: signer.id },
+            purpose: 'signing_link',
+            subject: `Please sign: ${facts.title}`,
+            body: `${company.senderName} has sent you a document to read and sign: ${facts.title}. Open {{link}} to read it and sign. The link works for ${SIGNING_LINK_DAYS} days.`,
+            link: { purpose: 'sign', targetId: signer.id },
+            propertyId: current.propertyId,
+            related: { type: 'signing_request', id: current.id },
+            requestedBy: current.createdBy,
+          });
+      }
+      return opened;
     });
   }
 
@@ -316,7 +483,8 @@ export class EsignService {
         'signing_complete',
         'Everyone has signed this lease; it can no longer be recalled',
       );
-    const allSigned = signingComplete(
+    const allSigned = signingCompleteBy(
+      'all_required',
       (await signersOf(tx, latest.id)).map((s) => ({
         required: s.required,
         status: s.status as SignerStatus,
@@ -430,7 +598,11 @@ export class EsignService {
     messageId: string,
     purpose: SignerLinkPurpose,
   ): Promise<void> {
-    await requestRow(tx, (await signerRow(tx, signerId)).signingRequestId, { lock: true });
+    const request = await requestRow(tx, (await signerRow(tx, signerId)).signingRequestId, {
+      lock: true,
+    });
+    // M7 decision 6: one token per message, and every one stays valid until the notice's expiry.
+    if (isNoticeRequest(request)) return;
     const [sent] = await tx
       .select({ id: schema.secureLink.id })
       .from(schema.secureLink)
@@ -518,7 +690,7 @@ export class EsignService {
       );
     if (signer.status !== 'pending')
       throw conflict('link_unavailable', 'This person has already signed or declined');
-    if (signedByAll(signers))
+    if (signedByAll(signers, completionOf(request)))
       throw conflict(
         'link_unavailable',
         'Everyone who must sign has signed; the signed copy is being prepared',
@@ -539,10 +711,16 @@ export class EsignService {
     const now = this.clock.now();
     const token = newToken();
     const days = purpose === 'sign' ? SIGNING_LINK_DAYS : SIGNED_COPY_LINK_DAYS;
-    const expiresAt = new Date(now.getTime() + days * DAY_MS);
+    const notice = isNoticeRequest(request);
+    // M7 (LN-02, decision 6): a notice's signing links all expire at the notice's link expiry.
+    const expiresAt =
+      notice && purpose === 'sign' && request.linksExpireAt
+        ? request.linksExpireAt
+        : new Date(now.getTime() + days * DAY_MS);
     // A newer link to the same signer revokes the last (plan 4.8): at once for a hand-over or the
     // tenant app, which staff or the tenant hold themselves; for a message only once it is sent.
-    if (options.via !== 'message')
+    // A notice's links are never superseded (M7 decision 6).
+    if (options.via !== 'message' && !notice)
       await revokeLinks(tx, { signerId: signer.id, purpose }, 'superseded', now);
     const [link] = await tx
       .insert(schema.secureLink)
@@ -585,7 +763,8 @@ export class EsignService {
       if (request.status !== 'pending' || !request.documentId || !request.documentSha256)
         return null;
       const signers = await signersOf(tx, requestId);
-      const complete = signingComplete(
+      const complete = signingCompleteBy(
+        completionOf(request),
         signers.map((s) => ({ required: s.required, status: s.status as SignerStatus })),
       );
       if (!complete) return null;
@@ -684,7 +863,9 @@ export class EsignService {
           updatedAt: now,
         })
         .where(eq(schema.signingRequest.id, requestId));
-      const revoked = await revokeLinks(tx, { requestId }, 'request_closed', now);
+      const notice = isNoticeRequest(current);
+      // A notice's links still open it, now acknowledged (M7 plan 4.8); a lease's close.
+      const revoked = notice ? 0 : await revokeLinks(tx, { requestId }, 'request_closed', now);
       await signingEvent(tx, current, 'request.completed', now, {
         data: { documentSha256: current.documentSha256, finalSha256: file.sha256, revoked },
       });
@@ -703,30 +884,47 @@ export class EsignService {
           completedAt: completedAt.toISOString(),
         },
       });
-      await enqueueOutbox(tx, {
-        companyId,
-        type: SIGNING_COMPLETED_EVENT,
-        payload: {
-          signingRequestId: requestId,
-          leaseId: current.leaseId,
-          completedAt: completedAt.toISOString(),
-          finalDocumentId,
-        },
-        idempotencyKey: `${SIGNING_COMPLETED_EVENT}:${requestId}`,
-      });
+      if (notice)
+        await enqueueOutbox(tx, {
+          companyId,
+          type: NOTICE_SIGNING_EVENT,
+          payload: {
+            kind: 'completed',
+            signingRequestId: requestId,
+            noticeId: current.noticeId,
+            at: completedAt.toISOString(),
+            finalDocumentId,
+            finalSha256: file.sha256,
+          },
+          idempotencyKey: `${NOTICE_SIGNING_EVENT}:completed:${requestId}`,
+        });
+      else
+        await enqueueOutbox(tx, {
+          companyId,
+          type: SIGNING_COMPLETED_EVENT,
+          payload: {
+            signingRequestId: requestId,
+            leaseId: current.leaseId,
+            completedAt: completedAt.toISOString(),
+            finalDocumentId,
+          },
+          idempotencyKey: `${SIGNING_COMPLETED_EVENT}:${requestId}`,
+        });
       for (const signer of signers)
         await queueMessage(tx, companyId, {
           messageId: uuidv7(),
           recipient: { type: 'signer', signerId: signer.id },
           purpose: 'signed_copy',
-          subject: `Signed by everyone: ${facts.title}`,
-          body: `Everyone has signed ${facts.title} with ${company.senderName}. Download your signed copy at {{link}}. The link works for ${SIGNED_COPY_LINK_DAYS} days.`,
+          subject: notice ? `Acknowledged: ${facts.title}` : `Signed by everyone: ${facts.title}`,
+          body: notice
+            ? `The receipt of ${facts.title} from ${company.senderName} has been acknowledged. Download the acknowledged copy at {{link}}. The link works for ${SIGNED_COPY_LINK_DAYS} days.`
+            : `Everyone has signed ${facts.title} with ${company.senderName}. Download your signed copy at {{link}}. The link works for ${SIGNED_COPY_LINK_DAYS} days.`,
           link: { purpose: 'signed_copy', targetId: signer.id },
           propertyId: current.propertyId,
           related: { type: 'signing_request', id: requestId },
           requestedBy: null,
         });
-      if (current.createdBy)
+      if (current.createdBy && !notice)
         await queueMessage(tx, companyId, {
           recipient: { type: 'staff', personId: current.createdBy },
           purpose: 'staff_notice',
@@ -805,7 +1003,12 @@ export class EsignService {
           ),
         )
         .where(
-          and(eq(schema.signingRequest.status, 'pending'), eq(schema.signer.status, 'pending')),
+          and(
+            eq(schema.signingRequest.status, 'pending'),
+            eq(schema.signer.status, 'pending'),
+            // M7: a notice has its own ladder (notices.ladder), never these reminders.
+            eq(schema.signingRequest.subjectType, 'lease'),
+          ),
         )
         .orderBy(asc(schema.signer.signingRequestId), asc(schema.signer.position));
       let sent = 0;
@@ -871,7 +1074,8 @@ export class EsignService {
         sql`update secure_link l set revoked_at = ${now}, revoke_reason = 'request_closed'
             where l.revoked_at is null and l.purpose = 'sign' and exists (
               select 1 from signer s join signing_request r on r.company_id = s.company_id and r.id = s.signing_request_id
-              where s.company_id = l.company_id and s.id = l.signer_id and r.status <> 'pending')
+              where s.company_id = l.company_id and s.id = l.signer_id and r.status <> 'pending'
+                and r.subject_type = 'lease')
             returning l.id`,
       );
       const unlocked = await tx.execute<{ id: string }>(
@@ -986,6 +1190,8 @@ export class EsignService {
       const facts = await this.documentFacts(tx, request);
       out.push({
         signingRequestId: request.id,
+        subject: isNoticeRequest(request) ? 'notice' : 'lease',
+        noticeId: request.noticeId,
         leaseId: request.leaseId!,
         status: request.status as SigningRequestStatus,
         title: facts.title,

@@ -3,6 +3,8 @@ import { schema, sql, withCompany, withSystem, type Database, type Tx } from '@r
 import {
   checkSignature,
   CURRENT_CONSENT,
+  CURRENT_NOTICE_CONSENT,
+  NOTICE_SIGNING_STATEMENT,
   SIGNER_ROLE_LABELS,
   SIGNING_CODE,
   SIGNING_CONSENT,
@@ -24,7 +26,12 @@ import { enqueueOutbox } from '../core/outbox';
 import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import { CLOCK, CONFIG, DATABASE, EMAIL_PORT, SMS_PORT } from '../core/tokens';
 import { DocumentsService, type WriteOnceFile } from '../documents/documents.service';
-import { EsignService, SIGNING_DECLINED_EVENT, SIGNING_FINALISE_JOB } from './esign.service';
+import {
+  EsignService,
+  NOTICE_SIGNING_EVENT,
+  SIGNING_DECLINED_EVENT,
+  SIGNING_FINALISE_JOB,
+} from './esign.service';
 import type {
   ClientInfo,
   LinkScreen,
@@ -36,6 +43,8 @@ import {
   codeDestination,
   codesSince,
   companyFacts,
+  completionOf,
+  isNoticeRequest,
   latestChallenge,
   linkRow,
   requestRow,
@@ -121,6 +130,13 @@ export class SigningPageService {
         .update(schema.secureLink)
         .set({
           firstOpenedAt: link.firstOpenedAt ?? now,
+          // M7 (plan 4.5): each token keeps its first open's address and device as evidence.
+          ...(link.firstOpenedAt
+            ? {}
+            : {
+                firstOpenIp: client.ip.slice(0, 64),
+                firstOpenUserAgent: client.userAgent.slice(0, 500),
+              }),
           lastOpenedAt: now,
           openCount: link.openCount + 1,
         })
@@ -138,12 +154,41 @@ export class SigningPageService {
           .where(sql`${schema.signer.id} = ${signer.id}`);
         if (!signer.firstOpenedAt)
           await signingEvent(tx, request, 'signer.opened', now, { signerId: signer.id, client });
+        // M7 (LN-03): the notice records the recipient's first open, with the time and device.
+        if (!signer.firstOpenedAt && isNoticeRequest(request) && link.purpose === 'sign')
+          await enqueueOutbox(tx, {
+            companyId,
+            type: NOTICE_SIGNING_EVENT,
+            payload: {
+              kind: 'opened',
+              signingRequestId: request.id,
+              noticeId: request.noticeId,
+              signerId: signer.id,
+              linkId: link.id,
+              at: now.toISOString(),
+              userAgent: client.userAgent.slice(0, 300),
+            },
+            idempotencyKey: `${NOTICE_SIGNING_EVENT}:opened:${signer.id}`,
+          });
       }
       const company = await companyFacts(tx, companyId);
       const facts = await this.esign.documentFacts(tx, request);
+      const noticeView =
+        isNoticeRequest(request) && request.noticeId
+          ? await this.esign.describeNotice(tx, request.noticeId)
+          : null;
+      const notice = isNoticeRequest(request);
+      // M7 (plan 4.8): a closed notice's page says whether it was corrected or closed.
+      const pageReason =
+        notice && screen === 'closed' && request.status === 'cancelled'
+          ? noticeView?.supersededBy
+            ? 'notice_superseded'
+            : 'notice_closed'
+          : reason;
+      const consentVersion = notice ? CURRENT_NOTICE_CONSENT : CURRENT_CONSENT;
       const view: SigningPageView = {
         screen,
-        reason,
+        reason: pageReason,
         purpose: link.purpose as SignerLinkPurpose,
         landlord: this.esign.landlordContact(company, signers),
         timeZone: company.timeZone,
@@ -176,8 +221,25 @@ export class SigningPageService {
         code: screen === 'sign' ? await this.codeState(tx, link, signer, now) : null,
         consent:
           screen === 'sign'
-            ? { version: CURRENT_CONSENT, text: SIGNING_CONSENT[CURRENT_CONSENT]! }
+            ? { version: consentVersion, text: SIGNING_CONSENT[consentVersion]! }
             : null,
+        subject: notice ? 'notice' : 'lease',
+        canDecline: !notice,
+        notice: noticeView
+          ? {
+              number: noticeView.number,
+              type: noticeView.type,
+              typeLabel: noticeView.typeLabel,
+              issuedAt: noticeView.issuedAt,
+              effectiveDate: noticeView.effectiveDate,
+              statement: NOTICE_SIGNING_STATEMENT,
+              supersededBy: noticeView.supersededBy,
+              acknowledgedByAnother:
+                signer.status !== 'signed' &&
+                completionOf(request) === 'any_one' &&
+                signers.some((s) => s.status === 'signed'),
+            }
+          : null,
       };
       return { view, request };
     });
@@ -198,9 +260,11 @@ export class SigningPageService {
     const found = await withCompany(this.database, this.context(companyId), async (tx) => {
       const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const { screen, downloadable } = screenFor(link, signer, request, this.clock.now(), signers);
+      // M7: a signer of an acknowledged notice downloads the acknowledged copy.
       const documentId = !downloadable
         ? null
-        : screen === 'copy'
+        : screen === 'copy' ||
+            (isNoticeRequest(request) && screen === 'signed' && request.finalDocumentId)
           ? request.finalDocumentId
           : request.documentId;
       if (!documentId) throw notUsable(screen);
@@ -382,7 +446,10 @@ export class SigningPageService {
     await this.limitAddress('action', client, SIGNING_LIMITS.actionsPerIp);
     const code = input.code.trim();
     if (!/^\d{6}$/.test(code)) throw invalid('code_format', 'Enter the 6-digit code we sent you');
-    if (!input.consentAccepted || input.consentVersion !== CURRENT_CONSENT)
+    if (
+      !input.consentAccepted ||
+      (input.consentVersion !== CURRENT_CONSENT && input.consentVersion !== CURRENT_NOTICE_CONSENT)
+    )
       throw invalid('consent_required', 'Tick the box to agree to sign electronically');
     const drawing = input.method === 'drawn' ? parseDrawing(input.drawing) : null;
     let signature: { method: 'typed' | 'drawn'; typedName: string | null };
@@ -404,6 +471,14 @@ export class SigningPageService {
       const now = this.clock.now();
       const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
+      // M7 (plan 4.5): a notice is acknowledged under its own consent text, a lease signed under M3's.
+      if (
+        input.consentVersion !==
+        (isNoticeRequest(request) ? CURRENT_NOTICE_CONSENT : CURRENT_CONSENT)
+      )
+        return {
+          refused: invalid('consent_required', 'Tick the box to confirm, then sign again'),
+        };
       const lock = await this.lockState(tx, signer, now);
       if (lock) return { refused: locked(lock) };
       const challenge = await latestChallenge(tx, link.id, { lock: true });
@@ -509,7 +584,8 @@ export class SigningPageService {
       const drawingDocumentId = drawingFile
         ? await this.documents.recordWriteOnce(tx, drawingFile, { kind: 'signature_drawing' })
         : null;
-      const consentText = SIGNING_CONSENT[CURRENT_CONSENT]!;
+      const consentVersion = isNoticeRequest(request) ? CURRENT_NOTICE_CONSENT : CURRENT_CONSENT;
+      const consentText = SIGNING_CONSENT[consentVersion]!;
       const [row] = await tx
         .insert(schema.signature)
         .values({
@@ -521,7 +597,7 @@ export class SigningPageService {
           method: signature.method,
           typedName: signature.typedName,
           drawingDocumentId,
-          consentVersion: CURRENT_CONSENT,
+          consentVersion,
           consentSha256: sha256Text(consentText),
           signedAt: now,
           verifiedChannel: challenge.channel,
@@ -551,7 +627,7 @@ export class SigningPageService {
         data: {
           signatureId: row!.id,
           method: signature.method,
-          consentVersion: CURRENT_CONSENT,
+          consentVersion,
           documentSha256: request.documentSha256,
           htmlSha256: request.htmlSha256,
         },
@@ -568,11 +644,24 @@ export class SigningPageService {
           role: signer.signerRole,
           method: signature.method,
           verifiedChannel: challenge.channel,
-          consentVersion: CURRENT_CONSENT,
+          consentVersion,
           documentSha256: request.documentSha256,
         },
       });
-      const complete = signedByAll(await signersOf(tx, request.id));
+      if (isNoticeRequest(request))
+        await enqueueOutbox(tx, {
+          companyId,
+          type: NOTICE_SIGNING_EVENT,
+          payload: {
+            kind: 'signed',
+            signingRequestId: request.id,
+            noticeId: request.noticeId,
+            signerId: signer.id,
+            at: now.toISOString(),
+          },
+          idempotencyKey: `${NOTICE_SIGNING_EVENT}:signed:${signer.id}`,
+        });
+      const complete = signedByAll(await signersOf(tx, request.id), completionOf(request));
       if (complete) {
         await signingEvent(tx, request, 'request.signed_by_all', now);
         await enqueueOutbox(tx, {
@@ -601,6 +690,14 @@ export class SigningPageService {
     const result = await withCompany(this.database, this.context(companyId), async (tx) => {
       const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const now = this.clock.now();
+      // M7 (plan 4.5; CLAUDE.md section 9): a notice is never declined, only left unsigned.
+      if (isNoticeRequest(request))
+        return {
+          refused: conflict(
+            'notice_not_declinable',
+            'A notice cannot be declined. Signing only acknowledges that you received it; if you disagree with it, contact the landlord.',
+          ),
+        };
       const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
       await tx

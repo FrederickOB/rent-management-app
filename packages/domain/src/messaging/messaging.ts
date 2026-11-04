@@ -43,6 +43,11 @@ export const MESSAGE_PURPOSES = [
   'renewal_reminder',
   'paid_until_prompt',
   'inbound',
+  // M7 (plan 4.6 and 4.7): a notice's link, the first ladder reminder, and later reminders that
+  // say the notice remains in force whether or not it is signed.
+  'notice_link',
+  'notice_reminder',
+  'notice_in_force',
 ] as const;
 export type MessagePurpose = (typeof MESSAGE_PURPOSES)[number];
 

@@ -253,6 +253,20 @@
       "when": 1793803723603,
       "tag": "0035_messaging_review_security",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1793811011021,
+      "tag": "0036_notices",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1793811026133,
+      "tag": "0037_notices_security",
+      "breakpoints": true
     }
   ]
 }

@@ -12,10 +12,12 @@ import { IdentityModule } from '@rent/server/identity';
 import { LedgerModule } from '@rent/server/ledger';
 import { MaintenanceModule } from '@rent/server/maintenance';
 import { MessagingModule } from '@rent/server/messaging';
+import { NoticesModule } from '@rent/server/notices';
 import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
 import { PortfolioModule } from '@rent/server/portfolio';
 import { RulesModule } from '@rent/server/rules';
+import { TasksModule } from '@rent/server/tasks';
 import { TaxModule } from '@rent/server/tax';
 import { TenancyModule } from '@rent/server/tenancy';
 import { AdvanceController } from './billing/advance.controller';
@@ -39,6 +41,12 @@ import {
   UnsubscribeLinksController,
 } from './messaging/messaging.controller';
 import { MessagingWebhooksController } from './messaging/messaging-webhooks.controller';
+import {
+  NoticesController,
+  QuitAcknowledgementController,
+  RentAssessmentsController,
+  TasksController,
+} from './notices/notices.controller';
 import { PayLinksController } from './payments/pay-links.controller';
 import { PaymentsController } from './payments/payments.controller';
 import { WebhooksController } from './payments/webhooks.controller';
@@ -73,6 +81,9 @@ export class AppModule {
         BillingModule,
         PaymentsModule,
         TaxModule,
+        // M7: staff tasks and legal notices.
+        TasksModule,
+        NoticesModule,
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -113,6 +124,11 @@ export class AppModule {
         TenantMessagingController,
         UnsubscribeLinksController,
         MaintenanceController,
+        // M7 notices, the OQ-16 acknowledgement, Rent Officer assessments and tasks.
+        NoticesController,
+        QuitAcknowledgementController,
+        RentAssessmentsController,
+        TasksController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

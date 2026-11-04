@@ -23,6 +23,7 @@
     "./tax": "./src/tax/index.ts",
     "./maintenance": "./src/maintenance/index.ts",
     "./notices": "./src/notices/index.ts",
+    "./tasks": "./src/tasks/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

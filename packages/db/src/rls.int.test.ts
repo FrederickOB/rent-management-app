@@ -242,7 +242,86 @@ async function seedCompany(companyId: string) {
       tenantId,
       leaseId: leases[0]!.id,
     });
+    await seedNotices(companyId, {
+      initiator,
+      initiatorMembership,
+      documentId: docs[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * Legal notices and tasks (M7): one row in each of their company tables, around one notice of
+ * entry issued under the fixture lease.
+ */
+async function seedNotices(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    documentId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const zero = '0'.repeat(64);
+  const { rows: notices } = await app.query<{ id: string }>(
+    `insert into notice (company_id, number, type, subtype, status, property_id, unit_id, lease_id, tenant_id, fields,
+       template_key, template_version, issue_date, issued_at, created_by)
+     values ($1, 1, 'entry', 'inspection', 'sent', $2, $3, $4, $5, '{}', 'notices.notice', 1, current_date, now(), $6)
+     returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId, ids.initiator],
+  );
+  const noticeId = notices[0]!.id;
+  const { rows: recipients } = await app.query<{ id: string }>(
+    `insert into notice_recipient (company_id, property_id, notice_id, tenant_id, lease_id, unit_id, kind, name, phone,
+       channels, physical_service_planned, position)
+     values ($1, $2, $3, $4, $5, $6, 'tenant', 'Tenant', '+233200000099', '[]', false, 1) returning id`,
+    [companyId, ids.propertyId, noticeId, ids.tenantId, ids.leaseId, ids.unitId],
+  );
+  await app.query(
+    `insert into notice_event (company_id, property_id, notice_id, recipient_id, tenant_id, kind, dedupe_key)
+     values ($1, $2, $3, $4, $5, 'sent', $6)`,
+    [companyId, ids.propertyId, noticeId, recipients[0]!.id, ids.tenantId, `sent:${noticeId}`],
+  );
+  await app.query(
+    `insert into service_record (company_id, property_id, notice_id, recipient_id, method, served_at, served_by_name,
+       recorded_by)
+     values ($1, $2, $3, $4, 'handed_to_tenant', now(), 'Caretaker', $5)`,
+    [companyId, ids.propertyId, noticeId, recipients[0]!.id, ids.initiator],
+  );
+  await app.query(
+    `insert into rent_assessment (company_id, property_id, unit_id, assessed_on, reference, document_id, recorded_by)
+     values ($1, $2, $3, current_date - 30, 'RO/2026/001', $4, $5)`,
+    [companyId, ids.propertyId, ids.unitId, ids.documentId, ids.initiator],
+  );
+  await app.query(
+    `insert into notice_quit_acknowledgement (company_id, action, person_id, membership_id, typed_name,
+       statement_version, statement_sha256)
+     values ($1, 'grant', $2, $3, 'Initiator', 'quit_ack.v1', $4)`,
+    [companyId, ids.initiator, ids.initiatorMembership, zero],
+  );
+  await app.query(
+    `insert into task (company_id, property_id, unit_id, tenant_id, kind, title, related_type, notice_id, recipient_id,
+       due_at, dedupe_key)
+     values ($1, $2, $3, $4, 'notice_in_person_reminder', 'Remind the tenant', 'notice', $5, $6, now() + interval '1 day',
+       $7)`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.unitId,
+      ids.tenantId,
+      noticeId,
+      recipients[0]!.id,
+      `task:${noticeId}`,
+    ],
+  );
 }
 
 /**

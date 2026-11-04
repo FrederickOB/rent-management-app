@@ -81,7 +81,11 @@ export interface UploadPurpose {
     | 'gra_receipt'
     | 'withholding_certificate'
     | 'refund_proof'
-    | 'message_photo';
+    | 'message_photo'
+    | 'notice_service_photo'
+    | 'notice_affidavit'
+    | 'notice_received'
+    | 'rent_assessment';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }
@@ -126,6 +130,31 @@ export const MESSAGE_PHOTO_UPLOAD: UploadPurpose = {
   purpose: 'message_photo',
   contentTypes: ['image/jpeg', 'image/png', 'image/webp'],
   maxBytes: 10_000_000,
+};
+
+/**
+ * M7: a photo of a notice posted on the premises, a sworn affidavit of service, a notice the tenant
+ * gave, and a Rent Officer assessment (plan 4.7, 4.9, decision 13 and 3). Evidence, write-once.
+ */
+const NOTICE_EVIDENCE = {
+  contentTypes: ['application/pdf', 'image/jpeg', 'image/png'],
+  maxBytes: 20_000_000,
+} as const;
+export const NOTICE_PHOTO_UPLOAD: UploadPurpose = {
+  purpose: 'notice_service_photo',
+  ...NOTICE_EVIDENCE,
+};
+export const NOTICE_AFFIDAVIT_UPLOAD: UploadPurpose = {
+  purpose: 'notice_affidavit',
+  ...NOTICE_EVIDENCE,
+};
+export const NOTICE_RECEIVED_UPLOAD: UploadPurpose = {
+  purpose: 'notice_received',
+  ...NOTICE_EVIDENCE,
+};
+export const RENT_ASSESSMENT_UPLOAD: UploadPurpose = {
+  purpose: 'rent_assessment',
+  ...NOTICE_EVIDENCE,
 };
 
 /** An upload checked and copied to write-once storage, waiting to be recorded as a document. */

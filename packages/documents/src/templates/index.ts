@@ -18,6 +18,7 @@ export {
   type ReceiptDocumentData,
 } from './billing';
 export { leaseV1, type LeaseDocumentData } from './lease';
+export { noticeV1, servicePackV1, type NoticeDocumentData, type ServicePackData } from './notice';
 export { signingCertificateV1, type SigningCertificateData } from './signing-certificate';
 export { systemSampleV1, type SystemSampleData } from './system-sample';
 export {

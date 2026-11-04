@@ -43,7 +43,7 @@ export const AGENCY_WABA_ID = '200000000000002';
 const PENDING_TEMPLATE = 'renewal_reminder';
 const NAMESPACE = '7d3d0f0e-3b9a-4f7e-9a55-5c1f1d0b6a21';
 /** Tenants without WhatsApp consent in the demo (M6 review E2). */
-const SMS_ONLY = ['Kwesi Queue', 'Kofi Arrears-45', 'Ama Tenant'];
+const SMS_ONLY = ['Kwesi Queue', 'Kofi Arrears-45', 'Ama Tenant', 'Yaw No-Clause'];
 
 export interface MessagingSeedDeps {
   readonly database: Database;
@@ -132,7 +132,8 @@ export async function ensureMessaging(deps: MessagingSeedDeps): Promise<Messagin
 
   // WhatsApp consent for most of the agency's tenants, and the landlord's. Kwesi Queue has none;
   // Kofi Arrears-45 and Ama Tenant stay SMS-only, as the M4b seed and its pay-link and receipt
-  // specs describe them (M6 review E2).
+  // specs describe them (M6 review E2). Yaw No-Clause, whom the M7 seed adds after this runs, stays
+  // SMS-only too, or a second seed would grant him WhatsApp.
   const manager = await deps.actor(companies.agency, 'manager.one@demo.invalid');
   const landlord = await deps.actor(companies.landlord, 'landlord@demo.invalid');
   let consents = 0;

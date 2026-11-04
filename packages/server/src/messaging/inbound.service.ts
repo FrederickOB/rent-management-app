@@ -1363,6 +1363,11 @@ export class InboundService {
         // for whatever reason, goes by the next channel. The failed one is not tried again.
         if (report.status === 'failed')
           await this.messaging.redeliver(tx, m.company_id, m.message_id, providerMessageId);
+        // M7 (plan 4.6; prd-issues 7): a notice's tracker records which channel confirmed delivery.
+        await this.messaging.reportToRelated(tx, m.company_id, m.message_id, inserted[0]!.id, {
+          status: report.status!,
+          channel: m.channel,
+        });
         return report.status!;
       },
     );

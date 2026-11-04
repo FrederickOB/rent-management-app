@@ -51,6 +51,12 @@ export const signingRequest = pgTable(
     tenantId: uuid(),
     subjectType: text().notNull(),
     leaseId: uuid(),
+    /** M7: the notice a `notice` request acknowledges (the FK is in 0037_notices_security.sql). */
+    noticeId: uuid(),
+    /** M7 (plan 4.5): `all_required` (M3, leases) or `any_one` (a company's signatories, LN-07). */
+    completionRule: text().notNull().default('all_required'),
+    /** M7 (decision 6): when set, every link of the request expires then, none is superseded. */
+    linksExpireAt: ts(),
     /** preparing (the PDF is rendering), pending, completed, declined, cancelled. */
     status: text().notNull().default('preparing'),
     renderRequestId: uuid(),
@@ -104,10 +110,22 @@ export const signingRequest = pgTable(
       foreignColumns: [document.companyId, document.id],
     }),
     index('signing_request_lease_idx').on(t.companyId, t.leaseId),
+    // One lease out for signature at a time; notices on the same lease are their own requests.
     uniqueIndex('signing_request_one_open')
       .on(t.companyId, t.leaseId)
-      .where(sql`${t.leaseId} is not null and ${t.status} in ('preparing', 'pending')`),
-    check('signing_request_subject_check', sql`${t.subjectType} in ('lease')`),
+      .where(
+        sql`${t.leaseId} is not null and ${t.status} in ('preparing', 'pending') and ${t.subjectType} = 'lease'`,
+      ),
+    index('signing_request_notice_idx').on(t.companyId, t.noticeId),
+    check('signing_request_subject_check', sql`${t.subjectType} in ('lease', 'notice')`),
+    check(
+      'signing_request_notice_check',
+      sql`(${t.subjectType} = 'notice') = (${t.noticeId} is not null) and (${t.subjectType} <> 'notice' or ${t.tenantId} is not null)`,
+    ),
+    check(
+      'signing_request_completion_check',
+      sql`${t.completionRule} in ('all_required', 'any_one') and (${t.subjectType} = 'notice' or ${t.completionRule} = 'all_required')`,
+    ),
     check(
       'signing_request_lease_check',
       sql`${t.subjectType} <> 'lease' or (${t.leaseId} is not null and ${t.tenantId} is not null)`,
@@ -238,6 +256,9 @@ export const secureLink = pgTable(
     revokedAt: ts(),
     revokeReason: text(),
     firstOpenedAt: ts(),
+    /** M7 (plan 4.5): the first open's address and device, as evidence for that token. */
+    firstOpenIp: text(),
+    firstOpenUserAgent: text(),
     lastOpenedAt: ts(),
     openCount: integer().notNull().default(0),
     usedAt: ts(),

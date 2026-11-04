@@ -23,6 +23,12 @@ import {
 } from './messaging';
 import { meContract } from './me';
 import {
+  noticesContract,
+  quitAcknowledgementContract,
+  rentAssessmentsContract,
+  tasksContract,
+} from './notices';
+import {
   payLinksContract,
   paymentsQueueContract,
   receiptLinksContract,
@@ -54,6 +60,7 @@ export * from './links';
 export * from './maintenance';
 export * from './messaging';
 export * from './me';
+export * from './notices';
 export * from './payments';
 export * from './memberships';
 export * from './register';
@@ -106,6 +113,11 @@ export const contract = {
   tenantMessaging: tenantMessagingContract,
   unsubscribeLinks: unsubscribeLinksContract,
   maintenance: maintenanceContract,
+  // M7: legal notices, the OQ-16 acknowledgement, Rent Officer assessments and staff tasks.
+  notices: noticesContract,
+  quitAcknowledgement: quitAcknowledgementContract,
+  rentAssessments: rentAssessmentsContract,
+  tasks: tasksContract,
 };
 
 export type Contract = typeof contract;

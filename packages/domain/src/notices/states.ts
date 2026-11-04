@@ -495,7 +495,15 @@ export const NOTICE_OUTCOME_LABELS: Record<NoticeOutcome, string> = {
 };
 
 /** Outcomes staff choose; `superseded` is set only when a correction is issued (plan 4.8). */
-export const STAFF_NOTICE_OUTCOMES = NOTICE_OUTCOMES.filter((o) => o !== 'superseded');
+export const STAFF_NOTICE_OUTCOMES = [
+  'complied',
+  'paid',
+  'vacated',
+  'disputed',
+  'referred_rent_control',
+  'referred_court',
+  'withdrawn',
+] as const satisfies readonly Exclude<NoticeOutcome, 'superseded'>[];
 
 export interface NoticeClosure {
   readonly outcome: NoticeOutcome;

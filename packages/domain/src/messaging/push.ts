@@ -46,6 +46,11 @@ export function pushNotice(purpose: MessagePurpose, companyName: string): PushNo
       return { title, body: `${companyName} replied to your message`, screen: 'messages' };
     case 'renewal_reminder':
       return { title, body: `A message from ${companyName} about your lease`, screen: 'tenancy' };
+    // M7: a notice to acknowledge (plan 4.5); the app lists it under To sign.
+    case 'notice_link':
+    case 'notice_reminder':
+    case 'notice_in_force':
+      return { title, body: `${companyName} has sent you a notice`, screen: 'to_sign' };
     default:
       return { title, body: `A message from ${companyName}`, screen: 'messages' };
   }
