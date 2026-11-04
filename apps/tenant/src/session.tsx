@@ -13,7 +13,17 @@ import { AppState } from 'react-native';
 import { api } from './api';
 import { authClient } from './auth-client';
 import { clearCache, recallPerson, rememberPerson } from './cache';
+import { forgetOutbox } from './outbox';
 import { toProblem } from './problems';
+import { dismissAll } from './push';
+import {
+  finishPendingSignOut,
+  forgetRegistration,
+  hasRegisteredToken,
+  leaveThisDevice,
+  markSignOutPending,
+  signOutPending,
+} from './push-registration';
 
 interface SessionValue {
   readonly me: Me | null;
@@ -29,6 +39,11 @@ interface SessionValue {
   signOut(): Promise<void>;
   /** Forgets a session the API refused (401), so the screens send the person to sign in. */
   expire(): void;
+  /**
+   * Finishes a sign-out made offline, if there is one. Sign-in calls it before asking for a code,
+   * so the retry never signs out the session that sign-in is about to make.
+   */
+  finishSignOut(): Promise<void>;
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -38,10 +53,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [ended, setEnded] = useState(false);
   const [offline, setOffline] = useState(false);
+  /** Signed out while offline: the API has still to hear of it (push-registration.ts). */
+  const [leaving, setLeaving] = useState(false);
   const current = useRef<Me | null>(null);
 
   const refresh = useCallback(async () => {
     try {
+      if (await signOutPending()) {
+        // The person signed out here while offline: that session never resumes. Once the API can
+        // be reached, this device's token goes, then the session itself.
+        const finished = await finishPendingSignOut(() => authClient.signOut());
+        current.current = null;
+        setMe(null);
+        setOffline(false);
+        setLeaving(!finished);
+        return null;
+      }
       const next = await api.me.get();
       current.current = next;
       setMe(next);
@@ -52,7 +79,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       // Not a refusal: the API could not be reached. The person last signed in here, whose
       // session has not run out, keeps their cached figures; a refusal always signs out.
-      if (toProblem(error).code === 'network') {
+      const problem = toProblem(error);
+      if (problem.code === 'network') {
         const known = current.current ?? (await recallPerson<Me>());
         if (known && Date.parse(known.sessionExpiresAt) > Date.now()) {
           current.current = known;
@@ -60,6 +88,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           setOffline(true);
           return known;
         }
+      }
+      // A refusal: the session ended while the app was closed (expired, or revoked from another
+      // device). Nothing of the person stays on the phone: their cached figures and messages,
+      // what they had not sent, and this device's token, which the API dropped with the session.
+      if (problem.status === 401 || problem.status === 403) {
+        forgetOutbox();
+        forgetRegistration();
+        await clearCache();
       }
       current.current = null;
       setMe(null);
@@ -71,13 +107,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    await authClient.signOut().catch(() => undefined);
+    // While the session still works: this phone stops getting the person's notifications, and
+    // the tray is emptied. Offline, the session is kept on the device (signed out on the screen)
+    // until the API can be reached: signing out of Better Auth forgets it before the request goes,
+    // so the token would never be removed and the notifications would keep coming.
+    const reached = await leaveThisDevice();
+    if (reached) await authClient.signOut().catch(() => undefined);
+    else await markSignOutPending();
     // A shared phone keeps nothing of the person who signed out.
+    forgetOutbox();
     await clearCache();
     current.current = null;
     setMe(null);
     setEnded(false);
     setOffline(false);
+    setLeaving(!reached);
   }, []);
 
   const expire = useCallback(() => {
@@ -87,25 +131,37 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setMe(null);
     setEnded(true);
     setOffline(false);
+    // The API dropped the session's push token with it; the next sign-in registers again. The
+    // tray is emptied of the person's notifications.
+    void hasRegisteredToken().then((had) => {
+      forgetRegistration();
+      if (had) void dismissAll();
+    });
+    forgetOutbox();
     void clearCache();
+  }, []);
+
+  const finishSignOut = useCallback(async () => {
+    if (!(await signOutPending())) return;
+    setLeaving(!(await finishPendingSignOut(() => authClient.signOut())));
   }, []);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  // Opened offline: ask again when the person comes back to the app.
+  // Opened offline, or signed out offline: ask again when the person comes back to the app.
   useEffect(() => {
-    if (!offline) return;
+    if (!offline && !leaving) return;
     const subscription = AppState.addEventListener('change', (next) => {
       if (next === 'active') void refresh();
     });
     return () => subscription.remove();
-  }, [offline, refresh]);
+  }, [offline, leaving, refresh]);
 
   const value = useMemo(
-    () => ({ me, loading, ended, offline, refresh, signOut, expire }),
-    [me, loading, ended, offline, refresh, signOut, expire],
+    () => ({ me, loading, ended, offline, refresh, signOut, expire, finishSignOut }),
+    [me, loading, ended, offline, refresh, signOut, expire, finishSignOut],
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
