@@ -31,6 +31,8 @@ export const RENT_TAX_STATUS_LABELS: Record<RentTaxStatus, string> = TAX_ITEM_ST
 export const TAX_ITEM_KIND_LABELS: Record<TaxItemKind, string> = {
   receipt: 'Rent received',
   carry_over: 'Credit carried to a renewal',
+  // M8 (P11): rent a move-out settled from the deposit is rent received then.
+  deposit_applied: 'Rent settled from the deposit at move-out',
   withholding: 'Withheld by the tenant',
   reversal: 'Payment reversed',
   withholding_offset: 'Replaced by withholding',
@@ -97,9 +99,13 @@ export const NOT_ASSESSED_REASON_LABELS: Record<'rule_missing' | 'rule_unsupport
 };
 
 /** What was not assessed: money received, credit carried to a renewal, or tax withheld. */
-export const NOT_ASSESSED_EVENT_LABELS: Record<'receipt' | 'carry_over' | 'withholding', string> = {
+export const NOT_ASSESSED_EVENT_LABELS: Record<
+  'receipt' | 'carry_over' | 'deposit_applied' | 'withholding',
+  string
+> = {
   receipt: 'Rent received',
   carry_over: 'Credit carried to a renewal',
+  deposit_applied: 'Rent settled from the deposit at move-out',
   withholding: 'Withheld by the tenant',
 };
 

@@ -22,3 +22,21 @@ export function taskOverdue(
     return false;
   }
 }
+
+/**
+ * Where a task's record is (M8): the repair to attend, or the inspection to do. A notice's task
+ * links to its notice through `task.notice`, so it is not repeated here.
+ */
+export function taskRecordLink(task: {
+  readonly relatedType: string;
+  readonly relatedId: string;
+}): { readonly href: string; readonly text: string } | null {
+  switch (task.relatedType) {
+    case 'maintenance_job':
+      return { href: `/repairs/${task.relatedId}`, text: 'Open the repair' };
+    case 'inspection':
+      return { href: `/inspections/${task.relatedId}`, text: 'Open the inspection' };
+    default:
+      return null;
+  }
+}

@@ -14,6 +14,7 @@ import type { NoticeDetail } from '@rent/contracts';
 import { useApp } from '@/components/app-context';
 import { ConfirmBox } from '@/components/confirm-box';
 import { EvidenceButton } from '@/components/evidence-button';
+import { MoveOutApprovalSummary } from '@/components/move-out-approval-summary';
 import { NoticeApprovalSummary } from '@/components/notice-approval-summary';
 import { Alert } from '@/components/ui/alert';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
@@ -29,6 +30,7 @@ import {
   approvalMoves,
   approvalWarning,
   closeReasonLabel,
+  MOVE_OUT_SETTLEMENT,
   payloadLeaseId,
   payloadReason,
   payloadSubject,
@@ -125,6 +127,8 @@ const RECORD_LINKS: Record<string, string> = {
   early_termination: 'Open the lease',
   // M7: read the notice and its preview before approving it.
   notice: 'Open the notice',
+  // M8: the move-out, with its inspection and deductions.
+  move_out: 'Open the move-out',
 };
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
@@ -290,6 +294,9 @@ function ApprovalItem({
   const label = approvalActionLabel(row.actionType);
   // M7 review item 1: a notice is read in full before it is approved.
   const noticeId = row.subjectType === 'notice' ? row.subjectId : null;
+  // M8: a move-out's settlement is approved with its statement and every deduction's photos.
+  const moveOutId =
+    row.actionType === MOVE_OUT_SETTLEMENT && row.subjectType === 'move_out' ? row.subjectId : null;
   const [notice, setNotice] = useState<NoticeDetail | null>(null);
   const [noticeProblem, setNoticeProblem] = useState<string | null>(null);
   useEffect(() => {
@@ -395,6 +402,7 @@ function ApprovalItem({
             </p>
           )
         ) : null}
+        {moveOutId ? <MoveOutApprovalSummary moveOutId={moveOutId} /> : null}
         {evidence || otherRecord ? (
           <div className="flex flex-wrap items-center gap-3">
             {/* The approver checks the photo, proof or slip before deciding (BC-05, P07, P28). */}

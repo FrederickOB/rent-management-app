@@ -16,7 +16,7 @@ import { cn } from '@/lib/cn';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import { useRequestGate } from '@/lib/request-gate';
-import { TASK_STATUS_LABELS, taskOverdue } from '@/lib/tasks';
+import { TASK_STATUS_LABELS, taskOverdue, taskRecordLink } from '@/lib/tasks';
 
 type Which = 'mine' | 'all';
 
@@ -216,6 +216,14 @@ function TaskItem({
             {' · '}
             <Link href={`/notices/${task.notice.id}`} className="underline underline-offset-2">
               {task.notice.number ?? task.notice.typeLabel}
+            </Link>
+          </>
+        ) : null}
+        {taskRecordLink(task) ? (
+          <>
+            {' · '}
+            <Link href={taskRecordLink(task)!.href} className="underline underline-offset-2">
+              {taskRecordLink(task)!.text}
             </Link>
           </>
         ) : null}

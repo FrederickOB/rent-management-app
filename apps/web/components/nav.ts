@@ -17,6 +17,11 @@ export interface NavItem {
    * sees no inbox, broadcasts or tenant groups. The API refuses them again (403 `not_on_plan`).
    */
   readonly feature?: PlanFeature;
+  /**
+   * Hidden when the policy allows this action: a read-only entry to a section is left out for
+   * people who already have the full one (M8 decision 9).
+   */
+  readonly unless?: PolicyAction;
 }
 
 const ITEMS: readonly NavItem[] = [
@@ -157,12 +162,45 @@ const ITEMS: readonly NavItem[] = [
     description: 'The text of each WhatsApp template, and whether Meta has approved it.',
     needs: 'messaging.templates.read',
   },
+  // M8 (plan 4.11): the maintenance board replaces M6's list at the same address. Managers,
+  // admins, landlords and caretakers keep M6's entry; accountants, an agency's client owners and
+  // advisers get a read-only one (decision 9). The board is Growth only (decision 1).
   {
     href: '/repairs',
     label: 'Reported repairs',
-    description: 'Repairs tenants reported on WhatsApp, with their photos and ticket numbers.',
+    description:
+      'The maintenance board: every repair by status, with its priority, who has it, its photos and its cost.',
     needs: 'maintenance.view',
     feature: 'maintenance',
+  },
+  {
+    href: '/repairs',
+    label: 'Repairs',
+    description:
+      'Repairs on the properties you can see: each job, its photos, its cost and its history.',
+    needs: 'maintenance.read',
+    unless: 'maintenance.view',
+    feature: 'maintenance',
+  },
+  {
+    href: '/artisans',
+    label: 'Artisans',
+    description: 'The plumbers, electricians and others you send work to, and how to reach them.',
+    needs: 'artisan.manage',
+    feature: 'maintenance',
+  },
+  // Inspections and expenses are on every plan (decision 1): move-in and move-out need them.
+  {
+    href: '/inspections',
+    label: 'Inspections',
+    description: 'Move-in, move-out and routine inspections, room by room with photos.',
+    needs: 'inspection.read',
+  },
+  {
+    href: '/expenses',
+    label: 'Expenses',
+    description: 'Money spent on the properties, with receipts, linked to repairs.',
+    needs: 'expense.read',
   },
   // M7: legal notices and the tasks they create (plan 4.10). Growth only (decision 14).
   {
@@ -176,7 +214,8 @@ const ITEMS: readonly NavItem[] = [
   {
     href: '/tasks',
     label: 'Tasks',
-    description: 'Reminders in person, posting notices on the premises and serving them.',
+    description:
+      'Reminders in person, posting and serving notices, repairs to attend and inspections to do.',
     needs: 'tasks.read',
     feature: 'notices',
   },
@@ -206,6 +245,13 @@ const ITEMS: readonly NavItem[] = [
       'Turning notices to quit on (the risk acknowledgement), the reminder ladder per notice type, quiet hours and link expiry.',
     needs: ['company.update', 'notices.quit.acknowledge'],
     feature: 'notices',
+  },
+  {
+    href: '/settings/maintenance',
+    label: 'Maintenance settings',
+    description:
+      'Target times for each priority, when a job closes without the tenant’s reply, and the inspection checklists.',
+    needs: 'company.update',
   },
   {
     href: '/settings/settlement',
@@ -261,6 +307,8 @@ function permitted(me: Me, needs: NavItem['needs']): boolean {
 export function navFor(me: Me, features: readonly PlanFeature[] = []): NavItem[] {
   return ITEMS.filter(
     (item) =>
-      permitted(me, item.needs) && (item.feature === undefined || features.includes(item.feature)),
+      permitted(me, item.needs) &&
+      (item.unless === undefined || !allowed(me, item.unless)) &&
+      (item.feature === undefined || features.includes(item.feature)),
   );
 }

@@ -361,8 +361,9 @@ function MoveOutForm({
     >
       {error ? <Alert tone="error">{error}</Alert> : null}
       <p className="text-sm text-slate-700">
-        The lease ends on the move-out date and the unit becomes vacant. The full move-out, with the
-        inspection and the deposit, comes later.
+        The lease ends on the move-out date and the unit becomes vacant. To inspect the unit and
+        settle the deposit with it, plan the move-out instead; after this, the deposit is settled
+        from the lease’s Move-out card.
       </p>
       <TextField
         label="Moved out on"
