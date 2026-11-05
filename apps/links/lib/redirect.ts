@@ -39,6 +39,18 @@ export const backToPay = (token: string, query: PlainQuery): Response =>
 export const backToReceipt = (token: string, query: PlainQuery): Response =>
   withQuery(`/r/${token}`, query);
 
+/** Back to an artisan's job sheet (M8 decision 6), with what happened in the query. */
+export const backToJobSheet = (token: string, query: PlainQuery, hash = ''): Response =>
+  withQueryAndHash(`/j/${token}`, query, hash);
+
+function withQueryAndHash(path: string, query: PlainQuery, hash: string): Response {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query))
+    if (value !== null && value !== undefined && value !== '') params.set(key, String(value));
+  const search = params.size > 0 ? `?${params.toString()}` : '';
+  return seeOther(`${path}${search}${hash}`);
+}
+
 /** Back to an email unsubscribe link's page (CM-09), with what happened in the query. */
 export const backToUnsubscribe = (token: string, query: PlainQuery): Response =>
   withQuery(`/u/${token}`, query);

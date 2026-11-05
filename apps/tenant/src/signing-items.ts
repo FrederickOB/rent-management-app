@@ -13,6 +13,18 @@ export type ItemNotice = NonNullable<Item['notice']>;
 export const isNoticeItem = (item: Item): boolean =>
   item.subject === 'notice' || Boolean(item.notice);
 
+/** Whether an item is the move-in report to sign (M8 plan 4.7, TL-08). */
+export const isMoveInReportItem = (item: Item): boolean => item.subject === 'move_in_report';
+
+/** A lease to sign: neither a notice nor a move-in report. */
+export const isLeaseItem = (item: Item): boolean =>
+  !isNoticeItem(item) && !isMoveInReportItem(item);
+
+/** "1 move-in report is", "2 move-in reports are". */
+export function reportsAre(count: number): string {
+  return count === 1 ? '1 move-in report is' : `${count} move-in reports are`;
+}
+
 /** Waiting for the tenant's own signature now. */
 export const isWaiting = (item: Item): boolean =>
   item.status === 'pending' && item.signer.status === 'pending';
@@ -31,8 +43,9 @@ export interface ToSignSummary {
 /** Home's line about what waits under To sign. */
 export function toSignSummary(items: readonly Item[]): ToSignSummary {
   const waiting = items.filter(isWaiting);
-  const leases = waiting.filter((item) => !isNoticeItem(item)).length;
-  const notices = waiting.length - leases;
+  const leases = waiting.filter(isLeaseItem).length;
+  const reports = waiting.filter(isMoveInReportItem).length;
+  const notices = waiting.filter(isNoticeItem).length;
   if (waiting.length === 0) {
     const leaseOut = items.some((item) => !isNoticeItem(item));
     return leaseOut
@@ -45,11 +58,12 @@ export function toSignSummary(items: readonly Item[]): ToSignSummary {
   }
   const parts: string[] = [];
   if (leases > 0) parts.push(`${leasesAre(leases)} waiting for your signature.`);
+  if (reports > 0) parts.push(`${reportsAre(reports)} waiting for your signature.`);
   if (notices > 0) parts.push(`${noticesAre(notices)} waiting for you to acknowledge receipt.`);
   return {
     text: parts.join(' '),
     waiting: true,
-    action: leases > 0 ? 'Review and sign' : 'Read and acknowledge',
+    action: leases + reports > 0 ? 'Review and sign' : 'Read and acknowledge',
   };
 }
 

@@ -1,4 +1,8 @@
-import type { TenancyDetailView, TenantNoticeView } from '@rent/contracts';
+import type {
+  TenancyDetailView,
+  TenantNoticeView,
+  TenantTenancyDocumentView,
+} from '@rent/contracts';
 import { Redirect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
@@ -87,12 +91,27 @@ export default function TenancyScreen() {
           We could not update this just now, so it may be out of date.
         </Notice>
       ) : null}
-      <Details tenancy={state.data} onToSign={() => router.push('/to-sign')} />
+      <Details
+        tenancy={state.data}
+        onToSign={() => router.push('/to-sign')}
+        onReport={() => router.push(`/repairs/new?leaseId=${state.data.leaseId}`)}
+      />
     </Screen>
   );
 }
 
-function Details({ tenancy, onToSign }: { tenancy: TenancyDetailView; onToSign: () => void }) {
+/** Leases a repair can be reported under: in force, or about to start. */
+const REPORTABLE = new Set(['signed', 'active', 'ending', 'holding_over']);
+
+function Details({
+  tenancy,
+  onToSign,
+  onReport,
+}: {
+  tenancy: TenancyDetailView;
+  onToSign: () => void;
+  onReport: () => void;
+}) {
   return (
     <View style={styles.stack} testID="tenancy-detail">
       <Badge
@@ -138,7 +157,16 @@ function Details({ tenancy, onToSign }: { tenancy: TenancyDetailView; onToSign: 
       </Card>
 
       <Signing tenancy={tenancy} onToSign={onToSign} />
+      <Documents tenancy={tenancy} />
       <Notices tenancy={tenancy} />
+      {REPORTABLE.has(tenancy.status) ? (
+        <Button
+          label="Report a repair"
+          variant="quiet"
+          testID="report-repair-here"
+          onPress={onReport}
+        />
+      ) : null}
     </View>
   );
 }
@@ -199,6 +227,84 @@ function Signing({ tenancy, onToSign }: { tenancy: TenancyDetailView; onToSign: 
         />
       ) : null}
       {problem ? <ErrorText testID="download-error">{problem}</ErrorText> : null}
+    </Card>
+  );
+}
+
+const DOCUMENT_KINDS: Readonly<Record<TenantTenancyDocumentView['kind'], string>> = {
+  lease: 'The lease',
+  move_in_report: 'The move-in report',
+  final_statement: 'The final statement',
+};
+
+/**
+ * The tenancy's documents (M8 plan 4.11): the signed lease, the move-in report signed by every
+ * party (TL-08), and the final statement at move-out (TL-11). Each opens through a short-lived
+ * link fetched at the tap.
+ */
+function Documents({ tenancy }: { tenancy: TenancyDetailView }) {
+  const { me, expire } = useSession();
+  const load = useCallback(
+    async () => api.tenantApp.documents({ leaseId: tenancy.leaseId }),
+    [tenancy.leaseId],
+  );
+  const documents = useLoad(load, Boolean(me));
+  const [busy, setBusy] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const opening = useRef(false);
+  const state = documents.state;
+  if (state.status === 'loading') return null;
+  if (state.status === 'error')
+    return state.problem.status === 401 ? null : (
+      <Small testID="documents-error">We could not load this tenancy’s documents just now.</Small>
+    );
+  if (state.data.length === 0) return null;
+
+  function open(document: TenantTenancyDocumentView) {
+    if (opening.current) return;
+    opening.current = true;
+    setBusy(document.documentId);
+    setProblem(null);
+    // Straight from the tap: on the web the tab has to open before anything is awaited.
+    void openFetchedUrl(
+      () => api.tenantApp.documentDownload({ documentId: document.documentId }),
+      'Opening the document…',
+    )
+      .catch((error: unknown) => {
+        const found = toProblem(error);
+        if (found.status === 401) return expire();
+        setProblem(`We could not open the document. ${found.message}`);
+      })
+      .finally(() => {
+        opening.current = false;
+        setBusy(null);
+      });
+  }
+
+  return (
+    <Card label="Documents" testID="tenancy-documents">
+      <Heading>Documents</Heading>
+      {state.data.map((document) => (
+        <View key={document.documentId} style={styles.notice} testID="tenancy-document">
+          <Body>{document.title}</Body>
+          <Small>
+            {DOCUMENT_KINDS[document.kind]}
+            {document.kind === 'final_statement'
+              ? ''
+              : document.signed
+                ? ', signed by everyone'
+                : ', not signed by everyone yet'}
+          </Small>
+          <Button
+            label="Download"
+            variant="quiet"
+            testID="download-document"
+            busy={busy === document.documentId}
+            onPress={() => open(document)}
+          />
+        </View>
+      ))}
+      {problem ? <ErrorText testID="document-error">{problem}</ErrorText> : null}
     </Card>
   );
 }

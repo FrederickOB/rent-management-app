@@ -14,6 +14,7 @@ import { api } from './api';
 import { authClient } from './auth-client';
 import { clearCache, recallPerson, rememberPerson } from './cache';
 import { forgetOutbox } from './outbox';
+import { forgetRepairQueue } from './repair-queue';
 import { toProblem } from './problems';
 import { dismissAll } from './push';
 import {
@@ -94,6 +95,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // what they had not sent, and this device's token, which the API dropped with the session.
       if (problem.status === 401 || problem.status === 403) {
         forgetOutbox();
+        forgetRepairQueue();
         forgetRegistration();
         await clearCache();
       }
@@ -114,8 +116,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const reached = await leaveThisDevice();
     if (reached) await authClient.signOut().catch(() => undefined);
     else await markSignOutPending();
-    // A shared phone keeps nothing of the person who signed out.
+    // A shared phone keeps nothing of the person who signed out: what they had not sent, and the
+    // files of repair requests on the phone.
     forgetOutbox();
+    forgetRepairQueue();
     await clearCache();
     current.current = null;
     setMe(null);
@@ -138,6 +142,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (had) void dismissAll();
     });
     forgetOutbox();
+    forgetRepairQueue();
     void clearCache();
   }, []);
 

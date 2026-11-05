@@ -7,7 +7,12 @@ import { formatTime, SIGNER_STATUS_LABELS } from '../src/format';
 import { openFetchedUrl } from '../src/open-url';
 import { toProblem, type Problem } from '../src/problems';
 import { useSession } from '../src/session';
-import { isNoticeItem, noticeDates, noticeStatement } from '../src/signing-items';
+import {
+  isMoveInReportItem,
+  isNoticeItem,
+  noticeDates,
+  noticeStatement,
+} from '../src/signing-items';
 import {
   BackLink,
   Badge,
@@ -30,11 +35,13 @@ type Signer = Item['signers'][number];
 const loadSigning = () => api.tenantApp.signing();
 
 /** Why the signing page could not be opened, in words for the tenant. */
-function linkMessage(problem: Problem, notice: boolean): string {
+function linkMessage(problem: Problem, item: Item): string {
   if (problem.status === 404)
-    return notice
+    return isNoticeItem(item)
       ? 'This notice is no longer waiting for you to acknowledge it.'
-      : 'This lease is no longer waiting for your signature.';
+      : isMoveInReportItem(item)
+        ? 'This move-in report is no longer waiting for your signature.'
+        : 'This lease is no longer waiting for your signature.';
   if (problem.status === 409) return problem.message;
   return `We could not open the signing page. ${problem.message}`;
 }
@@ -82,7 +89,7 @@ export default function ToSign() {
       .catch((error: unknown) => {
         const found = toProblem(error);
         if (found.status === 401) return expire();
-        setProblem(linkMessage(found, isNoticeItem(item)));
+        setProblem(linkMessage(found, item));
         // Signed or closed meanwhile: show the list as it is now.
         if (found.status === 404 || found.status === 409) signing.reload();
       })
@@ -115,8 +122,8 @@ export default function ToSign() {
           ) : null}
           {state.data.length === 0 ? (
             <Body testID="nothing-to-sign">
-              Nothing is waiting for your signature. When your landlord sends you a lease to sign or
-              a notice to acknowledge, it will appear here.
+              Nothing is waiting for your signature. When your landlord sends you a lease or a
+              move-in report to sign, or a notice to acknowledge, it will appear here.
             </Body>
           ) : (
             <>
@@ -162,8 +169,13 @@ function SigningItem({
 }) {
   const canSign = item.status === 'pending' && item.signer.status === 'pending';
   const others = othersOf(item);
+  const report = isMoveInReportItem(item);
   return (
-    <Card testID="signing-item" label={item.title} highlight={canSign}>
+    <Card
+      testID={report ? 'move-in-report-item' : 'signing-item'}
+      label={item.title}
+      highlight={canSign}
+    >
       <View>
         <Heading>{item.title}</Heading>
         <Small>From {item.landlord.name}</Small>
@@ -174,6 +186,12 @@ function SigningItem({
         ) : null}
         {item.sentAt ? <Small>Sent {formatTime(item.sentAt)}</Small> : null}
       </View>
+      {report ? (
+        <Body testID="move-in-report-about">
+          It records the condition of your home when you moved in, room by room, with photos. Check
+          it before you sign: it is compared with the home when you move out.
+        </Body>
+      ) : null}
 
       <View style={styles.own} testID="own-status">
         <Text style={styles.ownLabel}>Your signature</Text>
@@ -188,7 +206,10 @@ function SigningItem({
         ) : item.status === 'pending' ? (
           <Badge label="Waiting for your signature" tone="waiting" />
         ) : (
-          <Small>Your landlord is still preparing this lease. Try again in a few minutes.</Small>
+          <Small>
+            Your landlord is still preparing this {report ? 'report' : 'lease'}. Try again in a few
+            minutes.
+          </Small>
         )}
       </View>
 
@@ -208,7 +229,12 @@ function SigningItem({
       ) : null}
 
       {canSign ? (
-        <Button label="Review and sign" testID="review-and-sign" busy={busy} onPress={onReview} />
+        <Button
+          label="Review and sign"
+          testID={report ? 'review-move-in-report' : 'review-and-sign'}
+          busy={busy}
+          onPress={onReview}
+        />
       ) : null}
     </Card>
   );

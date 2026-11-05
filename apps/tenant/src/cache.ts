@@ -19,8 +19,11 @@ export interface Cached<T> {
 
 const keyFor = (personId: string, name: string) => `${PREFIX}:${personId}:${name}`;
 
-/** Anything shaped like a link: a scheme, or a secure-link path. */
-const LINK = /:\/\/|\/[lp]\/[A-Za-z0-9_-]{43}/;
+/**
+ * Anything shaped like a link: a scheme, or a secure-link path (signing, pay, receipt,
+ * unsubscribe, and from M8 the artisan's job sheet).
+ */
+const LINK = /:\/\/|\/[lpruj]\/[A-Za-z0-9_-]{43}/;
 
 /** Whether a value may be cached: never one that holds a link or a token. */
 export function cacheable(json: string): boolean {
