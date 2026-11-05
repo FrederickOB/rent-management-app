@@ -301,6 +301,17 @@ async function seedNotices(
      values ($1, $2, $3, current_date - 30, 'RO/2026/001', $4, $5)`,
     [companyId, ids.propertyId, ids.unitId, ids.documentId, ids.initiator],
   );
+  // M7 review C4: an assessment recorded in error, voided.
+  const { rows: mistaken } = await app.query<{ id: string }>(
+    `insert into rent_assessment (company_id, property_id, unit_id, assessed_on, reference, recorded_by)
+     values ($1, $2, $3, current_date - 40, 'RO/2026/000', $4) returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.initiator],
+  );
+  await app.query(
+    `insert into rent_assessment_void (company_id, property_id, unit_id, assessment_id, reason, voided_by)
+     values ($1, $2, $3, $4, 'Recorded on the wrong unit', $5)`,
+    [companyId, ids.propertyId, ids.unitId, mistaken[0]!.id, ids.initiator],
+  );
   await app.query(
     `insert into notice_quit_acknowledgement (company_id, action, person_id, membership_id, typed_name,
        statement_version, statement_sha256)

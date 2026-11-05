@@ -28,7 +28,10 @@ import { approvalSchema } from './approvals';
  * (decision 14): a Starter company is refused with 403 `not_on_plan`. Amounts are integer pesewas
  * in `*Minor` fields; business dates are `YYYY-MM-DD` in the company's time zone; instants are UTC.
  * Writes that create records accept an `Idempotency-Key` header: a retry with the same key and
- * body returns the first answer, the same key with another body is refused with 422.
+ * body returns the first answer, the same key with another body is refused with 422. The
+ * append-only creates require one (400 `IDEMPOTENCY_KEY_REQUIRED` without it): service records,
+ * received notices, and Rent Officer assessments with their corrections and voids. Starting a
+ * notice's correction takes one optionally: one live correction per notice already stops a second.
  */
 const uuid = z.string().uuid();
 const iso = z.string().datetime();
@@ -100,9 +103,14 @@ const recipientStatus = z.enum(NOTICE_STATUSES);
 
 export const noticeRecipientSchema = z.object({
   id: uuid,
+  /**
+   * `tenant`, `co_tenant` (another tenant party on a residential lease, served and acknowledging
+   * for themself, with a ladder of their own) or `signatory` (acknowledges for a company tenant;
+   * one signatory's acknowledgement stops every signatory's ladder, LN-07). Decision 7.
+   */
   kind: z.enum(NOTICE_RECIPIENT_KINDS),
   name: z.string(),
-  /** The company tenant a signatory acknowledges for, or the tenant themself (decision 7). */
+  /** The tenant record the recipient is served under: the lease's tenant, for all three kinds. */
   partyTenantId: uuid,
   leaseId: uuid.nullable(),
   unitCode: z.string().nullable(),
@@ -173,6 +181,8 @@ export const taskSchema = z.object({
   cancelledAt: iso.nullable(),
   /** Whether the reader may complete it now (caretakers: only their own). */
   mayComplete: z.boolean(),
+  /** Whether the reader may cancel it (`tasks.manage`: managers, admins and landlords). */
+  mayCancel: z.boolean(),
 });
 export type TaskView = z.infer<typeof taskSchema>;
 
@@ -228,6 +238,36 @@ const noticeActionsSchema = z.object({
   recordService: z.boolean(),
   close: z.boolean(),
   correct: z.boolean(),
+  /**
+   * Show a recipient's handover link (QR or copy): anyone who may record service, caretakers
+   * included, while the notice is live and its PDF is frozen (decision 6).
+   */
+  handover: z.boolean(),
+});
+
+/**
+ * The latest approval request the notice had, kept once it closes and after the notice returns to
+ * draft. `decidedAt` is when it closed (approved, rejected, cancelled or expired), and
+ * `decidedByName` who decided it: null while it is open, and for an expiry or a cancellation.
+ */
+export const noticeLastApprovalSchema = z.object({
+  id: uuid,
+  actionType: z.enum(['notice.issue', 'notice.issue_quit']),
+  status: z.enum(['pending', 'cooling_off', 'approved', 'rejected', 'cancelled', 'expired']),
+  decidedAt: iso.nullable(),
+  decidedByName: z.string().nullable(),
+});
+
+/**
+ * Why a draft is a draft again. `code` is a blocker's domain code (`notice.effective_date_too_early`,
+ * `notice.quit_barred`, …) when an approved notice could not be issued, or `approval.rejected`,
+ * `approval.expired`, `approval.cancelled` or `notice.taken_back` (staff returned it). Null unless the
+ * notice is a draft that was returned.
+ */
+export const noticeReturnedReasonSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  at: iso,
 });
 
 export const noticeDetailSchema = noticeListRowSchema.extend({
@@ -270,7 +310,13 @@ export const noticeDetailSchema = noticeListRowSchema.extend({
   }),
   linkExpiresAt: iso.nullable(),
   completion: z.enum(['any_one', 'each']),
+  /**
+   * The approval request the notice waits on, or was issued under, in full. Null for a draft,
+   * including one returned to draft: `lastApproval` keeps the last request's outcome.
+   */
   approval: approvalSchema.nullable(),
+  lastApproval: noticeLastApprovalSchema.nullable(),
+  returnedReason: noticeReturnedReasonSchema.nullable(),
   corrects: z.object({ id: uuid, number: z.string().nullable() }).nullable(),
   correctedBy: z.object({ id: uuid, number: z.string().nullable() }).nullable(),
   closeNote: z.string().nullable(),
@@ -548,7 +594,7 @@ export const noticesContract = {
       method: 'POST',
       path: '/notices/{noticeId}/service-records',
       summary:
-        'Record physical service: how, when and by whom; a correction is a new record that references the old one (LN-05)',
+        'Record physical service: how, when and by whom; a correction is a new record that references the old one (LN-05). Requires an Idempotency-Key',
     })
     .input(
       z.object({
@@ -603,7 +649,7 @@ export const noticesContract = {
       method: 'POST',
       path: '/notices/{noticeId}/correct',
       summary:
-        'Start a correction: a new draft that references this notice. Issuing it closes this one as superseded (plan 4.8)',
+        'Start a correction: a new draft that references this notice. Issuing it closes this one as superseded (plan 4.8). One open correction per notice: another is refused with 409 NOTICE_CORRECTION_OPEN, so a retry never makes two. An Idempotency-Key is optional; with one, a retry gets the first answer back',
     })
     .input(z.object({ noticeId: uuid }))
     .output(noticeDetailSchema),
@@ -630,7 +676,7 @@ export const noticesContract = {
       method: 'POST',
       path: '/notices/received',
       summary:
-        'Record a notice the tenant gave: an intention to vacate or a formal complaint (decision 13)',
+        'Record a notice the tenant gave: an intention to vacate or a formal complaint (decision 13). Requires an Idempotency-Key',
     })
     .input(
       z.object({
@@ -702,6 +748,11 @@ export const quitAcknowledgementContract = {
 
 // Rent Officer assessments (decision 3) -----------------------------------------------------------
 
+/**
+ * One Rent Officer assessment record. Records are append-only: a correction is a new record that
+ * replaces an earlier one, with a reason, and a void cancels one, with a reason. Only `active`
+ * records count towards the s.23 bar.
+ */
 export const rentAssessmentSchema = z.object({
   id: uuid,
   unitId: uuid,
@@ -710,7 +761,23 @@ export const rentAssessmentSchema = z.object({
   hasDocument: z.boolean(),
   recordedByName: z.string().nullable(),
   recordedAt: iso,
+  /** `active`, `corrected` (a later record replaces it) or `voided`. */
+  status: z.enum(['active', 'corrected', 'voided']),
+  /** The record this one corrects, and why. */
+  replacesId: uuid.nullable(),
+  reason: z.string().nullable(),
+  /** The record that corrects this one. */
+  replacedById: uuid.nullable(),
+  voided: z.object({ at: iso, byName: z.string().nullable(), reason: z.string() }).nullable(),
 });
+
+const assessmentRecordInput = {
+  unitId: uuid,
+  /** Never in the future (company date). */
+  assessedOn: isoDate,
+  reference: z.string().trim().min(1).max(120),
+  uploadId: uuid.nullable().optional(),
+};
 
 export const rentAssessmentsContract = {
   list: oc
@@ -719,29 +786,57 @@ export const rentAssessmentsContract = {
     .output(
       z.object({
         assessments: z.array(rentAssessmentSchema),
-        /** The s.23 bar from the latest assessment, with its rule's status (shown as a warning). */
+        /**
+         * The s.23 bar from the latest active assessment, with its rule's status (shown as a
+         * warning). `barredUntil` is the last barred day; `active` is true while today (company
+         * date) is on or before it. Null with no active assessment, or with no bar rule in force
+         * (`ruleMissing`).
+         */
         bar: z
           .object({
             barredUntil: isoDate,
             months: z.number().int(),
             ruleStatus,
+            active: z.boolean(),
           })
           .nullable(),
+        /** An active assessment is on record but no bar rule is in force: shown as a warning. */
+        ruleMissing: z.boolean(),
       }),
     ),
   record: oc
     .route({
       method: 'POST',
       path: '/units/{unitId}/rent-assessments',
-      summary: 'Record a Rent Officer assessment of the unit; records are never edited',
+      summary:
+        'Record a Rent Officer assessment of the unit; records are never edited. Requires an Idempotency-Key',
+    })
+    .input(z.object(assessmentRecordInput))
+    .output(rentAssessmentSchema),
+  correct: oc
+    .route({
+      method: 'POST',
+      path: '/units/{unitId}/rent-assessments/{assessmentId}/correct',
+      summary:
+        'Correct an active assessment with a new record that replaces it, with a reason. Requires an Idempotency-Key',
     })
     .input(
       z.object({
-        unitId: uuid,
-        assessedOn: isoDate,
-        reference: z.string().trim().min(1).max(120),
-        uploadId: uuid.nullable().optional(),
+        ...assessmentRecordInput,
+        assessmentId: uuid,
+        reason: z.string().trim().min(3).max(500),
       }),
+    )
+    .output(rentAssessmentSchema),
+  void: oc
+    .route({
+      method: 'POST',
+      path: '/units/{unitId}/rent-assessments/{assessmentId}/void',
+      summary:
+        'Void an active assessment recorded in error, with a reason; it stays listed. Requires an Idempotency-Key',
+    })
+    .input(
+      z.object({ unitId: uuid, assessmentId: uuid, reason: z.string().trim().min(3).max(500) }),
     )
     .output(rentAssessmentSchema),
   download: oc

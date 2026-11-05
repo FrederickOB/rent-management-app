@@ -1,5 +1,9 @@
 import { oc } from '@orpc/contract';
-import { LADDER_NOTICE_TYPES } from '@rent/domain/notices';
+import {
+  LADDER_ESCALATION_REQUIRED_MESSAGE,
+  LADDER_NOTICE_TYPES,
+  laddersMissingEscalation,
+} from '@rent/domain/notices';
 import { inboxTag, INTERIM_PLANS, PLAN_FEATURES } from '@rent/domain/settings';
 import { z } from 'zod';
 
@@ -75,10 +79,19 @@ export const companySettingsSchema = z.object({
         .object({
           reminderHours: z.array(ladderHours).max(6),
           inPersonHours: ladderHours.nullable(),
+          /** Required (not null) for full-ladder types (review D-F). */
           escalationHours: ladderHours.nullable(),
         })
         .strict(),
     )
+    .superRefine((ladders, ctx) => {
+      for (const type of laddersMissingEscalation(ladders))
+        ctx.addIssue({
+          code: 'custom',
+          path: [type, 'escalationHours'],
+          message: LADDER_ESCALATION_REQUIRED_MESSAGE,
+        });
+    })
     .optional(),
   /** Decision 11: tenant ladder messages go only inside this window, company time (07:00-20:00). */
   noticeSendWindow: z.object({ from: timeOfDay, to: timeOfDay }).strict().optional(),

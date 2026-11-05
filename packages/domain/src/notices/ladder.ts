@@ -2,8 +2,10 @@ import { z } from 'zod';
 import {
   addDays,
   addHours,
+  addSeconds,
   businessDateOf,
-  compareInstants,
+  epochMillisOf,
+  epochMillisPlusHours,
   instantAtMinutes,
   instantFrom,
   instantToDate,
@@ -159,6 +161,22 @@ export const noticeLadderConfigSchema = z
   })
   .strict();
 
+/**
+ * Review D-F (CLAUDE.md section 9): an unsigned notice of a full-ladder type always escalates to
+ * physical service, so a company ladder for one of those types must keep its escalation step.
+ * Returns the types that drop it.
+ */
+export function laddersMissingEscalation(
+  ladders: Partial<Record<string, NoticeLadderConfig>>,
+): NoticeType[] {
+  return (Object.keys(ladders) as NoticeType[]).filter(
+    (type) => NOTICE_TYPE_RULES[type]?.ladder === 'full' && ladders[type]?.escalationHours === null,
+  );
+}
+
+export const LADDER_ESCALATION_REQUIRED_MESSAGE =
+  'Notices of this type must escalate to physical service when unsigned: set the escalation hours';
+
 const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time such as 07:00');
 
 export const noticeSendWindowSchema = z
@@ -261,6 +279,11 @@ export interface DueLadderInput {
   readonly window: NoticeSendWindow;
   /** When the notice's links expire (noticeLinkExpiresAt): a reminder after it is skipped. */
   readonly linksExpireAt?: InstantInput | null;
+  /**
+   * Review D-B: seconds the ladder spent paused. Every step falls due that much later, so a
+   * resume carries on where the pause left off and never fires a burst of overdue steps.
+   */
+  readonly shiftSeconds?: number;
 }
 
 /**
@@ -274,18 +297,33 @@ export interface DueLadderInput {
  */
 export function dueLadderSteps(input: DueLadderInput): DueLadderStep[] {
   if (!isLive(input.status) || input.flags.paused || input.flags.cancelled) return [];
-  const issued = instantFrom(input.issuedAt);
-  const now = instantFrom(input.now);
   const window = checkWindow(input.window);
-  const open = inSendWindow(now, window, input.timeZone);
-  const linksExpired =
-    input.linksExpireAt != null && compareInstants(now, instantFrom(input.linksExpireAt)) >= 0;
+  // Plain epoch milliseconds: this runs every 15 minutes for every live notice, and comparing
+  // instants this way gives the same answers as Temporal without its cost (review, CI).
+  const issued = epochMillisOf(input.issuedAt) + (input.shiftSeconds ?? 0) * 1000;
+  const now = epochMillisOf(input.now);
+  const dueSteps: { readonly step: NoticeLadderStep; readonly at: number }[] = [];
+  for (const step of input.steps) {
+    const at = epochMillisPlusHours(issued, step.afterHours);
+    if (at <= now) dueSteps.push({ step, at });
+  }
+  if (dueSteps.length === 0) return [];
+  // The window needs a time-zone conversion, so it and the link expiry are worked out only when
+  // a reminder not yet done is due.
+  let tenantSide: { readonly open: boolean; readonly linksExpired: boolean } | undefined;
+  const tenantState = () =>
+    (tenantSide ??= {
+      open: inSendWindow(input.now, window, input.timeZone),
+      linksExpired: input.linksExpireAt != null && now >= epochMillisOf(input.linksExpireAt),
+    });
   const out: DueLadderStep[] = [];
   for (const r of input.recipients) {
+    const due = dueSteps.filter(({ step }) => !r.doneSteps.has(step.key));
+    if (due.length === 0) continue;
     if (recipientAcknowledged(r.recipientId, input.recipients, input.completion)) continue;
-    const due = input.steps
-      .map((step) => ({ step, at: addHours(issued, step.afterHours) }))
-      .filter(({ step, at }) => !r.doneSteps.has(step.key) && compareInstants(at, now) <= 0);
+    const { open, linksExpired } = due.some((d) => d.step.toTenant)
+      ? tenantState()
+      : { open: false, linksExpired: false };
     const reminders = open ? due.filter((d) => d.step.toTenant) : [];
     const latest = reminders.at(-1);
     for (const d of due) {
@@ -293,7 +331,7 @@ export function dueLadderSteps(input: DueLadderInput): DueLadderStep[] {
       out.push({
         recipientId: r.recipientId,
         step: d.step,
-        dueAt: instantToDate(d.at),
+        dueAt: new Date(d.at),
         decision: d.step.toTenant && (linksExpired || d !== latest) ? 'skip' : 'fire',
         idempotencyKey: noticeLadderKey(r.recipientId, d.step.key),
       });
@@ -311,8 +349,10 @@ export function plannedNoticeLadder(input: {
   readonly steps: readonly NoticeLadderStep[];
   readonly timeZone: string;
   readonly window: NoticeSendWindow;
+  /** As in dueLadderSteps (review D-B). */
+  readonly shiftSeconds?: number;
 }): { readonly step: NoticeLadderStep; readonly dueAt: Date; readonly runsAt: Date }[] {
-  const issued = instantFrom(input.issuedAt);
+  const issued = addSeconds(instantFrom(input.issuedAt), input.shiftSeconds ?? 0);
   return input.steps.map((step) => {
     const at = addHours(issued, step.afterHours);
     return {

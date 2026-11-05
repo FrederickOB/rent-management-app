@@ -22,6 +22,16 @@ export const NOTICES_EVENT_TYPES = [
   MESSAGE_NOT_SENT_EVENT,
 ] as const;
 
+/**
+ * The notices hook on `documents.rendered` (plan 4.12, `notices.issue-delivery`): after the
+ * e-signing engine has opened a notice's requests, the frozen PDF is recorded and the links go
+ * out. main.ts passes it to esignJobs' `onRendered`, after the engine's own handling.
+ */
+export const noticesOnRendered =
+  (tracking: Pick<NoticeTrackingService, 'onDocumentRendered'>) =>
+  (companyId: string, renderRequestId: string): Promise<boolean> =>
+    tracking.onDocumentRendered(companyId, renderRequestId);
+
 const uuid = z.string().uuid();
 const companySlot = z.object({ companyId: uuid, slot: z.string().datetime() }).passthrough();
 

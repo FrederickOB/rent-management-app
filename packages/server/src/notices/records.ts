@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, schema, sql, type Tx } from '@rent/db';
+import { and, asc, desc, eq, inArray, schema, sql, type Tx } from '@rent/db';
 import { formatNoticeNumber } from '@rent/domain/notices';
 import {
   NOTICE_EVENT_KINDS,
@@ -105,8 +105,17 @@ export const factsOf = (events: readonly NoticeEventRow[]): NoticeEventFact[] =>
     .filter((e) => STATE_KINDS.has(e.kind))
     .map((e) => ({ kind: e.kind as NoticeEventKind, recipientId: e.recipientId }));
 
+/**
+ * A recipient's party (decision 7; review MF-4): a tenant record for the tenant and a company's
+ * signatories, who acknowledge together, and a party of their own for each co-tenant, who
+ * acknowledges for themself only.
+ */
+export const partyKeyOf = (
+  r: Pick<RecipientRow, 'kind' | 'tenantId' | 'tenantContactId'>,
+): string => (r.kind === 'co_tenant' ? `${r.tenantId}:${r.tenantContactId}` : r.tenantId);
+
 export const recipientRefs = (recipients: readonly RecipientRow[]) =>
-  recipients.map((r) => ({ recipientId: r.id, party: r.tenantId }));
+  recipients.map((r) => ({ recipientId: r.id, party: partyKeyOf(r) }));
 
 export function progressOf(
   notice: NoticeRow,
@@ -180,6 +189,8 @@ export const hasServiceClause = (
 /** A recipient as planned before issue: who, where, and each channel (decisions 4, 5 and 7). */
 export interface PlannedRecipient {
   readonly kind: NoticeRecipientKind;
+  /** See partyKeyOf. */
+  readonly partyKey: string;
   readonly tenantId: string;
   readonly tenantContactId: string | null;
   readonly leaseId: string;
@@ -207,9 +218,10 @@ export const NOTICE_LEASE_STATUSES = [
 const CURRENT_LEASE_STATUSES = ['signed', 'active', 'ending', 'holding_over'];
 
 /**
- * The recipients a notice would go to now (decision 7): each residential tenant; every
+ * The recipients a notice would go to now (decision 7): each residential tenant, with each co-tenant
+ * on the lease (another `tenant` party, from one of the tenant's contacts; review MF-4); every
  * authorised signatory of a company tenant (or the company itself, with none on record); and for a
- * building-wide notice, the current tenants of the property or blocks chosen. Each channel is
+ * building-wide notice, all of these for the current leases of the property or blocks chosen. Each channel is
  * planned from the lease's electronic-service clause, the addresses and consent (decisions 4, 5).
  */
 export async function planRecipients(
@@ -268,10 +280,39 @@ export async function planRecipients(
             )
             .orderBy(asc(schema.tenantContact.createdAt))
         : [];
-    const people =
+    // Co-tenants: the lease's other `tenant` parties, each from one of the tenant's live contacts.
+    const coTenants =
+      tenant.kind === 'company' || lease.use !== 'residential'
+        ? []
+        : await tx
+            .select({ contactId: schema.leaseParty.tenantContactId })
+            .from(schema.leaseParty)
+            .innerJoin(
+              schema.tenantContact,
+              and(
+                eq(schema.tenantContact.companyId, schema.leaseParty.companyId),
+                eq(schema.tenantContact.id, schema.leaseParty.tenantContactId),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.leaseParty.leaseId, lease.id),
+                eq(schema.leaseParty.partyRole, 'tenant'),
+                sql`${schema.leaseParty.tenantContactId} is not null`,
+                sql`${schema.tenantContact.archivedAt} is null`,
+              ),
+            )
+            .orderBy(asc(schema.leaseParty.position));
+    const people: { kind: NoticeRecipientKind; contactId: string | null }[] =
       signatories.length > 0
         ? signatories.map((c) => ({ kind: 'signatory' as const, contactId: c.id }))
-        : [{ kind: 'tenant' as const, contactId: null }];
+        : [
+            { kind: 'tenant' as const, contactId: null },
+            ...[...new Set(coTenants.map((c) => c.contactId!))].map((contactId) => ({
+              kind: 'co_tenant' as const,
+              contactId,
+            })),
+          ];
     for (const person of people) {
       const point = await tenants.messagingPoint(tx, {
         tenantId: tenant.id,
@@ -298,6 +339,11 @@ export async function planRecipients(
       });
       out.push({
         kind: person.kind,
+        partyKey: partyKeyOf({
+          kind: person.kind,
+          tenantId: tenant.id,
+          tenantContactId: person.contactId,
+        }),
         tenantId: tenant.id,
         tenantContactId: person.contactId,
         leaseId: lease.id,
@@ -322,12 +368,12 @@ export async function planRecipients(
  */
 export function servedElectronically(
   clause: boolean,
-  recipients: readonly Pick<PlannedRecipient, 'tenantId' | 'physicalServicePlanned'>[],
+  recipients: readonly Pick<PlannedRecipient, 'partyKey' | 'physicalServicePlanned'>[],
 ): boolean {
   if (!clause || recipients.length === 0) return false;
   const parties = new Map<string, boolean>();
   for (const r of recipients)
-    parties.set(r.tenantId, (parties.get(r.tenantId) ?? false) || !r.physicalServicePlanned);
+    parties.set(r.partyKey, (parties.get(r.partyKey) ?? false) || !r.physicalServicePlanned);
   return [...parties.values()].every(Boolean);
 }
 
@@ -339,3 +385,51 @@ export const effectiveDateOf = (
   NOTICE_TYPE_RULES[type].hasPeriod && typeof fields.effectiveDate === 'string'
     ? fields.effectiveDate
     : null;
+
+/** Why an approval that closed without approving sent its notice back to draft (review C1). */
+export function returnedForApproval(status: string): { code: string; message: string } {
+  switch (status) {
+    case 'rejected':
+      return { code: 'approval.rejected', message: 'The approval request was rejected' };
+    case 'expired':
+      return { code: 'approval.expired', message: 'The approval request expired' };
+    default:
+      return { code: 'approval.cancelled', message: 'The approval request was withdrawn' };
+  }
+}
+
+/** A Rent Officer assessment with what became of it (review C4). */
+export interface AssessmentRecord {
+  readonly row: typeof schema.rentAssessment.$inferSelect;
+  readonly status: 'active' | 'corrected' | 'voided';
+  readonly replacedById: string | null;
+  readonly void: typeof schema.rentAssessmentVoid.$inferSelect | null;
+}
+
+/**
+ * A unit's assessments, newest first, each with its status: corrected when a later record replaces
+ * it, voided when voided. Only active ones count towards the s.23 bar (review C4).
+ */
+export async function assessmentRecordsOf(tx: Tx, unitId: string): Promise<AssessmentRecord[]> {
+  const rows = await tx
+    .select()
+    .from(schema.rentAssessment)
+    .where(eq(schema.rentAssessment.unitId, unitId))
+    .orderBy(desc(schema.rentAssessment.assessedOn), desc(schema.rentAssessment.recordedAt));
+  const voids = rows.length
+    ? await tx
+        .select()
+        .from(schema.rentAssessmentVoid)
+        .where(eq(schema.rentAssessmentVoid.unitId, unitId))
+    : [];
+  return rows.map((row) => {
+    const replacedBy = rows.find((x) => x.replacesId === row.id) ?? null;
+    const voided = voids.find((v) => v.assessmentId === row.id) ?? null;
+    return {
+      row,
+      status: voided ? 'voided' : replacedBy ? 'corrected' : 'active',
+      replacedById: replacedBy?.id ?? null,
+      void: voided,
+    };
+  });
+}

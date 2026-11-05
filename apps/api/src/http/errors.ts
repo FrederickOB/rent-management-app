@@ -4,6 +4,7 @@ import { DomainError } from '@rent/domain/errors';
 import {
   AppError,
   conflict,
+  noticeCheckConflict,
   registerCheckConflict,
   sqlStateOf,
   type AppLogger,
@@ -18,7 +19,7 @@ import type { FastifyReply } from 'fastify';
 function fromDatabase(error: unknown): AppError | null {
   if (error instanceof AppError || error instanceof DomainError || error instanceof ORPCError)
     return null;
-  const check = registerCheckConflict(error);
+  const check = registerCheckConflict(error) ?? noticeCheckConflict(error);
   if (check) return check;
   if (sqlStateOf(error) === '23505')
     return conflict(

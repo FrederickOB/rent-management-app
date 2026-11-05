@@ -57,7 +57,11 @@ export type NoticeWarningCode =
   /** Decision 1: counsel has not reviewed the template version's wording. */
   | 'counsel_wording_outstanding'
   /** Plan 4.2: no notice period is recorded for this type. */
-  | 'no_period_enforced';
+  | 'no_period_enforced'
+  /** Review note: a notice to quit on a lease whose own notice period is 0 days. */
+  | 'lease_notice_days_zero'
+  /** Review note (s.23): a notice to quit with no Rent Officer assessment on record. */
+  | 'no_assessment_on_record';
 
 export interface NoticeWarning {
   readonly code: NoticeWarningCode;

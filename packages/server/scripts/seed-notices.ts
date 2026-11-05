@@ -307,28 +307,28 @@ export async function ensureNotices(deps: NoticesSeedDeps): Promise<Record<strin
       const issueDate = toIsoDate(
         addDays(parseBusinessDate(tenToday.toISOString().slice(0, 10)), -2),
       );
+      // The ledger's arrears as the composer suggests them: a demand states exactly what the
+      // ledger says is overdue (M7 review M2).
       const compose = await deps.notices.compose(managerOne, {
         type: 'rent_demand',
         leaseId: arrears45.id,
       });
-      const arrears = compose.prefill.arrears;
-      const draft = await deps.notices.create(managerOne, {
-        type: 'rent_demand',
-        leaseId: arrears45.id,
-        fields: {
-          arrearsMinor: Math.max(arrears?.amountMinor ?? 0, 100),
-          arrearsAsOf: issueDate,
-          invoiceIds: arrears?.invoices.length
-            ? arrears.invoices.map((i) => i.id)
-            : ['demo-arrears'],
-          payBy: toIsoDate(addDays(parseBusinessDate(issueDate), 14)),
-        },
-      });
-      await deps.notices.issue(managerOne, draft.id);
-      await settle();
-      at(daysAgo(1));
-      await acknowledge(draft.id, 0);
-      out.rentDemand = (await deps.notices.get(managerOne, draft.id)).status;
+      if (!compose.prefill.arrears?.invoices.length) out.rentDemand = 'no arrears in the ledger';
+      else {
+        const draft = await deps.notices.create(managerOne, {
+          type: 'rent_demand',
+          leaseId: arrears45.id,
+          fields: {
+            ...compose.prefill.suggestedFields,
+            payBy: toIsoDate(addDays(parseBusinessDate(issueDate), 14)),
+          },
+        });
+        await deps.notices.issue(managerOne, draft.id);
+        await settle();
+        at(daysAgo(1));
+        await acknowledge(draft.id, 0);
+        out.rentDemand = (await deps.notices.get(managerOne, draft.id)).status;
+      }
     } else out.rentDemand = 'already there';
 
     // 7. A breach notice to the commercial tenant, acknowledged by one of its two signatories.
@@ -385,12 +385,17 @@ export async function ensureNotices(deps: NoticesSeedDeps): Promise<Record<strin
       const issueDate = toIsoDate(
         addDays(parseBusinessDate(tenToday.toISOString().slice(0, 10)), -4),
       );
+      // The rent in force, as the lease records it (M7 review M2).
+      const current = Number(
+        (await deps.notices.compose(managerOne, { type: 'rent_review', leaseId: expiring.id }))
+          .prefill.suggestedFields.currentRentMinor,
+      );
       const first = await deps.notices.create(managerOne, {
         type: 'rent_review',
         leaseId: expiring.id,
         fields: {
-          currentRentMinor: 200_000,
-          newRentMinor: 220_000,
+          currentRentMinor: current,
+          newRentMinor: current + 20_000,
           effectiveDate: toIsoDate(addDays(parseBusinessDate(issueDate), 40)),
           reason: 'Annual review (the first notice gave the wrong amount).',
         },
@@ -402,7 +407,7 @@ export async function ensureNotices(deps: NoticesSeedDeps): Promise<Record<strin
       await deps.notices.update(managerOne, correction.id, {
         fields: {
           ...(correction.fields as Record<string, unknown>),
-          newRentMinor: 210_000,
+          newRentMinor: current + 10_000,
           reason: 'Annual review, as agreed at the meeting.',
         },
       });
@@ -410,6 +415,36 @@ export async function ensureNotices(deps: NoticesSeedDeps): Promise<Record<strin
       await settle();
       out.correction = `${(await deps.notices.get(managerOne, first.id)).number} superseded by ${(await deps.notices.get(managerOne, correction.id)).number}`;
     } else out.correction = 'already there';
+
+    // 10. Co-tenants (M7 review MF-4): a rent review on a lease with two tenant parties, which
+    // one of them has acknowledged and the other not.
+    out.coTenantLease = await ensureCoTenantLease(deps, managerOne);
+    const joint = await leaseOn(CO_TENANT_UNIT);
+    if (!(await existing('rent_review', { leaseId: joint.id }))) {
+      at(daysAgo(1));
+      const issueDate = toIsoDate(
+        addDays(parseBusinessDate(tenToday.toISOString().slice(0, 10)), -1),
+      );
+      const current = Number(
+        (await deps.notices.compose(managerOne, { type: 'rent_review', leaseId: joint.id })).prefill
+          .suggestedFields.currentRentMinor,
+      );
+      const draft = await deps.notices.create(managerOne, {
+        type: 'rent_review',
+        leaseId: joint.id,
+        fields: {
+          currentRentMinor: current,
+          newRentMinor: current + 5_000,
+          effectiveDate: toIsoDate(addDays(parseBusinessDate(issueDate), 45)),
+          reason: 'Annual review.',
+        },
+      });
+      await deps.notices.issue(managerOne, draft.id);
+      await settle();
+      await acknowledge(draft.id, 0);
+      const detail = await deps.notices.get(managerOne, draft.id);
+      out.coTenants = `${detail.number}: ${detail.signedRecipients} of ${detail.recipients.length} acknowledged`;
+    } else out.coTenants = 'already there';
   } finally {
     deps.clock.offsetMs = 0;
     await renderer.close();
@@ -468,4 +503,77 @@ async function ensureNoClauseLease(deps: NoticesSeedDeps, manager: Actor): Promi
     serviceEmails: [],
   } as never);
   return `${unit} let to Yaw No-Clause (demo), no electronic-service clause`;
+}
+
+/** Review MF-4: the residential lease with a co-tenant, on a unit vacant in the M1 seed. */
+const CO_TENANT_UNIT = 'ACC-LEG-B1-04';
+
+/**
+ * A paper lease with two tenant parties (M3's shape): the tenant, and a co-tenant from one of the
+ * tenant's contacts. The lease's electronic-service clause names both phones.
+ */
+async function ensureCoTenantLease(deps: NoticesSeedDeps, manager: Actor): Promise<string> {
+  const unit = CO_TENANT_UNIT;
+  const sys = <T>(fn: Parameters<typeof withCompany<T>>[2]) =>
+    withCompany(deps.database, { companyId: deps.agency, actorKind: 'system' }, fn);
+  const rows = await sys((tx) =>
+    tx.execute<{ id: string }>(
+      sql`select l.id from lease l join unit u on u.company_id = l.company_id and u.id = l.unit_id
+          where u.code = ${unit} and l.status <> 'cancelled' limit 1`,
+    ),
+  );
+  if (rows.rows[0]) return `${unit} already let`;
+  const [unitRow] = await sys((tx) =>
+    tx.select({ id: schema.unit.id }).from(schema.unit).where(eq(schema.unit.code, unit)),
+  );
+  const tenantPhone = '+233200000053';
+  const coPhone = '+233200000054';
+  const { tenant } = await deps.tenants.create(manager, {
+    kind: 'individual',
+    displayName: 'Adjoa Joint-Tenant (demo)',
+    phone: tenantPhone,
+    consent: { sms: true },
+  } as never);
+  const contact = await deps.tenants.addContact(manager, tenant.id, {
+    kind: 'next_of_kin',
+    name: 'Kwabena Joint-Tenant (demo)',
+    phone: coPhone,
+    relationship: 'Spouse, co-tenant',
+    consent: { sms: true },
+  } as never);
+  const today = new Date().toISOString().slice(0, 10);
+  const start = toIsoDate(addDays(parseBusinessDate(today), -50));
+  const upload = await deps.leases.createUpload(manager, {
+    contentType: 'application/pdf',
+    sizeBytes: deps.paperScan.length,
+  });
+  await deps.storage.put({
+    bucket: deps.config.S3_BUCKET_FILES,
+    key: upload.fields.key!,
+    body: deps.paperScan,
+    contentType: 'application/pdf',
+  });
+  await deps.leases.recordPaper(manager, {
+    unitId: unitRow!.id,
+    tenantId: tenant.id,
+    startDate: start,
+    endDate: toIsoDate(addDays(parseBusinessDate(start), 364)),
+    monthlyRentMinor: 90_000,
+    cycle: 'monthly',
+    noticeDays: 30,
+    parties: [
+      { role: 'tenant', name: 'Adjoa Joint-Tenant (demo)', paperSignedOn: start },
+      {
+        role: 'tenant',
+        name: 'Kwabena Joint-Tenant (demo)',
+        tenantContactId: contact.id,
+        paperSignedOn: start,
+      },
+    ],
+    scanUploadId: upload.uploadId,
+    signedOn: start,
+    servicePhones: [tenantPhone, coPhone],
+    serviceEmails: [],
+  } as never);
+  return `${unit} let to Adjoa Joint-Tenant (demo) ${tenantPhone}, co-tenant Kwabena Joint-Tenant (demo) ${coPhone}`;
 }

@@ -51,6 +51,38 @@ export function registerCheckConflict(error: unknown): AppError | null {
   }
 }
 
+/**
+ * M7's database rules on notices, tasks and assessments (0037, 0039) as named conflicts (review
+ * MF-8): the services check first, so these fire only when two writes race or a check was missed.
+ */
+export function noticeCheckConflict(error: unknown): AppError | null {
+  switch (sqlStateOf(error)) {
+    case 'RA070':
+      return conflict(
+        'notice_frozen',
+        'This notice has been issued or closed, so it can no longer change that way. Reload it.',
+      );
+    case 'RA071':
+      return conflict('task_closed', 'This task is already done or cancelled. Reload it.');
+    case 'RA072':
+      return conflict('notice_never_deleted', 'Notices are never deleted.');
+    case 'RA073':
+      return conflict(
+        'notice_two_person_required',
+        'A notice to quit is issued only on a second person’s approval, while notices to quit are switched on (OQ-16).',
+      );
+    case 'RA074':
+      return conflict('notice_frozen', 'This notice has been issued; its recipients are fixed.');
+    case 'RA075':
+      return conflict(
+        'assessment_changed',
+        'This assessment has already been corrected or voided. Reload the unit.',
+      );
+    default:
+      return null;
+  }
+}
+
 /** Runs `fn`, turning a commit-time register check into its clear conflict (409). */
 export async function withRegisterChecks<T>(fn: () => Promise<T>): Promise<T> {
   try {

@@ -106,6 +106,8 @@ export const NOTICE_EVENT_KINDS_SQL = [
   'service_pack_ready',
   'served_too_late',
   'link_issued',
+  'reminder_not_sent',
+  'escalation_requested',
 ] as const;
 const CHANNELS = ['whatsapp', 'sms', 'email'] as const;
 
@@ -162,6 +164,8 @@ export const notice = pgTable(
     ladderReason: text(),
     ladderChangedAt: ts(),
     ladderChangedBy: uuid().references(() => person.id),
+    /** M7 review D-B: seconds the ladder spent paused; the remaining steps move by it. */
+    ladderShiftSeconds: integer().notNull().default(0),
     /** Every link of the notice expires at this instant (LN-02). */
     linkExpiresAt: ts(),
     renderRequestId: uuid(),
@@ -237,6 +241,10 @@ export const notice = pgTable(
     index('notice_lease_idx').on(t.companyId, t.leaseId),
     index('notice_tenant_idx').on(t.companyId, t.tenantId),
     index('notice_render_idx').on(t.companyId, t.renderRequestId),
+    // M7 review S6: one live correction per notice; a discarded one makes room for another.
+    uniqueIndex('notice_one_live_correction_key')
+      .on(t.companyId, t.correctsNoticeId)
+      .where(sql`${t.correctsNoticeId} is not null and ${t.status} <> 'cancelled'`),
     check('notice_type_check', sql`${t.type} in (${list(NOTICE_TYPES_SQL)})`),
     check('notice_status_check', sql`${t.status} in (${list(STATUSES)})`),
     check(
@@ -329,10 +337,11 @@ export const noticeRecipient = pgTable(
     }),
     index('notice_recipient_notice_idx').on(t.companyId, t.noticeId),
     index('notice_recipient_tenant_idx').on(t.companyId, t.tenantId),
-    check('notice_recipient_kind_check', sql`${t.kind} in ('tenant', 'signatory')`),
+    check('notice_recipient_kind_check', sql`${t.kind} in ('tenant', 'co_tenant', 'signatory')`),
+    // A signatory or a co-tenant is one of the tenant's contacts; the tenant is the record itself.
     check(
       'notice_recipient_contact_check',
-      sql`(${t.kind} = 'signatory') = (${t.tenantContactId} is not null)`,
+      sql`(${t.kind} in ('signatory', 'co_tenant')) = (${t.tenantContactId} is not null)`,
     ),
     check('notice_recipient_position_check', sql`${t.position} >= 1`),
   ],
@@ -467,6 +476,9 @@ export const rentAssessment = pgTable(
     assessedOn: day().notNull(),
     reference: text().notNull(),
     documentId: uuid(),
+    /** M7 review C4: the record this one corrects, with why; a record is corrected once. */
+    replacesId: uuid(),
+    reason: text(),
     recordedBy: uuid()
       .notNull()
       .references(() => person.id),
@@ -474,6 +486,17 @@ export const rentAssessment = pgTable(
   },
   (t) => [
     unique('rent_assessment_company_id_id_key').on(t.companyId, t.id),
+    unique('rent_assessment_scope_key').on(t.companyId, t.unitId, t.id),
+    unique('rent_assessment_replaces_key').on(t.companyId, t.replacesId),
+    foreignKey({
+      name: 'rent_assessment_replaces_fk',
+      columns: [t.companyId, t.unitId, t.replacesId],
+      foreignColumns: [t.companyId, t.unitId, t.id],
+    }),
+    check(
+      'rent_assessment_reason_check',
+      sql`(${t.replacesId} is null) = (${t.reason} is null) and (${t.reason} is null or length(${t.reason}) between 3 and 500)`,
+    ),
     foreignKey({
       name: 'rent_assessment_unit_fk',
       columns: [t.companyId, t.propertyId, t.unitId],
@@ -490,6 +513,41 @@ export const rentAssessment = pgTable(
 );
 
 /**
+ * M7 review C4, append-only: a Rent Officer assessment recorded in error is voided, with a reason,
+ * once. It stays listed; a voided or corrected record never counts towards the s.23 bar.
+ */
+export const rentAssessmentVoid = pgTable(
+  'rent_assessment_void',
+  {
+    id: id(),
+    companyId: companyId(),
+    propertyId: uuid().notNull(),
+    unitId: uuid().notNull(),
+    assessmentId: uuid().notNull(),
+    reason: text().notNull(),
+    voidedBy: uuid()
+      .notNull()
+      .references(() => person.id),
+    voidedAt: tsNow(),
+  },
+  (t) => [
+    unique('rent_assessment_void_company_id_id_key').on(t.companyId, t.id),
+    unique('rent_assessment_void_once_key').on(t.companyId, t.assessmentId),
+    foreignKey({
+      name: 'rent_assessment_void_assessment_fk',
+      columns: [t.companyId, t.unitId, t.assessmentId],
+      foreignColumns: [rentAssessment.companyId, rentAssessment.unitId, rentAssessment.id],
+    }),
+    foreignKey({
+      name: 'rent_assessment_void_unit_fk',
+      columns: [t.companyId, t.propertyId, t.unitId],
+      foreignColumns: [unit.companyId, unit.propertyId, unit.id],
+    }),
+    check('rent_assessment_void_reason_check', sql`length(${t.reason}) between 3 and 500`),
+  ],
+);
+
+/**
  * OQ-16 (decision 9), append-only: a company admin accepts the risk statement by typing their
  * name, or withdraws it. The statement's version and hash are kept with each row.
  */
@@ -502,9 +560,7 @@ export const noticeQuitAcknowledgement = pgTable(
     personId: uuid()
       .notNull()
       .references(() => person.id),
-    membershipId: uuid()
-      .notNull()
-      .references(() => membership.id),
+    membershipId: uuid().notNull(),
     typedName: text(),
     statementVersion: text().notNull(),
     statementSha256: text().notNull(),
@@ -513,6 +569,12 @@ export const noticeQuitAcknowledgement = pgTable(
   },
   (t) => [
     unique('notice_quit_acknowledgement_company_id_id_key').on(t.companyId, t.id),
+    // M7 review data S3: the membership is the company's own.
+    foreignKey({
+      name: 'notice_quit_acknowledgement_membership_fk',
+      columns: [t.companyId, t.membershipId],
+      foreignColumns: [membership.companyId, membership.id],
+    }),
     index('notice_quit_acknowledgement_idx').on(t.companyId, t.at),
     check('notice_quit_acknowledgement_action_check', sql`${t.action} in ('grant', 'withdraw')`),
     check(

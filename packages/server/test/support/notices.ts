@@ -15,7 +15,8 @@ import { NoticeTrackingService } from '../../src/notices/tracking.service';
 import { TasksService } from '../../src/tasks/tasks.service';
 import type { BillingServices } from './billing';
 import type { ServerTestContext } from './index';
-import { deliverMessages, type TenancyServices } from './tenancy';
+import { MESSAGE_SEND_JOB, messageRequestSchema } from '../../src/core/messages';
+import type { TenancyServices } from './tenancy';
 
 /** The M7 services wired as Nest wires them, on the test database (CLAUDE.md section 12). */
 export function noticesServices(ctx: ServerTestContext, s: TenancyServices, b: BillingServices) {
@@ -69,7 +70,13 @@ export type NoticesServices = ReturnType<typeof noticesServices>;
  */
 export class NoticesWorker {
   private readonly done = new Set<string>();
-  private delivered = 0;
+  /**
+   * The `messaging.send` events this worker has run. Each runs once, as the job queue runs it:
+   * `deliver` settles every message it is given (sent, not sent or failed) or throws, so running
+   * an event again does nothing but cost a transaction. deliverMessages() runs every event of the
+   * company on every call, which grows with each test in a file (the M7 review's timing finding).
+   */
+  private readonly sent = new Set<string>();
 
   constructor(
     private readonly ctx: ServerTestContext,
@@ -139,9 +146,20 @@ export class NoticesWorker {
         }
       }
       // Sending can record new outbox events (a channel not sent), so a round that sent more goes on.
-      const sent = await deliverMessages(this.ctx, this.s, companyId);
-      if (sent > this.delivered) worked = true;
-      this.delivered = sent;
+      const sends = await withCompany(this.ctx.database, { companyId, actorKind: 'system' }, (tx) =>
+        tx
+          .select({ id: schema.outboxEvent.id, payload: schema.outboxEvent.payload })
+          .from(schema.outboxEvent)
+          .where(sql`${schema.outboxEvent.type} = ${MESSAGE_SEND_JOB}`)
+          .orderBy(asc(schema.outboxEvent.createdAt), asc(schema.outboxEvent.id)),
+      );
+      for (const e of sends) {
+        if (this.sent.has(e.id)) continue;
+        // A throw is a failed send: it propagates, and the event runs again next time, as a retry.
+        await this.s.messaging.deliver(companyId, messageRequestSchema.parse(e.payload));
+        this.sent.add(e.id);
+        worked = true;
+      }
       if (!worked) return;
     }
     throw new Error('the notices work did not settle');

@@ -267,6 +267,20 @@
       "when": 1793811026133,
       "tag": "0037_notices_security",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1793819025411,
+      "tag": "0038_notices_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1793819042784,
+      "tag": "0039_notices_review_security",
+      "breakpoints": true
     }
   ]
 }

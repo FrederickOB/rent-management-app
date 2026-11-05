@@ -117,10 +117,21 @@ async function acknowledge(token: string, phone: string) {
 }
 
 async function issuedDemand(lease: Awaited<ReturnType<typeof leased>>) {
+  // M7 review M2 checks a rent demand against the ledger (fixture change approved by the founder,
+  // 2026-11-04): the lease is billed from its start, so its first invoices are overdue, and the
+  // demand names them and what they still owe, as compose suggests.
+  await asSuperuser(ctx, 'update lease set billing_start_date = start_date where id = $1', [
+    lease.leaseId,
+  ]);
+  await b.invoicing.onLeaseSigned(agencyId, lease.leaseId);
+  const check = await n.notices.compose(managerOne, {
+    type: 'rent_demand',
+    leaseId: lease.leaseId,
+  });
   const draft = await n.notices.create(managerOne, {
     type: 'rent_demand',
     leaseId: lease.leaseId,
-    fields: { arrearsMinor: 300_000, arrearsAsOf: today(), invoiceIds: ['inv-1'], payBy: plus(14) },
+    fields: check.prefill.suggestedFields,
   });
   await n.notices.issue(managerOne, draft.id);
   await worker.run(agencyId);

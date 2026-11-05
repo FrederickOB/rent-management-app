@@ -31,6 +31,19 @@ export function instantFrom(value: Date | string | Instant): Instant {
 
 export const instantToDate = (instant: Instant): Date => new Date(instant.epochMilliseconds);
 
+/**
+ * Milliseconds since the epoch, for comparing many instants cheaply (the M7 ladder runs every 15
+ * minutes for every live notice). Exact: an instant has no time zone, so an hour is 3,600,000 ms.
+ */
+export function epochMillisOf(value: Date | string | Instant): number {
+  if (value instanceof Date) return value.getTime();
+  return instantFrom(value).epochMilliseconds;
+}
+
+/** `epochMillis` plus whole clock hours, as epoch milliseconds (the same as `addHours`). */
+export const epochMillisPlusHours = (epochMillis: number, hours: number): number =>
+  epochMillis + hours * 3_600_000;
+
 /** The business date on which `instant` falls in `timeZone`. */
 export function businessDateOf(
   instant: Instant,
@@ -57,6 +70,9 @@ export const compareDates = (a: BusinessDate, b: BusinessDate): -1 | 0 | 1 =>
   Temporal.PlainDate.compare(a, b) as -1 | 0 | 1;
 
 export const addHours = (instant: Instant, hours: number): Instant => instant.add({ hours });
+
+/** Clock seconds after an instant (M7 review D-B: a ladder shifted by the time it was paused). */
+export const addSeconds = (instant: Instant, seconds: number): Instant => instant.add({ seconds });
 
 /** Clock minutes after an instant (M6: the inbox's response target, bot timeouts). */
 export const addMinutes = (instant: Instant, minutes: number): Instant => instant.add({ minutes });

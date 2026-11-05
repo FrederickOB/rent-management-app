@@ -28,9 +28,11 @@ import {
   noticeRow,
   NOTICE_ESCALATE_JOB,
   numberOf,
+  partyKeyOf,
   progressOf,
   recipientsOf,
   recordEvent,
+  returnedForApproval,
   syncStatus,
   type NoticeRow,
   type RecipientRow,
@@ -215,7 +217,12 @@ export class NoticeTrackingService {
           {
             noticeId: notice.id,
             kinds: ['notice_in_person_reminder'],
-            recipientTenantId: recipient.tenantId,
+            // The party that acknowledged: a company's signatories together, a co-tenant alone.
+            recipientIds: recipients
+              .filter(
+                (r) => notice.completion === 'any_one' || partyKeyOf(r) === partyKeyOf(recipient),
+              )
+              .map((r) => r.id),
           },
           'cancelled',
           'The tenant acknowledged the notice',
@@ -326,13 +333,25 @@ export class NoticeTrackingService {
         );
       return rows.map((r) => r.id);
     });
+    // Each notice in its own transaction, so one that fails never stops the rest (review note).
+    // The failures are raised together at the end, so the job retries and then alerts.
+    const failures: unknown[] = [];
     for (const noticeId of ids) {
-      const counts = await withCompany(this.database, this.ctx(companyId), (tx) =>
-        this.ladderFor(tx, noticeId),
-      );
-      fired += counts.fired;
-      skipped += counts.skipped;
+      try {
+        const counts = await withCompany(this.database, this.ctx(companyId), (tx) =>
+          this.ladderFor(tx, noticeId),
+        );
+        fired += counts.fired;
+        skipped += counts.skipped;
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    if (failures.length > 0)
+      throw new AggregateError(
+        failures,
+        `The notice ladder failed for ${failures.length} of ${ids.length} notices`,
+      );
     return { fired, skipped };
   }
 
@@ -359,7 +378,7 @@ export class NoticeTrackingService {
       steps: (notice.ladder as NoticeLadderStep[] | null) ?? [],
       recipients: recipients.map((r) => ({
         recipientId: r.id,
-        party: r.tenantId,
+        party: partyKeyOf(r),
         signed:
           progress.recipients.find((p) => p.recipientId === r.id)?.signed === true ||
           (r.signerId ? signers.get(r.signerId)?.status === 'signed' : false),
@@ -373,30 +392,41 @@ export class NoticeTrackingService {
       timeZone: company.timeZone,
       window: settings.sendWindow,
       linksExpireAt: notice.linkExpiresAt,
+      shiftSeconds: notice.ladderShiftSeconds,
     });
     let fired = 0;
     let skipped = 0;
     for (const d of due) {
       const recipient = recipients.find((r) => r.id === d.recipientId)!;
+      // Review MF-6: a reminder is recorded as sent only when a message goes to this recipient.
+      const reminder = d.decision === 'fire' && d.step.action === 'reminder';
+      const channels = reminder ? reminderChannels(recipient, d.step) : [];
+      const unsendable = reminder && (!recipient.signerId || channels.length === 0);
       const kind =
         d.decision === 'skip'
           ? 'step_skipped'
           : d.step.action === 'reminder'
-            ? 'reminded'
+            ? unsendable
+              ? 'reminder_not_sent'
+              : 'reminded'
             : d.step.action === 'manager_alert'
               ? 'manager_alerted'
               : d.step.action === 'caretaker_task'
                 ? 'task_created'
-                : 'escalated';
+                : 'escalation_requested';
       const first = await recordEvent(tx, notice, {
         kind,
         at: now,
         recipient,
-        data: { step: d.step.key, dueAt: d.dueAt.toISOString() },
+        data: {
+          step: d.step.key,
+          dueAt: d.dueAt.toISOString(),
+          ...(unsendable ? { reason: recipient.signerId ? 'no_channel' : 'no_signer' } : {}),
+        },
         dedupeKey: `ladder:${recipient.id}:${d.step.key}`,
       });
       if (!first) continue;
-      if (d.decision === 'skip') {
+      if (d.decision === 'skip' || unsendable) {
         skipped += 1;
         continue;
       }
@@ -419,10 +449,8 @@ export class NoticeTrackingService {
     const title = NOTICE_TYPE_LABELS[notice.type as NoticeType];
     switch (step.action) {
       case 'reminder': {
-        if (!recipient.signerId) return;
-        const planned = (recipient.channels as ChannelPlanRow[]).filter(
-          (c) => c.mode !== 'withheld' && step.channels.includes(c.channel),
-        );
+        const planned = reminderChannels(recipient, step);
+        if (!recipient.signerId || planned.length === 0) return;
         const body = step.statesRemainsInForce
           ? `A reminder from ${company.senderName}: notice ${number} (${title}) remains in force whether or not you sign it. Read it at {{link}}.`
           : `A reminder from ${company.senderName}: notice ${number} (${title}) is waiting for you at {{link}}. Please open it and confirm you received it.`;
@@ -444,16 +472,21 @@ export class NoticeTrackingService {
         return;
       }
       case 'manager_alert': {
-        if (!notice.createdBy) return;
-        await queueMessage(tx, notice.companyId, {
-          recipient: { type: 'staff', personId: notice.createdBy },
-          purpose: 'staff_notice',
-          subject: `Not yet acknowledged: notice ${number}`,
-          body: `${recipient.name} has not acknowledged notice ${number} (${title}) after ${Math.floor(step.afterHours / 24)} days. A task asks the caretaker to remind them in person; the notice escalates to physical service if it stays unsigned.`,
-          channels: ['email'],
-          propertyId: notice.propertyId,
-          related: { type: 'notice', id: notice.id },
-        });
+        // Review S8: the property's managers in scope, not whoever drafted the notice.
+        for (const personId of await this.tasks.managersFor(
+          tx,
+          notice.companyId,
+          notice.propertyId,
+        ))
+          await queueMessage(tx, notice.companyId, {
+            recipient: { type: 'staff', personId },
+            purpose: 'staff_notice',
+            subject: `Not yet acknowledged: notice ${number}`,
+            body: `${recipient.name} has not acknowledged notice ${number} (${title}) after ${Math.floor(step.afterHours / 24)} days. A task asks the caretaker to remind them in person; the notice escalates to physical service if it stays unsigned.`,
+            channels: ['email'],
+            propertyId: notice.propertyId,
+            related: { type: 'notice', id: notice.id },
+          });
         return;
       }
       case 'caretaker_task': {
@@ -493,13 +526,23 @@ export class NoticeTrackingService {
     await withCompany(this.database, this.ctx(companyId), async (tx) => {
       const notice = await noticeRow(tx, noticeId, true);
       if (!LIVE.includes(notice.status)) return;
+      // Review S4: a cancelled ladder never escalates; a paused one escalates when it resumes
+      // (controlLadder asks again).
+      if (notice.ladderCancelled || notice.ladderPaused) return;
       const now = this.clock.now();
-      const progress = progressOf(
-        notice,
-        await recipientsOf(tx, noticeId),
-        await eventsOf(tx, noticeId),
-      );
+      const events = await eventsOf(tx, noticeId);
+      const progress = progressOf(notice, await recipientsOf(tx, noticeId), events);
       if (progress.signed) return;
+      // Review S7: a notice already served in person needs no physical service.
+      if (await this.servedInPerson(tx, notice)) {
+        await recordEvent(tx, notice, {
+          kind: 'step_skipped',
+          at: now,
+          data: { step: 'escalate', reason: 'served_in_person' },
+          dedupeKey: `escalated:${notice.id}`,
+        });
+        return;
+      }
       if (!notice.documentSha256)
         throw new Error('The notice is still rendering; escalation waits for it');
       const first = await recordEvent(tx, notice, {
@@ -540,23 +583,26 @@ export class NoticeTrackingService {
           .set({ servicePackRenderRequestId: renderRequestId, updatedAt: now })
           .where(eq(schema.notice.id, noticeId));
       }
-      await this.tasks.create(tx, {
-        companyId,
-        propertyId: notice.propertyId,
-        unitId: notice.unitId,
-        tenantId: notice.tenantId,
-        kind: 'notice_physical_service',
-        title: `Serve notice ${numberOf(notice)} in person (escalated)`,
-        noticeId,
-        recipientId: null,
-        assigneePersonId: await this.tasks.assigneeFor(tx, companyId, notice.propertyId),
-        dueAt: new Date(now.getTime() + 48 * HOUR),
-        dedupeKey: `notice:${noticeId}:escalation_service`,
-        createdBy: null,
-      });
-      if (notice.createdBy)
+      // Review S7: one physical-service task is enough; the one planned at issue may be open.
+      if (!(await this.tasks.hasOpen(tx, noticeId, 'notice_physical_service')))
+        await this.tasks.create(tx, {
+          companyId,
+          propertyId: notice.propertyId,
+          unitId: notice.unitId,
+          tenantId: notice.tenantId,
+          kind: 'notice_physical_service',
+          title: `Serve notice ${numberOf(notice)} in person (escalated)`,
+          noticeId,
+          recipientId: null,
+          assigneePersonId: await this.tasks.assigneeFor(tx, companyId, notice.propertyId),
+          dueAt: new Date(now.getTime() + 48 * HOUR),
+          dedupeKey: `notice:${noticeId}:escalation_service`,
+          createdBy: null,
+        });
+      // Review S8: the property's managers in scope.
+      for (const personId of await this.tasks.managersFor(tx, companyId, notice.propertyId))
         await queueMessage(tx, companyId, {
-          recipient: { type: 'staff', personId: notice.createdBy },
+          recipient: { type: 'staff', personId },
           purpose: 'staff_notice',
           subject: `Escalated to physical service: notice ${numberOf(notice)}`,
           body: `Notice ${numberOf(notice)} (${NOTICE_TYPE_LABELS[notice.type as NoticeType]}) has not been acknowledged and is escalated to physical service. Its service pack is on the notice; record how, when and by whom it is served.`,
@@ -616,10 +662,14 @@ export class NoticeTrackingService {
     });
   }
 
-  /** Notices whose approval closed without approving come back to draft (rejected or expired). */
+  /**
+   * Notices whose approval closed without approving come back to draft (rejected, expired or
+   * withdrawn). Each is locked and checked again (review S11): a notice resubmitted meanwhile, or
+   * already returned by a write, is left alone, so no event is recorded twice.
+   */
   private async returnClosedApprovals(tx: Tx): Promise<void> {
     const waiting = await tx
-      .select()
+      .select({ id: schema.notice.id, approvalRequestId: schema.notice.approvalRequestId })
       .from(schema.notice)
       .where(
         and(
@@ -633,17 +683,73 @@ export class NoticeTrackingService {
       waiting.map((n) => n.approvalRequestId!),
     );
     const now = this.clock.now();
-    for (const notice of waiting) {
-      const status = requests.get(notice.approvalRequestId!)?.status;
+    for (const candidate of waiting) {
+      const status = requests.get(candidate.approvalRequestId!)?.status;
       if (!status || status === 'pending' || status === 'cooling_off' || status === 'approved')
         continue;
-      const reason = `The approval request was ${status}`;
-      await recordEvent(tx, notice, { kind: 'returned_to_draft', at: now, data: { reason } });
+      const notice = await noticeRow(tx, candidate.id, true);
+      if (
+        notice.status !== 'pending_approval' ||
+        notice.approvalRequestId !== candidate.approvalRequestId
+      )
+        continue;
+      const returned = returnedForApproval(status);
+      await recordEvent(tx, notice, {
+        kind: 'returned_to_draft',
+        at: now,
+        data: {
+          code: returned.code,
+          reason: returned.message,
+          approvalRequestId: candidate.approvalRequestId,
+        },
+        dedupeKey: `returned:${candidate.approvalRequestId}`,
+      });
       await tx
         .update(schema.notice)
-        .set({ status: 'draft', approvalRequestId: null, returnedReason: reason, updatedAt: now })
+        .set({
+          status: 'draft',
+          approvalRequestId: null,
+          returnedReason: returned.message,
+          updatedAt: now,
+        })
         .where(eq(schema.notice.id, notice.id));
     }
+  }
+
+  /**
+   * Served in person on every party (review S7): handed over, or left with an adult at the
+   * premises, and not corrected since. Posting on the premises (decision 10, every notice to quit)
+   * and post or courier do not count: the escalation still serves those in person.
+   */
+  private async servedInPerson(tx: Tx, notice: NoticeRow): Promise<boolean> {
+    const records = await tx
+      .select({
+        id: schema.serviceRecord.id,
+        method: schema.serviceRecord.method,
+        recipientId: schema.serviceRecord.recipientId,
+        correctsRecordId: schema.serviceRecord.correctsRecordId,
+      })
+      .from(schema.serviceRecord)
+      .where(eq(schema.serviceRecord.noticeId, notice.id));
+    const corrected = new Set(
+      records.flatMap((r) => (r.correctsRecordId ? [r.correctsRecordId] : [])),
+    );
+    const live = records.filter(
+      (r) =>
+        !corrected.has(r.id) &&
+        (r.method === 'handed_to_tenant' || r.method === 'left_with_adult_occupant'),
+    );
+    if (live.length === 0) return false;
+    // A record for the premises as a whole serves everyone on it.
+    if (live.some((r) => r.recipientId === null)) return true;
+    const recipients = await recipientsOf(tx, notice.id);
+    const servedParties = new Set(
+      live.flatMap((r) => {
+        const recipient = recipients.find((x) => x.id === r.recipientId);
+        return recipient ? [partyKeyOf(recipient)] : [];
+      }),
+    );
+    return recipients.every((r) => servedParties.has(partyKeyOf(r)));
   }
 
   private async unitCodes(
@@ -666,4 +772,11 @@ export class NoticeTrackingService {
       .where(eq(schema.property.id, propertyId));
     return row?.name ?? '';
   }
+}
+
+/** The channels a reminder step may use for a recipient: planned at issue, and not withheld. */
+function reminderChannels(recipient: RecipientRow, step: NoticeLadderStep): ChannelPlanRow[] {
+  return (recipient.channels as ChannelPlanRow[]).filter(
+    (c) => c.mode !== 'withheld' && step.channels.includes(c.channel),
+  );
 }

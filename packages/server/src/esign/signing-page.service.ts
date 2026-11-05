@@ -260,11 +260,12 @@ export class SigningPageService {
     const found = await withCompany(this.database, this.context(companyId), async (tx) => {
       const { request, signer, link, signers } = await this.lockRows(tx, linkId);
       const { screen, downloadable } = screenFor(link, signer, request, this.clock.now(), signers);
-      // M7: a signer of an acknowledged notice downloads the acknowledged copy.
+      // Only a signed-copy link fetches the signed copy, whose certificate holds every signer's
+      // address and device (M3; M7 review data S8). An ordinary link, a notice's included,
+      // fetches the frozen document.
       const documentId = !downloadable
         ? null
-        : screen === 'copy' ||
-            (isNoticeRequest(request) && screen === 'signed' && request.finalDocumentId)
+        : screen === 'copy'
           ? request.finalDocumentId
           : request.documentId;
       if (!documentId) throw notUsable(screen);

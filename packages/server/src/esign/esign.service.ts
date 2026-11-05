@@ -15,9 +15,9 @@ import {
   appendPdfPages,
   renderTemplateContent,
   renderTemplateHtml,
-  signingCertificateV1,
+  signingCertificateV2,
   type Branding,
-  type SigningCertificateData,
+  type SigningCertificateV2Data,
 } from '@rent/documents';
 import {
   dueSigningReminders,
@@ -333,7 +333,19 @@ export class EsignService {
       .for('update');
     const now = this.clock.now();
     const reason = input.reason.trim().slice(0, 500) || 'Closed';
+    let closed = 0;
     for (const request of open) {
+      // Review M3: a request its rule already counts as complete (the last signature is in and
+      // finalise is on its way) keeps its signed acknowledgement; finalise completes it.
+      const complete = signingCompleteBy(
+        completionOf(request),
+        (await signersOf(tx, request.id)).map((x) => ({
+          required: x.required,
+          status: x.status as SignerStatus,
+        })),
+      );
+      if (complete) continue;
+      closed += 1;
       await tx
         .update(schema.signingRequest)
         .set({ status: 'cancelled', cancelledAt: now, cancelReason: reason, updatedAt: now })
@@ -347,7 +359,7 @@ export class EsignService {
         data: { noticeId, reason, by: input.by },
       });
     }
-    return open.length;
+    return closed;
   }
 
   /** M7: a notice's requests and their signers, in the caller's transaction. */
@@ -537,6 +549,8 @@ export class EsignService {
       .where(
         and(
           eq(schema.signingRequest.leaseId, leaseId),
+          // A notice served under the lease has requests of its own (M7 review M1).
+          eq(schema.signingRequest.subjectType, 'lease'),
           inArray(schema.signingRequest.status, ['preparing', 'pending']),
         ),
       );
@@ -792,7 +806,16 @@ export class EsignService {
     const completedAt = new Date(
       Math.max(...signed.map((s) => bySigner.get(s.id)!.signedAt.getTime())),
     );
-    const certificate: SigningCertificateData = {
+    // M7 review data S9: the typed name or the drawing itself, both times and the hashes.
+    const drawings = new Map<string, string>();
+    for (const sig of signatures)
+      if (sig.drawingDocumentId) {
+        const file = await this.documents.documentFile(companyId, sig.drawingDocumentId);
+        if (!file?.intact) throw new Error('A drawn signature no longer matches its fingerprint');
+        drawings.set(sig.id, `data:image/png;base64,${Buffer.from(file.bytes).toString('base64')}`);
+      }
+    const certificate: SigningCertificateV2Data = {
+      subject: isNoticeRequest(request) ? 'notice' : 'lease',
       documentTitle: facts.title.slice(0, 200),
       reference: facts.reference.slice(0, 60),
       documentSha256: request.documentSha256!,
@@ -805,6 +828,8 @@ export class EsignService {
           name: s.name.slice(0, 200),
           signedAt: sig.signedAt.toISOString(),
           method: sig.method as 'typed' | 'drawn',
+          typedName: sig.typedName ? sig.typedName.slice(0, 200) : null,
+          drawingDataUri: drawings.get(sig.id) ?? null,
           verification: verificationLabel(
             sig.verifiedChannel as 'sms' | 'email',
             sig.verifiedDestinationMasked,
@@ -812,13 +837,15 @@ export class EsignService {
           ipAddress: sig.ipAddress.slice(0, 64),
           device: sig.userAgent.slice(0, 300) || 'unknown',
           consentVersion: sig.consentVersion,
+          consentSha256: sig.consentSha256,
+          documentSha256: sig.documentSha256,
         };
       }),
     };
     const certificatePdf = await render(
       renderTemplateHtml(
-        signingCertificateV1.key,
-        signingCertificateV1.version,
+        signingCertificateV2.key,
+        signingCertificateV2.version,
         certificate,
         branding(company),
       ),
@@ -848,8 +875,8 @@ export class EsignService {
       const now = this.clock.now();
       const finalDocumentId = await this.documents.recordWriteOnce(tx, file, {
         kind: 'signed_pdf',
-        templateKey: signingCertificateV1.key,
-        templateVersion: signingCertificateV1.version,
+        templateKey: signingCertificateV2.key,
+        templateVersion: signingCertificateV2.version,
         dataSnapshot: certificate as unknown as Record<string, unknown>,
         createdBy: current.createdBy,
       });
@@ -1272,7 +1299,13 @@ export class EsignService {
     const query = tx
       .select()
       .from(schema.signingRequest)
-      .where(eq(schema.signingRequest.leaseId, leaseId))
+      // Lease signing only: a notice served under the lease carries its lease id too (review M1).
+      .where(
+        and(
+          eq(schema.signingRequest.leaseId, leaseId),
+          eq(schema.signingRequest.subjectType, 'lease'),
+        ),
+      )
       .orderBy(desc(schema.signingRequest.createdAt), desc(schema.signingRequest.id))
       .limit(1);
     const [row] = options.lock ? await query.for('update') : await query;

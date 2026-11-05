@@ -1,5 +1,17 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, inArray, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNull,
+  or,
+  schema,
+  sql,
+  withCompany,
+  type Database,
+  type Tx,
+} from '@rent/db';
 import { DomainError } from '@rent/domain/errors';
 import { scopeOf, taskAssigneeOrder, type Actor, type StaffRole } from '@rent/domain/policy';
 import type { CompanyKind } from '@rent/domain/policy';
@@ -42,6 +54,7 @@ export interface TaskView {
   readonly completedByName: string | null;
   readonly cancelledAt: Date | null;
   readonly mayComplete: boolean;
+  readonly mayCancel: boolean;
 }
 
 export interface NewTask {
@@ -103,11 +116,38 @@ export class TasksService {
    * admin or the landlord, among active members whose scope covers the property.
    */
   async assigneeFor(tx: Tx, companyId: string, propertyId: string): Promise<string | null> {
+    const members = await this.coveringMembers(tx, companyId, propertyId);
+    return (
+      members.reduce<{ personId: string; order: number } | null>(
+        (best, m) => (best && best.order <= m.order ? best : m),
+        null,
+      )?.personId ?? null
+    );
+  }
+
+  /**
+   * Who manages a property, for staff alerts about it (review S8): its property managers in scope;
+   * with none, the agency's admins; for a landlord, the owner users.
+   */
+  async managersFor(tx: Tx, companyId: string, propertyId: string): Promise<string[]> {
+    const members = (await this.coveringMembers(tx, companyId, propertyId)).filter(
+      (m) => m.order > 0,
+    );
+    const first = Math.min(...members.map((m) => m.order));
+    return [...new Set(members.filter((m) => m.order === first).map((m) => m.personId))];
+  }
+
+  /** Active members whose scope covers the property, with their task order (taskAssigneeOrder). */
+  private async coveringMembers(
+    tx: Tx,
+    companyId: string,
+    propertyId: string,
+  ): Promise<{ personId: string; order: number }[]> {
     const [company] = await tx
       .select({ kind: schema.company.kind })
       .from(schema.company)
       .where(eq(schema.company.id, companyId));
-    if (!company || company.kind === 'platform') return null;
+    if (!company || company.kind === 'platform') return [];
     const members = await tx
       .select({
         personId: schema.membership.personId,
@@ -120,10 +160,10 @@ export class TasksService {
         and(eq(schema.membership.companyId, companyId), eq(schema.membership.status, 'active')),
       )
       .orderBy(asc(schema.membership.createdAt));
-    let best: { personId: string; order: number } | null = null;
+    const out: { personId: string; order: number }[] = [];
     for (const m of members) {
       const order = taskAssigneeOrder(m.role as StaffRole, company.kind as CompanyKind);
-      if (order === null || (best && order >= best.order)) continue;
+      if (order === null) continue;
       const scope = scopeOf({
         kind: 'staff',
         personId: m.personId,
@@ -142,9 +182,9 @@ export class TasksService {
         );
         if (!(covered.rows[0]?.scope ?? []).includes(propertyId)) continue;
       }
-      best = { personId: m.personId, order };
+      out.push({ personId: m.personId, order });
     }
-    return best?.personId ?? null;
+    return out;
   }
 
   /** Makes a task in the caller's transaction, once per dedupe key. */
@@ -186,14 +226,15 @@ export class TasksService {
   /**
    * Closes a notice's open tasks of some kinds, in the caller's transaction: done when the work
    * was recorded (service), cancelled when it is no longer needed (the tenant acknowledged, the
-   * notice closed). `recipientTenantId` narrows it to one party's tasks, with the notice-wide ones.
+   * notice closed). `recipientIds` narrows it to one party's tasks (its recipients'), with the
+   * notice-wide ones.
    */
   async closeOpen(
     tx: Tx,
     where: {
       readonly noticeId: string;
       readonly kinds: readonly TaskKind[];
-      readonly recipientTenantId?: string | null;
+      readonly recipientIds?: readonly string[] | null;
     },
     status: 'done' | 'cancelled',
     note: string,
@@ -212,13 +253,34 @@ export class TasksService {
           eq(schema.task.noticeId, where.noticeId),
           eq(schema.task.status, 'open'),
           inArray(schema.task.kind, [...where.kinds]),
-          where.recipientTenantId
-            ? sql`(${schema.task.tenantId} = ${where.recipientTenantId} or ${schema.task.recipientId} is null)`
+          where.recipientIds
+            ? or(
+                isNull(schema.task.recipientId),
+                where.recipientIds.length
+                  ? inArray(schema.task.recipientId, [...where.recipientIds])
+                  : undefined,
+              )
             : undefined,
         ),
       )
       .returning({ id: schema.task.id });
     return rows.length;
+  }
+
+  /** Whether a notice has an open task of this kind (review S7: no duplicate service work). */
+  async hasOpen(tx: Tx, noticeId: string, kind: TaskKind): Promise<boolean> {
+    const [row] = await tx
+      .select({ id: schema.task.id })
+      .from(schema.task)
+      .where(
+        and(
+          eq(schema.task.noticeId, noticeId),
+          eq(schema.task.kind, kind),
+          eq(schema.task.status, 'open'),
+        ),
+      )
+      .limit(1);
+    return !!row;
   }
 
   /** A notice's tasks, in the caller's (staff) transaction. */
@@ -431,6 +493,8 @@ export class TasksService {
             kind: 'task',
             assigneePersonId: r.assigneePersonId,
           }).allowed,
+        // Review C2: cancelling needs tasks.manage (managers, admins and landlords).
+        mayCancel: r.status === 'open' && this.policy.can(actor, 'tasks.manage').allowed,
       };
     });
   }

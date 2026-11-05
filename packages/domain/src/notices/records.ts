@@ -18,6 +18,8 @@ export const NOTICE_WARNING_CODES = [
   'electronic_service_withheld',
   'counsel_wording_outstanding',
   'no_period_enforced',
+  'lease_notice_days_zero',
+  'no_assessment_on_record',
 ] as const satisfies readonly NoticeWarningCode[];
 
 /**
@@ -35,6 +37,13 @@ export const NOTICE_RECORD_KINDS = [
   'service_pack_ready',
   'served_too_late',
   'link_issued',
+  /** Review MF-6: a reminder fell due, but no channel could carry it to this recipient. */
+  'reminder_not_sent',
+  /**
+   * Review S7: the ladder's escalation step ran for a recipient and asked for escalation. The
+   * notice becomes Escalated only when the escalation job has made the service pack.
+   */
+  'escalation_requested',
 ] as const;
 export type NoticeRecordKind = (typeof NOTICE_RECORD_KINDS)[number];
 
@@ -56,8 +65,12 @@ export const SERVICE_METHOD_LABELS: Record<ServiceMethod, string> = {
   courier: 'Courier',
 };
 
-/** Who a recipient is (decision 7): a tenant, or an authorised signatory of a company tenant. */
-export const NOTICE_RECIPIENT_KINDS = ['tenant', 'signatory'] as const;
+/**
+ * Who a recipient is (decision 7): the tenant; a co-tenant, another tenant party on the lease
+ * (one of the tenant's contacts), who is a party of their own and acknowledges for themself only;
+ * or an authorised signatory of a company tenant, whose acknowledgement counts for the company.
+ */
+export const NOTICE_RECIPIENT_KINDS = ['tenant', 'co_tenant', 'signatory'] as const;
 export type NoticeRecipientKind = (typeof NOTICE_RECIPIENT_KINDS)[number];
 
 /**

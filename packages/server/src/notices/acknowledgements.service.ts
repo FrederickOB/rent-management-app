@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { asc, desc, eq, inArray, schema, withCompany, type Database } from '@rent/db';
-import { parseBusinessDate } from '@rent/domain/dates';
+import { asc, eq, inArray, schema, withCompany, type Database, type Tx } from '@rent/db';
+import { businessDateOf, instantFrom, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import {
   ASSESSMENT_BAR_KEY,
@@ -15,13 +15,14 @@ import { AuditService } from '../audit/audit.service';
 import { staffActor } from '../companies/companies.service';
 import { EntitlementsService } from '../companies/entitlements.service';
 import type { Clock } from '../core/clock';
+import { isUniqueViolation, sqlStateOf } from '../core/db-errors';
 import { conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, RENT_ASSESSMENT_UPLOAD } from '../documents/documents.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService } from '../rules/rules.service';
-import { companyFacts } from './records';
+import { assessmentRecordsOf, companyFacts, type AssessmentRecord } from './records';
 
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -187,48 +188,57 @@ export class NoticeAcknowledgementsService {
         .from(schema.unit)
         .where(eq(schema.unit.id, unitId));
       if (!unit) throw notFound('Unit');
-      const rows = await tx
-        .select()
-        .from(schema.rentAssessment)
-        .where(eq(schema.rentAssessment.unitId, unitId))
-        .orderBy(desc(schema.rentAssessment.assessedOn), desc(schema.rentAssessment.recordedAt));
-      const people = [...new Set(rows.map((r) => r.recordedBy))];
+      const records = await assessmentRecordsOf(tx, unitId);
+      const people = [
+        ...new Set(
+          records.flatMap((r) => [r.row.recordedBy, ...(r.void ? [r.void.voidedBy] : [])]),
+        ),
+      ];
       const names = people.length
         ? await tx
             .select({ id: schema.person.id, name: schema.person.name })
             .from(schema.person)
             .where(inArray(schema.person.id, people))
         : [];
+      const active = records.filter((r) => r.status === 'active');
+      const company = await companyFacts(tx, staff.companyId);
       let bar: {
         barredUntil: string;
         months: number;
         ruleStatus: 'verified' | 'from_prd' | 'unverified';
+        active: boolean;
       } | null = null;
-      if (rows.length) {
-        const company = await companyFacts(tx, staff.companyId);
+      let ruleMissing = false;
+      if (active.length) {
+        const latest = active.reduce((a, b) => (a.row.assessedOn >= b.row.assessedOn ? a : b));
         try {
           const rule = await this.rules.resolveIn(
             tx,
             company.countryCode,
             ASSESSMENT_BAR_KEY,
-            parseBusinessDate(rows[0]!.assessedOn),
+            parseBusinessDate(latest.row.assessedOn),
           );
           const months = (rule.value as { months: number }).months;
+          const barredUntil = quitBarredUntil(
+            active.map((r) => ({ date: r.row.assessedOn })),
+            months,
+          )!;
           bar = {
-            barredUntil: quitBarredUntil(
-              rows.map((r) => ({ date: r.assessedOn })),
-              months,
-            )!,
+            barredUntil,
             months,
             ruleStatus: rule.verificationStatus,
+            // The last barred day is inclusive (decision 3).
+            active: this.today(company.timeZone) <= barredUntil,
           };
         } catch (error) {
           if (!(error instanceof DomainError)) throw error;
+          ruleMissing = true;
         }
       }
       return {
-        assessments: rows.map((r) => this.assessmentView(r, names)),
+        assessments: records.map((r) => this.assessmentView(r, names)),
         bar,
+        ruleMissing,
       };
     });
   }
@@ -239,6 +249,73 @@ export class NoticeAcknowledgementsService {
     input: { assessedOn: string; reference: string; uploadId?: string | null },
     claim: IdempotencyClaim | null = null,
   ) {
+    return this.writeAssessment(actor, unitId, input, null, claim);
+  }
+
+  /** Review C4: a new record that replaces an active one, with why; records are never edited. */
+  async correctAssessment(
+    actor: Actor | null,
+    unitId: string,
+    assessmentId: string,
+    input: { assessedOn: string; reference: string; uploadId?: string | null; reason: string },
+    claim: IdempotencyClaim | null = null,
+  ) {
+    return this.writeAssessment(
+      actor,
+      unitId,
+      input,
+      { id: assessmentId, reason: input.reason },
+      claim,
+    );
+  }
+
+  /** Review C4: voids an active assessment recorded in error, with why; it stays listed. */
+  async voidAssessment(
+    actor: Actor | null,
+    unitId: string,
+    assessmentId: string,
+    reason: string,
+    claim: IdempotencyClaim | null = null,
+  ) {
+    const staff = staffActor(actor);
+    this.policy.assert(staff, 'rent_assessment.record');
+    await this.entitlements.assert(staff.companyId, 'notices');
+    const why = checkReason(reason);
+    return withCompany(this.database, staffContext(staff), async (tx) => {
+      await claim?.claim(tx);
+      const target = await this.activeAssessment(tx, unitId, assessmentId);
+      await tx
+        .insert(schema.rentAssessmentVoid)
+        .values({
+          companyId: staff.companyId,
+          propertyId: target.propertyId,
+          unitId,
+          assessmentId,
+          reason: why,
+          voidedBy: staff.personId,
+          voidedAt: this.clock.now(),
+        })
+        .catch(changedMeanwhile);
+      const record = (await assessmentRecordsOf(tx, unitId)).find(
+        (r) => r.row.id === assessmentId,
+      )!;
+      const names = await tx
+        .select({ id: schema.person.id, name: schema.person.name })
+        .from(schema.person)
+        .where(inArray(schema.person.id, [record.row.recordedBy, staff.personId]));
+      const out = this.assessmentView(record, names);
+      await claim?.done(tx, jsonView(out));
+      return out;
+    });
+  }
+
+  private async writeAssessment(
+    actor: Actor | null,
+    unitId: string,
+    input: { assessedOn: string; reference: string; uploadId?: string | null },
+    replaces: { readonly id: string; readonly reason: string } | null,
+    claim: IdempotencyClaim | null,
+  ) {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'rent_assessment.record');
     await this.entitlements.assert(staff.companyId, 'notices');
@@ -247,6 +324,7 @@ export class NoticeAcknowledgementsService {
     } catch {
       throw invalid('assessed_on_invalid', 'Give the date of the assessment');
     }
+    const why = replaces ? checkReason(replaces.reason) : null;
     const staged = input.uploadId
       ? await this.documents.stageEvidenceUpload(
           { companyId: staff.companyId, personId: staff.personId },
@@ -261,6 +339,11 @@ export class NoticeAcknowledgementsService {
         .from(schema.unit)
         .where(eq(schema.unit.id, unitId));
       if (!unit) throw notFound('Unit');
+      // Review S10: an assessment has happened; a date in the future is a mistake.
+      const company = await companyFacts(tx, staff.companyId);
+      if (input.assessedOn > this.today(company.timeZone))
+        throw invalid('assessed_on_future', 'An assessment cannot be dated in the future');
+      if (replaces) await this.activeAssessment(tx, unitId, replaces.id);
       const documentId = staged
         ? await this.documents.recordStagedEvidence(tx, staged, 'rent_assessment')
         : null;
@@ -273,20 +356,49 @@ export class NoticeAcknowledgementsService {
           assessedOn: input.assessedOn,
           reference: input.reference.trim(),
           documentId,
+          replacesId: replaces?.id ?? null,
+          reason: why,
           recordedBy: staff.personId,
           recordedAt: this.clock.now(),
         })
-        .returning();
+        .returning()
+        .catch(changedMeanwhile);
       const [person] = await tx
         .select({ id: schema.person.id, name: schema.person.name })
         .from(schema.person)
         .where(eq(schema.person.id, staff.personId));
-      const out = this.assessmentView(row!, person ? [person] : []);
-      await claim?.done(tx, { ...out, recordedAt: out.recordedAt.toISOString() });
+      const out = this.assessmentView(
+        { row: row!, status: 'active', replacedById: null, void: null },
+        person ? [person] : [],
+      );
+      await claim?.done(tx, jsonView(out));
       return out;
     });
     if (staged) await this.documents.discardStagedUpload(staged);
     return view;
+  }
+
+  /**
+   * An assessment of this unit that is neither corrected nor voided. Records are append-only, so
+   * nothing locks them: the unique keys and RA075 refuse a second change made at the same moment.
+   */
+  private async activeAssessment(tx: Tx, unitId: string, assessmentId: string) {
+    const [row] = await tx
+      .select()
+      .from(schema.rentAssessment)
+      .where(eq(schema.rentAssessment.id, assessmentId));
+    if (!row || row.unitId !== unitId) throw notFound('Assessment');
+    const record = (await assessmentRecordsOf(tx, unitId)).find((r) => r.row.id === assessmentId);
+    if (record?.status !== 'active')
+      throw conflict(
+        'assessment_changed',
+        `This assessment has already been ${record?.status ?? 'changed'}. Reload the unit.`,
+      );
+    return row;
+  }
+
+  private today(timeZone: string): string {
+    return toIsoDate(businessDateOf(instantFrom(this.clock.now()), timeZone));
   }
 
   async assessmentDocument(
@@ -312,18 +424,45 @@ export class NoticeAcknowledgementsService {
     return url;
   }
 
-  private assessmentView(
-    r: typeof schema.rentAssessment.$inferSelect,
-    names: readonly { id: string; name: string }[],
-  ) {
+  private assessmentView(r: AssessmentRecord, names: readonly { id: string; name: string }[]) {
+    const name = (id: string) => names.find((n) => n.id === id)?.name ?? null;
     return {
-      id: r.id,
-      unitId: r.unitId,
-      assessedOn: r.assessedOn,
-      reference: r.reference,
-      hasDocument: r.documentId !== null,
-      recordedByName: names.find((n) => n.id === r.recordedBy)?.name ?? null,
-      recordedAt: r.recordedAt,
+      id: r.row.id,
+      unitId: r.row.unitId,
+      assessedOn: r.row.assessedOn,
+      reference: r.row.reference,
+      hasDocument: r.row.documentId !== null,
+      recordedByName: name(r.row.recordedBy),
+      recordedAt: r.row.recordedAt,
+      status: r.status,
+      replacesId: r.row.replacesId,
+      reason: r.row.reason,
+      replacedById: r.replacedById,
+      voided: r.void
+        ? { at: r.void.voidedAt, byName: name(r.void.voidedBy), reason: r.void.reason }
+        : null,
     };
   }
+}
+
+function checkReason(reason: string): string {
+  const why = reason.trim();
+  if (why.length < 3 || why.length > 500)
+    throw invalid('reason_required', 'Say why, in 3 to 500 characters');
+  return why;
+}
+
+/** The unique keys and RA075 refuse a second correction or void made at the same moment. */
+function changedMeanwhile(error: unknown): never {
+  if (isUniqueViolation(error) || sqlStateOf(error) === 'RA075')
+    throw conflict(
+      'assessment_changed',
+      'This assessment has already been corrected or voided. Reload the unit.',
+    );
+  throw error;
+}
+
+/** The view with its instants as strings, as an idempotent replay stores it. */
+function jsonView(view: { recordedAt: Date; voided: { at: Date } | null }) {
+  return JSON.parse(JSON.stringify(view)) as Record<string, unknown>;
 }

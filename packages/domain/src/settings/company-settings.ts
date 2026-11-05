@@ -1,7 +1,12 @@
 import { z } from 'zod';
 import { DEFAULT_INVOICE_LEAD_DAYS } from '../billing/invoicing';
 import { DEFAULT_SIGNING_REMINDER_HOURS } from '../esign/signing';
-import { noticeLadderConfigSchema, noticeSendWindowSchema } from '../notices/ladder';
+import {
+  LADDER_ESCALATION_REQUIRED_MESSAGE,
+  laddersMissingEscalation,
+  noticeLadderConfigSchema,
+  noticeSendWindowSchema,
+} from '../notices/ladder';
 import { LADDER_NOTICE_TYPES } from '../notices/types';
 
 /**
@@ -94,6 +99,15 @@ export const companySettingsSchema = z
     /** LN-05: a company's own ladder per notice type; the type's default where a type is absent. */
     noticeLadders: z
       .partialRecord(z.enum(LADDER_NOTICE_TYPES), noticeLadderConfigSchema)
+      .superRefine((ladders, ctx) => {
+        // Review D-F: full-ladder types keep their escalation step.
+        for (const type of laddersMissingEscalation(ladders))
+          ctx.addIssue({
+            code: 'custom',
+            path: [type, 'escalationHours'],
+            message: LADDER_ESCALATION_REQUIRED_MESSAGE,
+          });
+      })
       .optional(),
     /** Decision 11: tenant ladder messages go only in this window, company time; 07:00 to 20:00. */
     noticeSendWindow: noticeSendWindowSchema.optional(),

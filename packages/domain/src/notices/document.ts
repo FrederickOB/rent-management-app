@@ -126,7 +126,17 @@ export function noticeDocumentContent(input: NoticeDocumentInput): NoticeDocumen
     issuedOn: formatBusinessDate(input.issueDate),
     propertyName: input.propertyName,
     premises: input.premises,
-    recipients: [...input.recipients],
+    // Review MF-5 (Act 843): a building-wide notice is addressed to the occupants and names no
+    // tenant, since every occupant receives the same document.
+    recipients:
+      input.type === 'building_wide'
+        ? [
+            `The occupants of ${input.propertyName}${input.premises ? `, ${input.premises}` : ''}`.slice(
+              0,
+              200,
+            ),
+          ]
+        : [...input.recipients],
     facts,
     sections,
     replaces: input.replaces,

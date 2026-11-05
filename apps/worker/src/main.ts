@@ -70,7 +70,7 @@ import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
 import { MESSAGING_EVENT_TYPES, messagingJobs } from './messaging.jobs';
-import { NOTICES_EVENT_TYPES, noticesJobs } from './notices.jobs';
+import { NOTICES_EVENT_TYPES, noticesJobs, noticesOnRendered } from './notices.jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
 import { taxJobs } from './tax.jobs';
@@ -149,8 +149,7 @@ const definitions = [
       (companyId: string, renderRequestId: string) =>
         app.get(BotService).onDocumentRendered(companyId, renderRequestId),
       // M7 (plan 4.12, notices.issue-delivery): the frozen notice recorded and its links sent.
-      (companyId: string, renderRequestId: string) =>
-        app.get(NoticeTrackingService).onDocumentRendered(companyId, renderRequestId),
+      noticesOnRendered(app.get(NoticeTrackingService)),
     ],
   }),
   ...messagingJobs({

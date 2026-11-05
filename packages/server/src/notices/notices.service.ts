@@ -6,6 +6,8 @@ import {
   desc,
   eq,
   inArray,
+  isNull,
+  or,
   schema,
   sql,
   withCompany,
@@ -63,6 +65,7 @@ import {
   type NoticeLadderFlags,
   type NoticeLadderStep,
   type NoticeOutcome,
+  type NoticeRecipientKind,
   type NoticeRuleInput,
   type NoticeRecordKind,
   type NoticeRuleUsed,
@@ -72,8 +75,9 @@ import {
   type NoticeWarning,
   type ServiceMethod,
 } from '@rent/domain/notices';
+import { format as formatMoneyOf, money } from '@rent/domain/money';
 import type { Actor } from '@rent/domain/policy';
-import type { LeaseUse } from '@rent/domain/tenancy';
+import { rentOn, type LeaseUse } from '@rent/domain/tenancy';
 import { z } from 'zod';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
@@ -82,8 +86,10 @@ import { staffActor } from '../companies/companies.service';
 import { EntitlementsService } from '../companies/entitlements.service';
 import type { Clock } from '../core/clock';
 import type { AppConfig } from '../core/config';
+import { isUniqueViolation } from '../core/db-errors';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
+import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, CONFIG, DATABASE } from '../core/tokens';
 import {
   DocumentsService,
@@ -97,21 +103,26 @@ import { EsignService } from '../esign/esign.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService } from '../rules/rules.service';
 import { TasksService, type TaskView } from '../tasks/tasks.service';
+import { billingLeaseOf } from '../tenancy/billing-facts';
 import { TenantsService } from '../tenancy/tenants.service';
 import {
+  assessmentRecordsOf,
   companyFacts,
   effectiveDateOf,
   eventsOf,
   factsOf,
   hasServiceClause,
   noticeRow,
+  NOTICE_ESCALATE_JOB,
   NOTICE_LEASE_STATUSES,
   numberOf,
+  partyKeyOf,
   planRecipients,
   progressOf,
   recipientRefs,
   recipientsOf,
   recordEvent,
+  returnedForApproval,
   servedElectronically,
   syncStatus,
   type CompanyFacts,
@@ -129,11 +140,34 @@ export const NOTICE_ISSUE_QUIT_ACTION = 'notice.issue_quit';
 const ISSUER_ROLES = ['owner', 'agency_admin', 'property_manager'] as const;
 
 const LIVE = ['sent', 'delivered', 'reminded', 'opened', 'escalated', 'served', 'signed'];
+/**
+ * The notice events on a tenant's timeline (LN-03): every status change, including the steps
+ * before issue and the ladder's controls (review D-A, founder decision).
+ */
+export const NOTICE_TIMELINE_KINDS = [
+  'submitted',
+  'approved',
+  'returned_to_draft',
+  'cancelled',
+  'sent',
+  'delivered',
+  'opened',
+  'reminded',
+  'escalated',
+  'served',
+  'signed',
+  'closed',
+  'received',
+  'ladder_paused',
+  'ladder_resumed',
+  'ladder_cancelled',
+] as const satisfies readonly NoticeRecordKind[];
 const PRE_ISSUE = ['draft', 'pending_approval', 'approved'];
 const HOUR = 3_600_000;
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 const codeOf = (code: string) => code.replace(/\./g, '_');
+const formatMoney = (amountMinor: number) => formatMoneyOf(money(amountMinor));
 
 /** Domain state errors become named 409s; field errors 400s (M6 review lesson). */
 function asAppError(error: unknown): never {
@@ -268,7 +302,11 @@ export class NoticesService implements OnModuleInit {
           return { noticeId: notice.id, contentHash: contentHash(notice) };
         },
         execute: async (tx, request) => {
-          await this.onApproved(tx, request.subjectId, request.initiatedBy);
+          await this.onApproved(
+            tx,
+            request.subjectId,
+            (await this.approvals.approverIn(tx, request.id)) ?? request.initiatedBy,
+          );
         },
       });
     this.esign.useNoticeFacts(async (tx, noticeId) => {
@@ -322,18 +360,16 @@ export class NoticesService implements OnModuleInit {
         )
         .where(
           and(
-            eq(schema.noticeEvent.tenantId, tenantId),
-            inArray(schema.noticeEvent.kind, [
-              'sent',
-              'delivered',
-              'opened',
-              'reminded',
-              'escalated',
-              'served',
-              'signed',
-              'closed',
-              'received',
-            ]),
+            // The tenant's own events, and every notice-wide event of a notice served on them:
+            // a building-wide notice names no tenant on the notice itself (review MF-7).
+            or(
+              eq(schema.noticeEvent.tenantId, tenantId),
+              and(
+                isNull(schema.noticeEvent.recipientId),
+                sql`exists (select 1 from notice_recipient r where r.company_id = ${schema.noticeEvent.companyId} and r.notice_id = ${schema.noticeEvent.noticeId} and r.tenant_id = ${tenantId})`,
+              ),
+            ),
+            inArray(schema.noticeEvent.kind, [...NOTICE_TIMELINE_KINDS]),
           ),
         )
         .orderBy(desc(schema.noticeEvent.occurredAt))
@@ -564,13 +600,16 @@ export class NoticesService implements OnModuleInit {
     input: ComposeTarget & { fields?: Record<string, unknown>; plannedIssueDate?: string },
   ) {
     const staff = await this.drafter(actor);
-    const arrears =
-      input.type === 'rent_demand' && input.leaseId
-        ? await this.arrearsOf(staff, input.leaseId)
-        : null;
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const company = await companyFacts(tx, staff.companyId);
       const target = await this.resolveTarget(tx, input);
+      // The ledger's arrears, for readers who may see the money (LN-01).
+      const arrears =
+        input.type === 'rent_demand' &&
+        target.lease &&
+        this.policy.can(staff, 'billing.view').allowed
+          ? await this.arrearsOf(tx, company, target.lease.id)
+          : null;
       const plannedIssueDate = input.plannedIssueDate ?? this.today(company);
       guard(() => parseBusinessDate(plannedIssueDate));
       const fields = input.fields ?? {};
@@ -599,7 +638,15 @@ export class NoticesService implements OnModuleInit {
               }
             : null,
           arrears,
-          suggestedFields: suggestedFields(input.type, target, arrears, plannedIssueDate),
+          suggestedFields: suggestedFields(
+            input.type,
+            target,
+            arrears,
+            plannedIssueDate,
+            input.type === 'rent_review' && target.lease
+              ? rentOn((await billingLeaseOf(tx, target.lease.id)).terms, plannedIssueDate)
+              : null,
+          ),
         },
         recipients: evaluation.recipients.map((r) => ({
           kind: r.kind,
@@ -676,6 +723,23 @@ export class NoticesService implements OnModuleInit {
           }),
         );
         correctsNoticeId = original.id;
+        // Review S6: one live correction per notice (the partial unique index backs this up).
+        const [open] = await tx
+          .select({ id: schema.notice.id })
+          .from(schema.notice)
+          .where(
+            and(
+              eq(schema.notice.correctsNoticeId, original.id),
+              sql`${schema.notice.status} <> 'cancelled'`,
+            ),
+          )
+          .limit(1);
+        if (open)
+          throw conflict(
+            'notice_correction_open',
+            'A correction of this notice has been started already: open it, or discard it first',
+            { noticeId: open.id },
+          );
       }
       const now = this.clock.now();
       const [row] = await tx
@@ -703,7 +767,15 @@ export class NoticesService implements OnModuleInit {
           createdAt: now,
           updatedAt: now,
         })
-        .returning({ id: schema.notice.id });
+        .returning({ id: schema.notice.id })
+        .catch((error: unknown) => {
+          if (isUniqueViolation(error, 'notice_one_live_correction_key'))
+            throw conflict(
+              'notice_correction_open',
+              'A correction of this notice has been started already: open it, or discard it first',
+            );
+          throw error;
+        });
       await claim?.done(tx, { noticeId: row!.id });
       return row!.id;
     });
@@ -801,10 +873,33 @@ export class NoticesService implements OnModuleInit {
       return notice.approvalRequestId;
     });
     // The engine closes the request in its own transaction (the initiator withdraws it); the
-    // notice follows it back to draft.
-    if (requestId) await this.approvals.cancel(staff, requestId).catch(() => undefined);
+    // notice follows it back to draft. A refusal is never swallowed (review S5).
+    if (requestId)
+      try {
+        await this.approvals.cancel(staff, requestId);
+      } catch (error) {
+        const status = await withCompany(
+          this.database,
+          staffContext(staff),
+          async (tx) => (await this.approvals.requestsIn(tx, [requestId])).get(requestId)?.status,
+        );
+        if (status === 'pending' || status === 'cooling_off')
+          throw conflict(
+            'notice_return_refused',
+            'Only the person who submitted this notice can take it back while it waits for approval. Ask them, or ask the approver to reject it.',
+          );
+        if (status === 'approved')
+          throw conflict(
+            'notice_transition',
+            'This notice was approved meanwhile, so it can no longer go back to draft',
+          );
+        if (status !== 'rejected' && status !== 'expired' && status !== 'cancelled') throw error;
+      }
     await withCompany(this.database, staffContext(staff), async (tx) => {
-      await this.syncedRow(tx, noticeId, staff.personId, true);
+      await this.syncedRow(tx, noticeId, staff.personId, {
+        code: 'notice.taken_back',
+        message: 'Taken back to draft to change it',
+      });
     });
     return this.get(staff, noticeId);
   }
@@ -860,6 +955,11 @@ export class NoticesService implements OnModuleInit {
         checkLadderControl({ status: notice.status as NoticeStatus, flags, action, reason }),
       );
       const now = this.clock.now();
+      // Review D-B: a resume moves the remaining steps on by the time the ladder was paused.
+      const pausedSeconds =
+        action === 'resume' && notice.ladderPaused && notice.ladderChangedAt
+          ? Math.max(0, Math.floor((now.getTime() - notice.ladderChangedAt.getTime()) / 1000))
+          : 0;
       await tx
         .update(schema.notice)
         .set({
@@ -868,6 +968,7 @@ export class NoticesService implements OnModuleInit {
           ladderReason: reason.trim(),
           ladderChangedAt: now,
           ladderChangedBy: staff.personId,
+          ladderShiftSeconds: notice.ladderShiftSeconds + pausedSeconds,
           updatedAt: now,
         })
         .where(eq(schema.notice.id, noticeId));
@@ -880,8 +981,24 @@ export class NoticesService implements OnModuleInit {
               : 'ladder_cancelled',
         at: now,
         actorPersonId: staff.personId,
-        data: { reason: reason.trim() },
+        data: {
+          reason: reason.trim(),
+          ...(action === 'resume' ? { shiftedBySeconds: pausedSeconds } : {}),
+        },
       });
+      // Review S4: an escalation asked for while the ladder was paused waited; ask again.
+      if (action === 'resume') {
+        const events = await eventsOf(tx, noticeId);
+        const requested = events.some((e) => e.kind === 'escalation_requested');
+        const escalated = events.some((e) => e.dedupeKey === `escalated:${noticeId}`);
+        if (requested && !escalated)
+          await enqueueOutbox(tx, {
+            companyId: notice.companyId,
+            type: NOTICE_ESCALATE_JOB,
+            payload: { noticeId },
+            idempotencyKey: `${NOTICE_ESCALATE_JOB}:${noticeId}:resumed:${now.toISOString()}`,
+          });
+      }
     });
     return this.get(staff, noticeId);
   }
@@ -1012,7 +1129,11 @@ export class NoticesService implements OnModuleInit {
             input.method === 'posted_on_premises'
               ? ['notice_post_on_premises', 'notice_physical_service']
               : ['notice_physical_service'],
-          recipientTenantId: recipient?.tenantId ?? null,
+          recipientIds: recipient
+            ? (await recipientsOf(tx, noticeId))
+                .filter((r) => partyKeyOf(r) === partyKeyOf(recipient))
+                .map((r) => r.id)
+            : null,
         },
         'done',
         `Service recorded: ${SERVICE_METHOD_LABELS[input.method]}`,
@@ -1075,18 +1196,32 @@ export class NoticesService implements OnModuleInit {
   /** Starts a correction (plan 4.8): a draft copy that references the notice it replaces. */
   async correct(actor: Actor | null, noticeId: string) {
     const staff = await this.drafter(actor);
+    return this.get(staff, (await this.correctRecord(staff, noticeId, null)).noticeId);
+  }
+
+  /** The correction's draft, under the request's Idempotency-Key claim (review C5). */
+  async correctRecord(
+    actor: Actor | null,
+    noticeId: string,
+    claim: IdempotencyClaim | null,
+  ): Promise<{ noticeId: string }> {
+    const staff = await this.drafter(actor);
     const original = await withCompany(this.database, staffContext(staff), (tx) =>
       noticeRow(tx, noticeId),
     );
-    return this.create(staff, {
-      type: original.type as NoticeType,
-      subtype: original.subtype,
-      leaseId: original.leaseId,
-      propertyId: original.leaseId ? null : original.propertyId,
-      blockIds: original.blockIds,
-      fields: original.fields as Record<string, unknown>,
-      correctsNoticeId: original.id,
-    });
+    return this.createRecord(
+      staff,
+      {
+        type: original.type as NoticeType,
+        subtype: original.subtype,
+        leaseId: original.leaseId,
+        propertyId: original.leaseId ? null : original.propertyId,
+        blockIds: original.blockIds,
+        fields: original.fields as Record<string, unknown>,
+        correctsNoticeId: original.id,
+      },
+      claim,
+    );
   }
 
   /** A link to hand over as a QR code (decision 6): earlier links keep working. */
@@ -1259,22 +1394,29 @@ export class NoticesService implements OnModuleInit {
    * The approval completed (decision 8): issue now, in the deciding transaction. If the date or the
    * bar no longer holds, the notice goes back to draft with the reason (plan 4.3).
    */
-  async onApproved(tx: Tx, noticeId: string, initiatedBy: string): Promise<void> {
+  async onApproved(tx: Tx, noticeId: string, approvedBy: string): Promise<void> {
     const notice = await noticeRow(tx, noticeId, true);
     if (notice.status !== 'pending_approval') return;
-    await this.transition(tx, notice, { kind: 'approved' }, null);
+    // The approver approved it and, by approving, issued it (review notes).
+    await this.transition(tx, notice, { kind: 'approved' }, approvedBy);
     await tx
       .update(schema.notice)
       .set({ status: 'approved', updatedAt: this.clock.now() })
       .where(eq(schema.notice.id, noticeId));
-    const result = await this.issueIn(tx, await noticeRow(tx, noticeId, true), initiatedBy);
+    const result = await this.issueIn(tx, await noticeRow(tx, noticeId, true), approvedBy);
     if (!result.issued) {
       const reason = result.blockers.map((b) => b.message).join(' ');
       const now = this.clock.now();
       await recordEvent(tx, notice, {
         kind: 'returned_to_draft',
         at: now,
-        data: { reason, blockers: result.blockers },
+        data: {
+          code: result.blockers[0]?.code ?? 'notice.issue_refused',
+          reason,
+          blockers: result.blockers,
+          approvalRequestId: notice.approvalRequestId,
+        },
+        dedupeKey: notice.approvalRequestId ? `returned:${notice.approvalRequestId}` : null,
       });
       await tx
         .update(schema.notice)
@@ -1312,6 +1454,20 @@ export class NoticesService implements OnModuleInit {
       issueDate,
     });
     if (evaluation.blockers.length > 0) return { issued: false, blockers: evaluation.blockers };
+    // Review S6: a correction replaces a live notice; one closed meanwhile has nothing to correct.
+    if (notice.correctsNoticeId) {
+      const original = await noticeRow(tx, notice.correctsNoticeId, true);
+      if (!LIVE.includes(original.status))
+        return {
+          issued: false,
+          blockers: [
+            {
+              code: 'notice.correction_original_closed',
+              message: `The notice this corrects is ${original.status} now, so there is nothing to correct. Discard this draft, or start a new notice.`,
+            },
+          ],
+        };
+    }
     if (evaluation.recipients.length === 0)
       return {
         issued: false,
@@ -1351,13 +1507,14 @@ export class NoticesService implements OnModuleInit {
     });
 
     // One signing request per party (decision 7): a company tenant's signatories share one, and
-    // the first signature acknowledges for the company (any_one).
+    // the first signature acknowledges for the company (any_one); a co-tenant has their own.
     const byParty = new Map<string, PlannedRecipient[]>();
     for (const r of evaluation.recipients)
-      byParty.set(r.tenantId, [...(byParty.get(r.tenantId) ?? []), r]);
+      byParty.set(r.partyKey, [...(byParty.get(r.partyKey) ?? []), r]);
     let position = 0;
     const inserted: RecipientRow[] = [];
-    for (const [tenantId, members] of byParty) {
+    for (const [, members] of byParty) {
+      const tenantId = members[0]!.tenantId;
       const signable = members.filter((m) => m.phone || m.email);
       const opened = signable.length
         ? await this.esign.openNoticeRequest(tx, {
@@ -1375,10 +1532,9 @@ export class NoticesService implements OnModuleInit {
             linksExpireAt: linkExpiresAt,
             signers: signable.map((m) => ({
               role: m.kind === 'signatory' ? 'signatory' : 'tenant',
-              subject:
-                m.kind === 'signatory' && m.tenantContactId
-                  ? { type: 'tenant_contact', contactId: m.tenantContactId }
-                  : { type: 'tenant' },
+              subject: m.tenantContactId
+                ? { type: 'tenant_contact', contactId: m.tenantContactId }
+                : { type: 'tenant' },
               leasePartyId: null,
               name: m.name,
               phone: m.phone,
@@ -1480,11 +1636,11 @@ export class NoticesService implements OnModuleInit {
     const parties = new Map<string, RecipientRow>();
     for (const r of inserted)
       if (
-        !parties.has(r.tenantId) &&
-        !inserted.some((x) => x.tenantId === r.tenantId && !x.physicalServicePlanned)
+        !parties.has(partyKeyOf(r)) &&
+        !inserted.some((x) => partyKeyOf(x) === partyKeyOf(r) && !x.physicalServicePlanned)
       )
-        parties.set(r.tenantId, r);
-    for (const [, r] of parties)
+        parties.set(partyKeyOf(r), r);
+    for (const [party, r] of parties)
       await this.tasks.create(tx, {
         companyId: notice.companyId,
         propertyId: notice.propertyId,
@@ -1496,7 +1652,7 @@ export class NoticesService implements OnModuleInit {
         recipientId: r.id,
         assigneePersonId: await this.tasks.assigneeFor(tx, notice.companyId, notice.propertyId),
         dueAt: new Date(now.getTime() + 48 * HOUR),
-        dedupeKey: `notice:${notice.id}:physical_service:${r.tenantId}`,
+        dedupeKey: `notice:${notice.id}:physical_service:${party}`,
         createdBy: issuedBy,
       });
     // Plan 4.8: issuing a correction closes the notice it replaces as superseded.
@@ -1649,28 +1805,34 @@ export class NoticesService implements OnModuleInit {
     tx: Tx,
     noticeId: string,
     by: string | null,
-    force = false,
+    /** Why, when staff took the notice back themselves (review C1); otherwise the request's end. */
+    takenBack?: { readonly code: string; readonly message: string },
   ): Promise<NoticeRow> {
     const notice = await noticeRow(tx, noticeId, true);
     if (notice.status !== 'pending_approval' || !notice.approvalRequestId) return notice;
     const requests = await this.approvals.requestsIn(tx, [notice.approvalRequestId]);
     const status = requests.get(notice.approvalRequestId)?.status;
-    if (!force && (status === 'pending' || status === 'cooling_off' || status === 'approved'))
-      return notice;
     if (status === 'pending' || status === 'cooling_off' || status === 'approved') return notice;
+    const returned =
+      takenBack && status === 'cancelled' ? takenBack : returnedForApproval(status ?? 'cancelled');
     const now = this.clock.now();
     await recordEvent(tx, notice, {
       kind: 'returned_to_draft',
       at: now,
       actorPersonId: by,
-      data: { reason: `The approval request was ${status ?? 'closed'}` },
+      data: {
+        code: returned.code,
+        reason: returned.message,
+        approvalRequestId: notice.approvalRequestId,
+      },
+      dedupeKey: `returned:${notice.approvalRequestId}`,
     });
     await tx
       .update(schema.notice)
       .set({
         status: 'draft',
         approvalRequestId: null,
-        returnedReason: `The approval request was ${status ?? 'closed'}`,
+        returnedReason: returned.message,
         updatedAt: now,
       })
       .where(eq(schema.notice.id, noticeId));
@@ -1811,14 +1973,17 @@ export class NoticesService implements OnModuleInit {
     return numberOf(original);
   }
 
-  /** Arrears from the ledger for a rent demand (LN-01): what is overdue, and its invoices. */
-  private async arrearsOf(staff: StaffActor, leaseId: string) {
-    if (!this.policy.can(staff, 'billing.view').allowed) return null;
-    const invoices = await this.billing.invoices(staff, { leaseId, overdue: true, limit: 100 });
-    const open = invoices.filter((i) => i.outstandingMinor > 0);
+  /**
+   * Arrears from the ledger for a rent demand (LN-01): the lease's overdue invoices with money
+   * still owed, and their total, as of today in the company's time zone (review M2).
+   */
+  private async arrearsOf(tx: Tx, company: CompanyFacts, leaseId: string) {
+    const open = (await this.billing.openInvoicesIn(tx, company.id, leaseId)).filter(
+      (i) => i.overdue,
+    );
     return {
       amountMinor: open.reduce((sum, i) => sum + i.outstandingMinor, 0),
-      asOf: toIsoDate(businessDateOf(instantFrom(this.clock.now()))),
+      asOf: this.today(company),
       invoices: open.map((i) => ({
         id: i.id,
         number: i.number,
@@ -1826,6 +1991,69 @@ export class NoticesService implements OnModuleInit {
         outstandingMinor: i.outstandingMinor,
       })),
     };
+  }
+
+  /**
+   * Review M2 (CLAUDE.md section 4): what a notice states about money and the lease must match the
+   * records at submit and at issue. A rent demand names real, open, overdue invoices of the lease,
+   * for exactly what the ledger says they still owe; a non-renewal names the lease's end date; a
+   * rent review the rent in force on the issue date.
+   */
+  private async recordChecks(
+    tx: Tx,
+    company: CompanyFacts,
+    type: NoticeType,
+    fields: Record<string, unknown>,
+    lease: LeaseRow,
+    issueDate: string,
+  ): Promise<NoticeIssueBlocker[]> {
+    const out: NoticeIssueBlocker[] = [];
+    if (type === 'rent_demand') {
+      const named = Array.isArray(fields.invoiceIds) ? (fields.invoiceIds as string[]) : [];
+      const open = new Map(
+        (await this.billing.openInvoicesIn(tx, company.id, lease.id)).map((i) => [i.id, i]),
+      );
+      const unknown = named.filter((id) => !open.has(id));
+      if (unknown.length > 0)
+        out.push({
+          code: 'notice.arrears_invoice_unknown',
+          message:
+            'An invoice named is not an open invoice of this lease (paid, cancelled or not this lease’s). Refresh the arrears from the ledger',
+        });
+      const notOverdue = named.filter((id) => open.get(id) && !open.get(id)!.overdue);
+      if (notOverdue.length > 0)
+        out.push({
+          code: 'notice.arrears_invoice_not_overdue',
+          message: `${notOverdue.map((id) => open.get(id)!.number).join(', ')} is not overdue yet; a rent demand names overdue invoices only`,
+        });
+      if (unknown.length === 0) {
+        const owed = named.reduce((sum, id) => sum + open.get(id)!.outstandingMinor, 0);
+        if (fields.arrearsMinor !== owed)
+          out.push({
+            code: 'notice.arrears_mismatch',
+            message: `The arrears stated (${formatMoney(Number(fields.arrearsMinor ?? 0))}) differ from what the ledger shows these invoices still owe (${formatMoney(owed)}). Refresh the arrears from the ledger`,
+          });
+      }
+      if (typeof fields.arrearsAsOf === 'string' && fields.arrearsAsOf > issueDate)
+        out.push({
+          code: 'notice.arrears_as_of_future',
+          message: 'The arrears cannot be counted to a date after the notice is issued',
+        });
+    }
+    if (type === 'non_renewal' && fields.leaseEndDate !== lease.endDate)
+      out.push({
+        code: 'notice.lease_end_mismatch',
+        message: `The lease ends on ${lease.endDate}; the notice must state that date`,
+      });
+    if (type === 'rent_review') {
+      const current = rentOn((await billingLeaseOf(tx, lease.id)).terms, issueDate);
+      if (fields.currentRentMinor !== current)
+        out.push({
+          code: 'notice.current_rent_mismatch',
+          message: `The rent in force on ${issueDate} is ${formatMoney(current)} a month; the notice must state that as the current rent`,
+        });
+    }
+    return out;
   }
 
   /**
@@ -1891,12 +2119,12 @@ export class NoticesService implements OnModuleInit {
         ? await ruleRow(statutoryMinimumKey(target.lease.use as LeaseUse))
         : null;
     const barRule = rules.checksAssessmentBar ? await ruleRow(ASSESSMENT_BAR_KEY) : null;
+    // Only active assessments count: a corrected or voided record never bars (review C4).
     const assessments =
       rules.checksAssessmentBar && target.unitId
-        ? await tx
-            .select({ date: schema.rentAssessment.assessedOn })
-            .from(schema.rentAssessment)
-            .where(eq(schema.rentAssessment.unitId, target.unitId))
+        ? (await assessmentRecordsOf(tx, target.unitId))
+            .filter((r) => r.status === 'active')
+            .map((r) => ({ date: r.row.assessedOn }))
         : [];
     const effectiveInput: EarliestDateInput & { effectiveDate: string | null } = {
       type,
@@ -1926,7 +2154,26 @@ export class NoticesService implements OnModuleInit {
         })
       : null;
     const earliestCalc = checks?.effective?.earliest ?? null;
-    const warnings = [...(earliestCalc?.warnings ?? []), ...(checks?.quitBar?.warnings ?? [])];
+    const warnings: NoticeWarning[] = [
+      ...(earliestCalc?.warnings ?? []),
+      ...(checks?.quitBar?.warnings ?? []),
+    ];
+    if (type === 'notice_to_quit' && target.lease) {
+      if (target.lease.noticeDays === 0)
+        warnings.push({
+          code: 'lease_notice_days_zero',
+          message:
+            'This lease gives 0 days’ notice, so no period is enforced from it, and the statutory minimum is unverified. Check the lease and counsel’s advice before relying on the date.',
+          ruleKey: null,
+        });
+      if (assessments.length === 0)
+        warnings.push({
+          code: 'no_assessment_on_record',
+          message:
+            'No Rent Officer assessment of this unit is on record. If the Rent Officer assessed it in the last 24 months, record that first: a notice to quit inside that time is barred (Act 220 s.23).',
+          ruleKey: ASSESSMENT_BAR_KEY,
+        });
+    }
     const ruleVersions = [
       ...(earliestCalc?.rulesUsed ?? []),
       ...(checks?.quitBar?.ruleUsed ? [checks.quitBar.ruleUsed] : []),
@@ -1934,6 +2181,9 @@ export class NoticesService implements OnModuleInit {
     const blockers: NoticeIssueBlocker[] = [
       ...fieldErrors.map((f) => ({ code: f.code, message: f.message })),
       ...(checks?.blockers ?? []),
+      ...(target.lease && fieldErrors.length === 0
+        ? await this.recordChecks(tx, company, type, input.fields, target.lease, input.issueDate)
+        : []),
     ];
     if (rules.needsQuitAcknowledgement && !checks && !(await this.quitEnabledIn(tx)))
       blockers.push({
@@ -1964,7 +2214,7 @@ export class NoticesService implements OnModuleInit {
             reason: checks.effective.reason,
           }
         : null,
-      warnings: warnings as NoticeWarning[],
+      warnings,
       blockers,
       quitBar: checks?.quitBar
         ? {
@@ -2002,13 +2252,18 @@ export class NoticesService implements OnModuleInit {
         verificationStatus: string;
       }[]
     ).find((r) => r.key.startsWith('notice_to_quit.statutory_min_days.'));
+    // Review data S12: the period as it stood at issue (frozen on the notice), never the lease's
+    // values now, which may have changed since.
+    const atIssue = notice.earliest as EarliestView | null;
+    const fields = notice.fields as Record<string, unknown>;
     const late = servedTooLate({
       type,
       lease: target.lease
         ? {
             use: target.lease.use as LeaseUse,
-            noticeDays: target.lease.noticeDays,
-            endDate: target.lease.endDate,
+            noticeDays: atIssue?.contractualDays ?? target.lease.noticeDays,
+            endDate:
+              typeof fields.leaseEndDate === 'string' ? fields.leaseEndDate : target.lease.endDate,
             electronicServiceClause: hasServiceClause(target.lease),
           }
         : null,
@@ -2212,6 +2467,7 @@ export class NoticesService implements OnModuleInit {
           steps,
           timeZone: company.timeZone,
           window: settings.sendWindow,
+          shiftSeconds: notice.ladderShiftSeconds,
         })
       : steps.map((step) => ({ step, dueAt: null, runsAt: null }));
     const can = (action: Parameters<PolicyService['can']>[1]) =>
@@ -2261,6 +2517,8 @@ export class NoticesService implements OnModuleInit {
       linkExpiresAt: notice.linkExpiresAt,
       completion: notice.completion as 'any_one' | 'each',
       approvalRequestId: notice.approvalRequestId,
+      lastApproval: await this.lastApprovalOf(tx, notice),
+      returnedReason: returnedReasonOf(notice, events),
       corrects: notice.correctsNoticeId
         ? { id: notice.correctsNoticeId, number: row!.correctsNumber }
         : null,
@@ -2275,7 +2533,7 @@ export class NoticesService implements OnModuleInit {
         const delivered = firstOf('delivered', r.id);
         return {
           id: r.id,
-          kind: r.kind as 'tenant' | 'signatory',
+          kind: r.kind as NoticeRecipientKind,
           name: r.name,
           partyTenantId: r.tenantId,
           leaseId: r.leaseId,
@@ -2337,11 +2595,14 @@ export class NoticesService implements OnModuleInit {
           (LIVE.includes(status) || status === 'closed') && can('notices.service.record'),
         close: (LIVE.includes(status) || status === 'received') && can('notices.close'),
         correct: LIVE.includes(status) && NOTICE_TYPE_RULES[type].issuable && can('notices.draft'),
+        // Review D-D, founder decision: notice authority only, while live and frozen.
+        handover: LIVE.includes(status) && notice.documentSha256 !== null && can('notices.issue'),
       },
     };
   }
 
   private async correctedBy(tx: Tx, noticeId: string) {
+    // The issued correction (review S10: ordered, should there ever be more than one).
     const [next] = await tx
       .select({ id: schema.notice.id, number: schema.notice.number })
       .from(schema.notice)
@@ -2351,8 +2612,31 @@ export class NoticesService implements OnModuleInit {
           inArray(schema.notice.status, [...LIVE, 'closed']),
         ),
       )
+      .orderBy(asc(schema.notice.issuedAt), asc(schema.notice.id))
       .limit(1);
     return next ? { id: next.id, number: numberOf(next) } : null;
+  }
+
+  /** Review C1: the notice's latest approval request, open or closed, with who decided it. */
+  private async lastApprovalOf(tx: Tx, notice: NoticeRow) {
+    const latest = await this.approvals.latestForSubject(tx, 'notice', notice.id, [
+      NOTICE_ISSUE_ACTION,
+      NOTICE_ISSUE_QUIT_ACTION,
+    ]);
+    if (!latest) return null;
+    const [person] = latest.decidedBy
+      ? await tx
+          .select({ name: schema.person.name })
+          .from(schema.person)
+          .where(eq(schema.person.id, latest.decidedBy))
+      : [];
+    return {
+      id: latest.id,
+      actionType: latest.actionType as typeof NOTICE_ISSUE_ACTION | typeof NOTICE_ISSUE_QUIT_ACTION,
+      status: latest.status,
+      decidedAt: latest.decidedAt,
+      decidedByName: person?.name ?? null,
+    };
   }
 }
 
@@ -2398,6 +2682,7 @@ function suggestedFields(
   target: Target,
   arrears: { amountMinor: number; asOf: string; invoices: { id: string }[] } | null,
   issueDate: string,
+  currentRentMinor: number | null,
 ): Record<string, unknown> {
   switch (type) {
     case 'rent_demand':
@@ -2410,7 +2695,7 @@ function suggestedFields(
           }
         : {};
     case 'rent_review':
-      return target.lease ? { currentRentMinor: Number(target.lease.monthlyRentMinor) } : {};
+      return currentRentMinor !== null ? { currentRentMinor } : {};
     case 'non_renewal':
       return target.lease
         ? { leaseEndDate: target.lease.endDate, effectiveDate: target.lease.endDate }
@@ -2428,3 +2713,29 @@ const maskEmail = (email: string) => {
   const at = email.lastIndexOf('@');
   return at < 1 ? '***' : `${email.slice(0, 1)}***@${email.slice(at + 1)}`;
 };
+
+/**
+ * Review C1: why a draft is a draft again, from its latest return to draft; null unless the notice
+ * is a draft whose last pre-issue step was that return.
+ */
+function returnedReasonOf(
+  notice: NoticeRow,
+  events: readonly { kind: string; occurredAt: Date; data: unknown }[],
+): { code: string; message: string; at: Date } | null {
+  if (notice.status !== 'draft') return null;
+  const last = [...events]
+    .reverse()
+    .find((e) => ['submitted', 'returned_to_draft', 'approved'].includes(e.kind));
+  if (last?.kind !== 'returned_to_draft') return null;
+  const data = (last.data ?? {}) as { code?: unknown; reason?: unknown; blockers?: unknown };
+  const blockers = Array.isArray(data.blockers) ? (data.blockers as { code?: unknown }[]) : [];
+  const code =
+    typeof data.code === 'string'
+      ? data.code
+      : typeof blockers[0]?.code === 'string'
+        ? blockers[0].code
+        : 'notice.returned';
+  const message =
+    typeof data.reason === 'string' ? data.reason : (notice.returnedReason ?? 'Returned to draft');
+  return { code, message, at: last.occurredAt };
+}

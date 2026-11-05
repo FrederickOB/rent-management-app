@@ -1,8 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createLogger } from '@rent/server/core';
 import type { JobContext, JobDefinition } from '@rent/server/jobs';
 import { describe, expect, it, vi } from 'vitest';
+import { esignJobs } from './esign.jobs';
 import type { WorkerDeps } from './jobs';
-import { NOTICES_EVENT_TYPES, noticesJobs } from './notices.jobs';
+import { NOTICES_EVENT_TYPES, noticesJobs, noticesOnRendered } from './notices.jobs';
 
 const companyId = '019a3000-0000-7000-8000-000000000002';
 const noticeId = '019a3000-0000-7000-8000-00000000aaaa';
@@ -116,5 +119,55 @@ describe('LN-03 and LN-05 notice worker jobs (plan 4.12)', () => {
       byName.get('notices.delivery-status')!.schema.parse({ companyId, status: 'delivered' }),
     ).toThrow();
     expect(() => byName.get('notices.escalate')!.schema.parse({ companyId })).toThrow();
+  });
+});
+
+describe('LN-02 the worker’s notices wiring (plan 4.12)', () => {
+  it('records the frozen notice and sends its links on documents.rendered, after the engine opens its requests', async () => {
+    const calls: string[] = [];
+    const tracking = {
+      onDocumentRendered: vi.fn(async () => {
+        calls.push('notices');
+        return true;
+      }),
+    };
+    const esign = {
+      onDocumentRendered: vi.fn(async () => {
+        calls.push('esign');
+        return true;
+      }),
+    };
+    const jobs = esignJobs({
+      esign,
+      lifecycle: {},
+      render: vi.fn(),
+      clock: { now: () => new Date('2026-11-09T10:00:00Z') },
+      onRendered: [noticesOnRendered(tracking)],
+    } as unknown as Parameters<typeof esignJobs>[0] & WorkerDeps);
+    const rendered = jobs.find((j) => j.name === 'documents.rendered')! as JobDefinition<unknown>;
+    const ctx: JobContext = {
+      jobId: 'job-1',
+      logger: createLogger({ level: 'silent' }),
+      companyId,
+      withCompany: () => Promise.reject(new Error('not used')),
+      once: () => Promise.resolve(true),
+      enqueue: vi.fn().mockResolvedValue(undefined),
+    };
+    const renderRequestId = '019a3000-0000-7000-8000-00000000ffff';
+    await rendered.handle(
+      rendered.schema.parse({ companyId, renderRequestId, eventId: messageId }),
+      ctx,
+    );
+    expect(calls).toEqual(['esign', 'notices']);
+    expect(tracking.onDocumentRendered).toHaveBeenCalledWith(companyId, renderRequestId);
+  });
+
+  it('is wired in main.ts: the hook, the jobs and the relayed event types', () => {
+    const main = readFileSync(fileURLToPath(new URL('./main.ts', import.meta.url)), 'utf8');
+    expect(main).toMatch(
+      /onRendered: \[[\s\S]*noticesOnRendered\(app\.get\(NoticeTrackingService\)\)/,
+    );
+    expect(main).toContain('...noticesJobs({ ...deps, tracking: app.get(NoticeTrackingService) })');
+    expect(main).toContain('...NOTICES_EVENT_TYPES,');
   });
 });

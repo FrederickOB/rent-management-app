@@ -7,7 +7,9 @@ import {
   parseBusinessDate,
   toIsoDate,
 } from '@rent/domain/dates';
+import { runSqlWithoutTriggers } from '@rent/db/testing';
 import { CURRENT_QUIT_ACK } from '@rent/domain/notices';
+import { InvoicingService } from '@rent/server/billing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addMembership,
@@ -98,10 +100,16 @@ async function property(part: string, ownerId: string) {
   };
 }
 
+/**
+ * A rent demand as the composer suggests it from the ledger. M7 review M2 checks a demand against
+ * the ledger (fixture change approved by the founder, 2026-11-04): the lease is billed from its
+ * start, so its first invoices are overdue, and the demand names them and what they still owe.
+ */
+let demandFields: Record<string, unknown> = {};
 const demand = (over: Record<string, unknown> = {}) => ({
   type: 'rent_demand',
   leaseId,
-  fields: { arrearsMinor: 300_000, arrearsAsOf: today, invoiceIds: ['inv-1'], payBy: day(14) },
+  fields: demandFields,
   ...over,
 });
 
@@ -163,6 +171,25 @@ beforeAll(async () => {
   });
   expect(lease.status, JSON.stringify(lease.json)).toBe(200);
   leaseId = String(lease.json.id);
+});
+
+// The ledger behind demand() (see there): billed from the lease's start, as the worker would.
+beforeAll(async () => {
+  await runSqlWithoutTriggers(
+    api.db.superuserUrl,
+    'update lease set billing_start_date = start_date where id = $1',
+    [leaseId],
+  );
+  const [row] = await runSqlWithoutTriggers<{ company_id: string }>(
+    api.db.superuserUrl,
+    'select company_id from lease where id = $1',
+    [leaseId],
+  );
+  await api.app.get(InvoicingService).onLeaseSigned(row!.company_id, leaseId);
+  const check = await manager.call('/notices/compose', { body: { type: 'rent_demand', leaseId } });
+  expect(check.status, JSON.stringify(check.json)).toBe(200);
+  demandFields = (check.json.prefill as { suggestedFields: Record<string, unknown> })
+    .suggestedFields;
 });
 
 afterAll(async () => {

@@ -57,6 +57,7 @@ export const APPEND_ONLY_TABLES = [
   'notice_event',
   'service_record',
   'rent_assessment',
+  'rent_assessment_void',
   'notice_quit_acknowledgement',
 ] as const;
 

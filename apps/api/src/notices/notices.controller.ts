@@ -10,6 +10,8 @@ import { Ctx, type RequestContext } from '../http/request-context';
 import { serialize } from '../http/serialize';
 
 const optional = { required: false } as const;
+/** Review C5: the append-only creates require a key, so a retry never records twice. */
+const required = { required: true } as const;
 
 /**
  * Legal notices (LN-01 to LN-05, LN-07, LN-09; M7 plan 4.10): the dashboard, the composer, drafts,
@@ -98,7 +100,7 @@ export class NoticesController {
             return { noticeId };
           },
           (written) => this.detail(ctx, written.noticeId),
-          optional,
+          required,
         );
       }),
       createUpload: implement(contract.notices.createUpload).handler(async ({ input }) =>
@@ -108,10 +110,19 @@ export class NoticesController {
         await this.notices.close(ctx.actor, input.noticeId, input.outcome, input.note);
         return this.detail(ctx, input.noticeId);
       }),
-      correct: implement(contract.notices.correct).handler(async ({ input }) => {
-        const draft = await this.notices.correct(ctx.actor, input.noticeId);
-        return this.detail(ctx, draft.id);
-      }),
+      correct: implement(contract.notices.correct).handler(async ({ input }) =>
+        idempotent(
+          this.idempotency,
+          ctx,
+          'notices.correct',
+          input,
+          (claim) => this.notices.correctRecord(ctx.actor, input.noticeId, claim),
+          (written) => this.detail(ctx, written.noticeId),
+          // Optional (review-round adjustment): a retry without a key is refused by the one
+          // live correction per notice (409 NOTICE_CORRECTION_OPEN), so it never makes two.
+          optional,
+        ),
+      ),
       handoverLink: implement(contract.notices.handoverLink).handler(async ({ input }) =>
         serialize(await this.notices.handoverLink(ctx.actor, input.noticeId, input.recipientId)),
       ),
@@ -129,7 +140,7 @@ export class NoticesController {
             return { noticeId: view.id };
           },
           (written) => this.detail(ctx, written.noticeId),
-          optional,
+          required,
         ),
       ),
     };
@@ -183,10 +194,44 @@ export class RentAssessmentsController {
             input,
             (claim) => this.acks.recordAssessment(ctx.actor, unitId, record, claim),
             undefined,
-            optional,
+            required,
           ),
         );
       }),
+      correct: implement(contract.rentAssessments.correct).handler(async ({ input }) => {
+        const { unitId, assessmentId, ...record } = input;
+        return serialize(
+          await idempotent(
+            this.idempotency,
+            ctx,
+            'rent-assessments.correct',
+            input,
+            (claim) => this.acks.correctAssessment(ctx.actor, unitId, assessmentId, record, claim),
+            undefined,
+            required,
+          ),
+        );
+      }),
+      void: implement(contract.rentAssessments.void).handler(async ({ input }) =>
+        serialize(
+          await idempotent(
+            this.idempotency,
+            ctx,
+            'rent-assessments.void',
+            input,
+            (claim) =>
+              this.acks.voidAssessment(
+                ctx.actor,
+                input.unitId,
+                input.assessmentId,
+                input.reason,
+                claim,
+              ),
+            undefined,
+            required,
+          ),
+        ),
+      ),
       download: implement(contract.rentAssessments.download).handler(async ({ input }) => ({
         url: await this.acks.assessmentDocument(ctx.actor, input.unitId, input.assessmentId),
       })),
