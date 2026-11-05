@@ -1,5 +1,7 @@
 export * from './accounts';
+export * from './fees';
 export * from './journal';
+export * from './owner-posting';
 export * from './periods';
 export * from './posting';
 export * from './settlement-posting';
