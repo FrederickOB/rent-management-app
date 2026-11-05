@@ -49,8 +49,8 @@ Run order for one Claude Code thread: M1, M2, M3, M4a, M4b, M5, M6, M7, M8, M9, 
 | M5 Advance rent and tax | AR-04, AR-05, AR-06, TX-01, TX-02, TX-03, TX-04, TX-08 (tax rules); VAT returns (P33) | M4b | Tax rules still unconfirmed (D9, OQ-17 to OQ-19); refund edge cases |
 | M6 Messaging and inbox | CM-01 to CM-03, CM-05 to CM-10, CM-04 stub; message cost recorded (CM-12 groundwork) | M4b | Meta verification and template approval lead times; 24-hour window logic; consent |
 | M7 Legal notices | LN-01 to LN-05, LN-07, LN-09; CF-06 tasks in the web app | M3, M6 | Notice periods unverified (OQ-09, OQ-16); ladder timing; evidence quality |
-| M8 Maintenance, move-in, move-out | MI-01 to MI-04, MI-06, MI-10, MI-11, CM-04, TL-08, TL-11 | M4a, M6 | Deposit deductions and the final statement balancing to zero |
-| M9 Owner reporting and dashboards | AC-02 to AC-05, DA-01, DA-02, DA-06; Gate 1 metrics | M5, M8 | Statement regeneration with period locks; dashboard query speed at 5,000 units |
+| M8 Maintenance, move-in, move-out | MI-01 to MI-04, MI-06, MI-10, MI-11, CM-04, TL-08, TL-11; AC-03 (moved from M9, M8 decision 8) | M4a, M6 | Deposit deductions and the final statement balancing to zero |
+| M9 Owner reporting and dashboards | AC-02, AC-04, AC-05, DA-01, DA-02, DA-06; Gate 1 metrics | M5, M8 | Statement regeneration with period locks; dashboard query speed at 5,000 units |
 | M10 Subscription and admin | AD-08, AD-10, PB-02 to PB-05, PB-07, PB-08, PB-10, PB-11 | M4b | Occupancy snapshot rule (D8); proration; never switching off tenant flows |
 | M11 Hardening, Gate 1 | All NFRs; traceability; pilot onboarding (P25) | all | Expo web inside the 1 MB budget; load at month-end peaks; restore drill |
 
@@ -97,7 +97,8 @@ Run order for one Claude Code thread: M1, M2, M3, M4a, M4b, M5, M6, M7, M8, M9, 
 | | CM-04 | M6 (stub), M8 |
 | 6 Maintenance and inspections | MI-01, MI-02, MI-03, MI-04, MI-06, MI-10, MI-11 | M8 |
 | 8 Accounting | AC-01 | M4a |
-| | AC-02, AC-03, AC-04, AC-05 | M9 |
+| | AC-03 | M8 (moved from M9) |
+| | AC-02, AC-04, AC-05 | M9 |
 | 8 Tax and compliance | TX-08 | M1 (engine), M5 (tax rules) |
 | | TX-01, TX-02, TX-03, TX-04 | M5 |
 | | TX-05 | M3 |
