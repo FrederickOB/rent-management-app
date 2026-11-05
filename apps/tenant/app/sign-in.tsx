@@ -10,7 +10,7 @@ type Step = { kind: 'phone' } | { kind: 'code'; phone: string };
 /** Tenant sign-in by phone one-time code (AD-06). */
 export default function SignIn() {
   const router = useRouter();
-  const { refresh, ended } = useSession();
+  const { refresh, ended, finishSignOut } = useSession();
   const [step, setStep] = useState<Step>({ kind: 'phone' });
   const [phoneInput, setPhoneInput] = useState('');
   const [code, setCode] = useState('');
@@ -25,6 +25,8 @@ export default function SignIn() {
       return;
     }
     setBusy(true);
+    // A sign-out made offline on this phone is finished first (src/session.tsx).
+    await finishSignOut?.().catch(() => undefined);
     const result = await authClient.phoneNumber.sendOtp({ phoneNumber: phone });
     setBusy(false);
     if (result.error) {

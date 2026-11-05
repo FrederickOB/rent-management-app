@@ -142,7 +142,8 @@ export class ReceiptsService {
           .filter(Boolean)
           .join(' '),
         link: { purpose: 'receipt', targetId: receiptId },
-        channels: ['sms', 'email'],
+        // M6 (plan 4.9): the app first, then WhatsApp, SMS and email, each with its consent.
+        channels: ['push', 'whatsapp', 'sms', 'email'],
         propertyId: receipt.propertyId,
         related: { type: 'receipt', id: receiptId },
         requestedBy: null,

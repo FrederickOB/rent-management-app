@@ -8,6 +8,23 @@ export interface Captured {
   readonly meta?: Record<string, unknown>;
 }
 
+/** What a simulated tenant wrote to us, for the dev chat page. */
+export interface FakeInbound {
+  readonly id: string;
+  readonly channel: 'whatsapp' | 'sms' | 'email';
+  readonly from: string;
+  readonly body: string;
+  readonly at: string;
+}
+
+export interface FakeTemplate {
+  readonly id: string;
+  readonly name: string;
+  readonly language: string;
+  readonly status: 'APPROVED' | 'PENDING' | 'REJECTED' | 'PAUSED' | 'DISABLED';
+  readonly reason?: string;
+}
+
 export interface FakeMedia {
   readonly id: string;
   readonly contentType: string;
@@ -81,7 +98,7 @@ export interface FakeIdentityCheck {
 
 export interface WebhookDelivery {
   readonly at: string;
-  readonly kind: 'payments' | 'whatsapp' | 'identity';
+  readonly kind: 'payments' | 'whatsapp' | 'identity' | 'sms' | 'email';
   readonly event: string;
   readonly url: string;
   readonly status?: number;
@@ -90,6 +107,8 @@ export interface WebhookDelivery {
 
 export interface FakeStore {
   messages: Captured[];
+  inbound: FakeInbound[];
+  templates: Map<string, FakeTemplate>;
   media: Map<string, FakeMedia>;
   pushReceipts: Map<string, FakePushReceipt>;
   subaccounts: Map<string, FakeSubaccount>;
@@ -102,6 +121,8 @@ export interface FakeStore {
 export function createStore(): FakeStore {
   return {
     messages: [],
+    inbound: [],
+    templates: new Map(),
     media: new Map(),
     pushReceipts: new Map(),
     subaccounts: new Map(),
@@ -114,6 +135,8 @@ export function createStore(): FakeStore {
 
 export function resetStore(store: FakeStore): void {
   store.messages.length = 0;
+  store.inbound.length = 0;
+  store.templates.clear();
   store.media.clear();
   store.pushReceipts.clear();
   store.subaccounts.clear();

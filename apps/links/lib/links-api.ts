@@ -6,6 +6,7 @@ import {
   type PayPage,
   type ReceiptPage,
   type SigningPage,
+  type UnsubscribePage,
 } from '@rent/contracts';
 
 /**
@@ -18,7 +19,7 @@ const API = (process.env.API_BASE_URL ?? 'http://localhost:3700').replace(/\/+$/
 const KEY = process.env.LINKS_API_KEY ?? DEV_LINKS_API_KEY;
 
 export { LINK_TOKEN_PATTERN };
-export type { PayIntent, PayPage, ReceiptPage, SigningPage };
+export type { PayIntent, PayPage, ReceiptPage, SigningPage, UnsubscribePage };
 
 /** The browser behind a request, as this server sees it: evidence for the signing record. */
 export interface Client {
@@ -147,6 +148,16 @@ export const openReceipt = (token: string, client: Client) =>
 
 export const receiptDocument = (token: string, client: Client) =>
   call<{ url: string }>('/links/receipt/document', { token, client });
+
+// The email unsubscribe link (CM-09; M6 decision 7): the token is the only authorisation.
+
+/** What the link would stop, or that it already has: nothing changes on opening. */
+export const openUnsubscribe = (token: string, client: Client) =>
+  call<UnsubscribePage>('/links/unsubscribe/open', { token, client });
+
+/** Withdraws email consent for the link's person and landlord. Idempotent. */
+export const confirmUnsubscribe = (token: string, client: Client) =>
+  call<UnsubscribePage>('/links/unsubscribe/confirm', { token, client });
 
 /**
  * The card return page (M4b review 14): the provider sends the payer to

@@ -10,6 +10,7 @@ import { DocumentsModule } from '@rent/server/documents';
 import { EsignModule } from '@rent/server/esign';
 import { IdentityModule } from '@rent/server/identity';
 import { LedgerModule } from '@rent/server/ledger';
+import { MaintenanceModule } from '@rent/server/maintenance';
 import { MessagingModule } from '@rent/server/messaging';
 import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
@@ -27,6 +28,17 @@ import { HealthController } from './health/health.controller';
 import { LinksController } from './links/links.controller';
 import { OpenApiController } from './health/openapi.controller';
 import { MeController } from './me/me.controller';
+import { InboxStreamController } from './messaging/inbox-stream.controller';
+import {
+  BroadcastsController,
+  InboxController,
+  MaintenanceController,
+  MessagingConsentController,
+  MessagingSettingsController,
+  TenantMessagingController,
+  UnsubscribeLinksController,
+} from './messaging/messaging.controller';
+import { MessagingWebhooksController } from './messaging/messaging-webhooks.controller';
 import { PayLinksController } from './payments/pay-links.controller';
 import { PaymentsController } from './payments/payments.controller';
 import { WebhooksController } from './payments/webhooks.controller';
@@ -55,6 +67,7 @@ export class AppModule {
         PortfolioModule,
         EsignModule,
         TenancyModule,
+        MaintenanceModule,
         MessagingModule,
         LedgerModule,
         BillingModule,
@@ -86,9 +99,20 @@ export class AppModule {
         BillingController,
         PaymentsController,
         PayLinksController,
+        // Before the payments webhooks' `/webhooks/:provider`, which would otherwise match them.
+        MessagingWebhooksController,
         WebhooksController,
         TaxController,
         AdvanceController,
+        // M6 messaging.
+        InboxController,
+        InboxStreamController,
+        MessagingConsentController,
+        BroadcastsController,
+        MessagingSettingsController,
+        TenantMessagingController,
+        UnsubscribeLinksController,
+        MaintenanceController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

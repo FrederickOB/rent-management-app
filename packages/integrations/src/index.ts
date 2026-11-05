@@ -1,6 +1,7 @@
 export * from './http';
 export * from './sms/sms';
 export * from './whatsapp/whatsapp';
+export * from './whatsapp/meta';
 export * from './email/email';
 export * from './push/push';
 export * from './payments/payments';

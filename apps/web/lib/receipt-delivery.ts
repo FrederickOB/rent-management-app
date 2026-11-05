@@ -16,14 +16,20 @@ export type DeliveryStatus = 'queued' | 'sent' | 'not_sent' | 'failed';
 
 export interface DeliveryFacts {
   readonly status: DeliveryStatus;
-  /** The channel it went on (`sms`, `email`), once sent. */
+  /** The channel it went on (`push`, `whatsapp`, `sms`, `email`), once sent. */
   readonly channel: string | null;
   readonly sentAt: string | null;
   /** From the payment's confirmation to the send, by the server's clock. */
   readonly latencyMs: number | null;
 }
 
-const CHANNEL_NAMES: Record<string, string> = { sms: 'SMS', email: 'email', whatsapp: 'WhatsApp' };
+/** M6 (C1): receipts go by app notification and WhatsApp too. */
+const CHANNEL_NAMES: Record<string, string> = {
+  push: 'app notification',
+  whatsapp: 'WhatsApp',
+  sms: 'SMS',
+  email: 'email',
+};
 const channelName = (channel: string): string => CHANNEL_NAMES[channel] ?? channel;
 
 /** `under a second`, `12 seconds`, `1 minute 5 seconds`, `3 minutes`. Whole seconds, rounded down. */

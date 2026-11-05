@@ -134,3 +134,6 @@ Start these now; each can block a milestone.
 | Ghana Card verification contract | Founder | M3 | OQ-22 |
 | GhanaPost GPS API access | Founder | M2 | OQ-23 |
 | Data Protection Commission registration | Founder with counsel | Pilot | OQ-14 |
+| SMS two-way short code (Hubtel) and gateway account | Founder | M6 (replies and STOP by SMS) | M6 decision 1 |
+| Email sending and inbound domains (Postmark) | Founder | M6 (CM-10) | M6 decision 2 |
+| Meta developer app with a test number | Founder | M6 (sandbox smoke test) | M6 decision 14 |

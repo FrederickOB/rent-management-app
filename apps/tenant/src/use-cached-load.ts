@@ -37,11 +37,14 @@ export const isOffline = (problem: Problem | null): boolean =>
  * useLoad, with the offline cache (M4b plan 4.10): each answer is kept for the signed-in person
  * under `name`, and when the API cannot be reached the last copy is shown with the time it was
  * fetched. A refusal (401, 404 and so on) never falls back to the cache. `load` must be stable.
+ * `toCache`, also stable, is what is kept of an answer: messages keep their text without links
+ * (M6), since the cache refuses anything that holds one.
  */
 export function useCachedLoad<T>(
   name: string,
   load: () => Promise<T>,
   enabled = true,
+  toCache?: (data: T) => T,
 ): CachedLoaded<T> {
   const { me } = useSession();
   const personId = me?.personId ?? null;
@@ -52,9 +55,11 @@ export function useCachedLoad<T>(
   const { state, reload, retry } = useLoad(timed, enabled && personId !== null);
 
   useEffect(() => {
-    if (state.status === 'ready' && state.refreshProblem === null && personId)
-      void writeCache(personId, name, state.data.data, state.data.fetchedAt);
-  }, [state, personId, name]);
+    if (state.status === 'ready' && state.refreshProblem === null && personId) {
+      const kept = toCache ? toCache(state.data.data) : state.data.data;
+      void writeCache(personId, name, kept, state.data.fetchedAt);
+    }
+  }, [state, personId, name, toCache]);
 
   const key = `${personId ?? ''}:${name}`;
   const offlineFirst = state.status === 'error' && isOffline(state.problem);

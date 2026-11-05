@@ -139,7 +139,8 @@ export class RemindersService {
                   : 'Pay your landlord as usual, quoting your payment reference.',
               ].join(' '),
               link: payable ? { purpose: 'pay', targetId: invoice.id } : null,
-              channels: ['sms', 'email'],
+              // M6 (plan 4.9): every channel in the business order, each with its consent.
+              channels: ['push', 'whatsapp', 'sms', 'email'],
               propertyId: invoice.propertyId,
               related: { type: 'invoice', id: invoice.id },
             });

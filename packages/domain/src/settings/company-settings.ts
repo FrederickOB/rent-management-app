@@ -7,6 +7,10 @@ import { DEFAULT_SIGNING_REMINDER_HOURS } from '../esign/signing';
  * New keys get defaults, so stored settings from earlier milestones stay valid.
  */
 const offsets = (fallback: number[]) => z.array(z.number().int()).min(1).max(12).default(fallback);
+/** A conversation tag (CM-06): lower case words, so filters and the list match exactly. */
+export const inboxTag = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,29}$/, 'Use lower case letters, numbers, - or _ (up to 30)');
 
 export const companySettingsSchema = z
   .object({
@@ -68,8 +72,49 @@ export const companySettingsSchema = z
     // M5 (plan 5.5), optional so stored settings stay valid.
     /** AR-06: days before paid-until that the renewal prompt goes; 90 when unset. */
     paidUntilPromptDays: z.number().int().min(7).max(366).optional(),
+    // M6 (plan 4.2, decision 10), optional so stored settings stay valid.
+    /** CM-06: clock minutes from a tenant's message to the first staff reply; 240 when unset. */
+    inboxFirstResponseMinutes: z
+      .number()
+      .int()
+      .min(15)
+      .max(7 * 24 * 60)
+      .optional(),
+    /** CM-06: the tags staff may put on conversations; `DEFAULT_INBOX_TAGS` when unset. */
+    inboxTags: z
+      .array(inboxTag)
+      .min(1)
+      .max(30)
+      .refine((tags) => new Set(tags).size === tags.length, 'Each tag once')
+      .optional(),
   })
   .strict();
+
+/** CM-06 and decision 10: four clock hours from the tenant's message to the first staff reply. */
+export const DEFAULT_INBOX_FIRST_RESPONSE_MINUTES = 240;
+
+/** A product choice, not law: a starting list each company can change. */
+export const DEFAULT_INBOX_TAGS: readonly string[] = [
+  'payment',
+  'repair',
+  'lease',
+  'complaint',
+  'general',
+];
+
+/** The M6 messaging settings with their defaults applied. */
+export interface MessagingSettings {
+  readonly inboxFirstResponseMinutes: number;
+  readonly inboxTags: readonly string[];
+}
+
+export function messagingSettingsOf(settings: CompanySettings): MessagingSettings {
+  return {
+    inboxFirstResponseMinutes:
+      settings.inboxFirstResponseMinutes ?? DEFAULT_INBOX_FIRST_RESPONSE_MINUTES,
+    inboxTags: settings.inboxTags ?? DEFAULT_INBOX_TAGS,
+  };
+}
 
 /** AR-06: the renewal prompt goes when paid-until is this many days away (the PRD's 90). */
 export const DEFAULT_PAID_UNTIL_PROMPT_DAYS = 90;

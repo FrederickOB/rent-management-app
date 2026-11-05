@@ -9,6 +9,18 @@ import {
 } from './billing';
 import { companyContract } from './company';
 import { linksContract } from './links';
+import { maintenanceContract } from './maintenance';
+import {
+  broadcastsContract,
+  inboxContract,
+  messagingConsentContract,
+  messagingSettingsContract,
+  platformMessagingContract,
+  templatesContract,
+  tenantGroupsContract,
+  tenantMessagingContract,
+  unsubscribeLinksContract,
+} from './messaging';
 import { meContract } from './me';
 import {
   payLinksContract,
@@ -39,6 +51,8 @@ export * from './audit';
 export * from './billing';
 export * from './company';
 export * from './links';
+export * from './maintenance';
+export * from './messaging';
 export * from './me';
 export * from './payments';
 export * from './memberships';
@@ -79,6 +93,19 @@ export const contract = {
   vat: vatContract,
   earlyTermination: earlyTerminationContract,
   advanceRent: advanceRentContract,
+  // M6: the inbox, consent on every channel, broadcasts, groups, templates, messaging settings,
+  // the platform admin's numbers and plans, the tenant app's messages and push, the unsubscribe
+  // page, and the maintenance stub.
+  inbox: inboxContract,
+  messagingConsent: messagingConsentContract,
+  broadcasts: broadcastsContract,
+  tenantGroups: tenantGroupsContract,
+  templates: templatesContract,
+  messagingSettings: messagingSettingsContract,
+  platformMessaging: platformMessagingContract,
+  tenantMessaging: tenantMessagingContract,
+  unsubscribeLinks: unsubscribeLinksContract,
+  maintenance: maintenanceContract,
 };
 
 export type Contract = typeof contract;

@@ -21,6 +21,7 @@
     "./billing/testing": "./src/billing/testing/index.ts",
     "./payments": "./src/payments/index.ts",
     "./tax": "./src/tax/index.ts",
+    "./maintenance": "./src/maintenance/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

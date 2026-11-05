@@ -1,10 +1,12 @@
 /**
  * Log redaction (CLAUDE.md section 10): no phone numbers, emails, ID numbers, one-time codes,
  * tokens, signatures or request bodies in logs. Two layers: sensitive keys are dropped by name,
- * and every string is scrubbed for values that look like personal data or secrets.
+ * and every string is scrubbed for values that look like personal data or secrets. M6 adds the
+ * messaging fields by name: message text, subjects, captions, file names, WhatsApp ids, addresses
+ * and reply tokens, which no pattern could recognise.
  */
 const SENSITIVE_KEY =
-  /^(phone|phones|phonenumber|phone_number|msisdn|to|from|email|emails|code|otp|token|tokens|accesstoken|refreshtoken|idtoken|password|newpassword|currentpassword|secret|secretkey|totpuri|backupcodes|idnumber|id_number|ghanacard|cardnumber|accountnumber|account_number|passport|passportnumber|passport_number|tin|tinnumber|tin_number|signature|authorization|cookie|cookies|set-cookie|body|payload|value)$/i;
+  /^(phone|phones|phonenumber|phone_number|msisdn|to|from|email|emails|code|otp|token|tokens|accesstoken|refreshtoken|idtoken|password|newpassword|currentpassword|secret|secretkey|totpuri|backupcodes|idnumber|id_number|ghanacard|cardnumber|accountnumber|account_number|passport|passportnumber|passport_number|tin|tinnumber|tin_number|signature|authorization|cookie|cookies|set-cookie|body|payload|value|text|subject|caption|preview|fullbody|full_body|textbody|htmlbody|strippedtextreply|whatsappphone|whatsapp_phone|wa_id|waid|address|replyto|reply_to|replytoken|reply_token|filename)$/i;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

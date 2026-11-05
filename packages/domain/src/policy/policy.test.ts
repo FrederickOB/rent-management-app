@@ -54,6 +54,18 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   // M5 (docs/plans/M5.md decisions 3 and 5).
   'tax.manage': '10101000',
   'withholding.confirm': '11100000',
+  // M6 (docs/plans/M6.md section 4.12).
+  'messaging.inbox.read': '10111110',
+  'messaging.reply': '10110100',
+  'messaging.assign': '10110000',
+  'messaging.triage': '10110000',
+  'messaging.broadcast': '10110000',
+  'messaging.templates.read': '10110000',
+  'tenant_group.manage': '10110000',
+  'messaging.own': '00000000',
+  'whatsapp_account.manage': '00000001',
+  'company.plan.manage': '00000001',
+  'maintenance.view': '10110100',
   'tenant.view': '11111110',
   'tenant.view_details': '11111010',
   'tenant.manage': '10110000',

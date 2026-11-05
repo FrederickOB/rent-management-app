@@ -20,10 +20,15 @@ export const authClient = createAuthClient({
   ],
 });
 
-/** Cookie header for API calls from native; the web build relies on the browser instead. */
-export function sessionCookieHeader(): Record<string, string> {
+/**
+ * Cookie header for API calls from native; the web build relies on the browser instead. The Expo
+ * plugin's getCookie reads SecureStore, so it answers a promise (M6 review: used as a string, the
+ * header was "[object Promise]" and native calls went unauthenticated).
+ */
+export async function sessionCookieHeader(): Promise<Record<string, string>> {
   if (Platform.OS === 'web') return {};
-  const getCookie = (authClient as unknown as { getCookie?: () => string }).getCookie;
-  const cookie = getCookie?.();
-  return cookie ? { cookie } : {};
+  const getCookie = (authClient as unknown as { getCookie?: () => string | Promise<string> })
+    .getCookie;
+  const cookie = await getCookie?.();
+  return typeof cookie === 'string' && cookie.length > 0 ? { cookie } : {};
 }

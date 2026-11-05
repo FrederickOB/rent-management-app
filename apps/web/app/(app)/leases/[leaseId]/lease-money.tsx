@@ -276,8 +276,9 @@ function PayLinkSection({ payLink }: { readonly payLink: NonNullable<LeaseBillin
       {state.kind === 'send' ? (
         <>
           <p className="text-sm text-slate-700">
-            Send the tenant a link to pay by mobile money or card, by SMS or email. It is for the
-            oldest invoice still to pay, and the page shows everything due on the lease.
+            Send the tenant a link to pay by mobile money or card, on the first channel they agreed
+            to: app notification, WhatsApp, SMS or email. It is for the oldest invoice still to pay,
+            and the page shows everything due on the lease.
           </p>
           <SendPayLink invoiceId={state.invoiceId} detail="for this lease" />
         </>

@@ -56,8 +56,18 @@ services:
       FAKE_PAYMENTS_SECRET_KEY: ${FAKE_PAYMENTS_SECRET_KEY:-}
       FAKE_PAYMENTS_WEBHOOK_URL: ${FAKE_PAYMENTS_WEBHOOK_URL:-}
       FAKE_WHATSAPP_APP_SECRET: ${FAKE_WHATSAPP_APP_SECRET:-}
-      FAKE_WHATSAPP_WEBHOOK_URL: ${FAKE_WHATSAPP_WEBHOOK_URL:-}
+      # M6: the fake's inbound messages and delivery reports go to the API on the host by
+      # default (an empty value in .env turns one off). The secrets are the API's dev stand-ins.
+      FAKE_WHATSAPP_WEBHOOK_URL: ${FAKE_WHATSAPP_WEBHOOK_URL-http://host.docker.internal:3700/webhooks/whatsapp}
+      FAKE_WHATSAPP_PHONE_NUMBER_ID: ${FAKE_WHATSAPP_PHONE_NUMBER_ID:-}
       FAKE_IDENTITY_WEBHOOK_URL: ${FAKE_IDENTITY_WEBHOOK_URL:-}
+      FAKE_SMS_INBOUND_URL: ${FAKE_SMS_INBOUND_URL-http://host.docker.internal:3700/webhooks/sms/inbound?secret=dev-only-messaging-webhook-secret}
+      FAKE_SMS_STATUS_URL: ${FAKE_SMS_STATUS_URL-http://host.docker.internal:3700/webhooks/sms/status?secret=dev-only-messaging-webhook-secret}
+      FAKE_EMAIL_INBOUND_URL: ${FAKE_EMAIL_INBOUND_URL-http://host.docker.internal:3700/webhooks/email/inbound?secret=dev-only-messaging-webhook-secret}
+      FAKE_EMAIL_EVENTS_URL: ${FAKE_EMAIL_EVENTS_URL-http://host.docker.internal:3700/webhooks/email/events?secret=dev-only-messaging-webhook-secret}
+    extra_hosts:
+      # host.docker.internal on Linux too (Docker Desktop provides it on macOS).
+      - 'host.docker.internal:host-gateway'
     ports:
       - '4010:4010'
     healthcheck:

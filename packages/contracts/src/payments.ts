@@ -421,12 +421,14 @@ export const paymentsQueueContract = {
     .route({
       method: 'POST',
       path: '/invoices/{invoiceId}/pay-link',
-      summary: 'Send the tenant a pay link by SMS or email, where consent is recorded (BC-04)',
+      summary:
+        'Send the tenant a pay link where consent is recorded (BC-04): M6 tries push, WhatsApp, SMS and email in that order',
     })
     .input(z.object({ invoiceId: uuid }))
     .output(
       z.object({
-        channels: z.array(z.enum(['sms', 'email'])),
+        /** M6: the consented channels, in the order they will be tried; empty when nothing went. */
+        channels: z.array(z.enum(['push', 'whatsapp', 'sms', 'email'])),
         /** Why nothing went: no consent, or no usable settlement destination. */
         notSentReason: z.string().nullable(),
       }),

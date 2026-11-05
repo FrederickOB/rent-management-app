@@ -84,6 +84,22 @@ export const POLICY_ACTIONS = [
   'tax.manage',
   // M5: a withholding certificate confirmed by a user for its owner (plan decision 3).
   'withholding.confirm',
+  // M6: the inbox, broadcasts, templates and groups (plan 4.12). The plan's own limits (Starter
+  // has no inbox or broadcasts, decision 9) are checked by EntitlementsService, not here.
+  'messaging.inbox.read',
+  'messaging.reply',
+  'messaging.assign',
+  'messaging.triage',
+  'messaging.broadcast',
+  'messaging.templates.read',
+  'tenant_group.manage',
+  // M6: a tenant's own conversations, photos and push devices in the tenant app.
+  'messaging.own',
+  // M6: platform admins register WhatsApp numbers and set the interim plan (decisions 3 and 9).
+  'whatsapp_account.manage',
+  'company.plan.manage',
+  // M6 (decision 12): the reported repairs the bot creates; M8 adds the rest of maintenance.
+  'maintenance.view',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -144,7 +160,13 @@ type Grant = 'own_company' | 'agency_client';
 const STAFF_MATRIX: Record<
   Exclude<
     PolicyAction,
-    'approval.decide' | 'approval.self_confirm' | 'approval.cancel' | 'rules.view' | 'rules.add'
+    | 'approval.decide'
+    | 'approval.self_confirm'
+    | 'approval.cancel'
+    | 'rules.view'
+    | 'rules.add'
+    | 'whatsapp_account.manage'
+    | 'company.plan.manage'
   >,
   readonly (StaffRole | `owner:${Grant}`)[]
 > = {
@@ -320,7 +342,39 @@ const STAFF_MATRIX: Record<
   // Owners confirm their own certificates; an agency admin only for an owner with no user, which
   // the certificate resource says (decision 3).
   'withholding.confirm': ['owner:own_company', 'owner:agency_client', 'agency_admin'],
+  // M6 (plan 4.12). Scope still applies: a caretaker reads and replies only in conversations of
+  // tenants on assigned properties, and triage only shows to people who see the whole company.
+  // Accountants and advisers read but do not reply. An agency's client owners stay out of tenant
+  // conversations; the agency answers its tenants.
+  'messaging.inbox.read': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'messaging.reply': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'messaging.assign': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'messaging.triage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // Agency admins, managers and landlords; no approval step (plan 4.7).
+  'messaging.broadcast': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'messaging.templates.read': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'tenant_group.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // Tenants only (below); staff use the inbox.
+  'messaging.own': [],
+  // Caretakers see the repairs on their assigned properties (scope applies).
+  'maintenance.view': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
 };
+
+/** Platform-level actions: platform admins only, never staff of a company (M6 decisions 3 and 9). */
+const PLATFORM_ACTIONS: readonly PolicyAction[] = [
+  'rules.view',
+  'rules.add',
+  'session.manage_own',
+  'whatsapp_account.manage',
+  'company.plan.manage',
+];
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
   if (role !== 'owner') return role;
@@ -377,15 +431,17 @@ export function can(actor: Actor, action: PolicyAction, resource?: PolicyResourc
       if (action === 'session.manage_own') return allow('tenants manage their own sessions');
       // Only their own tenancies, which the tenancy module finds by person (TL-01, OQ-30).
       if (action === 'tenancy.view_own') return allow('tenants see their own tenancies');
+      // M6: their own conversation with each landlord, and their own push devices.
+      if (action === 'messaging.own') return allow('tenants use their own conversations');
       return deny('not available to tenants');
     case 'platform_admin':
-      if (action === 'rules.view' || action === 'rules.add' || action === 'session.manage_own') {
-        return allow('platform admin');
-      }
+      if (PLATFORM_ACTIONS.includes(action)) return allow('platform admin');
       return deny('platform admins see company data only under a support grant (M10)');
     case 'staff': {
       if (action === 'rules.view' || action === 'rules.add')
         return deny('rules are managed by platform admins');
+      if (action === 'whatsapp_account.manage' || action === 'company.plan.manage')
+        return deny('WhatsApp numbers and plans are managed by platform admins');
       if (
         action === 'approval.decide' ||
         action === 'approval.self_confirm' ||

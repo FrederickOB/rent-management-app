@@ -178,3 +178,19 @@ export function parseAmount(input: string, currency: CurrencyCode = 'GHS'): Mone
   const minor = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0') || '0');
   return fromBigInt(sign ? -minor : minor, currency);
 }
+
+/**
+ * A provider's charge, as the decimal it reports (an SMS at `0.0246` GHS), to minor units,
+ * rounded half up to the pesewa once (CM-12 groundwork, M6 decision 13). Exact: no floats.
+ */
+export function providerCostToMinor(decimal: string, currency: CurrencyCode = 'GHS'): Money {
+  const match = /^(\d{1,12})(?:\.(\d{1,12}))?$/.exec(decimal.trim());
+  if (!match) throw new DomainError('money.unparseable', 'A provider cost must be a plain decimal');
+  const [, whole = '0', fraction = ''] = match;
+  const scale = 10n ** BigInt(fraction.length);
+  const units = BigInt(whole) * scale + BigInt(fraction || '0');
+  // Minor units = units * 100 / scale, half up.
+  const numerator = units * 100n;
+  const minor = (numerator * 2n + scale) / (2n * scale);
+  return fromBigInt(minor, currency);
+}

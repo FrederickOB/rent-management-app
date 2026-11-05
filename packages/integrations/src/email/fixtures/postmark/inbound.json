@@ -1,0 +1,35 @@
+{
+  "FromName": "Ama Tenant",
+  "MessageStream": "inbound",
+  "From": "Ama.Tenant@Example.test",
+  "FromFull": { "Email": "ama.tenant@example.test", "Name": "Ama Tenant", "MailboxHash": "" },
+  "To": "\"Osu Ridge\" <reply+Zq3s9X_aB-7cD2eF4gH6iJ8kL0mN1oP3qR5sT7uV9w@inbound.rent.test>",
+  "ToFull": [
+    {
+      "Email": "reply+Zq3s9X_aB-7cD2eF4gH6iJ8kL0mN1oP3qR5sT7uV9w@inbound.rent.test",
+      "Name": "Osu Ridge",
+      "MailboxHash": "Zq3s9X_aB-7cD2eF4gH6iJ8kL0mN1oP3qR5sT7uV9w"
+    }
+  ],
+  "Cc": "",
+  "CcFull": [],
+  "OriginalRecipient": "reply+Zq3s9X_aB-7cD2eF4gH6iJ8kL0mN1oP3qR5sT7uV9w@inbound.rent.test",
+  "Subject": "Re: Receipt RCT-000012",
+  "MessageID": "22c74902-a0c1-4511-804f-341342852c90",
+  "ReplyTo": "",
+  "MailboxHash": "Zq3s9X_aB-7cD2eF4gH6iJ8kL0mN1oP3qR5sT7uV9w",
+  "Date": "Wed, 4 Nov 2026 09:00:00 +0000",
+  "TextBody": "Thanks, but the amount looks wrong.\n\nOn Tue, Osu Ridge wrote:\n> Your receipt",
+  "HtmlBody": "<p>Thanks, but the amount looks wrong.</p>",
+  "StrippedTextReply": "Thanks, but the amount looks wrong.",
+  "Tag": "",
+  "Headers": [{ "Name": "X-Spam-Status", "Value": "No" }],
+  "Attachments": [
+    {
+      "Name": "proof.pdf",
+      "Content": "JVBERi0xLjQK",
+      "ContentType": "application/pdf",
+      "ContentLength": 9
+    }
+  ]
+}

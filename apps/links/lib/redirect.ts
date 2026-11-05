@@ -39,6 +39,10 @@ export const backToPay = (token: string, query: PlainQuery): Response =>
 export const backToReceipt = (token: string, query: PlainQuery): Response =>
   withQuery(`/r/${token}`, query);
 
+/** Back to an email unsubscribe link's page (CM-09), with what happened in the query. */
+export const backToUnsubscribe = (token: string, query: PlainQuery): Response =>
+  withQuery(`/u/${token}`, query);
+
 export const notFoundResponse = () =>
   new Response('Not found', {
     status: 404,

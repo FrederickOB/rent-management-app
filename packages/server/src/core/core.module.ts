@@ -14,13 +14,23 @@ import {
   EmailAlert,
   FakeProvidersAddressLookup,
   FakeProvidersIdentityVerification,
+  ExpoPush,
+  FakeProvidersPush,
   FakeProvidersSms,
+  FakeProvidersWhatsApp,
+  HubtelSms,
   InMemoryIdentityVerification,
+  InMemoryPush,
   InMemorySms,
+  InMemoryWhatsApp,
   LocalKms,
+  MetaWhatsApp,
+  PostmarkEmail,
   S3Storage,
   SmtpEmail,
   type AddressLookupPort,
+  type PushPort,
+  type WhatsAppPort,
   type AlertPort,
   type EmailPort,
   type IdentityVerificationPort,
@@ -47,8 +57,10 @@ import {
   KMS_PORT,
   LOGGER,
   PAYMENT_PROVIDERS,
+  PUSH_PORT,
   SMS_PORT,
   STORAGE_PORT,
+  WHATSAPP_PORT,
 } from './tokens';
 
 export interface CoreOptions {
@@ -58,6 +70,9 @@ export interface CoreOptions {
   readonly clock?: Clock;
   readonly sms?: SmsPort;
   readonly email?: EmailPort;
+  /** M6: WhatsApp and push; tests pass in-memory fakes. */
+  readonly whatsapp?: WhatsAppPort;
+  readonly push?: PushPort;
   readonly storage?: StoragePort;
   readonly alerts?: AlertPort;
   /** Null switches lookups off; see addressLookupFor. */
@@ -70,10 +85,47 @@ export interface CoreOptions {
 }
 
 function smsFor(config: AppConfig): SmsPort {
+  // M6 decision 1: Hubtel when its keys are set; the fake provider locally.
+  if (config.HUBTEL_CLIENT_ID && config.HUBTEL_CLIENT_SECRET)
+    return new HubtelSms({
+      clientId: config.HUBTEL_CLIENT_ID,
+      clientSecret: config.HUBTEL_CLIENT_SECRET,
+      senderId: config.HUBTEL_SENDER_ID ?? 'RentPlatfrm',
+    });
   if (config.FAKE_PROVIDERS_URL) return new FakeProvidersSms(config.FAKE_PROVIDERS_URL);
-  if (config.NODE_ENV === 'production')
-    throw new Error('No SMS gateway is configured (the real adapter arrives in M6)');
+  if (config.NODE_ENV === 'production') throw new Error('No SMS gateway is configured');
   return new InMemorySms();
+}
+
+/** M6 decision 2: Postmark when its token is set; Mailpit over SMTP otherwise. */
+function emailFor(config: AppConfig): EmailPort {
+  if (config.POSTMARK_SERVER_TOKEN)
+    return new PostmarkEmail({
+      serverToken: config.POSTMARK_SERVER_TOKEN,
+      defaultFrom: config.MAIL_FROM,
+    });
+  return new SmtpEmail(config.SMTP_URL, config.MAIL_FROM);
+}
+
+/** M6 decision 3: Meta's Cloud API when its token is set; the fake provider locally. */
+function whatsappFor(config: AppConfig): WhatsAppPort {
+  if (config.META_ACCESS_TOKEN && config.META_SHARED_PHONE_NUMBER_ID)
+    return new MetaWhatsApp({
+      accessToken: config.META_ACCESS_TOKEN,
+      graphVersion: config.META_GRAPH_VERSION,
+      defaultPhoneNumberId: config.META_SHARED_PHONE_NUMBER_ID,
+    });
+  if (config.FAKE_PROVIDERS_URL) return new FakeProvidersWhatsApp(config.FAKE_PROVIDERS_URL);
+  if (config.NODE_ENV === 'production') throw new Error('No WhatsApp provider is configured');
+  return new InMemoryWhatsApp();
+}
+
+/** M6 decision 5: Expo's push service; the fake provider locally. */
+function pushFor(config: AppConfig): PushPort {
+  if (config.NODE_ENV === 'production' || config.EXPO_ACCESS_TOKEN)
+    return new ExpoPush(config.EXPO_ACCESS_TOKEN ? { accessToken: config.EXPO_ACCESS_TOKEN } : {});
+  if (config.FAKE_PROVIDERS_URL) return new FakeProvidersPush(config.FAKE_PROVIDERS_URL);
+  return new InMemoryPush();
 }
 
 /**
@@ -145,10 +197,9 @@ export class CoreModule {
           }),
       },
       { provide: SMS_PORT, useFactory: () => options.sms ?? smsFor(config) },
-      {
-        provide: EMAIL_PORT,
-        useFactory: () => options.email ?? new SmtpEmail(config.SMTP_URL, config.MAIL_FROM),
-      },
+      { provide: EMAIL_PORT, useFactory: () => options.email ?? emailFor(config) },
+      { provide: WHATSAPP_PORT, useFactory: () => options.whatsapp ?? whatsappFor(config) },
+      { provide: PUSH_PORT, useFactory: () => options.push ?? pushFor(config) },
       { provide: STORAGE_PORT, useFactory: () => options.storage ?? storageFor(config) },
       {
         provide: ADDRESS_LOOKUP_PORT,
@@ -210,6 +261,8 @@ export class CoreModule {
         DATABASE,
         SMS_PORT,
         EMAIL_PORT,
+        WHATSAPP_PORT,
+        PUSH_PORT,
         STORAGE_PORT,
         ADDRESS_LOOKUP_PORT,
         IDENTITY_VERIFICATION_PORT,

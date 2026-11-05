@@ -1,10 +1,11 @@
 'use client';
 
-import type { TenantDetailView } from '@rent/contracts';
+import type { ContactRow, MessagingConsent, TenantDetailView } from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
+import type { ConsentChannel } from '@rent/domain/messaging';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ConfirmBox } from '@/components/confirm-box';
 import { primaryLink, secondaryLink } from '@/components/link-styles';
 import { PageHeader } from '@/components/page-header';
@@ -16,9 +17,10 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { CheckboxField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { channelsFor, consentChannelName } from '@/lib/messaging-consent';
 import { TENANT_KIND_LABELS, termLabel } from '@/lib/tenancy-format';
 import {
-  consentChangeNotes,
+  consentResetNotes,
   hasErrors,
   tenantDraftOf,
   tenantErrors,
@@ -47,6 +49,10 @@ export interface TenantPermissions {
   readonly verify: boolean;
   readonly reveal: boolean;
   readonly lease: boolean;
+  /** M6: the tenant's messages join the timeline, with a link to the conversation (CM-05). */
+  readonly messages?: boolean;
+  /** M6: may write to the tenant (messaging.reply), starting the conversation if need be. */
+  readonly write?: boolean;
 }
 
 /** What a caretaker sees (plan 4.14): the name, the phone and the units, nothing else. */
@@ -112,7 +118,53 @@ export function TenantProfile({
   const [archiving, setArchiving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [timelineVersion, setTimelineVersion] = useState(0);
+  // Consent on every channel (CM-09): null while loading, false when only the M3 record could be
+  // read (an API without the M6 route), so the card still shows SMS and email.
+  // Consent on every channel (CM-09), null while it loads. A failed read shows its error and a
+  // retry; it never falls back to the M3 rows, which know only SMS and email (review W8).
+  const [messaging, setMessaging] = useState<MessagingConsent | null>(null);
+  const [consentProblem, setConsentProblem] = useState<string | null>(null);
   const live = !tenant.archived;
+  const tenantId = tenant.id;
+
+  const loadConsent = useCallback(async () => {
+    try {
+      setMessaging(await api().messagingConsent.get({ tenantId }));
+      setConsentProblem(null);
+    } catch (failure) {
+      setConsentProblem(toProblem(failure).message);
+    }
+  }, [tenantId]);
+
+  useEffect(() => {
+    void loadConsent();
+  }, [loadConsent, timelineVersion]);
+
+  /** One person's channels; null while loading or when the read failed. */
+  const channelsOf = (contact: ContactRow | null) =>
+    messaging ? (channelsFor(messaging, contact?.id ?? null) ?? []) : null;
+
+  async function recordConsent(
+    contact: ContactRow | null,
+    channel: ConsentChannel,
+    action: 'grant' | 'withdraw',
+  ) {
+    setMessaging(
+      await api().messagingConsent.record({
+        tenantId,
+        contactId: contact?.id ?? null,
+        channel,
+        action,
+      }),
+    );
+    const who = contact?.name ?? tenant.displayName;
+    const name = consentChannelName(channel);
+    await refresh(
+      action === 'grant'
+        ? `Recorded ${name} consent for ${who}.`
+        : `Recorded that ${who} withdrew ${name} consent.`,
+    );
+  }
   const company = tenant.kind === 'company';
   // A number shown after a reveal belongs to the number it was asked for (TL-02): the identity
   // card starts afresh, hiding it, when the number on file changes or the edit form opens.
@@ -269,14 +321,19 @@ export function TenantProfile({
         onChanged={(text) => refresh(text)}
       />
       <ConsentCard
-        tenant={tenant}
+        channels={channelsOf(null)}
+        problem={consentProblem}
+        onRetry={() => void loadConsent()}
         canManage={can.manage && live}
-        onChanged={(text) => refresh(text)}
+        onRecord={(channel, action) => recordConsent(null, channel, action)}
       />
       <ContactsCard
         tenant={tenant}
         canManage={can.manage && live}
         onChanged={(text) => refresh(text)}
+        consentOf={(contact) => channelsOf(contact)}
+        consentProblem={consentProblem}
+        onRecordConsent={recordConsent}
       />
 
       <Card>
@@ -307,7 +364,12 @@ export function TenantProfile({
         </CardBody>
       </Card>
 
-      <TimelineCard tenantId={tenant.id} version={timelineVersion} />
+      <TimelineCard
+        tenantId={tenant.id}
+        version={timelineVersion}
+        withMessages={Boolean(can.messages)}
+        canWrite={Boolean(can.write) && live}
+      />
     </>
   );
 }
@@ -328,7 +390,7 @@ function EditDetails({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const errors = tried ? tenantErrors(draft) : {};
-  const consentNotes = consentChangeNotes(tenant, draft, 'the tenant');
+  const consentNotes = consentResetNotes(tenant, draft, 'the tenant');
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
