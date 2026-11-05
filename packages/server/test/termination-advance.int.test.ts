@@ -152,8 +152,8 @@ describe('AR-04 early termination', () => {
     const l = await lease(c, { start, breakCredit });
     await transfer(c, l.id, 600_000, start);
     // Five days ago, but never a rent period's last day: a move-out then leaves no unused days,
-    // so on the 5th after a 31-day month the test would prove nothing (founder-approved,
-    // 2026-11-05). Periods start on the 1st here.
+    // so on the 5th of every month the test would prove nothing (founder-approved, 2026-11-05).
+    // Periods start on the 1st here.
     const fiveDaysAgo = plusDays(today, -5);
     const lastDay =
       monthStart(plusDays(fiveDaysAgo, 1)) === plusDays(fiveDaysAgo, 1)
