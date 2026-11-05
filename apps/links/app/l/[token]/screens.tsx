@@ -4,10 +4,12 @@ import {
   noticeHeading,
   noticeOf,
   readOnlyBanner,
+  statementOf,
   type Notice,
 } from '../../../lib/notice';
 import { day } from '../../../lib/pay';
 import { problemText } from '../../../lib/problems';
+import { sanitiseDocumentHtml } from '../../../lib/sanitize';
 import { DrawPad } from './draw-pad';
 
 type Query = Readonly<Record<string, string | undefined>>;
@@ -117,7 +119,7 @@ export function NoticeReadOnly({ token, page }: { token: string; page: SigningPa
         <article
           className="document"
           aria-label="The notice"
-          dangerouslySetInnerHTML={{ __html: page.document.html }}
+          dangerouslySetInnerHTML={{ __html: sanitiseDocumentHtml(page.document.html) }}
         />
       ) : null}
       <NoticeDownload token={token} page={page} />
@@ -366,7 +368,7 @@ export function SignScreen({
       <article
         className="document"
         aria-label={notice ? 'The notice' : 'The document'}
-        dangerouslySetInnerHTML={{ __html: page.document.html ?? '' }}
+        dangerouslySetInnerHTML={{ __html: sanitiseDocumentHtml(page.document.html) }}
       />
       <p>
         <a href={`${base}/document`}>Download the PDF</a>
@@ -382,7 +384,7 @@ export function SignScreen({
         </h2>
         {notice ? (
           <p className="panel notice" id="statement">
-            <strong>{notice.statement}</strong>
+            <strong>{statementOf(notice)}</strong>
           </p>
         ) : (
           <Signers page={page} />

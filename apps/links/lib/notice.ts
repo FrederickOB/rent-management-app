@@ -1,3 +1,4 @@
+import { NOTICE_SIGNING_STATEMENT } from '@rent/domain/esign';
 import type { SigningPage } from './links-api';
 
 // A notice's signing page (M7 plan 4.5 and 4.8; CLAUDE.md section 9). A notice is acknowledged,
@@ -6,6 +7,13 @@ import type { SigningPage } from './links-api';
 // read-only, with a banner naming the new notice where there is one.
 
 export type Notice = NonNullable<SigningPage['notice']>;
+
+/**
+ * The statement above the signature box: the API's, or, should it send none, the domain's own
+ * words, so the page never goes without it (CLAUDE.md section 9).
+ */
+export const statementOf = (notice: Notice): string =>
+  notice.statement.trim() || NOTICE_SIGNING_STATEMENT;
 
 /** Whether the link is for a notice. */
 export const isNotice = (page: SigningPage): boolean =>

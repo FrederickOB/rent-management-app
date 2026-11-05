@@ -162,4 +162,30 @@ test.describe('LN-04 notices in the tenant app', () => {
     await expect(page.getByTestId('tenancy-notices')).toHaveCount(0);
     await expect(page.getByText(`Notice ${notice.number}`)).toHaveCount(0);
   });
+  test('TL-12: once /me/notices has answered with the agency’s notice, the other landlord’s tenancy still shows none (M7 review, LT 5)', async () => {
+    const answered = page.waitForResponse(
+      (response) =>
+        /\/me\/notices(\?|$)/.test(
+          new URL(response.url()).pathname + new URL(response.url()).search,
+        ) && response.request().method() === 'GET',
+    );
+    await page.goto(`/tenancy/${landlordLeaseId}`);
+    const response = await answered;
+    expect(response.status()).toBe(200);
+    const groups = (await response.json()) as {
+      landlord: { name: string };
+      notices: { number: string }[];
+    }[];
+    // The answer holds the agency's notice, so the screen had it to leave out.
+    expect(
+      groups.some(
+        (group) =>
+          group.landlord.name === agencyName &&
+          group.notices.some((item) => item.number === notice.number),
+      ),
+    ).toBe(true);
+    await expect(page.getByTestId('tenancy-detail')).toBeVisible();
+    await expect(page.getByTestId('tenancy-notices')).toHaveCount(0);
+    await expect(page.getByText(`Notice ${notice.number}`)).toHaveCount(0);
+  });
 });

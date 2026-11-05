@@ -7,7 +7,7 @@ import { formatTime, SIGNER_STATUS_LABELS } from '../src/format';
 import { openFetchedUrl } from '../src/open-url';
 import { toProblem, type Problem } from '../src/problems';
 import { useSession } from '../src/session';
-import { isNoticeItem, noticeDates } from '../src/signing-items';
+import { isNoticeItem, noticeDates, noticeStatement } from '../src/signing-items';
 import {
   BackLink,
   Badge,
@@ -234,7 +234,7 @@ function NoticeItem({ item, busy, onReview }: { item: Item; busy: boolean; onRev
         ) : null}
         {notice ? noticeDates(notice).map((line) => <Small key={line}>{line}</Small>) : null}
       </View>
-      {notice ? <Body testID="notice-statement">{notice.statement}</Body> : null}
+      {notice ? <Body testID="notice-statement">{noticeStatement(notice)}</Body> : null}
 
       <View style={styles.own} testID="own-status">
         <Text style={styles.ownLabel}>Your acknowledgement</Text>

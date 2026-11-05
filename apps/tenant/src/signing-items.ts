@@ -1,4 +1,5 @@
 import type { TenantSigningView } from '@rent/contracts';
+import { NOTICE_SIGNING_STATEMENT } from '@rent/domain/esign';
 import { formatDate, formatTime, leasesAre } from './format';
 
 // What waits for the tenant under "To sign" (TL-07; M7 plan 4.5 and 4.10): leases to sign and
@@ -58,3 +59,7 @@ export function noticeDates(notice: ItemNotice): string[] {
   if (notice.effectiveDate) lines.push(`Effective date ${formatDate(notice.effectiveDate)}`);
   return lines;
 }
+
+/** The statement that signing acknowledges receipt: the API's, or the domain's own words. */
+export const noticeStatement = (notice: ItemNotice): string =>
+  notice.statement.trim() || NOTICE_SIGNING_STATEMENT;

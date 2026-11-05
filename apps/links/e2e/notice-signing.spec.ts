@@ -1,7 +1,8 @@
 import { NOTICE_SIGNING_STATEMENT } from '@rent/domain/esign';
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import { leaseDueToday, type PayLease } from './pay-support';
-import { codeTextedTo, managerApi, ok } from './signing-support';
+import { DEV_LINKS_API_KEY, LINKS_API_KEY_HEADER } from '@rent/contracts';
+import { API, codeTextedTo, managerApi, ok } from './signing-support';
 import { headerValues } from './support';
 
 // A notice's signing page (M7 plan 4.5 and 4.8; LN-02, LN-04; CLAUDE.md section 9). The demo
@@ -163,6 +164,37 @@ test.describe('LN-04 a notice’s signing page', () => {
             .recipients[0]!.signedAt,
       )
       .not.toBeNull();
+  });
+});
+
+test.describe('LN-02 a notice cannot be declined (M7 review, LT 5)', () => {
+  test('the links API itself refuses a decline with 409, and the notice stays out for acknowledgement', async ({
+    page,
+  }) => {
+    test.setTimeout(150_000);
+    const notice = await issueEntryNotice(staff, lease.leaseId);
+    const path = await noticeLinkPath(staff, notice);
+    const token = path.slice('/l/'.length);
+    const answer = await fetch(`${API}/links/decline`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [LINKS_API_KEY_HEADER]: process.env.LINKS_API_KEY ?? DEV_LINKS_API_KEY,
+      },
+      body: JSON.stringify({
+        token,
+        client: { ip: '203.0.113.7', userAgent: 'notice-signing e2e' },
+        reason: 'I do not agree with this notice',
+      }),
+    });
+    expect(answer.status).toBe(409);
+
+    const after = await ok<NoticeDetail>(await staff.get(`/notices/${notice.id}`), 'the notice');
+    expect(after.recipients[0]!.signedAt).toBeNull();
+    await page.goto(path);
+    await expect(
+      page.getByRole('heading', { name: 'Acknowledge receipt', exact: true }),
+    ).toBeVisible();
   });
 });
 
