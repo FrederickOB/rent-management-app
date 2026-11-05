@@ -1,19 +1,27 @@
 'use client';
 
-import type { NoticeDetail } from '@rent/contracts';
+import type { NoticeCompose, NoticeDetail } from '@rent/contracts';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApp } from '@/components/app-context';
 import { ConfirmBox } from '@/components/confirm-box';
 import { secondaryLink } from '@/components/link-styles';
+import { NoticeChannelPlan } from '@/components/notice-channel-plan';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
-import { noticeRefusal } from '@/lib/notices';
+import {
+  composeInputOf,
+  earliestText,
+  effectiveProblem,
+  issuePlanLines,
+  noticeRefusal,
+  tooEarly,
+} from '@/lib/notices';
 
 const APPROVAL_STATUS_TEXT: Record<NonNullable<NoticeDetail['approval']>['status'], string> = {
   pending: 'Waiting for a second person to approve it',
@@ -43,10 +51,38 @@ export function DraftActions({
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [discarding, setDiscarding] = useState(false);
+  const [confirmingIssue, setConfirmingIssue] = useState(false);
+  // The draft checked as the composer checks it: its channel plan and whether its date holds.
+  const [check, setCheck] = useState<NoticeCompose | null>(null);
+  const [checkProblem, setCheckProblem] = useState<string | null>(null);
   const { actions } = notice;
   const preIssue =
     !notice.issuedAt && notice.status !== 'cancelled' && notice.status !== 'received';
+
+  useEffect(() => {
+    if (!preIssue) return undefined;
+    let current = true;
+    api()
+      .notices.compose(composeInputOf(notice))
+      .then(
+        (answer) => {
+          if (current) {
+            setCheck(answer);
+            setCheckProblem(null);
+          }
+        },
+        (failure: unknown) => {
+          if (current) setCheckProblem(toProblem(failure).message);
+        },
+      );
+    return () => {
+      current = false;
+    };
+  }, [preIssue, notice]);
+
   if (!preIssue) return null;
+  const early = tooEarly(check);
+  const dateProblem = check ? effectiveProblem(check.effectiveCheck) : null;
 
   async function act(
     name: 'submit' | 'issue' | 'returnToDraft' | 'discard',
@@ -120,6 +156,24 @@ export function DraftActions({
             ) : null}
           </p>
         ) : null}
+        {dateProblem ? (
+          <Alert tone="error" title="The date is too early">
+            <span data-testid="effective-problem">{dateProblem}</span> It can be saved, but not
+            submitted or issued, until the date is changed.
+          </Alert>
+        ) : null}
+        {check?.earliest ? (
+          <p className="text-sm text-slate-700" data-testid="earliest-date">
+            Earliest lawful date: {earliestText(check.earliest)}
+          </p>
+        ) : null}
+        {check ? (
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-slate-900">Who it goes to, and how</p>
+            <NoticeChannelPlan recipients={check.recipients} />
+          </div>
+        ) : null}
+        {checkProblem ? <Alert tone="warning">{checkProblem}</Alert> : null}
         <Preview noticeId={notice.id} />
         <div className="flex flex-wrap gap-2">
           {actions.edit ? (
@@ -127,11 +181,11 @@ export function DraftActions({
               Edit the draft
             </Link>
           ) : null}
-          {actions.issue ? (
+          {actions.issue && !confirmingIssue ? (
             <Button
               pending={busy === 'issue'}
-              disabled={busy !== null || notice.blockers.length > 0}
-              onClick={() => void act('issue', 'Issued. The notice is frozen and on its way.')}
+              disabled={busy !== null || notice.blockers.length > 0 || early || check === null}
+              onClick={() => setConfirmingIssue(true)}
             >
               Issue now
             </Button>
@@ -140,7 +194,7 @@ export function DraftActions({
             <Button
               variant={actions.issue ? 'secondary' : 'primary'}
               pending={busy === 'submit'}
-              disabled={busy !== null}
+              disabled={busy !== null || early}
               onClick={() =>
                 void act(
                   'submit',
@@ -171,6 +225,29 @@ export function DraftActions({
             </Button>
           ) : null}
         </div>
+        {confirmingIssue ? (
+          <ConfirmBox
+            label="Confirm issuing the notice"
+            confirmText="Issue it now"
+            pending={busy === 'issue'}
+            onConfirm={() =>
+              void act('issue', 'Issued. The notice is frozen and on its way.').then(() =>
+                setConfirmingIssue(false),
+              )
+            }
+            onCancel={() => setConfirmingIssue(false)}
+          >
+            <p className="font-medium">
+              Issue it now? It is frozen, numbered and sent at once; it can then only be corrected
+              by a new notice.
+            </p>
+            <ul className="mt-1 list-disc pl-5" data-testid="issue-plan">
+              {issuePlanLines(check?.recipients ?? []).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </ConfirmBox>
+        ) : null}
         {discarding ? (
           <ConfirmBox
             label="Confirm discarding the draft"

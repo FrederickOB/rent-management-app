@@ -1,6 +1,8 @@
 import type { CompanyProfile } from '@rent/contracts';
 import {
+  LADDER_ESCALATION_REQUIRED_MESSAGE,
   LADDER_NOTICE_TYPES,
+  laddersMissingEscalation,
   noticeSettingsOf,
   NOTICE_TYPE_RULES,
   type LadderNoticeType,
@@ -73,6 +75,10 @@ export function noticeSettingsPatch(
     if ('error' in parsed) errors[type] = parsed.error;
     else ladders[type] = { ...parsed.config, reminderHours: [...parsed.config.reminderHours] };
   }
+  // D-F: a full-ladder type always escalates an unsigned notice to physical service (CLAUDE.md
+  // section 9); the API refuses a ladder without it.
+  for (const type of laddersMissingEscalation(ladders))
+    errors[type] ??= LADDER_ESCALATION_REQUIRED_MESSAGE;
   const window = sendWindowProblem(draft.from, draft.to);
   if (window) errors.window = window;
   const expiry = linkExpiryProblem(draft.linkExpiryDays);

@@ -15,7 +15,7 @@ import { openFetchedLink } from '@/lib/browser-files';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import { sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
-import { NOTICE_UPLOAD, uploadNoticeFile } from '@/lib/notice-uploads';
+import { NOTICE_UPLOAD, UploadCache, uploadNoticeFile } from '@/lib/notice-uploads';
 import { instantOfLocal, localNow, noticeRefusal } from '@/lib/notices';
 import { fileProblem } from '@/lib/upload';
 
@@ -28,10 +28,13 @@ export function ServiceCard({
   notice,
   personId,
   onChanged,
+  onReload,
 }: {
   readonly notice: NoticeDetail;
   readonly personId: string;
   readonly onChanged: (next: NoticeDetail, text?: string) => void;
+  /** Fetch the notice again, so the records shown are the API's. */
+  readonly onReload: () => void;
 }) {
   const { timeZone } = useApp();
   const [recording, setRecording] = useState(false);
@@ -78,6 +81,7 @@ export function ServiceCard({
               onChanged(next, 'Service recorded.');
             }}
             onCancel={() => setRecording(false)}
+            onReload={onReload}
           />
         ) : null}
         {notice.serviceRecords.length === 0 ? (
@@ -140,17 +144,20 @@ function ServiceForm({
   personId,
   onSaved,
   onCancel,
+  onReload,
 }: {
   readonly notice: NoticeDetail;
   readonly personId: string;
   readonly onSaved: (next: NoticeDetail) => void;
   readonly onCancel: () => void;
+  readonly onReload: () => void;
 }) {
   const { timeZone } = useApp();
   const [method, setMethod] = useState<ServiceMethod>(
     notice.type === 'notice_to_quit' ? 'posted_on_premises' : 'handed_to_tenant',
   );
-  const [servedAt, setServedAt] = useState(() => localNow(timeZone));
+  // To the second, so a notice served moments after it was issued is not dated before its issue.
+  const [servedAt, setServedAt] = useState(() => localNow(timeZone, new Date(), 'second'));
   const [byMe, setByMe] = useState(true);
   const [servedByName, setServedByName] = useState('');
   const [witness, setWitness] = useState('');
@@ -163,6 +170,7 @@ function ServiceForm({
   const affidavit = useRef<HTMLInputElement>(null);
   const keeper = useIdempotencyKeeper();
   const keyedFor = useRef<string | null>(null);
+  const [uploads] = useState(() => new UploadCache());
   const correctable = notice.serviceRecords.filter((r) => !r.correctedByRecordId);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -190,9 +198,12 @@ function ServiceForm({
     }
     setPending(true);
     try {
+      // A retry reuses the upload of the same file (review item 4).
       const [photoUploadId, affidavitUploadId] = await Promise.all(
         files.map(({ input, purpose }) =>
-          input ? uploadNoticeFile(input, purpose, api().notices) : Promise.resolve(null),
+          input
+            ? uploads.upload(input, purpose, (file, p) => uploadNoticeFile(file, p, api().notices))
+            : Promise.resolve(null),
         ),
       );
       const body = {
@@ -208,11 +219,7 @@ function ServiceForm({
         correctsRecordId: corrects || null,
       };
       // A changed record is a new submission with a new key (M6 lesson).
-      const content = JSON.stringify({
-        ...body,
-        photoUploadId: Boolean(photoUploadId),
-        affidavitUploadId: Boolean(affidavitUploadId),
-      });
+      const content = JSON.stringify(body);
       if (keyedFor.current !== content) {
         keeper.reset();
         keyedFor.current = content;
@@ -223,8 +230,9 @@ function ServiceForm({
         keeper.reset();
         keyedFor.current = null;
         setError(
-          'An earlier attempt with other details was already recorded. Check the list above.',
+          'An earlier attempt with other details was already recorded. The list above is up to date: check it before recording again.',
         );
+        onReload();
       } else {
         setError(toProblem(failure).message);
       }
@@ -249,6 +257,7 @@ function ServiceForm({
         <TextField
           label="When"
           type="datetime-local"
+          step={1}
           hint={`Company time (${timeZone}).`}
           value={servedAt}
           onChange={(event) => setServedAt(event.target.value)}

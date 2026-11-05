@@ -238,9 +238,11 @@ function TaskItem({
           <Button size="sm" variant="secondary" onClick={() => setActing('note')}>
             Add a note
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setActing('cancel')}>
-            Cancel the task
-          </Button>
+          {task.mayCancel ? (
+            <Button size="sm" variant="ghost" onClick={() => setActing('cancel')}>
+              Cancel the task
+            </Button>
+          ) : null}
         </div>
       ) : null}
       {acting ? (

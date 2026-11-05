@@ -112,7 +112,7 @@ export function NoticeSettingsForm({
                         />
                         <TextField
                           label="Escalation, hours after issue"
-                          hint="The physical service pack. Blank: none."
+                          hint="The physical service pack. Required: an unsigned notice always escalates."
                           inputMode="numeric"
                           value={ladder.escalationHours}
                           onChange={(event) =>

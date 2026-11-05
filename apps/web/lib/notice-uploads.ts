@@ -36,3 +36,26 @@ export async function uploadNoticeFile(
   await sendToStorage(slot, file);
   return slot.uploadId;
 }
+
+/**
+ * Uploads made for files chosen on a form (review item 4): a retry of the same submission reuses
+ * the upload of the same File instead of storing it again, so a record retried after a lost
+ * answer points at the same document. Choosing another file uploads that one.
+ */
+export class UploadCache {
+  private readonly ids = new WeakMap<File, Map<NoticeUploadPurpose, string>>();
+
+  async upload(
+    file: File,
+    purpose: NoticeUploadPurpose,
+    send: (file: File, purpose: NoticeUploadPurpose) => Promise<string>,
+  ): Promise<string> {
+    const known = this.ids.get(file)?.get(purpose);
+    if (known) return known;
+    const id = await send(file, purpose);
+    const forFile = this.ids.get(file) ?? new Map<NoticeUploadPurpose, string>();
+    forFile.set(purpose, id);
+    this.ids.set(file, forFile);
+    return id;
+  }
+}

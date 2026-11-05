@@ -145,6 +145,10 @@ test.describe('LN-02 and plan 4.8 an issued notice is never edited; a correction
     await expect(page.getByTestId('notice-corrects')).toContainText(issued.number!);
     await ready(page, 'Issue now');
     await page.getByRole('button', { name: 'Issue now' }).click();
+    await page
+      .getByRole('group', { name: 'Confirm issuing the notice' })
+      .getByRole('button', { name: 'Issue it now' })
+      .click();
     await expect(page.getByTestId('notice-status').first()).not.toHaveText('Draft');
 
     // The original stays as issued, closed as superseded, and names its replacement.

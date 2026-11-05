@@ -16,8 +16,8 @@ import { api, keyedApi } from '@/lib/api';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
 import { sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
-import { NOTICE_UPLOAD, uploadNoticeFile } from '@/lib/notice-uploads';
-import { noticeTitle, RECEIVED_VIA_LABELS, type NoticeRow } from '@/lib/notices';
+import { NOTICE_UPLOAD, UploadCache, uploadNoticeFile } from '@/lib/notice-uploads';
+import { noticeRefusal, noticeTitle, RECEIVED_VIA_LABELS, type NoticeRow } from '@/lib/notices';
 import { termLabel } from '@/lib/tenancy-format';
 import { fileProblem } from '@/lib/upload';
 
@@ -91,6 +91,7 @@ export function NoticesCard({
               await load();
             }}
             onCancel={() => setRecording(false)}
+            onReload={() => void load()}
           />
         ) : null}
         {problem ? <LoadFailed message={problem} onRetry={() => void load()} /> : null}
@@ -130,10 +131,12 @@ function RecordReceived({
   leases,
   onSaved,
   onCancel,
+  onReload,
 }: {
   readonly leases: TenantDetailView['leases'];
   readonly onSaved: (text: string) => Promise<void>;
   readonly onCancel: () => void;
+  readonly onReload: () => void;
 }) {
   const { timeZone } = useApp();
   const today = todayIn(timeZone);
@@ -147,6 +150,7 @@ function RecordReceived({
   const file = useRef<HTMLInputElement>(null);
   const keeper = useIdempotencyKeeper();
   const keyedFor = useRef<string | null>(null);
+  const [uploads] = useState(() => new UploadCache());
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -160,8 +164,18 @@ function RecordReceived({
     if (wrong) return setError(wrong);
     setPending(true);
     try {
-      const uploadId = await uploadNoticeFile(document, 'received_notice', api().notices);
-      const content = JSON.stringify([leaseId, subtype, receivedOn, receivedVia, details.trim()]);
+      // A retry reuses the upload of the same file (review item 4).
+      const uploadId = await uploads.upload(document, 'received_notice', (file, purpose) =>
+        uploadNoticeFile(file, purpose, api().notices),
+      );
+      const content = JSON.stringify([
+        leaseId,
+        subtype,
+        receivedOn,
+        receivedVia,
+        details.trim(),
+        uploadId,
+      ]);
       if (keyedFor.current !== content) {
         keeper.reset();
         keyedFor.current = content;
@@ -178,7 +192,16 @@ function RecordReceived({
       );
       await onSaved(`Recorded the tenant’s ${NOTICE_SUBTYPE_LABELS[subtype].toLowerCase()}.`);
     } catch (failure) {
-      setError(toProblem(failure).message);
+      if (noticeRefusal(failure) === 'key_reused') {
+        keeper.reset();
+        keyedFor.current = null;
+        setError(
+          'An earlier attempt with other details was already recorded. The list below is up to date: check it before recording again.',
+        );
+        onReload();
+      } else {
+        setError(toProblem(failure).message);
+      }
       setPending(false);
     }
   }

@@ -18,7 +18,6 @@ import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem, type Problem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import {
-  approvedButReturned,
   draftOfFields,
   earliestText,
   fieldKind,
@@ -28,10 +27,11 @@ import {
   orderedWarnings,
   quitBarText,
   RECEIVED_VIA_LABELS,
+  returnedCallout,
 } from '@/lib/notices';
 import { useRequestGate } from '@/lib/request-gate';
 import { formatMinor } from '@/lib/tenancy-format';
-import { NoticeWarnings } from '../notice-warnings';
+import { NoticeWarnings } from '@/components/notice-warnings';
 import { CloseAndCorrect } from './notice-close';
 import { DraftActions } from './notice-draft-actions';
 import { LadderCard } from './notice-ladder';
@@ -106,6 +106,7 @@ export function NoticeTracker({
   }
 
   const live = isLiveStatus(notice.status);
+  const callout = returnedCallout(notice);
   return (
     <>
       {breadcrumb}
@@ -152,21 +153,19 @@ export function NoticeTracker({
 
       {message ? <Alert tone="success">{message}</Alert> : null}
 
-      {approvedButReturned(notice) ? (
-        <Alert tone="error" title="Approved, but it could not be issued">
-          <span data-testid="approved-not-issued">
-            Both approvals were given, but when it came to issue the notice no longer held, so it
-            went back to draft. Change the draft and submit it again.
+      {callout ? (
+        <Alert tone={callout.tone} title={callout.title}>
+          <span data-testid={callout.refusedAtIssue ? 'approved-not-issued' : 'notice-returned'}>
+            {callout.text}
           </span>
-          {notice.blockers.length ? (
-            <ul className="mt-1 list-disc pl-5">
-              {notice.blockers.map((b) => (
-                <li key={b.code}>{b.message}</li>
-              ))}
-            </ul>
+          {notice.returnedReason ? (
+            <p className="mt-1 text-xs">
+              <ReturnedTime at={notice.returnedReason.at} />
+            </p>
           ) : null}
         </Alert>
-      ) : notice.blockers.length ? (
+      ) : null}
+      {notice.blockers.length > 0 && !callout?.refusedAtIssue ? (
         <Alert tone="error" title="It cannot be issued as it stands">
           <ul className="list-disc space-y-1 pl-5" data-testid="notice-blockers">
             {notice.blockers.map((b) => (
@@ -203,7 +202,12 @@ export function NoticeTracker({
       {notice.recipients.length ? <RecipientsCard notice={notice} /> : null}
       {notice.issuedAt ? <LadderCard notice={notice} onChanged={changed} /> : null}
       {notice.issuedAt || notice.serviceRecords.length ? (
-        <ServiceCard notice={notice} personId={personId} onChanged={changed} />
+        <ServiceCard
+          notice={notice}
+          personId={personId}
+          onChanged={changed}
+          onReload={() => void load()}
+        />
       ) : null}
       {notice.tasks.length ? <TasksCard notice={notice} /> : null}
       {live || notice.actions.correct || notice.actions.close ? (
@@ -228,6 +232,11 @@ export function NoticeTracker({
   );
 }
 
+function ReturnedTime({ at }: { readonly at: string }) {
+  const { timeZone } = useApp();
+  return <time dateTime={at}>{formatTime(at, timeZone)}</time>;
+}
+
 function ClosedTime({ at }: { readonly at: string }) {
   const { timeZone } = useApp();
   return <time dateTime={at}>{formatTime(at, timeZone)}</time>;
@@ -235,7 +244,7 @@ function ClosedTime({ at }: { readonly at: string }) {
 
 const COMPLETION_TEXT: Record<NoticeDetail['completion'], string> = {
   any_one: 'One signature acknowledges receipt for the company, and stops every reminder.',
-  each: 'Each recipient acknowledges receipt for themselves.',
+  each: 'Each tenant and co-tenant acknowledges receipt for themself; the notice counts as signed once every one of them has.',
 };
 
 /** The facts the notice carries, frozen at issue. */

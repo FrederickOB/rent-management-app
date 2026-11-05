@@ -1,18 +1,12 @@
 'use client';
 
 import type { NoticeCompose, NoticeDetail } from '@rent/contracts';
-import {
-  NOTICE_FIELD_LABELS,
-  NOTICE_WITHHELD_REASON_LABELS,
-  type NoticeSubtype,
-  type NoticeType,
-} from '@rent/domain/notices';
+import { NOTICE_FIELD_LABELS, type NoticeSubtype, type NoticeType } from '@rent/domain/notices';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { LeasePicker } from '@/components/lease-picker';
 import { LoadFailed, Loading } from '@/components/load-state';
 import { Alert } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { CheckboxField, Field, SelectField, TextField, controlClass } from '@/components/ui/field';
@@ -22,7 +16,6 @@ import { toProblem } from '@/lib/errors';
 import { sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
 import type { PickedLease } from '@/lib/lease-pick';
 import {
-  CHANNEL_MODE_LABELS,
   composerFields,
   draftFingerprint,
   draftOfFields,
@@ -31,7 +24,6 @@ import {
   fieldErrorsOf,
   fieldKind,
   fieldsOfDraft,
-  noticeChannelName,
   noticeRefusal,
   orderedWarnings,
   quitBarText,
@@ -40,7 +32,8 @@ import {
   type NoticeTypeInfo,
 } from '@/lib/notices';
 import { formatMinor } from '@/lib/tenancy-format';
-import { NoticeWarnings } from './notice-warnings';
+import { NoticeChannelPlan } from '@/components/notice-channel-plan';
+import { NoticeWarnings } from '@/components/notice-warnings';
 
 type Types = Awaited<ReturnType<ReturnType<typeof api>['notices']['types']>>;
 type Option = { readonly id: string; readonly label: string };
@@ -562,45 +555,7 @@ function ComposeChecks({ check }: { readonly check: NoticeCompose }) {
       <Card data-testid="compose-recipients">
         <CardHeader title="Who receives it" level={3} />
         <CardBody>
-          {check.recipients.length === 0 ? (
-            <p className="text-sm text-slate-600">Nobody yet.</p>
-          ) : (
-            <ul className="space-y-3 text-sm">
-              {check.recipients.map((r) => (
-                <li key={`${r.partyTenantId}-${r.name}`} className="space-y-1">
-                  <p className="font-medium">
-                    {r.name}
-                    {r.unitCode ? (
-                      <span className="ml-1 font-mono text-xs">{r.unitCode}</span>
-                    ) : null}
-                  </p>
-                  <ul className="flex flex-wrap gap-1">
-                    {r.channels.map((c) => (
-                      <li key={c.channel}>
-                        <Badge
-                          tone={
-                            c.mode === 'withheld'
-                              ? 'amber'
-                              : c.mode === 'service'
-                                ? 'green'
-                                : 'blue'
-                          }
-                        >
-                          {noticeChannelName(c.channel)}: {CHANNEL_MODE_LABELS[c.mode]}
-                          {c.reason ? ` (${NOTICE_WITHHELD_REASON_LABELS[c.reason]})` : ''}
-                        </Badge>
-                      </li>
-                    ))}
-                  </ul>
-                  {r.physicalServicePlanned ? (
-                    <p className="text-amber-900">
-                      Physical service is planned from the day it is issued.
-                    </p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
+          <NoticeChannelPlan recipients={check.recipients} />
         </CardBody>
       </Card>
       {check.prefill.arrears ? (

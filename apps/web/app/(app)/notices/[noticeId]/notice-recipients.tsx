@@ -15,8 +15,8 @@ import { formatTime } from '@/lib/format';
 import {
   CHANNEL_MODE_LABELS,
   eventsByRecipient,
-  isLiveStatus,
   noticeChannelName,
+  RECIPIENT_KIND_LABELS,
   recordKindLabel,
   type NoticeEvent,
   type NoticeRecipient,
@@ -30,8 +30,8 @@ import {
 export function RecipientsCard({ notice }: { readonly notice: NoticeDetail }) {
   const groups = eventsByRecipient(notice.events);
   const general = groups.get(null) ?? [];
-  // Handing a link over in person goes with serving the notice (decision 6).
-  const mayHandOver = isLiveStatus(notice.status) && notice.actions.recordService;
+  // C2: the API says who may show a recipient's handover link (decision 6).
+  const mayHandOver = notice.actions.handover;
   return (
     <Card data-testid="notice-recipients">
       <CardHeader
@@ -82,7 +82,7 @@ function RecipientItem({
     <li className="space-y-2" data-testid="notice-recipient">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-base font-semibold text-slate-900">{recipient.name}</span>
-        <Badge>{recipient.kind === 'signatory' ? 'Authorised signatory' : 'Tenant'}</Badge>
+        <Badge>{RECIPIENT_KIND_LABELS[recipient.kind]}</Badge>
         {recipient.status ? (
           <span data-testid="recipient-status">
             <Badge tone={recipient.acknowledged ? 'green' : 'blue'}>

@@ -198,6 +198,8 @@ const WARNING_TITLES: Record<NoticeWarning['code'], string> = {
   electronic_service_withheld: 'Electronic service is withheld',
   counsel_wording_outstanding: 'The wording is still to come from your lawyer',
   no_period_enforced: 'No notice period is enforced for this type',
+  lease_notice_days_zero: 'The lease gives no notice period',
+  no_assessment_on_record: 'No Rent Officer assessment is on record',
 };
 
 /** A warning's heading; the API's message is shown under it, with the rule it names. */
@@ -210,7 +212,9 @@ const WARNING_ORDER: readonly NoticeWarning['code'][] = [
   'statutory_minimum_unverified',
   'statutory_minimum_not_set',
   'assessment_bar_unverified',
+  'lease_notice_days_zero',
   'no_period_enforced',
+  'no_assessment_on_record',
   'no_electronic_service_clause',
   'electronic_service_withheld',
   'counsel_wording_outstanding',
@@ -287,6 +291,8 @@ export const NOTICE_RECORD_KIND_LABELS: Record<NoticeRecordKind, string> = {
   service_pack_ready: 'Service pack ready',
   served_too_late: 'Served too late for its date',
   link_issued: 'Link handed over',
+  reminder_not_sent: 'Reminder not sent: no channel',
+  escalation_requested: 'Escalation requested',
 };
 
 export const recordKindLabel = (kind: string): string =>
@@ -322,7 +328,9 @@ export function noticeTitle(notice: {
 /**
  * Decision 8 and plan 4.3: a notice to quit issues itself when its approval completes; when the
  * date or the s.23 bar no longer held then, it went back to draft with the reason while the
- * approval still reads approved. The tracker says so plainly.
+ * approval still reads approved. Superseded in the review round by `returnedCallout`, which reads
+ * C1's `lastApproval` and `returnedReason` (`approval` is now null for every draft). Kept with its
+ * unit test, which has passed.
  */
 export function approvedButReturned(
   notice: Pick<NoticeDetail, 'status' | 'approval' | 'blockers'>,
@@ -503,12 +511,18 @@ export function instantOfLocal(local: string, timeZone: string): string | null {
   }
 }
 
-/** Now in the company's time zone, as a `datetime-local` value (`2026-11-04T09:30`). */
-export function localNow(timeZone: string, now: Date = new Date()): string {
-  return instantFrom(now)
-    .toZonedDateTimeISO(timeZone)
-    .toPlainDateTime()
-    .toString({ smallestUnit: 'minute' });
+/**
+ * Now in the company's time zone, as a `datetime-local` value (`2026-11-04T09:30`). With
+ * `second`, to the second (`2026-11-04T09:30:45`): a service form opened moments after issue
+ * must not default to a time before it, which the minute alone can (the API refuses service
+ * before issue).
+ */
+export function localNow(
+  timeZone: string,
+  now: Date = new Date(),
+  smallestUnit: 'minute' | 'second' = 'minute',
+): string {
+  return instantFrom(now).toZonedDateTimeISO(timeZone).toPlainDateTime().toString({ smallestUnit });
 }
 
 // The ladder's steps and controls (LN-05) --------------------------------------------------------
@@ -546,4 +560,166 @@ export const RECEIVED_VIA_LABELS: Record<
   whatsapp: 'On WhatsApp',
   sms: 'By SMS',
   other: 'Another way',
+};
+
+// Checks for a saved draft (review round: the channel plan on the tracker, D-E) -----------------
+
+/** The composer's check for a saved draft: the same question the composer asks. */
+export function composeInputOf(
+  notice: Pick<NoticeDetail, 'type' | 'subtype' | 'leaseId' | 'property' | 'blockIds' | 'fields'>,
+) {
+  return {
+    type: notice.type,
+    subtype: notice.subtype,
+    ...(notice.type === 'building_wide'
+      ? { propertyId: notice.property.id, blockIds: [...notice.blockIds] }
+      : { leaseId: notice.leaseId }),
+    fields: { ...notice.fields },
+  };
+}
+
+/**
+ * D-E: submitting and issuing wait while the stated date is earlier than the earliest lawful date
+ * (plan 4.3: the composer refuses it). Saving a draft stays allowed.
+ */
+export const tooEarly = (check: Pick<NoticeCompose, 'effectiveCheck'> | null): boolean =>
+  check?.effectiveCheck?.ok === false;
+
+type Planned = Pick<
+  NoticeCompose['recipients'][number],
+  'name' | 'channels' | 'physicalServicePlanned'
+>;
+
+/**
+ * The confirmation before issuing (review item 5): who it goes to on which channels now, what is
+ * withheld, and who is to be served physically. One sentence per recipient.
+ */
+export function issuePlanLines(recipients: readonly Planned[]): string[] {
+  return recipients.map((r) => {
+    const sent = r.channels
+      .filter((c) => c.mode !== 'withheld')
+      .map(
+        (c) => `${noticeChannelName(c.channel)}${c.mode === 'courtesy' ? ' (courtesy copy)' : ''}`,
+      );
+    const withheld = r.channels
+      .filter((c) => c.mode === 'withheld')
+      .map((c) => noticeChannelName(c.channel));
+    const parts = [
+      sent.length ? `${r.name}: by ${sent.join(', ')}` : `${r.name}: no electronic copy`,
+      withheld.length ? `${withheld.join(', ')} withheld` : null,
+      r.physicalServicePlanned ? 'physical service planned' : null,
+    ].filter(Boolean);
+    return `${parts.join('; ')}.`;
+  });
+}
+
+// Approving a notice (review items 1 and 2) -----------------------------------------------------
+
+type ApprovedNotice = Pick<
+  NoticeDetail,
+  | 'issuedAt'
+  | 'number'
+  | 'status'
+  | 'blockers'
+  | 'type'
+  | 'tenant'
+  | 'unitCode'
+  | 'effectiveDate'
+  | 'property'
+> & { readonly returnedReason?: { readonly message: string } | null };
+
+/**
+ * What happened after approving a notice, read from the notice itself: approving does not mean it
+ * took effect. A notice issues on its approval; when the date or the s.23 bar no longer held, it
+ * went back to draft with the reason (decision 8; plan 4.3).
+ */
+export function noticeApprovalOutcome(notice: ApprovedNotice): string {
+  if (notice.issuedAt)
+    return `Approved. The notice was issued${notice.number ? ` as ${notice.number}` : ''} and is on its way.`;
+  if (notice.status === 'draft') {
+    const reason = notice.returnedReason?.message ?? notice.blockers[0]?.message ?? null;
+    return `Approved, but the notice could not be issued, so it went back to draft${reason ? `: ${reason}` : '.'}`;
+  }
+  return 'Approved. The notice is being issued: open it to follow its progress.';
+}
+
+/** The confirmation that names a notice to quit before it is approved (review item 1). */
+export function approveQuitText(notice: ApprovedNotice): string {
+  const to = notice.tenant?.name ?? `the tenants of ${notice.property.name}`;
+  const unit = notice.unitCode ? ` (${notice.unitCode})` : '';
+  const date = notice.effectiveDate
+    ? `, effective ${formatBusinessDate(notice.effectiveDate)}`
+    : '';
+  return `Approve the notice to quit to ${to}${unit}${date}? It is issued as soon as you approve: the tenant is served and it is posted on the premises. It never ends the tenancy by itself.`;
+}
+
+// Why a draft is a draft again (review item 2; C1) -----------------------------------------------
+
+export interface ReturnedCallout {
+  readonly tone: 'error' | 'warning' | 'info';
+  readonly title: string;
+  readonly text: string;
+  /** An approved notice that could not issue: the date or the s.23 bar no longer held. */
+  readonly refusedAtIssue: boolean;
+}
+
+type Returned = Pick<NoticeDetail, 'status' | 'lastApproval' | 'returnedReason'>;
+
+/**
+ * What the tracker says about a draft that came back (C1): a notice approved but refused at issue,
+ * a rejected, expired or cancelled approval, or one staff took back. Null for any other notice.
+ */
+export function returnedCallout(notice: Returned): ReturnedCallout | null {
+  const reason = notice.returnedReason;
+  if (notice.status !== 'draft' || !reason) return null;
+  const approval = notice.lastApproval;
+  const by = approval?.decidedByName ? ` by ${approval.decidedByName}` : '';
+  switch (reason.code) {
+    case 'approval.rejected':
+      return {
+        tone: 'warning',
+        title: `Rejected${by}`,
+        text: `The approval request was rejected, so the notice is back in draft. ${reason.message}`.trim(),
+        refusedAtIssue: false,
+      };
+    case 'approval.expired':
+      return {
+        tone: 'warning',
+        title: 'The approval request expired',
+        text: 'Nobody decided it in time, so the notice is back in draft. Submit it again when it is ready.',
+        refusedAtIssue: false,
+      };
+    case 'approval.cancelled':
+      return {
+        tone: 'info',
+        title: 'The approval request was cancelled',
+        text: `The notice is back in draft. ${reason.message}`.trim(),
+        refusedAtIssue: false,
+      };
+    case 'notice.taken_back':
+      return {
+        tone: 'info',
+        title: 'Taken back to change it',
+        text: 'Its approval request was withdrawn. Submit it again once it is changed.',
+        refusedAtIssue: false,
+      };
+    default: {
+      const quit = approval?.actionType === 'notice.issue_quit';
+      return {
+        tone: 'error',
+        title: quit
+          ? `Approved by a second person${by}, but it could not be issued`
+          : `Approved${by}, but it could not be issued`,
+        text: `When it came to issue, the notice no longer held, so it went back to draft: ${reason.message} Change the draft and submit it again.`,
+        refusedAtIssue: true,
+      };
+    }
+  }
+}
+
+/** Who a recipient is (decision 7; C3). */
+export const RECIPIENT_KIND_LABELS: Record<'tenant' | 'co_tenant' | 'signatory', string> = {
+  tenant: 'Tenant',
+  co_tenant: 'Co-tenant',
+  signatory: 'Authorised signatory',
 };

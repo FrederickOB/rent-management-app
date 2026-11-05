@@ -12,8 +12,9 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Field, SelectField, controlClass } from '@/components/ui/field';
-import { api } from '@/lib/api';
+import { api, keyedApi } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
 
 type StaffOutcome = Exclude<NoticeOutcome, 'superseded'>;
 
@@ -35,6 +36,8 @@ export function CloseAndCorrect({
   const [note, setNote] = useState('');
   const [pending, setPending] = useState<'close' | 'correct' | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // C5: starting a correction is an append-only create, keyed so a retry makes one draft.
+  const keeper = useIdempotencyKeeper();
   if (!notice.actions.close && !notice.actions.correct) return null;
 
   async function close(event: FormEvent<HTMLFormElement>) {
@@ -64,7 +67,9 @@ export function CloseAndCorrect({
     setPending('correct');
     setProblem(null);
     try {
-      const draft = await api().notices.correct({ noticeId: notice.id });
+      const draft = await sendOnce(keeper, (key) =>
+        keyedApi(key).notices.correct({ noticeId: notice.id }),
+      );
       router.push(`/notices/${draft.id}/edit`);
     } catch (failure) {
       setProblem(toProblem(failure).message);
