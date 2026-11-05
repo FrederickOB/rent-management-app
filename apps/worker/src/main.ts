@@ -30,7 +30,8 @@ import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
 import { LedgerModule } from '@rent/server/ledger';
-import { MaintenanceModule } from '@rent/server/maintenance';
+import { MaintenanceModule, MaintenanceService } from '@rent/server/maintenance';
+import { MoveInReportService, MoveOutModule, MoveOutService } from '@rent/server/moveout';
 import { NoticesModule, NoticeTrackingService } from '@rent/server/notices';
 import { TasksModule } from '@rent/server/tasks';
 import {
@@ -70,6 +71,7 @@ import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
 import { MESSAGING_EVENT_TYPES, messagingJobs } from './messaging.jobs';
+import { MAINTENANCE_EVENT_TYPES, maintenanceJobs, moveOutOnRendered } from './maintenance.jobs';
 import { NOTICES_EVENT_TYPES, noticesJobs, noticesOnRendered } from './notices.jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
@@ -98,6 +100,7 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     // M7: legal notices and staff tasks.
     TasksModule,
     NoticesModule,
+    MoveOutModule,
   ],
 })
 class WorkerModule {}
@@ -150,6 +153,8 @@ const definitions = [
         app.get(BotService).onDocumentRendered(companyId, renderRequestId),
       // M7 (plan 4.12, notices.issue-delivery): the frozen notice recorded and its links sent.
       noticesOnRendered(app.get(NoticeTrackingService)),
+      // M8 (plan 4.13): the final statement recorded and sent to the tenant.
+      moveOutOnRendered(app.get(MoveOutService)),
     ],
   }),
   ...messagingJobs({
@@ -176,6 +181,12 @@ const definitions = [
     queue: app.get(QueueService),
   }),
   ...noticesJobs({ ...deps, tracking: app.get(NoticeTrackingService) }),
+  ...maintenanceJobs({
+    ...deps,
+    maintenance: app.get(MaintenanceService),
+    reports: app.get(MoveInReportService),
+    moveOuts: app.get(MoveOutService),
+  }),
   ...taxJobs({
     ...deps,
     taxAlerts: app.get(TaxAlertsService),
@@ -200,6 +211,7 @@ const relay = new OutboxRelay(
     ...PAYMENTS_EVENT_TYPES,
     ...MESSAGING_EVENT_TYPES,
     ...NOTICES_EVENT_TYPES,
+    ...MAINTENANCE_EVENT_TYPES,
   ]),
 );
 await relay.start();

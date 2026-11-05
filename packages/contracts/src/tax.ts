@@ -84,7 +84,7 @@ export type RentTaxItemView = z.infer<typeof rentTaxItemSchema>;
 export const rentTaxNotAssessedSchema = z.object({
   /** The P17 key it is assessed on: `P17:<payment>`, `P17:<carry-over>` or `P17:<withholding>`. */
   eventKey: z.string(),
-  event: z.enum(['receipt', 'carry_over', 'withholding']),
+  event: z.enum(['receipt', 'carry_over', 'deposit_applied', 'withholding']),
   leaseId: uuid,
   ownerId: uuid,
   unitCode: z.string(),

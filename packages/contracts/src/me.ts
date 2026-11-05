@@ -47,4 +47,17 @@ export const meContract = {
     })
     .input(z.object({ companyId: z.string().uuid() }))
     .output(meSchema),
+  /** M8 (decision 5): the signed-in staff member's own WhatsApp opt-in, from their profile. */
+  whatsappConsent: oc
+    .route({ method: 'GET', path: '/me/whatsapp-consent' })
+    .output(z.object({ granted: z.boolean(), phoneMasked: z.string().nullable() })),
+  setWhatsappConsent: oc
+    .route({
+      method: 'POST',
+      path: '/me/whatsapp-consent',
+      summary:
+        'Agree to, or withdraw from, emergency alerts on WhatsApp in this company (a consent record)',
+    })
+    .input(z.object({ granted: z.boolean() }))
+    .output(z.object({ granted: z.boolean(), phoneMasked: z.string().nullable() })),
 };

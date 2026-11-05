@@ -288,7 +288,7 @@ export function alertDaysOf(value: unknown): number[] {
 
 /** A rent tax event that could not be assessed (M5 review 7), as the audit log keeps it. */
 export interface NotAssessedEvent {
-  readonly event: 'receipt' | 'carry_over' | 'withholding';
+  readonly event: 'receipt' | 'carry_over' | 'deposit_applied' | 'withholding';
   /** The P17 key its assessment uses: `P17:<payment>`, `P17:<carry-over>` or `P17:<withholding>`. */
   readonly eventKey: string;
   readonly leaseId: string;

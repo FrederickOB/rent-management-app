@@ -114,6 +114,22 @@ export const POLICY_ACTIONS = [
   'tasks.read',
   'tasks.complete',
   'tasks.manage',
+  // M8 (plan 4.12; decision 9). `maintenance.view` stays M6's (the inbox's repair links); the
+  // board's read-only access for accountants, an agency's client owners and advisers is
+  // `maintenance.read`. Growth-only parts are checked by EntitlementsService (decision 1).
+  'maintenance.read',
+  'maintenance.report',
+  'maintenance.manage',
+  'maintenance.attend',
+  // Decision 5: who an emergency alert goes to (the property's managers and caretakers).
+  'maintenance.alert',
+  'artisan.manage',
+  'inspection.read',
+  'inspection.perform',
+  'moveout.manage',
+  'moveout.settle',
+  'expense.read',
+  'expense.record',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -413,6 +429,47 @@ const STAFF_MATRIX: Record<
   'tasks.complete': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
   // Cancelling a task: managers and admins, never the caretaker it is assigned to.
   'tasks.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // M8 (plan 4.12; decision 9). Scope applies to every row: owner scope for an agency's client
+  // owners and advisers, property scope for caretakers. Read-only access: accountants, client
+  // owners and advisers see jobs, photos, cost and history. Managers, admins and landlords manage;
+  // caretakers report, attend, inspect and record work on their own properties.
+  'maintenance.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'maintenance.report': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'maintenance.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'maintenance.attend': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'maintenance.alert': ['property_manager', 'caretaker'],
+  'artisan.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'inspection.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'inspection.perform': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  // Move-out: managers, admins and landlords plan it and draft the settlement; the settlement is
+  // approved through approvals by a money approver who did not ask for it (AD-05).
+  'moveout.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'moveout.settle': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'expense.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'expense.record': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
 };
 
 /** Platform-level actions: platform admins only, never staff of a company (M6 decisions 3 and 9). */

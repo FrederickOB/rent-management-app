@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import {
   CreateBucketCommand,
   DeleteObjectCommand,
@@ -69,6 +70,22 @@ export interface WriteOnceRequest extends PutRequest {
   readonly mode: RetentionMode;
 }
 
+/**
+ * M8 (decision 2): a write-once object streamed rather than held in memory, for videos and voice
+ * notes. The caller has hashed it already (streaming it once), so the store can verify it.
+ */
+export interface WriteOnceStreamRequest {
+  readonly bucket: string;
+  readonly key: string;
+  readonly body: Readable;
+  readonly sizeBytes: number;
+  /** SHA-256 of the body, lowercase hex; the store rejects a body that does not match. */
+  readonly sha256: string;
+  readonly contentType: string;
+  readonly retainUntil: Date;
+  readonly mode: RetentionMode;
+}
+
 export interface StoredObject {
   /** Null only in a bucket without versioning. */
   readonly versionId: string | null;
@@ -114,6 +131,12 @@ export interface StoragePort {
   /** Null when the object, the version or the bucket does not exist, or it is a delete marker. */
   head(ref: ObjectRef): Promise<ObjectInfo | null>;
   get(ref: ObjectRef): Promise<Buffer>;
+  /** M8: the object as a stream, so a large file is never held in memory. */
+  getStream(ref: ObjectRef): Promise<Readable>;
+  /** M8: at most the first `length` bytes (fewer for a smaller object), to check its type. */
+  getHead(ref: ObjectRef, length: number): Promise<Buffer>;
+  /** M8: `putWriteOnce` for a streamed body of a known size and SHA-256. */
+  putWriteOnceStream(request: WriteOnceStreamRequest): Promise<WriteOnceResult>;
   /** With a version id, removes that version unless it is retained; without, adds a delete marker. */
   delete(ref: ObjectRef): Promise<DeleteResult>;
   /**
@@ -195,7 +218,7 @@ function assertUpload(request: UploadUrlRequest): void {
   }
 }
 
-function assertRetention(request: WriteOnceRequest, now: Date): void {
+function assertRetention(request: Pick<WriteOnceRequest, 'retainUntil' | 'mode'>, now: Date): void {
   if (request.mode !== 'GOVERNANCE' && request.mode !== 'COMPLIANCE') {
     throw new StorageError('invalid_request', 'Retention mode must be GOVERNANCE or COMPLIANCE');
   }
@@ -221,6 +244,13 @@ function attachmentDisposition(filename: string): string {
 }
 
 const sha256 = (body: Uint8Array) => createHash('sha256').update(body).digest();
+
+function assertStream(request: WriteOnceStreamRequest): void {
+  if (!Number.isSafeInteger(request.sizeBytes) || request.sizeBytes < 1)
+    throw new StorageError('invalid_request', 'A streamed object has a size of at least one byte');
+  if (!/^[0-9a-f]{64}$/.test(request.sha256))
+    throw new StorageError('invalid_request', 'A streamed object needs its SHA-256 in hex');
+}
 
 function storageErrorFrom(error: unknown, what: string): StorageError {
   if (error instanceof StorageError) return error;
@@ -412,6 +442,62 @@ export class S3Storage implements StoragePort {
         throw new StorageError('not_found', `get ${ref.bucket}/${ref.key}: no body`);
       return Buffer.from(await result.Body.transformToByteArray());
     });
+  }
+
+  async getStream(ref: ObjectRef): Promise<Readable> {
+    return attempt(`get stream ${ref.bucket}/${ref.key}`, async () => {
+      const result = await this.client.send(
+        new GetObjectCommand({ Bucket: ref.bucket, Key: ref.key, VersionId: ref.versionId }),
+      );
+      if (!result.Body)
+        throw new StorageError('not_found', `get ${ref.bucket}/${ref.key}: no body`);
+      // In Node the SDK's body is a Readable already.
+      return result.Body as unknown as Readable;
+    });
+  }
+
+  async getHead(ref: ObjectRef, length: number): Promise<Buffer> {
+    if (!Number.isSafeInteger(length) || length < 1)
+      throw new StorageError('invalid_request', 'Ask for at least one byte');
+    return attempt(`get head ${ref.bucket}/${ref.key}`, async () => {
+      const result = await this.client.send(
+        new GetObjectCommand({
+          Bucket: ref.bucket,
+          Key: ref.key,
+          VersionId: ref.versionId,
+          Range: `bytes=0-${length - 1}`,
+        }),
+      );
+      if (!result.Body)
+        throw new StorageError('not_found', `get ${ref.bucket}/${ref.key}: no body`);
+      return Buffer.from(await result.Body.transformToByteArray()).subarray(0, length);
+    });
+  }
+
+  async putWriteOnceStream(request: WriteOnceStreamRequest): Promise<WriteOnceResult> {
+    assertKey(request.key);
+    assertContentType(request.contentType);
+    assertRetention(request, new Date());
+    assertStream(request);
+    const result = await attempt(`put write-once ${request.bucket}/${request.key}`, () =>
+      this.client.send(
+        new PutObjectCommand({
+          Bucket: request.bucket,
+          Key: request.key,
+          Body: request.body,
+          ContentLength: request.sizeBytes,
+          ContentType: request.contentType,
+          ChecksumSHA256: Buffer.from(request.sha256, 'hex').toString('base64'),
+          IfNoneMatch: '*',
+          ObjectLockMode: request.mode,
+          ObjectLockRetainUntilDate: request.retainUntil,
+        }),
+      ),
+    );
+    if (!result.VersionId) {
+      throw new StorageError('invalid_request', `${request.bucket} returned no version id`);
+    }
+    return { versionId: result.VersionId, sha256: request.sha256 };
   }
 
   async delete(ref: ObjectRef): Promise<DeleteResult> {
@@ -668,6 +754,36 @@ export class InMemoryStorage implements StoragePort {
       throw new StorageError('not_found', `${ref.bucket}/${ref.key} not found`, 404);
     }
     return Buffer.from(version.body);
+  }
+
+  async getStream(ref: ObjectRef): Promise<Readable> {
+    const body = await this.get(ref);
+    // Small chunks, so a reader that stops early is exercised as against a real store.
+    return Readable.from(
+      Array.from({ length: Math.ceil(body.length / 65_536) }, (_, i) =>
+        body.subarray(i * 65_536, (i + 1) * 65_536),
+      ),
+    );
+  }
+
+  async getHead(ref: ObjectRef, length: number): Promise<Buffer> {
+    if (!Number.isSafeInteger(length) || length < 1)
+      throw new StorageError('invalid_request', 'Ask for at least one byte');
+    return (await this.get(ref)).subarray(0, length);
+  }
+
+  async putWriteOnceStream(request: WriteOnceStreamRequest): Promise<WriteOnceResult> {
+    assertStream(request);
+    const chunks: Buffer[] = [];
+    for await (const chunk of request.body) chunks.push(Buffer.from(chunk as Uint8Array));
+    const body = Buffer.concat(chunks);
+    if (body.length !== request.sizeBytes || sha256(body).toString('hex') !== request.sha256)
+      throw new StorageError(
+        'invalid_request',
+        'The body does not match its size and SHA-256',
+        400,
+      );
+    return this.putWriteOnce({ ...request, body });
   }
 
   async delete(ref: ObjectRef): Promise<DeleteResult> {

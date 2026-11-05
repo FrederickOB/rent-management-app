@@ -57,6 +57,8 @@ export function billingJobs(
   ) =>
     defineJob({
       name: type,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: leaseEvent,
       retry: { limit: 5, delaySeconds: 30, backoff: true },

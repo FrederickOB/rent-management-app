@@ -59,6 +59,18 @@ export const APPEND_ONLY_TABLES = [
   'rent_assessment',
   'rent_assessment_void',
   'notice_quit_acknowledgement',
+  // M8: staff and artisan consent, the job's history, inspection photos, expenses, and the
+  // deposit's deductions and applications at move-out.
+  'contact_consent_event',
+  'maintenance_job_event',
+  'inspection_photo',
+  'expense',
+  'expense_payment',
+  'expense_reversal',
+  'deposit_deduction',
+  'deposit_deduction_withdrawal',
+  'deposit_application',
+  'move_out_refund_part',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */

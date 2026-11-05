@@ -4,6 +4,7 @@ import {
   LADDER_NOTICE_TYPES,
   laddersMissingEscalation,
 } from '@rent/domain/notices';
+import { maintenanceTargetsSchema } from '@rent/domain/maintenance';
 import { inboxTag, INTERIM_PLANS, PLAN_FEATURES } from '@rent/domain/settings';
 import { z } from 'zod';
 
@@ -97,6 +98,12 @@ export const companySettingsSchema = z.object({
   noticeSendWindow: z.object({ from: timeOfDay, to: timeOfDay }).strict().optional(),
   /** LN-02 (prd-issues 27): days a notice link works for a type without a notice period (90). */
   noticeLinkExpiryDays: z.number().int().min(30).max(366).optional(),
+  // M8 (decisions 4 and 7), optional so clients written before M8 keep their types. GET returns
+  // the values in force, defaults applied.
+  /** MI-02: respond and complete targets per priority, calendar hours (emergency 2 h and 24 h, urgent 24 h and 3 days, routine 3 and 14 days). */
+  maintenanceTargets: maintenanceTargetsSchema.optional(),
+  /** MI-06: days after work done that a job closes without the tenant's reply (7). */
+  maintenanceAutoCloseDays: z.number().int().min(1).max(60).optional(),
 });
 
 export const companyProfileSchema = z.object({

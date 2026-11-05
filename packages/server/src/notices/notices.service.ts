@@ -1043,7 +1043,12 @@ export class NoticesService implements OnModuleInit {
       const notice = await noticeRow(tx, noticeId, true);
       if (!LIVE.includes(notice.status) && notice.status !== 'closed')
         throw conflict('notice_not_issued', 'Only an issued notice is served');
-      if (notice.issuedAt && servedAt.getTime() < notice.issuedAt.getTime())
+      // The form gives the time to the minute: a notice issued at 23:33:40 and served at "23:33"
+      // was served in the minute it was issued. Only a time before that minute is refused.
+      if (
+        notice.issuedAt &&
+        servedAt.getTime() < Math.floor(notice.issuedAt.getTime() / 60_000) * 60_000
+      )
         throw invalid('served_before_issue', 'A notice cannot be served before it was issued');
       const recipients = await recipientsOf(tx, noticeId);
       const recipient = input.recipientId

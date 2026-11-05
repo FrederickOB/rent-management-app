@@ -35,6 +35,13 @@ export interface JobDefinition<T = unknown> {
   readonly retry: RetryPolicy;
   /** Cron expression in Africa/Accra time, for scheduled system jobs. */
   readonly cron?: string;
+  /**
+   * For a high-volume queue (`messaging.send`): while jobs are waiting, fetch the next one as soon
+   * as the last one ends, instead of pausing the polling interval after every job. Jobs still run
+   * one at a time, each fetched alone in queue order (priority, then creation), and each settles
+   * and retries on its own. A fetch that finds nothing waits the interval as usual.
+   */
+  readonly drain?: boolean;
   handle(payload: T, ctx: JobContext): Promise<void>;
   /**
    * Runs once the job has failed its last retry (or expired), after the dead-letter alert, so

@@ -12,6 +12,7 @@ import { IdentityModule } from '@rent/server/identity';
 import { LedgerModule } from '@rent/server/ledger';
 import { MaintenanceModule } from '@rent/server/maintenance';
 import { MessagingModule } from '@rent/server/messaging';
+import { MoveOutModule } from '@rent/server/moveout';
 import { NoticesModule } from '@rent/server/notices';
 import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
@@ -29,12 +30,20 @@ import { ActorGuard, PermissionGuard } from './http/guards';
 import { HealthController } from './health/health.controller';
 import { LinksController } from './links/links.controller';
 import { OpenApiController } from './health/openapi.controller';
+import {
+  ArtisansController,
+  ExpensesController,
+  InspectionsController,
+  JobSheetsController,
+  MaintenanceController,
+  MoveOutsController,
+  TenantRepairsController,
+} from './maintenance/maintenance.controller';
 import { MeController } from './me/me.controller';
 import { InboxStreamController } from './messaging/inbox-stream.controller';
 import {
   BroadcastsController,
   InboxController,
-  MaintenanceController,
   MessagingConsentController,
   MessagingSettingsController,
   TenantMessagingController,
@@ -76,6 +85,7 @@ export class AppModule {
         EsignModule,
         TenancyModule,
         MaintenanceModule,
+        MoveOutModule,
         MessagingModule,
         LedgerModule,
         BillingModule,
@@ -124,6 +134,12 @@ export class AppModule {
         TenantMessagingController,
         UnsubscribeLinksController,
         MaintenanceController,
+        ArtisansController,
+        JobSheetsController,
+        InspectionsController,
+        ExpensesController,
+        TenantRepairsController,
+        MoveOutsController,
         // M7 notices, the OQ-16 acknowledgement, Rent Officer assessments and tasks.
         NoticesController,
         QuitAcknowledgementController,

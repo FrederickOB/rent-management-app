@@ -20,6 +20,7 @@ import {
   checkTaskTransition,
   TASK_KIND_LABELS,
   type TaskKind,
+  type TaskRelatedType,
   type TaskStatus,
 } from '@rent/domain/tasks';
 import type { Clock } from '../core/clock';
@@ -39,13 +40,15 @@ export interface TaskView {
   readonly property: { readonly id: string; readonly name: string };
   readonly unitCode: string | null;
   readonly tenantName: string | null;
-  readonly relatedType: 'notice';
+  readonly relatedType: TaskRelatedType;
   readonly relatedId: string;
   readonly notice: {
     readonly id: string;
     readonly number: string | null;
     readonly typeLabel: string;
   } | null;
+  /** M8: the maintenance job an attend task is for. */
+  readonly job: { readonly id: string; readonly ticket: string } | null;
   readonly assignee: { readonly personId: string; readonly name: string } | null;
   readonly dueAt: Date;
   readonly note: string | null;
@@ -64,7 +67,10 @@ export interface NewTask {
   readonly tenantId: string | null;
   readonly kind: TaskKind;
   readonly title: string;
-  readonly noticeId: string;
+  /** What the task is about: a notice (M7), a maintenance job or an inspection (M8). */
+  readonly noticeId?: string | null;
+  readonly jobId?: string | null;
+  readonly inspectionId?: string | null;
   readonly recipientId: string | null;
   readonly assigneePersonId: string | null;
   readonly dueAt: Date;
@@ -107,7 +113,7 @@ export class TasksService {
   ) {}
 
   /** A module that makes tasks names its records for the lists (the notices module). */
-  useRelated(type: 'notice', describer: RelatedDescriber): void {
+  useRelated(type: TaskRelatedType, describer: RelatedDescriber): void {
     this.describers.set(type, describer);
   }
 
@@ -202,8 +208,10 @@ export class TasksService {
         tenantId: input.tenantId,
         kind: input.kind,
         title: input.title.slice(0, 200),
-        relatedType: 'notice',
-        noticeId: input.noticeId,
+        relatedType: input.jobId ? 'maintenance_job' : input.inspectionId ? 'inspection' : 'notice',
+        noticeId: input.noticeId ?? null,
+        jobId: input.jobId ?? null,
+        inspectionId: input.inspectionId ?? null,
         recipientId: input.recipientId,
         assigneePersonId: input.assigneePersonId,
         dueAt: input.dueAt,
@@ -232,7 +240,9 @@ export class TasksService {
   async closeOpen(
     tx: Tx,
     where: {
-      readonly noticeId: string;
+      /** M7: a notice's tasks; M8: a maintenance job's. */
+      readonly noticeId?: string;
+      readonly jobId?: string;
       readonly kinds: readonly TaskKind[];
       readonly recipientIds?: readonly string[] | null;
     },
@@ -250,7 +260,9 @@ export class TasksService {
       )
       .where(
         and(
-          eq(schema.task.noticeId, where.noticeId),
+          where.jobId
+            ? eq(schema.task.jobId, where.jobId)
+            : eq(schema.task.noticeId, where.noticeId ?? '00000000-0000-0000-0000-000000000000'),
           eq(schema.task.status, 'open'),
           inArray(schema.task.kind, [...where.kinds]),
           where.recipientIds
@@ -459,6 +471,9 @@ export class TasksService {
     const noticeIds = ids((r) => r.noticeId);
     const describer = this.describers.get('notice');
     const notices = describer && noticeIds.length ? await describer(tx, noticeIds) : new Map();
+    const jobIds = ids((r) => r.jobId);
+    const jobDescriber = this.describers.get('maintenance_job');
+    const jobs = jobDescriber && jobIds.length ? await jobDescriber(tx, jobIds) : new Map();
     const name = (id: string | null) =>
       id ? (people.find((p) => p.id === id)?.name ?? null) : null;
     return rows.map((r) => {
@@ -475,9 +490,13 @@ export class TasksService {
         },
         unitCode: r.unitId ? (units.find((u) => u.id === r.unitId)?.code ?? null) : null,
         tenantName: r.tenantId ? (tenants.find((t) => t.id === r.tenantId)?.name ?? null) : null,
-        relatedType: 'notice',
-        relatedId: r.noticeId!,
+        relatedType: r.relatedType as TaskRelatedType,
+        relatedId: (r.noticeId ?? r.jobId ?? r.inspectionId)!,
         notice: r.noticeId && related ? { id: r.noticeId, ...related } : null,
+        job:
+          r.jobId && jobs.get(r.jobId)
+            ? { id: r.jobId, ticket: jobs.get(r.jobId)!.number ?? '' }
+            : null,
         assignee: r.assigneePersonId
           ? { personId: r.assigneePersonId, name: name(r.assigneePersonId) ?? '' }
           : null,

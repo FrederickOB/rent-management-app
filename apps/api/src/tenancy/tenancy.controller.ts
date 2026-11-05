@@ -3,7 +3,8 @@ import { Implement, implement } from '@orpc/nest';
 import { contract } from '@rent/contracts';
 import { TenantNoticesService } from '@rent/server/notices';
 import { PLACEHOLDERS } from '@rent/domain/tenancy';
-import { forbidden } from '@rent/server/core';
+import { forbidden, notFound } from '@rent/server/core';
+import { MoveInReportService } from '@rent/server/moveout';
 import {
   IdChecksService,
   LeaseDocumentsService,
@@ -228,6 +229,7 @@ export class TenantAppController {
   constructor(
     @Inject(TenantAppService) private readonly app: TenantAppService,
     @Inject(TenantNoticesService) private readonly notices: TenantNoticesService,
+    @Inject(MoveInReportService) private readonly reports: MoveInReportService,
   ) {}
 
   @Implement(contract.tenantApp)
@@ -239,6 +241,14 @@ export class TenantAppController {
       tenancy: implement(contract.tenantApp.tenancy).handler(async ({ input }) =>
         serialize(await this.app.tenancy(ctx.actor, input.leaseId)),
       ),
+      // M8 (plan 4.11): the signed lease, the move-in report and the final statement.
+      documents: implement(contract.tenantApp.documents).handler(async ({ input }) => {
+        const found = await this.app.forEachTenancy(ctx.actor, (_companyId, tx) =>
+          this.reports.tenantTenancyDocuments(tx, input.leaseId),
+        );
+        if (!found) throw notFound('Tenancy');
+        return serialize(found);
+      }),
       documentDownload: implement(contract.tenantApp.documentDownload).handler(
         async ({ input }) => ({
           url: await this.app.documentUrl(ctx.actor, input.documentId),

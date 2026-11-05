@@ -2,7 +2,6 @@ import { Controller, Inject, UseGuards } from '@nestjs/common';
 import { Implement, implement } from '@orpc/nest';
 import { contract } from '@rent/contracts';
 import { EntitlementsService } from '@rent/server/companies';
-import { MaintenanceService } from '@rent/server/maintenance';
 import {
   BroadcastsService,
   InboxService,
@@ -283,30 +282,6 @@ export class UnsubscribeLinksController {
       ),
       confirm: implement(contract.unsubscribeLinks.confirm).handler(async ({ input }) =>
         this.consent.unsubscribe(input.token, true, input.client),
-      ),
-    };
-  }
-}
-
-/** Reported repairs (CM-04 stub; decision 12): read-only until M8. */
-@Controller()
-export class MaintenanceController {
-  constructor(@Inject(MaintenanceService) private readonly maintenance: MaintenanceService) {}
-
-  @Implement(contract.maintenance)
-  maintenanceRouter(@Ctx() ctx: RequestContext) {
-    return {
-      list: implement(contract.maintenance.list).handler(async ({ input }) =>
-        serialize(await this.maintenance.list(ctx.actor, input)),
-      ),
-      get: implement(contract.maintenance.get).handler(async ({ input }) =>
-        serialize(await this.maintenance.get(ctx.actor, input.jobId)),
-      ),
-      attachmentDownload: implement(contract.maintenance.attachmentDownload).handler(
-        async ({ input }) =>
-          serialize(
-            await this.maintenance.attachmentDownload(ctx.actor, input.jobId, input.attachmentId),
-          ),
       ),
     };
   }

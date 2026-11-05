@@ -23,7 +23,12 @@ import {
   type HandoverReason,
 } from '@rent/domain/messaging';
 import { money } from '@rent/domain/money';
-import { messagingSettingsOf, parseCompanySettings, type InterimPlan } from '@rent/domain/settings';
+import {
+  messagingSettingsOf,
+  parseCompanySettings,
+  planHas,
+  type InterimPlan,
+} from '@rent/domain/settings';
 import { v5 as uuidv5 } from 'uuid';
 import { BillingReadService } from '../billing/billing-read.service';
 import { formatReceiptNumber } from '../billing/records';
@@ -396,6 +401,10 @@ export class BotService {
       })(),
       leases: leases.rows.map((l) => ({ id: l.id, label: `${l.code}, ${l.name}` })),
       receipts,
+      // M8 (decision 14): "my repairs" and the answers to work done, for the tenant themselves.
+      ...(sender.kind !== 'contact' && planHas(plan, 'maintenance')
+        ? { openRepairs: await this.maintenance.openRepairsFor(tx, sender.tenantId) }
+        : {}),
       now: instantFrom(now),
     };
   }
@@ -592,6 +601,14 @@ export class BotService {
             input.now,
             input.firstResponseMinutes,
           );
+          break;
+        case 'repair_response':
+          await this.maintenance.botRespond(tx, {
+            jobId: action.jobId,
+            tenantId: input.sender.tenantId,
+            response: action.response,
+            reason: action.reason,
+          });
           break;
         case 'forward_to_landlord':
           if (action.messageIds.length > 0) {

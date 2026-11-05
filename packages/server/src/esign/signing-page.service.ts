@@ -3,6 +3,7 @@ import { schema, sql, withCompany, withSystem, type Database, type Tx } from '@r
 import {
   checkSignature,
   CURRENT_CONSENT,
+  CURRENT_MOVE_IN_REPORT_CONSENT,
   CURRENT_NOTICE_CONSENT,
   NOTICE_SIGNING_STATEMENT,
   SIGNER_ROLE_LABELS,
@@ -44,6 +45,8 @@ import {
   codesSince,
   companyFacts,
   completionOf,
+  consentVersionFor,
+  isMoveInReportRequest,
   isNoticeRequest,
   latestChallenge,
   linkRow,
@@ -185,7 +188,7 @@ export class SigningPageService {
             ? 'notice_superseded'
             : 'notice_closed'
           : reason;
-      const consentVersion = notice ? CURRENT_NOTICE_CONSENT : CURRENT_CONSENT;
+      const consentVersion = consentVersionFor(request);
       const view: SigningPageView = {
         screen,
         reason: pageReason,
@@ -449,7 +452,9 @@ export class SigningPageService {
     if (!/^\d{6}$/.test(code)) throw invalid('code_format', 'Enter the 6-digit code we sent you');
     if (
       !input.consentAccepted ||
-      (input.consentVersion !== CURRENT_CONSENT && input.consentVersion !== CURRENT_NOTICE_CONSENT)
+      (input.consentVersion !== CURRENT_CONSENT &&
+        input.consentVersion !== CURRENT_NOTICE_CONSENT &&
+        input.consentVersion !== CURRENT_MOVE_IN_REPORT_CONSENT)
     )
       throw invalid('consent_required', 'Tick the box to agree to sign electronically');
     const drawing = input.method === 'drawn' ? parseDrawing(input.drawing) : null;
@@ -473,10 +478,7 @@ export class SigningPageService {
       const { screen } = screenFor(link, signer, request, now, signers);
       if (screen !== 'sign') return { refused: notUsable(screen) };
       // M7 (plan 4.5): a notice is acknowledged under its own consent text, a lease signed under M3's.
-      if (
-        input.consentVersion !==
-        (isNoticeRequest(request) ? CURRENT_NOTICE_CONSENT : CURRENT_CONSENT)
-      )
+      if (input.consentVersion !== consentVersionFor(request))
         return {
           refused: invalid('consent_required', 'Tick the box to confirm, then sign again'),
         };
@@ -585,7 +587,7 @@ export class SigningPageService {
       const drawingDocumentId = drawingFile
         ? await this.documents.recordWriteOnce(tx, drawingFile, { kind: 'signature_drawing' })
         : null;
-      const consentVersion = isNoticeRequest(request) ? CURRENT_NOTICE_CONSENT : CURRENT_CONSENT;
+      const consentVersion = consentVersionFor(request);
       const consentText = SIGNING_CONSENT[consentVersion]!;
       const [row] = await tx
         .insert(schema.signature)
@@ -731,19 +733,23 @@ export class SigningPageService {
           reason: why,
         },
       });
-      await enqueueOutbox(tx, {
-        companyId,
-        type: SIGNING_DECLINED_EVENT,
-        payload: { signingRequestId: request.id, leaseId: request.leaseId, signerId: signer.id },
-        idempotencyKey: `${SIGNING_DECLINED_EVENT}:${request.id}`,
-      });
+      // M8: a declined move-in report leaves the lease as it is (only a lease goes back to draft).
+      if (!isMoveInReportRequest(request))
+        await enqueueOutbox(tx, {
+          companyId,
+          type: SIGNING_DECLINED_EVENT,
+          payload: { signingRequestId: request.id, leaseId: request.leaseId, signerId: signer.id },
+          idempotencyKey: `${SIGNING_DECLINED_EVENT}:${request.id}`,
+        });
       if (request.createdBy) {
         const facts = await this.esign.documentFacts(tx, request);
         await queueMessage(tx, companyId, {
           recipient: { type: 'staff', personId: request.createdBy },
           purpose: 'staff_notice',
           subject: `A signer declined: ${facts.title}`,
-          body: `${signer.name} (${SIGNER_ROLE_LABELS[signer.signerRole as SignerRole]}) declined to sign ${facts.title} (reference ${facts.reference}). Their reason: “${why}”. The lease is back in draft: change it and send it again, or cancel it.`,
+          body: isMoveInReportRequest(request)
+            ? `${signer.name} (${SIGNER_ROLE_LABELS[signer.signerRole as SignerRole]}) declined to sign ${facts.title}. Their reason: “${why}”. Agree the conditions with them, correct the move-in inspection and send the report again.`
+            : `${signer.name} (${SIGNER_ROLE_LABELS[signer.signerRole as SignerRole]}) declined to sign ${facts.title} (reference ${facts.reference}). Their reason: “${why}”. The lease is back in draft: change it and send it again, or cancel it.`,
           channels: ['email'],
           propertyId: request.propertyId,
           related: { type: 'signing_request', id: request.id },

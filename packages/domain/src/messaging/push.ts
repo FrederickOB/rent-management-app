@@ -12,6 +12,8 @@ export const PUSH_SCREENS = [
   'to_sign',
   'tenancy',
   'home',
+  // M8: the tenant's repairs (a step on one of them).
+  'repairs',
 ] as const;
 export type PushScreen = (typeof PUSH_SCREENS)[number];
 
@@ -51,6 +53,15 @@ export function pushNotice(purpose: MessagePurpose, companyName: string): PushNo
     case 'notice_reminder':
     case 'notice_in_force':
       return { title, body: `${companyName} has sent you a notice`, screen: 'to_sign' };
+    // M8: a step on a repair (plan 4.4), and the final statement at move-out (plan 4.8).
+    case 'repair_update':
+      return { title, body: `An update on your repair from ${companyName}`, screen: 'repairs' };
+    case 'final_statement':
+      return {
+        title,
+        body: `Your final statement from ${companyName} is ready`,
+        screen: 'tenancy',
+      };
     default:
       return { title, body: `A message from ${companyName}`, screen: 'messages' };
   }

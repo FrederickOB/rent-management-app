@@ -48,6 +48,12 @@ export const MESSAGE_PURPOSES = [
   'notice_link',
   'notice_reminder',
   'notice_in_force',
+  // M8 (plan 4.4, 4.5 and 4.8): the emergency alert to the property's staff, the artisan's job
+  // sheet link, the tenant's repair updates, and the final statement at move-out.
+  'maintenance_alert',
+  'job_sheet_link',
+  'repair_update',
+  'final_statement',
 ] as const;
 export type MessagePurpose = (typeof MESSAGE_PURPOSES)[number];
 
@@ -56,6 +62,9 @@ export const STAFF_PURPOSES: readonly MessagePurpose[] = [
   'staff_notice',
   'settlement_alert',
   'overdue_alert',
+  // M8 decision 5: an emergency repair alert to the property's managers and caretakers. SMS goes
+  // to their phone on record; WhatsApp only to those who opted in (contact_consent_event).
+  'maintenance_alert',
 ];
 
 /** Purposes that answer a tenant who wrote in (M6 decision 6). */
@@ -105,6 +114,13 @@ export const CONSENT_TEXTS: Readonly<Record<string, string>> = {
   'staff_withdraw.v1':
     'Staff recorded that this person no longer wants messages about their tenancy by {channel}.',
   // M6 decision 8 (OQ-54): consent belongs to the address it was given for.
+  // M8 decisions 5 and 6: staff and artisans, recorded in contact_consent_event.
+  'staff_alerts.v1':
+    'This staff member agreed to receive emergency repair alerts for their properties by {channel}.',
+  'staff_alerts_off.v1': 'This staff member no longer wants emergency repair alerts by {channel}.',
+  'artisan_contact.v1':
+    'This artisan agreed to receive repair job sheets and one-time codes from the company by {channel}.',
+  'artisan_contact_off.v1': 'This artisan no longer wants repair job sheets by {channel}.',
   'address_changed.v1':
     'The {channel} address on record changed, so the consent given for the old one no longer applies. Record the person’s agreement for the new one.',
 };
@@ -161,8 +177,9 @@ export function consentGranted(
 /**
  * A message body as it is stored: the token in any secure link is replaced, so the record never
  * holds a live link (CLAUDE.md section 9). Matches `/l/<token>` (signing), `/p/<token>` (pay),
- * `/r/<token>` (receipt) and, from M6, `/u/<token>` (email unsubscribe) paths.
+ * `/r/<token>` (receipt), from M6 `/u/<token>` (email unsubscribe) and from M8 `/j/<token>` (an
+ * artisan's job sheet) paths.
  */
 export function redactLinkTokens(body: string): string {
-  return body.replace(/\/([lpru])\/[A-Za-z0-9_-]{16,}/g, '/$1/[link]');
+  return body.replace(/\/([lpruj])\/[A-Za-z0-9_-]{16,}/g, '/$1/[link]');
 }

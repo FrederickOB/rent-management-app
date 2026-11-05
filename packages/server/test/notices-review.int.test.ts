@@ -1155,3 +1155,41 @@ beforeAll(async () => {
   );
   accountantEmail = row!.email;
 });
+
+describe('LN-04 service time is compared at the minute the form gives (coordinator, 2026-11-05)', () => {
+  it('accepts service in the minute the notice was issued, and refuses it before that minute', async () => {
+    const lease = await leased({ clause: false });
+    const draft = await n.notices.create(managerOne, {
+      type: 'rent_review',
+      leaseId: lease.leaseId,
+      fields: {
+        currentRentMinor: 150_000,
+        newRentMinor: 165_000,
+        effectiveDate: plus(30),
+        reason: 'Annual review',
+      },
+    });
+    const issuedAt = new Date(START.getTime() + 40_000);
+    try {
+      ctx.clock.set(issuedAt);
+      await n.notices.issue(managerOne, draft.id);
+      // Issued at 10:00:40: a minute before is refused, the same minute accepted.
+      await expect(
+        n.notices.recordService(managerOne, draft.id, {
+          method: 'handed_to_tenant',
+          servedAt: new Date(START.getTime() - 1_000).toISOString(),
+          servedByName: 'Kojo Caretaker',
+        }),
+      ).rejects.toMatchObject({ code: 'served_before_issue' });
+      ctx.clock.set(new Date(issuedAt.getTime() + 5_000));
+      await n.notices.recordService(managerOne, draft.id, {
+        method: 'handed_to_tenant',
+        servedAt: START.toISOString(),
+        servedByName: 'Kojo Caretaker',
+      });
+    } finally {
+      ctx.clock.set(START);
+    }
+    expect((await n.notices.get(managerOne, draft.id)).serviceRecords).toHaveLength(1);
+  });
+});

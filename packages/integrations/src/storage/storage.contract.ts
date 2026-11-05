@@ -314,6 +314,64 @@ export function describeStorageContract(name: string, setup: () => Promise<Stora
       expect((await h.download(url)).status).toBe(403);
     });
 
+    it('M8 streams a write-once object of a known size and hash, reads its head, and streams it back', async () => {
+      const k = key('stream');
+      const body = Buffer.concat([
+        Buffer.from([0, 0, 0, 0x18]),
+        Buffer.from('ftypisom'),
+        Buffer.alloc(200_000, 7),
+      ]);
+      const { Readable } = await import('node:stream');
+      const stored = await h.storage.putWriteOnceStream({
+        bucket: h.buckets.evidence,
+        key: k,
+        body: Readable.from([body.subarray(0, 70_000), body.subarray(70_000)]),
+        sizeBytes: body.length,
+        sha256: sha256Hex(body),
+        contentType: 'video/mp4',
+        retainUntil: later(120_000),
+        mode: 'GOVERNANCE',
+      });
+      expect(stored.sha256).toBe(sha256Hex(body));
+      const info = await h.storage.head({ bucket: h.buckets.evidence, key: k });
+      expect(info).toMatchObject({ size: body.length, retentionMode: 'GOVERNANCE' });
+      expect(
+        await h.storage.getHead(
+          { bucket: h.buckets.evidence, key: k, versionId: stored.versionId },
+          12,
+        ),
+      ).toEqual(body.subarray(0, 12));
+      const chunks: Buffer[] = [];
+      for await (const chunk of await h.storage.getStream({ bucket: h.buckets.evidence, key: k }))
+        chunks.push(Buffer.from(chunk as Uint8Array));
+      expect(Buffer.concat(chunks).equals(body)).toBe(true);
+      // Nothing replaces it, and a body that does not match its hash is refused.
+      await expect(
+        h.storage.putWriteOnceStream({
+          bucket: h.buckets.evidence,
+          key: k,
+          body: Readable.from([body]),
+          sizeBytes: body.length,
+          sha256: sha256Hex(body),
+          contentType: 'video/mp4',
+          retainUntil: later(120_000),
+          mode: 'GOVERNANCE',
+        }),
+      ).rejects.toMatchObject({ code: 'already_exists' });
+      await expect(
+        h.storage.putWriteOnceStream({
+          bucket: h.buckets.evidence,
+          key: key('stream-bad'),
+          body: Readable.from([body]),
+          sizeBytes: body.length,
+          sha256: sha256Hex(Buffer.from('something else')),
+          contentType: 'video/mp4',
+          retainUntil: later(120_000),
+          mode: 'GOVERNANCE',
+        }),
+      ).rejects.toBeTruthy();
+    });
+
     it('head is null and get fails for an object that does not exist', async () => {
       const ref = { bucket: h.buckets.files, key: key('missing') };
       expect(await h.storage.head(ref)).toBeNull();

@@ -53,6 +53,10 @@ const WITNESS: ReadonlySet<string> = new Set<SignerRole>(['witness']);
  * in one transaction; recalling closes the request in the e-signing engine and returns the lease
  * to draft in the same transaction. The engine's tables are its own: this service only calls it.
  */
+/** M8 (plan 4.7): the signer roles that sign a move-in report (signing roles, not staff roles). */
+const MOVE_IN_REPORT_ROLES: ReadonlySet<string> = new Set(['tenant', 'signatory', 'landlord']);
+const LANDLORD_ROLE: ReadonlySet<string> = new Set(['landlord']);
+
 @Injectable()
 export class LeaseSigningService {
   constructor(
@@ -197,8 +201,44 @@ export class LeaseSigningService {
     return url;
   }
 
+  /**
+   * M8 (plan 4.7): who signs the move-in report: every tenant party and the landlord's
+   * representative, as on the lease, all required, with the phone and email on record now.
+   */
+  async moveInReportSigners(
+    tx: Tx,
+    leaseId: string,
+    /** Who signs for the landlord when the lease names nobody (a paper lease): the inspector. */
+    representative: string | null,
+  ): Promise<NewSigner[]> {
+    const row = await leaseRow(tx, leaseId);
+    const signers = (await this.signersOf(tx, row, { report: true }))
+      .filter((s) => MOVE_IN_REPORT_ROLES.has(s.role))
+      .map((s) => ({ ...s, required: true }));
+    if (!signers.some((s) => LANDLORD_ROLE.has(s.role)) && representative) {
+      const person = await personContact(tx, representative);
+      if (person && (person.phone || person.email))
+        signers.push({
+          role: 'landlord',
+          subject: { type: 'staff', personId: representative },
+          leasePartyId: null,
+          name: person.name,
+          phone: person.phone,
+          email: person.email,
+          required: true,
+          isTestContact: person.isTestContact,
+        });
+    }
+    return signers;
+  }
+
   /** The lease's parties as signers, with the phone and email on record now (plan 4.8). */
-  private async signersOf(tx: Tx, row: LeaseRow): Promise<NewSigner[]> {
+  private async signersOf(
+    tx: Tx,
+    row: LeaseRow,
+    /** M8: the move-in report needs only the tenant's side; the landlord may be the inspector. */
+    options: { readonly report?: boolean } = {},
+  ): Promise<NewSigner[]> {
     const parties = await tx
       .select()
       .from(schema.leaseParty)
@@ -211,9 +251,9 @@ export class LeaseSigningService {
         'tenant_signer_required',
         'Add the tenant, or the company tenant’s signatory, as a signer',
       );
-    if (!roles.has('landlord'))
+    if (!roles.has('landlord') && !options.report)
       throw invalid('landlord_signer_required', 'Add who signs for the landlord');
-    if (row.witnessRequired && !roles.has('witness'))
+    if (row.witnessRequired && !roles.has('witness') && !options.report)
       throw invalid(
         'witness_required',
         'Add the witness who will sign: your company asks for a witness on every lease',

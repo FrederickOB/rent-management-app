@@ -1,5 +1,6 @@
 import { invoiceV1, receiptV1 } from './billing';
 import { leaseV1 } from './lease';
+import { finalStatementV1, moveInReportV1 } from './moveout';
 import { noticeV1, servicePackV1 } from './notice';
 import { signingCertificateV1, signingCertificateV2 } from './signing-certificate';
 import { TemplateRegistry } from './registry';
@@ -22,4 +23,7 @@ export const templates = new TemplateRegistry([
   servicePackV1,
   // M7 review: the certificate with the full evidence, for notices and leases alike.
   signingCertificateV2,
+  // M8: the move-in report every party signs, and the final statement at move-out.
+  moveInReportV1,
+  finalStatementV1,
 ]);

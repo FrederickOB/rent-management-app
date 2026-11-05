@@ -83,6 +83,60 @@ export function noticeCheckConflict(error: unknown): AppError | null {
   }
 }
 
+/**
+ * M8's database rules (0041) as named conflicts: the services check first, so these fire only when
+ * two writes race or a check was missed. The messages never name ids or tables.
+ */
+export function maintenanceCheckConflict(error: unknown): AppError | null {
+  switch (sqlStateOf(error)) {
+    case 'RA080':
+      return conflict('maintenance_transition', 'This repair cannot move that way now. Reload it.');
+    case 'RA081':
+      return conflict(
+        'maintenance_evidence_required',
+        'Starting work needs a before photo or a reason; marking it done needs an after photo and a completion note.',
+      );
+    case 'RA082':
+      return conflict(
+        'maintenance_closed',
+        'This repair is closed or cancelled and no longer changes.',
+      );
+    case 'RA083':
+      return conflict(
+        'inspection_submitted',
+        'This inspection was submitted and is frozen. Start a correction instead.',
+      );
+    case 'RA084':
+      return conflict('inspection_incomplete', 'Every item needs a condition before submitting.');
+    case 'RA085':
+      return conflict(
+        'settlement_not_drafting',
+        'The deductions are fixed once the settlement is sent for approval.',
+      );
+    case 'RA086':
+      return conflict(
+        'deductions_exceed_deposit',
+        'The deductions would be more than the deposit held. Record damage beyond the deposit as a charge.',
+      );
+    case 'RA087':
+      return conflict(
+        'deduction_evidence',
+        'A deduction can name only items and photos of this move-out’s inspection.',
+      );
+    case 'RA088':
+      return conflict('moveout_transition', 'This move-out cannot change that way now. Reload it.');
+    case 'RA089':
+      return conflict(
+        'moveout_two_person_required',
+        'A move-out settlement is approved only by a second person.',
+      );
+    case 'RA090':
+      return conflict('expense_closed', 'This expense was already paid or reversed. Reload it.');
+    default:
+      return null;
+  }
+}
+
 /** Runs `fn`, turning a commit-time register check into its clear conflict (409). */
 export async function withRegisterChecks<T>(fn: () => Promise<T>): Promise<T> {
   try {

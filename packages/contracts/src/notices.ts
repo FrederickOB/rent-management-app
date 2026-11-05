@@ -172,6 +172,8 @@ export const taskSchema = z.object({
   relatedType: z.enum(TASK_RELATED_TYPES),
   relatedId: uuid,
   notice: z.object({ id: uuid, number: z.string().nullable(), typeLabel: z.string() }).nullable(),
+  /** M8: the maintenance job an attend task is for (`MT-0042`). Always sent; optional before M8. */
+  job: z.object({ id: uuid, ticket: z.string() }).nullable().optional(),
   assignee: z.object({ personId: uuid, name: z.string() }).nullable(),
   dueAt: iso,
   note: z.string().nullable(),

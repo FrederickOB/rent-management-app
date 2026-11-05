@@ -32,7 +32,8 @@ const TRANSITIONS: Record<LeaseStatus, readonly LeaseStatus[]> = {
   signed: ['active', 'cancelled'],
   active: ['ending', 'holding_over', 'ended', 'terminated'],
   holding_over: ['ending', 'ended', 'terminated'],
-  ending: ['ended'],
+  // M8 (plan 4.8): an early move-out terminates; a cancelled move-out returns the lease.
+  ending: ['ended', 'terminated', 'active', 'holding_over'],
   ended: [],
   terminated: [],
   cancelled: [],

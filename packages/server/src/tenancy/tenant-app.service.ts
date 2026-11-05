@@ -164,7 +164,10 @@ export class TenantAppService {
         const rows = await tx.execute<{ id: string }>(
           sql`select id from lease where signed_document_id = ${documentId} limit 1`,
         );
-        return rows.rows.length > 0;
+        if (rows.rows.length > 0) return true;
+        // M8: the move-in report and the final statement, as the moveout module recognises them.
+        for (const owns of this.documentOwners) if (await owns(tx, documentId)) return true;
+        return false;
       });
       if (!owned) continue;
       const url = await this.documents.downloadUrl(companyId, documentId);
@@ -213,6 +216,26 @@ export class TenantAppService {
       if (own) return this.esign.tenantAppLink(companyId, signerId);
     }
     throw notFound('Signer');
+  }
+
+  /** M8: modules above tenancy name the other documents a tenant may download (moveout). */
+  private readonly documentOwners: ((tx: Tx, documentId: string) => Promise<boolean>)[] = [];
+
+  useDocumentOwner(owns: (tx: Tx, documentId: string) => Promise<boolean>): void {
+    this.documentOwners.push(owns);
+  }
+
+  /** The person's tenant records by company, and a tenant-scoped transaction in one (M8). */
+  async forEachTenancy<T>(
+    actor: Actor | null,
+    fn: (companyId: string, tx: Tx) => Promise<T | null>,
+  ): Promise<T | null> {
+    const tenant = this.tenantActor(actor);
+    for (const [companyId, tenantIds] of await this.companies(tenant)) {
+      const found = await this.inCompany(tenant, companyId, tenantIds, (tx) => fn(companyId, tx));
+      if (found !== null) return found;
+    }
+    return null;
   }
 
   private tenantActor(actor: Actor | null): TenantActor {

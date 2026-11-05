@@ -109,6 +109,8 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
     }),
     defineJob({
       name: ISSUE_RECEIPT_JOB,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z.object({ companyId: uuid, receiptId: uuid }).passthrough(),
       retry: { limit: 5, delaySeconds: 5, backoff: true },
@@ -158,6 +160,8 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
     }),
     defineJob({
       name: SETTLEMENT_READY_JOB,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z.object({ companyId: uuid, accountId: uuid }).passthrough(),
       retry: { limit: 5, delaySeconds: 60, backoff: true },

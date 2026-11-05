@@ -251,7 +251,177 @@ async function seedCompany(companyId: string) {
       tenantId,
       leaseId: leases[0]!.id,
     });
+    await seedMaintenance(companyId, {
+      initiator,
+      initiatorMembership,
+      documentId: docs[0]!.id,
+      ownerId: owners[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * Maintenance, inspections, expenses and move-out (M8): one row in each of their company tables,
+ * around one job and one move-out under the fixture lease. The deposit the deduction comes from is
+ * a fixture entry crediting 2100, written as ledger_writer.
+ */
+async function seedMaintenance(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const lease = [companyId, ids.propertyId, ids.tenantId, ids.leaseId];
+  const { rows: books } = await app.query<{ id: string }>(
+    'select id from book where owner_id = $1',
+    [ids.ownerId],
+  );
+  const bookId = books[0]!.id;
+  const depositEntry = randomUUID();
+  await app.query('set local role ledger_writer');
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_entry (id, company_id, rule, idempotency_key, value_date, accounting_date, record_type, record_id)
+     values ($1, $2, 'P10', $3, current_date, current_date, 'fixture', $1)`,
+    [depositEntry, companyId, `P10:${depositEntry}`],
+  );
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_line (id, company_id, entry_id, line_no, book_id, account_code, amount_minor, property_id, unit_id,
+       lease_id, tenant_id)
+     values (gen_random_uuid(), $1, $2, 1, $3, '1010', 5000, $4, $5, $6, $7),
+            (gen_random_uuid(), $1, $2, 2, $3, '2100', -5000, $4, $5, $6, $7)`,
+    [companyId, depositEntry, bookId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId],
+  );
+  await app.query('set local role none');
+  const { rows: artisans } = await app.query<{ id: string }>(
+    "insert into artisan (company_id, name, phone, trades, created_by) values ($1, 'Kofi Plumber', '+233200000077', '{plumbing}', $2) returning id",
+    [companyId, ids.initiator],
+  );
+  const artisanId = artisans[0]!.id;
+  await app.query(
+    `insert into contact_consent_event (company_id, subject_type, membership_id, channel, action, text_version, text_sha256,
+       source, recorded_by) values ($1, 'staff', $2, 'whatsapp', 'grant', 'staff_alerts.v1', $3, 'staff', $4)`,
+    [companyId, ids.initiatorMembership, '0'.repeat(64), ids.initiator],
+  );
+  const { rows: jobs } = await app.query<{ id: string }>(
+    `insert into maintenance_job (company_id, property_id, unit_id, lease_id, tenant_id, source, description, reported_by)
+     values ($1, $2, $3, $4, $5, 'staff', 'The roof leaks', $6) returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId, ids.initiator],
+  );
+  const jobId = jobs[0]!.id;
+  await app.query(
+    `insert into maintenance_job_event (company_id, property_id, job_id, kind, actor_kind, actor_person_id, data)
+     values ($1, $2, $3, 'reported', 'staff', $4, '{"source":"staff"}')`,
+    [companyId, ids.propertyId, jobId, ids.initiator],
+  );
+  const { rows: links } = await app.query<{ id: string }>(
+    `insert into secure_link (company_id, property_id, purpose, token_hash, job_id, artisan_id, expires_at)
+     values ($1, $2, 'job_sheet', $3, $4, $5, now() + interval '30 days') returning id`,
+    [companyId, ids.propertyId, randomBytes(32).toString('hex'), jobId, artisanId],
+  );
+  await app.query(
+    `insert into job_sheet_code (company_id, property_id, job_id, artisan_id, secure_link_id, channel, destination_masked,
+       destination_hash, code_hash, expires_at)
+     values ($1, $2, $3, $4, $5, 'sms', '+233 ** *** 0077', 'h', 'c', now() + interval '10 minutes')`,
+    [companyId, ids.propertyId, jobId, artisanId, links[0]!.id],
+  );
+  await app.query(
+    `insert into inspection_template (company_id, unit_type, rooms, updated_by)
+     values ($1, 'single_room', '[{"key":"room","label":"Room","items":[{"key":"walls","label":"Walls"}]}]', $2)`,
+    [companyId, ids.initiator],
+  );
+  const { rows: inspections } = await app.query<{ id: string }>(
+    `insert into inspection (company_id, property_id, unit_id, lease_id, tenant_id, kind, unit_type, performed_by)
+     values ($1, $2, $3, $4, $5, 'move_out', 'single_room', $6) returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId, ids.initiator],
+  );
+  const inspectionId = inspections[0]!.id;
+  const { rows: items } = await app.query<{ id: string }>(
+    `insert into inspection_item (company_id, property_id, inspection_id, position, room_key, room_label, item_key,
+       item_label, condition) values ($1, $2, $3, 1, 'room', 'Room', 'walls', 'Walls', 'damaged') returning id`,
+    [companyId, ids.propertyId, inspectionId],
+  );
+  const { rows: photos } = await app.query<{ id: string }>(
+    `insert into inspection_photo (company_id, property_id, inspection_id, item_id, document_id, added_by)
+     values ($1, $2, $3, $4, $5, $6) returning id`,
+    [companyId, ids.propertyId, inspectionId, items[0]!.id, ids.documentId, ids.initiator],
+  );
+  const { rows: entries } = await app.query<{ id: string }>(
+    'select id from journal_entry order by posted_at limit 1',
+  );
+  const entryId = entries[0]!.id;
+  const { rows: expenses } = await app.query<{ id: string }>(
+    `insert into expense (company_id, property_id, unit_id, owner_id, book_id, category, supplier_name, amount_minor,
+       expense_date, paid_by, receipt_document_id, job_id, entry_id, accounting_date, created_by)
+     values ($1, $2, $3, $4, $5, 'repairs', 'Kofi Plumber', 12000, current_date, 'unpaid', $6, $7, $8, current_date, $9)
+     returning id`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.unitId,
+      ids.ownerId,
+      bookId,
+      ids.documentId,
+      jobId,
+      entryId,
+      ids.initiator,
+    ],
+  );
+  await app.query(
+    `insert into expense_payment (company_id, property_id, expense_id, paid_on, paid_from, entry_id, accounting_date)
+     values ($1, $2, $3, current_date, 'owner_account', $4, current_date)`,
+    [companyId, ids.propertyId, expenses[0]!.id, entryId],
+  );
+  await app.query(
+    `insert into expense_reversal (company_id, property_id, expense_id, reason, entry_id, value_date, accounting_date)
+     values ($1, $2, $3, 'A fixture', $4, current_date, current_date)`,
+    [companyId, ids.propertyId, expenses[0]!.id, entryId],
+  );
+  const { rows: moves } = await app.query<{ id: string }>(
+    `insert into move_out (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, reason, planned_date,
+       inspection_id, created_by)
+     values ($1, $2, $3, $4, $5, $6, $7, 'end_of_term', current_date, $8, $9) returning id`,
+    [...lease, ids.unitId, ids.ownerId, bookId, inspectionId, ids.initiator],
+  );
+  const moveOutId = moves[0]!.id;
+  const { rows: deductions } = await app.query<{ id: string }>(
+    `insert into deposit_deduction (company_id, property_id, tenant_id, lease_id, move_out_id, kind, amount_minor, reason,
+       inspection_item_ids, photo_ids, created_by)
+     values ($1, $2, $3, $4, $5, 'damage', 1000, 'A hole in the wall', array[$6::uuid], array[$7::uuid], $8) returning id`,
+    [...lease, moveOutId, items[0]!.id, photos[0]!.id, ids.initiator],
+  );
+  await app.query(
+    `insert into deposit_deduction_withdrawal (company_id, property_id, move_out_id, deduction_id, created_by)
+     values ($1, $2, $3, $4, $5)`,
+    [companyId, ids.propertyId, moveOutId, deductions[0]!.id, ids.initiator],
+  );
+  const { rows: payments } = await app.query<{ id: string }>(
+    'select id from payment where lease_id = $1 limit 1',
+    [ids.leaseId],
+  );
+  await app.query(
+    `insert into deposit_application (company_id, property_id, tenant_id, lease_id, move_out_id, kind, payment_id,
+       amount_minor, entry_id, value_date, accounting_date)
+     values ($1, $2, $3, $4, $5, 'refund', $6, 1000, $7, current_date, current_date)`,
+    [...lease, moveOutId, payments[0]!.id, depositEntry],
+  );
+  await app.query(
+    `insert into move_out_refund_part (company_id, move_out_id, property_id, tenant_id, lease_id, payment_id, amount_minor)
+     values ($1, $5, $2, $3, $4, $6, 1000)`,
+    [...lease, moveOutId, payments[0]!.id],
+  );
 }
 
 /**

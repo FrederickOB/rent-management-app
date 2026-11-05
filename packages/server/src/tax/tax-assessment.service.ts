@@ -108,7 +108,7 @@ export class TaxAssessmentService {
       if (a.kind === 'not_assessed') return false;
       let itemId: string | null = null;
       let note: string | null = null;
-      if (e.event === 'receipt' || e.event === 'carry_over') {
+      if (e.event === 'receipt' || e.event === 'carry_over' || e.event === 'deposit_applied') {
         const [payment] = e.paymentId ? await paymentsByIds(tx, [e.paymentId]) : [];
         if (payment?.reversedAccountingDate)
           note = 'The payment was reversed before it was assessed';
@@ -136,6 +136,7 @@ export class TaxAssessmentService {
             valueDate: e.valueDate,
             capMinor: e.capMinor,
             rules: a.rules,
+            kind: e.event === 'deposit_applied' ? 'deposit_applied' : 'carry_over',
           });
       } else {
         const [w] = await tx

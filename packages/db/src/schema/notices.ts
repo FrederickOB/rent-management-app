@@ -18,6 +18,7 @@ import {
 import { company, membership } from './company';
 import { signer } from './esign';
 import { person } from './identity';
+import { inspection, maintenanceJob } from './maintenance';
 import { document, documentRenderRequest, rule } from './platform';
 import { property, unit } from './register';
 import { lease, tenant, tenantContact } from './tenancy';
@@ -603,6 +604,9 @@ export const task = pgTable(
     relatedType: text().notNull(),
     noticeId: uuid(),
     recipientId: uuid(),
+    /** M8 (decision 6): a maintenance job attended in-house, or an inspection due. */
+    jobId: uuid(),
+    inspectionId: uuid(),
     assigneePersonId: uuid().references(() => person.id),
     dueAt: timestamp({ withTimezone: true }).notNull(),
     status: text().notNull().default('open'),
@@ -644,16 +648,29 @@ export const task = pgTable(
       columns: [t.companyId, t.noticeId, t.recipientId],
       foreignColumns: [noticeRecipient.companyId, noticeRecipient.noticeId, noticeRecipient.id],
     }),
+    foreignKey({
+      name: 'task_job_fk',
+      columns: [t.companyId, t.propertyId, t.jobId],
+      foreignColumns: [maintenanceJob.companyId, maintenanceJob.propertyId, maintenanceJob.id],
+    }),
+    foreignKey({
+      name: 'task_inspection_fk',
+      columns: [t.companyId, t.propertyId, t.inspectionId],
+      foreignColumns: [inspection.companyId, inspection.propertyId, inspection.id],
+    }),
+    index('task_job_idx')
+      .on(t.companyId, t.jobId)
+      .where(sql`${t.jobId} is not null`),
     index('task_assignee_idx').on(t.companyId, t.assigneePersonId, t.status),
     index('task_list_idx').on(t.companyId, t.status, t.dueAt),
     check(
       'task_kind_check',
-      sql`${t.kind} in ('notice_in_person_reminder', 'notice_post_on_premises', 'notice_physical_service')`,
+      sql`${t.kind} in ('notice_in_person_reminder', 'notice_post_on_premises', 'notice_physical_service', 'maintenance_attend', 'inspection_due')`,
     ),
     check('task_status_check', sql`${t.status} in ('open', 'done', 'cancelled')`),
     check(
       'task_related_check',
-      sql`${t.relatedType} in ('notice') and (${t.relatedType} <> 'notice' or ${t.noticeId} is not null)`,
+      sql`${t.relatedType} in ('notice', 'maintenance_job', 'inspection') and (${t.relatedType} = 'notice') = (${t.noticeId} is not null) and (${t.relatedType} = 'maintenance_job') = (${t.jobId} is not null) and (${t.relatedType} = 'inspection') = (${t.inspectionId} is not null)`,
     ),
     check(
       'task_closed_check',

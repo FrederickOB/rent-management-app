@@ -58,6 +58,8 @@ import {
   creditApplicationLines,
   creditDrawLines,
   creditNoteLines,
+  depositApplicationLines,
+  depositRefundApprovedLines,
   lateDrawLines,
   oneOffChargeLines,
   paymentReversalLines,
@@ -796,7 +798,8 @@ export class BillingEngine {
         | 'credit_note'
         | 'write_off'
         | 'withholding'
-        | 'termination';
+        | 'termination'
+        | 'move_out';
       readonly recordId: string;
       readonly entryId: string | null;
     },
@@ -1865,6 +1868,17 @@ export class BillingEngine {
     for (const c of carried)
       if (c.paymentId)
         add(c.paymentId, c.leaseId === state.lease.id ? c.amountMinor : -c.amountMinor);
+    // M8: what a move-out took (applied, retained or refunded) has left the deposit.
+    const used = await tx
+      .select({
+        paymentId: schema.depositApplication.paymentId,
+        amountMinor: schema.depositApplication.amountMinor,
+      })
+      .from(schema.depositApplication)
+      .where(eq(schema.depositApplication.leaseId, state.lease.id));
+    // A share with no payment (carried before shares were kept) is what the journal holds beyond
+    // the payments' shares, so its use needs no subtracting here.
+    for (const u of used) if (u.paymentId) add(u.paymentId, -u.amountMinor);
     const out = [...parts]
       .filter(([, amount]) => amount > 0)
       .map(([paymentId, amountMinor]) => ({ paymentId: paymentId as string | null, amountMinor }));
@@ -2380,8 +2394,11 @@ export class BillingEngine {
       readonly key: 'apply' | 'deductions';
       readonly valueDate: string;
       readonly causedBy: string | null;
+      /** M8: the settlement is a move-out's (`terminationId` is then the move-out's id). */
+      readonly subject?: 'early_termination' | 'move_out';
     },
   ): Promise<{ readonly lineId: string; readonly amountMinor: number }[]> {
+    const moveOut = input.subject === 'move_out';
     const pools = creditPools(state.payments, state.allocations);
     const { applications } = applyCreditToOpenLines(state.lines, state.allocations, pools);
     if (applications.length === 0) return [];
@@ -2396,7 +2413,7 @@ export class BillingEngine {
         lease: dimsOf(state.lease),
         applications: applications.map((a) => ({ invoiceLineId: a.lineId, draws: a.draws })),
       }),
-      record: { type: 'early_termination', id: input.terminationId },
+      record: { type: moveOut ? 'move_out' : 'early_termination', id: input.terminationId },
       causedBy: input.causedBy,
     });
     const rows = applications.flatMap((a) =>
@@ -2410,7 +2427,7 @@ export class BillingEngine {
     await this.writeAllocations(tx, state, rows, {
       valueDate: input.valueDate,
       accountingDate: posted!.accountingDate,
-      recordType: 'termination',
+      recordType: moveOut ? 'move_out' : 'termination',
       recordId: input.terminationId,
       entryId: posted!.entryId,
     });
@@ -2435,8 +2452,11 @@ export class BillingEngine {
       readonly causedBy: string | null;
       /** False only in a preview, which has no termination row to hang the shares on. */
       readonly recordParts?: boolean;
+      /** M8: a move-out's credit refund (its shares in move_out_refund_part). */
+      readonly subject?: 'early_termination' | 'move_out';
     },
   ): Promise<PostedEntry> {
+    const moveOut = input.subject === 'move_out';
     let credits: PaymentAmount[];
     try {
       credits = refundCredits(creditPools(state.payments, state.allocations), input.amountMinor);
@@ -2455,21 +2475,34 @@ export class BillingEngine {
       key: `P13:${input.terminationId}:refund`,
       valueDate: input.valueDate,
       lines: refundApprovedLines({ bookId: book.bookId, lease: dimsOf(state.lease), credits }),
-      record: { type: 'early_termination', id: input.terminationId },
+      record: { type: moveOut ? 'move_out' : 'early_termination', id: input.terminationId },
       causedBy: input.causedBy,
     });
     if (input.recordParts === false) return posted!;
-    await tx.insert(schema.earlyTerminationRefundPart).values(
-      credits.map((c) => ({
-        companyId: state.company.id,
-        terminationId: input.terminationId,
-        propertyId: state.lease.propertyId,
-        tenantId: state.lease.tenantId,
-        leaseId: state.lease.id,
-        paymentId: c.paymentId,
-        amountMinor: c.amountMinor,
-      })),
-    );
+    if (moveOut)
+      await tx.insert(schema.moveOutRefundPart).values(
+        credits.map((c) => ({
+          companyId: state.company.id,
+          moveOutId: input.terminationId,
+          propertyId: state.lease.propertyId,
+          tenantId: state.lease.tenantId,
+          leaseId: state.lease.id,
+          paymentId: c.paymentId,
+          amountMinor: c.amountMinor,
+        })),
+      );
+    else
+      await tx.insert(schema.earlyTerminationRefundPart).values(
+        credits.map((c) => ({
+          companyId: state.company.id,
+          terminationId: input.terminationId,
+          propertyId: state.lease.propertyId,
+          tenantId: state.lease.tenantId,
+          leaseId: state.lease.id,
+          paymentId: c.paymentId,
+          amountMinor: c.amountMinor,
+        })),
+      );
     state.payments = (
       await paymentsByIds(
         tx,
@@ -2489,13 +2522,16 @@ export class BillingEngine {
       readonly from: '1010' | '1070';
       readonly valueDate: string;
       readonly causedBy: string | null;
+      /** M8: a move-out's refund (credit and deposit together, P13 and P12 paid). */
+      readonly subject?: 'early_termination' | 'move_out';
     },
   ): Promise<PostedEntry> {
     const book = requireBook(state.book);
+    const moveOut = input.subject === 'move_out';
     const posted = await this.posting.post(tx, {
       companyId: state.company.id,
-      rule: 'P13',
-      key: `P13:${input.terminationId}:paid`,
+      rule: moveOut ? 'P12' : 'P13',
+      key: moveOut ? `P12:${input.terminationId}:paid` : `P13:${input.terminationId}:paid`,
       valueDate: input.valueDate,
       lines: refundPaidLines({
         bookId: book.bookId,
@@ -2503,10 +2539,146 @@ export class BillingEngine {
         from: input.from,
         amountMinor: input.amountMinor,
       }),
-      record: { type: 'early_termination', id: input.terminationId },
+      record: { type: moveOut ? 'move_out' : 'early_termination', id: input.terminationId },
       causedBy: input.causedBy,
     });
     return posted!;
+  }
+
+  // The deposit at move-out (M8 plan 4.8; P11, P12) ------------------------------------------------
+
+  /**
+   * P11: the deposit applied at a move-out, approved. It pays the open lines given (allocations of
+   * source `deposit`, so rent settled this way is rent received) and keeps the deductions (4300).
+   * The deposit is taken payment by payment, first in, first out; each share is recorded in
+   * deposit_application, which the nightly check counts against 2100 (invariant 4). Returns the
+   * shares left for the refund.
+   */
+  async applyDeposit(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly moveOutId: string;
+      readonly lines: readonly { readonly lineId: string; readonly amountMinor: number }[];
+      readonly retainedMinor: number;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<{ readonly shares: readonly { paymentId: string | null; amountMinor: number }[] }> {
+    const held = await this.depositHeld(tx, state.lease.id);
+    let parts = await this.depositParts(tx, state, held);
+    const applied = input.lines.reduce((s, l) => s + l.amountMinor, 0);
+    const take = applied + input.retainedMinor;
+    if (take > held)
+      throw conflict('deductions_exceed_deposit', 'The lease no longer holds this much deposit');
+    if (take === 0) return { shares: parts };
+    const { taken, left } = takeShares(parts, take);
+    parts = left;
+    const book = requireBook(state.book);
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P11',
+      key: `P11:${input.moveOutId}`,
+      valueDate: input.valueDate,
+      lines: depositApplicationLines({
+        bookId: book.bookId,
+        lease: dimsOf(state.lease),
+        shares: taken,
+        lines: input.lines
+          .filter((l) => l.amountMinor > 0)
+          .map((l) => ({ invoiceLineId: l.lineId, amountMinor: l.amountMinor })),
+        retainedMinor: input.retainedMinor,
+      }),
+      record: { type: 'move_out', id: input.moveOutId },
+      causedBy: input.causedBy,
+    });
+    await this.writeAllocations(
+      tx,
+      state,
+      input.lines
+        .filter((l) => l.amountMinor > 0)
+        .map((l) => ({
+          lineId: l.lineId,
+          source: 'deposit' as const,
+          paymentId: null,
+          amountMinor: l.amountMinor,
+        })),
+      {
+        valueDate: input.valueDate,
+        accountingDate: posted!.accountingDate,
+        recordType: 'move_out',
+        recordId: input.moveOutId,
+        entryId: posted!.entryId,
+      },
+    );
+    // The shares, split between what paid the lines and what was retained, in the same order.
+    const { taken: toLines, left: toRetained } = takeShares(taken, applied);
+    for (const [kind, shares] of [
+      ['applied', toLines],
+      ['retained', toRetained],
+    ] as const)
+      for (const share of shares)
+        await tx.insert(schema.depositApplication).values({
+          companyId: state.company.id,
+          propertyId: state.lease.propertyId,
+          tenantId: state.lease.tenantId,
+          leaseId: state.lease.id,
+          moveOutId: input.moveOutId,
+          kind,
+          paymentId: share.paymentId,
+          amountMinor: share.amountMinor,
+          entryId: posted!.entryId,
+          valueDate: input.valueDate,
+          accountingDate: posted!.accountingDate,
+        });
+    return { shares: parts };
+  }
+
+  /** P12 approved: the deposit left becomes a refund payable (Dr 2100 per share, Cr 2400). */
+  async approveDepositRefund(
+    tx: Tx,
+    state: LeaseState,
+    input: {
+      readonly moveOutId: string;
+      readonly amountMinor: number;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<PostedEntry | null> {
+    if (input.amountMinor <= 0) return null;
+    const held = await this.depositHeld(tx, state.lease.id);
+    if (input.amountMinor > held)
+      throw conflict('refund_over_deposit', 'The lease no longer holds this much deposit');
+    const { taken } = takeShares(await this.depositParts(tx, state, held), input.amountMinor);
+    const book = requireBook(state.book);
+    const posted = await this.posting.post(tx, {
+      companyId: state.company.id,
+      rule: 'P12',
+      key: `P12:${input.moveOutId}:approved`,
+      valueDate: input.valueDate,
+      lines: depositRefundApprovedLines({
+        bookId: book.bookId,
+        lease: dimsOf(state.lease),
+        shares: taken,
+      }),
+      record: { type: 'move_out', id: input.moveOutId },
+      causedBy: input.causedBy,
+    });
+    for (const share of taken)
+      await tx.insert(schema.depositApplication).values({
+        companyId: state.company.id,
+        propertyId: state.lease.propertyId,
+        tenantId: state.lease.tenantId,
+        leaseId: state.lease.id,
+        moveOutId: input.moveOutId,
+        kind: 'refund',
+        paymentId: share.paymentId,
+        amountMinor: share.amountMinor,
+        entryId: posted!.entryId,
+        valueDate: input.valueDate,
+        accountingDate: posted!.accountingDate,
+      });
+    return posted;
   }
 
   // The forward walk (AR-02, AR-03; plan 4.7) -------------------------------------------------------
@@ -2573,3 +2745,28 @@ export const recurringInOrder = (lines: readonly LineRecord[]) =>
   inAccrualOrder(lines.filter((l) => isRecurring(l.kind)));
 
 export { paymentOrder, DomainError, compactLines };
+
+/**
+ * M8: takes an amount from deposit shares in order (first in, first out), splitting the last one.
+ * The shares taken and the shares left add up to the shares given.
+ */
+export function takeShares(
+  shares: readonly { readonly paymentId: string | null; readonly amountMinor: number }[],
+  amountMinor: number,
+): {
+  taken: { paymentId: string | null; amountMinor: number }[];
+  left: { paymentId: string | null; amountMinor: number }[];
+} {
+  let need = amountMinor;
+  const taken: { paymentId: string | null; amountMinor: number }[] = [];
+  const left: { paymentId: string | null; amountMinor: number }[] = [];
+  for (const share of shares) {
+    const part = Math.min(need, share.amountMinor);
+    if (part > 0) taken.push({ paymentId: share.paymentId, amountMinor: part });
+    if (share.amountMinor - part > 0)
+      left.push({ paymentId: share.paymentId, amountMinor: share.amountMinor - part });
+    need -= part;
+  }
+  if (need > 0) throw new Error('The deposit shares do not cover the amount taken');
+  return { taken, left };
+}
