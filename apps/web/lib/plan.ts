@@ -36,7 +36,11 @@ export function planLabel(plan: InterimPlan | undefined): string {
 
 /** Why a page is missing: "The inbox is not on the Starter plan." */
 export function notOnPlanText(feature: PlanFeature, plan: InterimPlan | undefined): string {
-  const plural = feature === 'broadcasts' || feature === 'tenant_groups' || feature === 'notices';
+  const plural =
+    feature === 'broadcasts' ||
+    feature === 'tenant_groups' ||
+    feature === 'notices' ||
+    feature === 'owner_reporting';
   return `${PLAN_FEATURE_NAMES[feature]} ${plural ? 'are' : 'is'} not on the ${planLabel(plan)} plan.`;
 }
 

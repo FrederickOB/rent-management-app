@@ -19,6 +19,7 @@ import {
   loadUnitCounts,
 } from '@/lib/server/session';
 import { daysLeftLabel, leaseStatusLabel } from '@/lib/tenancy-format';
+import { DashboardView } from './dashboard-view';
 
 export default async function HomePage() {
   // The layout has already checked the session; these calls are cached for this request.
@@ -26,10 +27,13 @@ export default async function HomePage() {
   if (!me) return null;
   const membership = me.memberships.find((m) => m.companyId === me.activeCompanyId);
   const sections = navFor(me, companyFeatures(company)).filter((item) => item.href !== '/');
-  // The start of the DA-01 dashboard (M9): what is in the register, by status (M2 plan 4.11).
-  const [properties, units] = allowed(me, 'register.view')
-    ? await Promise.all([loadPropertyList(), loadUnitCounts()])
-    : [null, null];
+  // M9 (DA-01, DA-02, DA-06): the portfolio dashboard for those who may read it; otherwise M2's
+  // count of the register by status (plan 4.11).
+  const dashboard = allowed(me, 'dashboard.read');
+  const [properties, units] =
+    !dashboard && allowed(me, 'register.view')
+      ? await Promise.all([loadPropertyList(), loadUnitCounts()])
+      : [null, null];
   const register =
     properties?.ok && units?.ok
       ? { properties: properties.data.rows.length, counts: units.data.counts }
@@ -52,6 +56,7 @@ export default async function HomePage() {
           You are not a member of any company yet. Ask an administrator to invite you.
         </Alert>
       )}
+      {dashboard ? <DashboardView /> : null}
       {register ? (
         <Card data-testid="register-summary">
           <CardHeader

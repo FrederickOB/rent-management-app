@@ -219,6 +219,30 @@ const ITEMS: readonly NavItem[] = [
     needs: 'tasks.read',
     feature: 'notices',
   },
+  // M9 (plan 4.7): owner statements and the money moved for owners are Growth only (decision 13);
+  // the compliance list is on every plan. Owners and advisers read their own, within scope.
+  {
+    href: '/statements',
+    label: 'Owner statements',
+    description:
+      'Each owner’s monthly statement: cash, earned and owed, occupancy, and the agency’s side. Issuing one locks its month.',
+    needs: 'statements.read',
+    feature: 'owner_reporting',
+  },
+  {
+    href: '/owner-money',
+    label: 'Remittances',
+    description: 'Money paid to owners, fees taken and money owners sent, each with its proof.',
+    needs: 'statements.read',
+    feature: 'owner_reporting',
+  },
+  {
+    href: '/compliance',
+    label: 'Compliance list',
+    description:
+      'Rent tax due, Rent Control registrations, withholding certificates, VAT returns and advances over the limit.',
+    needs: 'compliance.read',
+  },
   {
     href: '/approvals',
     label: 'Approvals',
@@ -278,6 +302,13 @@ const ITEMS: readonly NavItem[] = [
     label: 'WhatsApp numbers',
     description: 'The shared WhatsApp number and the numbers companies send from.',
     needs: 'whatsapp_account.manage',
+  },
+  // M9: Gate 1 across companies, for platform admins (decision 13).
+  {
+    href: '/platform/gate1',
+    label: 'Gate 1 metrics',
+    description: 'The Gate 1 measures for each company and in total, month by month.',
+    needs: 'metrics.platform.read',
   },
   {
     href: '/platform/company-plans',

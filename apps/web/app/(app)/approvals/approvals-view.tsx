@@ -30,6 +30,7 @@ import {
   approvalMoves,
   approvalWarning,
   closeReasonLabel,
+  FEE_TERMS_CHANGE,
   MOVE_OUT_SETTLEMENT,
   payloadLeaseId,
   payloadReason,
@@ -131,6 +132,12 @@ const RECORD_LINKS: Record<string, string> = {
   // M8: the move-out, with its inspection and deductions.
   move_out: 'Open the move-out',
 };
+
+/** What the record link reads: M9's fee terms open the owner, not where their rent goes. */
+const recordLinkText = (row: ApprovalRow): string =>
+  row.actionType === FEE_TERMS_CHANGE
+    ? 'Open the owner'
+    : (RECORD_LINKS[row.subjectType] ?? 'Open the record');
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
 export function ApprovalsView({ names }: { readonly names: readonly [string, string][] }) {
@@ -352,7 +359,7 @@ function ApprovalItem({
               <dd>
                 {href ? (
                   <Link href={href} className="font-medium underline underline-offset-2">
-                    {subject?.title ?? RECORD_LINKS[row.subjectType] ?? 'Open the record'}
+                    {subject?.title ?? recordLinkText(row)}
                   </Link>
                 ) : (
                   subject?.title
@@ -417,7 +424,7 @@ function ApprovalItem({
             ) : null}
             {otherRecord ? (
               <Link href={otherRecord} className="text-sm font-medium underline underline-offset-2">
-                {RECORD_LINKS[row.subjectType] ?? 'Open the record'}
+                {recordLinkText(row)}
               </Link>
             ) : null}
           </div>

@@ -35,3 +35,18 @@ export async function openFetchedLink(load: () => Promise<string>): Promise<void
     throw error;
   }
 }
+
+/**
+ * Starts the download of a short-lived signed link served as an attachment (a dashboard export):
+ * the browser saves the file and the page stays where it is. No tab is opened, so none is left
+ * empty behind the download.
+ */
+export function startDownload(url: string): void {
+  if (!/^https?:\/\//i.test(url)) throw new Error('unexpected link');
+  const link = document.createElement('a');
+  link.href = url;
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
+}

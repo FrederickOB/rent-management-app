@@ -195,6 +195,15 @@ function OwnerItem({
             <Badge>{OWNER_KIND_LABELS[owner.kind]}</Badge>
             {owner.archived ? <Badge tone="dark">Archived</Badge> : null}
           </p>
+          {/* M9: the owner's fee terms, statements and remittances. */}
+          <p>
+            <Link
+              href={`/owners/${owner.id}`}
+              className="inline-flex min-h-9 items-center font-medium underline underline-offset-2"
+            >
+              Fees, statements and remittances
+            </Link>
+          </p>
           {owner.legalName && owner.legalName !== owner.displayName ? (
             <p className="text-slate-700">Legal name: {owner.legalName}</p>
           ) : null}
