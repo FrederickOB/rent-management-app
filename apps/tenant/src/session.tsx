@@ -95,7 +95,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // what they had not sent, and this device's token, which the API dropped with the session.
       if (problem.status === 401 || problem.status === 403) {
         forgetOutbox();
-        forgetRepairQueue();
+        forgetRepairQueue('session_ended');
         forgetRegistration();
         await clearCache();
       }
@@ -142,7 +142,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (had) void dismissAll();
     });
     forgetOutbox();
-    forgetRepairQueue();
+    forgetRepairQueue('session_ended');
     void clearCache();
   }, []);
 

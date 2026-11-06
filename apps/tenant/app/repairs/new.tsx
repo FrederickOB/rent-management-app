@@ -17,14 +17,22 @@ import {
   type Capture,
 } from '../../src/repair-capture';
 import { forgetRequestFiles, keepFile } from '../../src/repair-files';
-import { addRepair, flushRepairs, queuedFilesSurvive } from '../../src/repair-queue';
+import {
+  addRepair,
+  flushRepairs,
+  loadRepairs,
+  queuedFilesSurvive,
+  queuedRepair,
+} from '../../src/repair-queue';
 import {
   CATEGORY_CHOICES,
   checkRepairFile,
+  checkVoiceNote,
   clockLabel,
   fileLabel,
   MAX_FILES,
   secondsLabel,
+  type ChosenMedia,
   type RepairFile,
 } from '../../src/repair-rules';
 import { useSession } from '../../src/session';
@@ -73,7 +81,8 @@ function choicesOf(groups: TenancyGroupView[]): Choice[] {
 
 type Outcome =
   | { readonly kind: 'sent'; readonly repair: TenantRepairView; readonly landlordName: string }
-  | { readonly kind: 'waiting' }
+  /** Saved on the phone, and sent by itself: offline, or the API could not take it just now. */
+  | { readonly kind: 'waiting'; readonly offline: boolean }
   | { readonly kind: 'refused'; readonly problem: string };
 
 /**
@@ -91,7 +100,13 @@ export default function ReportRepair() {
   const { me, loading } = useSession();
   const personId = me?.personId ?? null;
   const tenancies = useCachedLoad('tenancies', loadTenancies, Boolean(me));
-  const voice = useVoiceRecorder();
+  // F2: whether each landlord takes files (false on Starter), from the repairs list.
+  const repairs = useCachedLoad('repairs', loadRepairs, Boolean(me));
+  // A voice note that stopped itself at 3 minutes is added like one the tenant stopped (LT 5).
+  const autoStopped = useRef<(note: ChosenMedia) => void>(() => undefined);
+  const voice = useVoiceRecorder((note) => {
+    if (note) autoStopped.current(note);
+  });
 
   // The request's own id, made once, so every send of it makes one job; its files' folder too.
   const [clientId] = useState(() => newClientMessageId());
@@ -120,11 +135,21 @@ export default function ReportRepair() {
   const chosen =
     choices.find((choice) => choice.leaseId === leaseId) ??
     (choices.length === 1 ? choices[0] : undefined);
+  const filesAllowed =
+    !chosen ||
+    repairs.view.status !== 'ready' ||
+    (repairs.view.data.find((group) => group.landlord.companyId === chosen.companyId)
+      ?.filesAllowed ??
+      true);
 
   if (!loading && !me) return <Redirect href="/sign-in" />;
   const back = () => (router.canGoBack() ? router.back() : router.replace('/repairs'));
 
-  async function add(capture: Promise<Capture>, what: 'camera' | 'microphone' | null) {
+  async function add(
+    capture: Promise<Capture>,
+    what: 'camera' | 'microphone' | null,
+    source: 'visual' | 'voice' = 'visual',
+  ) {
     if (!personId) return;
     setProblem(null);
     const result = await capture;
@@ -147,11 +172,13 @@ export default function ReportRepair() {
       }
       try {
         const file = await keepFile(personId, clientId, media, (kept.current += 1));
-        const checked = checkRepairFile(file);
+        const checked = source === 'voice' ? checkVoiceNote(file) : checkRepairFile(file);
         if (!checked.ok) {
           refused = checked.problem;
           continue;
         }
+        const { notice } = checked as { readonly notice?: string };
+        if (notice) refused = notice;
         added.push({
           key: file.keptName,
           keptName: file.keptName,
@@ -172,10 +199,18 @@ export default function ReportRepair() {
     setAdding(false);
   }
 
+  autoStopped.current = (note) => {
+    void add(Promise.resolve({ status: 'chosen', media: [note] }), null, 'voice').then(() =>
+      setProblem(
+        (shown) => shown ?? 'Recording stopped at 3 minutes, the longest a voice note can be.',
+      ),
+    );
+  };
+
   async function recordOrStop() {
     if (voice.recording) {
       const note = await voice.stop();
-      if (note) await add(Promise.resolve({ status: 'chosen', media: [note] }), null);
+      if (note) await add(Promise.resolve({ status: 'chosen', media: [note] }), null, 'voice');
       return;
     }
     if (files.length >= MAX_FILES) {
@@ -198,6 +233,7 @@ export default function ReportRepair() {
     const text = description.trim();
     if (text.length < 3) return setProblem('Say in a few words what is wrong.');
     if (voice.recording) return setProblem('Stop the recording first.');
+    if (adding) return setProblem('Wait until your files are added.');
     setProblem(null);
     setSending(true);
     submitted.current = true;
@@ -211,15 +247,29 @@ export default function ReportRepair() {
       category,
       description: text,
       emergency,
-      files,
+      // F2: a landlord on Starter takes the description only.
+      files: filesAllowed ? files : [],
     });
     void flushRepairs(personId, chosen.companyId).then((results) => {
-      const mine = results.find((r) => r.status !== 'dropped' && r.clientId === clientId);
+      const mine = results.find(
+        (r): r is Exclude<typeof r, { status: 'dropped' }> =>
+          r.status !== 'dropped' && r.clientId === clientId,
+      );
+      const queued = queuedRepair(clientId);
       if (mine?.status === 'sent')
         setOutcome({ kind: 'sent', repair: mine.repair, landlordName: chosen.landlordName });
-      else if (mine?.status === 'not_sent' && mine.problem.code !== 'network')
-        setOutcome({ kind: 'refused', problem: mine.problem.message });
-      else setOutcome({ kind: 'waiting' });
+      // Still on the phone and still to go by itself (LT 8): it is waiting, not refused, so the
+      // tenant has no reason to write it again.
+      else if (!mine || queued?.retryable)
+        setOutcome({
+          kind: 'waiting',
+          offline: mine?.status !== 'not_sent' || mine.problem.code === 'network',
+        });
+      else
+        setOutcome({
+          kind: 'refused',
+          problem: queued?.problem ?? `Your request was not sent. ${mine.problem.message}`,
+        });
       setSending(false);
     });
   }
@@ -299,65 +349,87 @@ export default function ReportRepair() {
         />
       </View>
 
-      <Card label="Photos, videos and voice notes">
-        <Heading>Photos, videos and voice notes</Heading>
-        <Small>
-          Up to {MAX_FILES} files. Videos up to {secondsLabel(90)}, voice notes up to{' '}
-          {secondsLabel(VOICE_SECONDS)}.
-          {queuedFilesSurvive ? '' : ' Keep this page open until the request is sent.'}
-        </Small>
-        {files.map((file, index) => (
-          <View key={file.key} style={styles.file} testID="repair-file">
-            <Text style={styles.fileText}>{fileLabel(file)}</Text>
+      {filesAllowed ? null : (
+        <Notice testID="no-files">
+          {chosen?.landlordName ?? 'Your landlord'} takes repair requests in the app as words only.
+          Say what is wrong, and they will be in touch with you about it.
+        </Notice>
+      )}
+      {filesAllowed ? (
+        <Card label="Photos, videos and voice notes">
+          <Heading>Photos, videos and voice notes</Heading>
+          <Small>
+            Up to {MAX_FILES} files. Videos up to {secondsLabel(90)}, voice notes up to{' '}
+            {secondsLabel(VOICE_SECONDS)}.
+            {queuedFilesSurvive ? '' : ' Keep this page open until the request is sent.'}
+          </Small>
+          {files.map((file, index) => (
+            <View key={file.key} style={styles.file} testID="repair-file">
+              <Text style={styles.fileText}>{fileLabel(file)}</Text>
+              <Button
+                label="Remove"
+                variant="quiet"
+                testID="remove-file"
+                onPress={() => setFiles((list) => list.filter((_, i) => i !== index))}
+              />
+            </View>
+          ))}
+          {canUseCamera ? (
+            <>
+              <Button
+                label="Take a photo"
+                variant="quiet"
+                testID="take-photo"
+                busy={adding}
+                onPress={() => void add(takeWithCamera('photo'), 'camera')}
+              />
+              <Button
+                label="Record a video"
+                variant="quiet"
+                testID="record-video"
+                busy={adding}
+                onPress={() => void add(takeWithCamera('video'), 'camera')}
+              />
+            </>
+          ) : null}
+          <Button
+            label="Choose photos or videos"
+            variant="quiet"
+            testID="choose-media"
+            busy={adding}
+            onPress={() => void add(chooseFromLibrary(MAX_FILES - files.length), null)}
+          />
+          {canRecordVoice ? (
             <Button
-              label="Remove"
-              variant="quiet"
-              testID="remove-file"
-              onPress={() => setFiles((list) => list.filter((_, i) => i !== index))}
+              label={
+                voice.recording
+                  ? `Stop recording (${clockLabel(voice.seconds)})`
+                  : 'Record a voice note'
+              }
+              variant={voice.recording ? 'primary' : 'quiet'}
+              testID="record-voice"
+              onPress={() => void recordOrStop()}
             />
-          </View>
-        ))}
-        {canUseCamera ? (
-          <Button
-            label="Take a photo or video"
-            variant="quiet"
-            testID="take-photo"
-            busy={adding}
-            onPress={() => void add(takeWithCamera(), 'camera')}
-          />
-        ) : null}
-        <Button
-          label="Choose photos or videos"
-          variant="quiet"
-          testID="choose-media"
-          busy={adding}
-          onPress={() => void add(chooseFromLibrary(MAX_FILES - files.length), null)}
-        />
-        {canRecordVoice ? (
-          <Button
-            label={
-              voice.recording
-                ? `Stop recording (${clockLabel(voice.seconds)})`
-                : 'Record a voice note'
-            }
-            variant={voice.recording ? 'primary' : 'quiet'}
-            testID="record-voice"
-            onPress={() => void recordOrStop()}
-          />
-        ) : null}
-        {voiceFileInput ? (
-          <Button
-            label="Add a voice note"
-            variant="quiet"
-            testID="choose-voice"
-            busy={adding}
-            onPress={() => void add(chooseVoiceFile(), null)}
-          />
-        ) : null}
-      </Card>
+          ) : null}
+          {voiceFileInput ? (
+            <Button
+              label="Add a voice note"
+              variant="quiet"
+              testID="choose-voice"
+              busy={adding}
+              onPress={() => void add(chooseVoiceFile(), null, 'voice')}
+            />
+          ) : null}
+        </Card>
+      ) : null}
 
       {problem ? <ErrorText testID="repair-problem">{problem}</ErrorText> : null}
-      <Button label="Send the request" testID="send-repair" busy={sending} onPress={send} />
+      <Button
+        label="Send the request"
+        testID="send-repair"
+        busy={sending || adding}
+        onPress={send}
+      />
     </Screen>
   );
 }
@@ -414,11 +486,12 @@ function Sent({ outcome, onDone }: { outcome: Outcome; onDone: () => void }) {
         )
       ) : outcome.kind === 'waiting' ? (
         <Notice testID="repair-waiting">
-          You are offline, so your request is saved on this phone. It goes by itself when you are
-          back online.
+          {outcome.offline
+            ? 'You are offline, so your request is saved on this phone. It will be sent when you are back online: there is no need to write it again.'
+            : 'We could not send your request just now, so it is saved on this phone. It will be sent by itself: there is no need to write it again.'}
         </Notice>
       ) : (
-        <ErrorText testID="repair-refused">Your request was not sent. {outcome.problem}</ErrorText>
+        <ErrorText testID="repair-refused">{outcome.problem}</ErrorText>
       )}
       <Button label="See your repairs" testID="see-repairs" onPress={onDone} />
     </Screen>

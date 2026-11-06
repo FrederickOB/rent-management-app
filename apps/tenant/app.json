@@ -26,13 +26,13 @@
         {
           "photosPermission": "Rent Platform uses the photos and videos you choose for repair reports and messages to your landlord.",
           "cameraPermission": "Rent Platform uses the camera when you take a photo or video of something that needs repair.",
-          "microphonePermission": "Rent Platform uses the microphone to record sound with a repair video."
+          "microphonePermission": "Rent Platform uses the microphone when you record a voice note or a video about a repair."
         }
       ],
       [
         "expo-audio",
         {
-          "microphonePermission": "Rent Platform uses the microphone when you record a voice note about a repair."
+          "microphonePermission": "Rent Platform uses the microphone when you record a voice note or a video about a repair."
         }
       ]
     ],

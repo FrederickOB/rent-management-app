@@ -8,7 +8,8 @@ import {
 
 /**
  * Runs before every request, static files included, so every response carries the headers.
- * It never logs anything: link URLs carry tokens (CLAUDE.md section 9).
+ * It never logs anything: link URLs carry tokens (CLAUDE.md section 9). The job sheet's photo
+ * posts are the exception (`config` below); their routes set the same headers themselves.
  */
 export function proxy(request: NextRequest): NextResponse {
   const nonce = createNonce();
@@ -24,3 +25,13 @@ export function proxy(request: NextRequest): NextResponse {
   if (/^\/[lpruj]\//.test(pathname)) response.headers.set('Cache-Control', 'no-store');
   return response;
 }
+
+/**
+ * Every path but the job sheet's two photo posts, `/j/<token>/start` and `/j/<token>/complete`
+ * (M8 review LT 1). For a post it runs on, Next.js copies the body for the proxy and cuts it at
+ * 10 MB, warning with the URL, token and all; those two carry up to ten 10 MB photos. Their routes
+ * read the form within an explicit limit (lib/body-limit.ts) and add the headers (secured()).
+ */
+export const config = {
+  matcher: ['/((?!j/[^/]+/(?:start|complete)$).*)'],
+};

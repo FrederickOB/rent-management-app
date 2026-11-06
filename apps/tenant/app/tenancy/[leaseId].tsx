@@ -17,6 +17,7 @@ import {
   optionalMoney,
   rentLabel,
   termLabel,
+  zoneOf,
 } from '../../src/format';
 import { openFetchedUrl } from '../../src/open-url';
 import { toProblem } from '../../src/problems';
@@ -340,7 +341,12 @@ function Notices({ tenancy }: { tenancy: TenancyDetailView }) {
         </Small>
       ) : null}
       {mine.map((notice) => (
-        <NoticeRow key={notice.noticeId} notice={notice} offline={view.offline} />
+        <NoticeRow
+          key={notice.noticeId}
+          notice={notice}
+          offline={view.offline}
+          timeZone={zoneOf(tenancy.landlord)}
+        />
       ))}
     </Card>
   );
@@ -353,7 +359,16 @@ function noticeState(notice: TenantNoticeView): { label: string; tone: 'ok' | 'w
   return { label: 'Waiting for you to acknowledge it', tone: 'waiting' };
 }
 
-function NoticeRow({ notice, offline }: { notice: TenantNoticeView; offline: boolean }) {
+function NoticeRow({
+  notice,
+  offline,
+  timeZone,
+}: {
+  notice: TenantNoticeView;
+  offline: boolean;
+  /** The landlord's zone, for the notice's times. */
+  timeZone: string;
+}) {
   const { expire } = useSession();
   const [busy, setBusy] = useState<'document' | 'sign' | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -400,12 +415,12 @@ function NoticeRow({ notice, offline }: { notice: TenantNoticeView; offline: boo
         Notice {notice.number} · {notice.typeLabel}
       </Body>
       <Badge label={state.label} tone={state.tone} testID="notice-state" />
-      <Small>Issued {formatTime(notice.issuedAt)}</Small>
+      <Small>Issued {formatTime(notice.issuedAt, timeZone)}</Small>
       {notice.effectiveDate ? (
         <Small>Effective date {formatDate(notice.effectiveDate)}</Small>
       ) : null}
       {notice.acknowledged && notice.acknowledgedAt ? (
-        <Small>Acknowledged {formatTime(notice.acknowledgedAt)}</Small>
+        <Small>Acknowledged {formatTime(notice.acknowledgedAt, timeZone)}</Small>
       ) : null}
       {offline ? null : (
         <>

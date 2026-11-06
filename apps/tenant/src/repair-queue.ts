@@ -2,8 +2,9 @@ import type { TenantRepairView } from '@rent/contracts';
 import type { MaintenanceCategory } from '@rent/domain/maintenance';
 import { useCallback, useSyncExternalStore } from 'react';
 import { api } from './api';
-import { cacheable, readCache, writeCache } from './cache';
+import { cacheable, readCache, withoutLinks, writeCache } from './cache';
 import { NETWORK_MESSAGE, toProblem, type Problem } from './problems';
+import { noteDroppedRepairs } from './repair-dropped';
 import {
   filesSurvive,
   forgetAllRepairFiles,
@@ -94,13 +95,16 @@ type StoredRepair = Omit<QueuedRepair, 'personId' | 'files' | 'state'> & {
 /** Keeps one landlord's queue in the offline cache, and the list of landlords with a queue. */
 async function keep(personId: string, companyId: string): Promise<void> {
   const stored = queuedRepairs(personId, companyId)
-    .map(({ personId: _p, files, state, problem, ...rest }): StoredRepair => ({
+    .map(({ personId: _p, files, state, problem, description, ...rest }): StoredRepair => ({
       ...rest,
+      // The cache keeps no link (M8 review LT 9): the copy on the phone has any link the tenant
+      // wrote taken out. The request in memory keeps them, and goes with them unless the app
+      // closes first.
+      description: withoutLinks(description),
       problem: state === 'sending' ? null : problem,
       files: files.map(({ part: _part, ...file }) => file),
     }))
-    // The cache keeps no link, and refuses a whole write that holds one: such a request stays in
-    // memory only.
+    // Anything still holding a link stays in memory only: the cache refuses a whole write.
     .filter((entry) => cacheable(JSON.stringify(entry)));
   await writeCache(personId, cacheName(companyId), stored);
   const index = new Set((await readCache<string[]>(personId, INDEX))?.data ?? []);
@@ -171,14 +175,21 @@ export function discardRepair(clientId: string): void {
   void keep(item.personId, item.companyId);
 }
 
-/** Signing out, or a session that ended: nothing of one person stays, files included. */
-export function forgetRepairQueue(): void {
+/**
+ * Signing out, or a session that ended: nothing of one person stays, files included. When the
+ * session ended by itself, the sign-in screen says how many requests went with it.
+ */
+export function forgetRepairQueue(why: 'signed_out' | 'session_ended' = 'signed_out'): void {
+  if (why === 'session_ended') noteDroppedRepairs(items.size);
   generation += 1;
   items.clear();
   chains.clear();
   changed();
   forgetAllRepairFiles();
 }
+
+/** One queued request, if it is still on the phone. */
+export const queuedRepair = (clientId: string): QueuedRepair | null => items.get(clientId) ?? null;
 
 const subscribe = (listener: () => void) => {
   listeners.add(listener);
@@ -231,6 +242,12 @@ const MEDIA_WORDS: Readonly<Record<string, string>> = {
 function notSentText(problem: Problem): string {
   if (problem.code === 'network')
     return 'Waiting to send. It goes by itself when you are back online.';
+  const code = problem.code?.toUpperCase();
+  // F2: on Starter the landlord takes a description only.
+  if (code === 'REPAIR_FILES_NOT_ON_PLAN')
+    return 'Not sent: your landlord does not take photos, videos or voice notes in the app. Discard this request and write it again without them.';
+  if (code === 'LEASE_ENDED')
+    return 'Not sent: this tenancy ended more than 30 days ago, so a repair for it cannot be reported in the app. Contact your landlord directly, then discard this request.';
   const media = problem.code ? MEDIA_WORDS[problem.code.toUpperCase()] : undefined;
   if (media) return `Not sent: ${media}. Discard this request and write it again without it.`;
   if (problem.status === 422 && problem.code?.toUpperCase() === 'IDEMPOTENCY_KEY_REUSED')

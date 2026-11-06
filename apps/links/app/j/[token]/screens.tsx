@@ -5,12 +5,14 @@ import {
   MEDIA_RULES,
 } from '@rent/domain/maintenance';
 import { attachmentLabel, jobSheetProblem } from '../../../lib/job-sheet';
+import { newFormId } from '../../../lib/job-sheet-store';
 import type { JobSheetView } from '../../../lib/links-api';
 import { when } from '../../../lib/pay';
 
 // The artisan's job sheet (MI-04, MI-06; M8 decision 6). Plain HTML forms, no script of its own.
-// It shows the unit, the description, the tenant's photos and the property contact's phone,
-// never the tenant's own phone number or anything else about them.
+// It shows the unit, the description, the tenant's photos and videos (F1) and the property
+// contact's phone, never the tenant's own phone number or anything else about them. Each form
+// carries an id of its own, so a second tap gets the first one's answer (lib/job-sheet-store.ts).
 
 type Query = Readonly<Record<string, string | undefined>>;
 
@@ -58,23 +60,31 @@ function Facts({ sheet }: { sheet: JobSheetView }) {
   );
 }
 
-/** Who to call about the job: the property's contact, never the tenant. */
+/** Who to call about the job: the property's contact, never the tenant. None on a dead link. */
 function Contact({ sheet }: { sheet: JobSheetView }) {
+  const { contact } = sheet;
+  if (!contact) return null;
   return (
     <section className="panel contact" aria-labelledby="contact">
       <h2 id="contact">Questions about this job?</h2>
-      <p>Call {sheet.contact.name}.</p>
-      {sheet.contact.phone ? (
+      <p>Call {contact.name}.</p>
+      {contact.phone ? (
         <p>
-          Phone: <a href={`tel:${sheet.contact.phone}`}>{sheet.contact.phone}</a>
+          Phone: <a href={`tel:${contact.phone}`}>{contact.phone}</a>
         </p>
       ) : null}
     </section>
   );
 }
 
+/** The person the job came from, as the notice names them: the property's contact. */
+const fromWhom = (sheet: JobSheetView) => sheet.contact?.name ?? sheet.property.name;
+
+/** F1: the tenant's photos and videos from the report; never voice notes or later files. */
 function Files({ token, sheet }: { token: string; sheet: JobSheetView }) {
-  const reported = sheet.attachments.filter((a) => a.stage === 'report');
+  const reported = sheet.attachments.filter(
+    (a) => a.stage === 'report' && (a.kind === 'image' || a.kind === 'video'),
+  );
   if (reported.length === 0) return null;
   return (
     <section aria-labelledby="files">
@@ -92,14 +102,17 @@ function Files({ token, sheet }: { token: string; sheet: JobSheetView }) {
   );
 }
 
-function Problem({ query }: { query: Query }) {
-  const problem = jobSheetProblem(query);
+function Problem({ query, timeZone }: { query: Query; timeZone: string }) {
+  const problem = jobSheetProblem(query, timeZone);
   return problem ? (
     <p className="panel problem" role="alert">
       {problem}
     </p>
   ) : null;
 }
+
+/** The form's own id, sent back with it. */
+const FormId = () => <input type="hidden" name="form" value={newFormId()} />;
 
 function PhotoField({ id, label, required }: { id: string; label: string; required?: boolean }) {
   return (
@@ -119,10 +132,13 @@ export function SheetScreen({
   token,
   sheet,
   query,
+  kept = 0,
 }: {
   token: string;
   sheet: JobSheetView;
   query: Query;
+  /** Photos of the finished work already in storage from a refused try (a wrong code). */
+  kept?: number;
 }) {
   const base = `/j/${token}`;
   const declining = sheet.actions.decline && query.step === 'decline';
@@ -132,17 +148,19 @@ export function SheetScreen({
     <>
       <h1>{jobHeading(sheet)}</h1>
       <p className="panel notice">
-        {sheet.artisan.name}, {sheet.contact.name} has a job for you. Read it, then answer below.
+        {sheet.artisan.name}, {fromWhom(sheet)} has a job for you. Read it, then answer below.
       </p>
       <Facts sheet={sheet} />
-      <section aria-labelledby="what">
-        <h2 id="what">What needs doing</h2>
-        <p className="instructions">{sheet.description}</p>
-      </section>
+      {sheet.description ? (
+        <section aria-labelledby="what">
+          <h2 id="what">What needs doing</h2>
+          <p className="instructions">{sheet.description}</p>
+        </section>
+      ) : null}
       <Files token={token} sheet={sheet} />
 
       <section id="act">
-        <Problem query={query} />
+        <Problem query={query} timeZone={sheet.timeZone} />
         {sheet.actions.accept || sheet.actions.decline ? (
           <>
             <h2 id="act-respond">{declining ? 'Decline the job' : 'Can you do this job?'}</h2>
@@ -175,6 +193,7 @@ export function SheetScreen({
           <>
             <h2 id="act-start">Start the work</h2>
             <form method="post" action={`${base}/start`} encType="multipart/form-data">
+              <FormId />
               <PhotoField id="before" label="A photo from before you start" />
               <label htmlFor="beforePhotoReason">No photo? Say why</label>
               <textarea id="beforePhotoReason" name="beforePhotoReason" rows={2} maxLength={500} />
@@ -193,6 +212,7 @@ export function SheetScreen({
               </p>
             ) : !code || code.sentAt === null ? (
               <form method="post" action={`${base}/code`}>
+                <FormId />
                 <p>
                   To send the finished work, you need a 6-digit code. We will send it by SMS
                   {code ? ` to ${code.destinationMasked}` : ' to your phone'}.
@@ -204,7 +224,22 @@ export function SheetScreen({
             ) : (
               <>
                 <form method="post" action={`${base}/complete`} encType="multipart/form-data">
-                  <PhotoField id="after" label="Photos of the finished work" required />
+                  <FormId />
+                  {kept > 0 ? (
+                    <p className="panel notice" role="status">
+                      {kept === 1
+                        ? 'Your photo of the finished work is kept from your last try.'
+                        : `Your ${kept} photos of the finished work are kept from your last try.`}{' '}
+                      Choose photos only to replace them.
+                    </p>
+                  ) : null}
+                  <PhotoField
+                    id="after"
+                    label={
+                      kept > 0 ? 'Other photos of the finished work' : 'Photos of the finished work'
+                    }
+                    required={kept === 0}
+                  />
                   <label htmlFor="completionNote">What did you do?</label>
                   <textarea
                     id="completionNote"
@@ -233,6 +268,7 @@ export function SheetScreen({
                   <button type="submit">Send the finished work</button>
                 </form>
                 <form method="post" action={`${base}/code`}>
+                  <FormId />
                   <button className="secondary" type="submit" disabled={code.sendsLeft === 0}>
                     Send a new code
                   </button>
@@ -273,7 +309,10 @@ export function DoneScreen({ sheet, done }: { sheet: JobSheetView; done: boolean
   );
 }
 
-/** A link that no longer works: closed, expired or replaced. */
+/**
+ * A link that no longer works: closed, expired or replaced. An expired or replaced link names the
+ * job only: no property, address or contact (M8 review LT 9); the API sends none of them.
+ */
 export function ClosedScreen({ sheet }: { sheet: JobSheetView }) {
   const [heading, body] =
     sheet.screen === 'expired'
@@ -288,9 +327,12 @@ export function ClosedScreen({ sheet }: { sheet: JobSheetView }) {
     <>
       <h1>{heading}</h1>
       <p>
-        {body} {jobHeading(sheet)} at {sheet.property.name}.
+        {body}{' '}
+        {sheet.screen === 'closed'
+          ? `${jobHeading(sheet)} at ${sheet.property.name}.`
+          : `${jobHeading(sheet)}.`}
       </p>
-      <Contact sheet={sheet} />
+      {sheet.screen === 'closed' ? <Contact sheet={sheet} /> : null}
     </>
   );
 }

@@ -87,9 +87,16 @@ async function toMedia(files: File[]): Promise<ChosenMedia[]> {
 const chosen = async (files: File[]): Promise<Capture> =>
   files.length === 0 ? { status: 'cancelled' } : { status: 'chosen', media: await toMedia(files) };
 
+export type CameraKind = 'photo' | 'video';
+
+const CAMERA_TYPES: Readonly<Record<CameraKind, string>> = {
+  photo: MEDIA_RULES.image.contentTypes.join(','),
+  video: MEDIA_RULES.video.contentTypes.join(','),
+};
+
 /** Call each straight from the tap: browsers open a file picker only while a tap is handled. */
-export async function takeWithCamera(): Promise<Capture> {
-  return chosen(await pick(VISUAL, 1, 'environment'));
+export async function takeWithCamera(kind?: CameraKind): Promise<Capture> {
+  return chosen(await pick(kind ? CAMERA_TYPES[kind] : VISUAL, 1, 'environment'));
 }
 
 export async function chooseFromLibrary(max: number): Promise<Capture> {
@@ -109,6 +116,6 @@ const NONE: VoiceRecorder = {
   stop: async () => null,
 };
 
-export function useVoiceRecorder(): VoiceRecorder {
+export function useVoiceRecorder(_onAutoStop?: (note: ChosenMedia | null) => void): VoiceRecorder {
   return NONE;
 }

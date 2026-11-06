@@ -1,5 +1,6 @@
 import { MEDIA_MAX_FILES_PER_REQUEST, MEDIA_RULES } from '@rent/domain/maintenance';
 import { createJobSheetUpload, type ApiResult, type Client, type JobSheetView } from './links-api';
+import { when } from './pay';
 import { problemText } from './problems';
 
 // The artisan's job sheet, /j/[token] (MI-04, MI-06; M8 decision 6 and plan 4.5). Plain HTML
@@ -27,14 +28,27 @@ const JOB_PROBLEMS: Readonly<Record<string, string>> = {
   MEDIA_TYPE_NOT_ALLOWED: 'Send photos as JPEG, PNG or WebP.',
   MEDIA_TOO_LARGE: `Each photo must be ${MEDIA_RULES.image.maxBytes / 1_000_000} MB or smaller.`,
   JOB_SHEET_LOCKED: 'Too many wrong codes. Wait a while before you try again.',
+  // Too many wrong codes (429): the API says until when, which the page adds.
+  CODE_LOCKED: 'Too many wrong codes.',
+  BODY_TOO_LARGE: `Send at most ${MEDIA_MAX_FILES_PER_REQUEST} photos at a time, each ${MEDIA_RULES.image.maxBytes / 1_000_000} MB or smaller.`,
+  RESPONSE_REQUIRED: 'Choose whether you can take the job.',
 };
 
 /** The problem to show: the job sheet's own words first, then the signing page's for codes. */
-export function jobSheetProblem(query: Query): string | null {
+export function jobSheetProblem(query: Query, timeZone = 'Africa/Accra'): string | null {
   if (!query.error) return null;
+  if (query.error === 'CODE_LOCKED') {
+    // From the query string: only a well-formed instant is shown.
+    const until = query.until && ISO_INSTANT.test(query.until) ? query.until : null;
+    return until
+      ? `${JOB_PROBLEMS.CODE_LOCKED} Try again after ${when(until, timeZone)}.`
+      : `${JOB_PROBLEMS.CODE_LOCKED} Wait a while before you try again.`;
+  }
   if (Object.hasOwn(JOB_PROBLEMS, query.error)) return JOB_PROBLEMS[query.error]!;
   return problemText(query);
 }
+
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 export type PhotoCheck =
   | { readonly ok: true; readonly photos: readonly File[] }
@@ -103,7 +117,14 @@ export async function uploadPhotos(
 
 /** The error code for the page after a refused action: the API's, or the rate limit's. */
 export function errorOf(result: Extract<ApiResult<unknown>, { ok: false }>): string {
+  // A lock on the code is a 429 with its own words, and the time it ends (lockedUntil).
+  if (result.status === 429 && result.code.toUpperCase() === 'CODE_LOCKED') return 'CODE_LOCKED';
   return result.status === 429 ? 'RATE_LIMITED' : result.code;
+}
+
+/** What the page adds to a refused code: the tries left (code_wrong), or when a lock ends. */
+export function codeDetails(result: Extract<ApiResult<unknown>, { ok: false }>) {
+  return { left: result.data?.attemptsLeft, until: result.data?.lockedUntil };
 }
 
 /** How the page refers to one of the job's files. */

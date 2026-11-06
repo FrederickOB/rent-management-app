@@ -144,6 +144,31 @@ export function checkRepairFile(
   return { ok: true, kind };
 }
 
+/**
+ * A voice note, chosen as a file or recorded. One saved by an Android phone as `.m4a` is an
+ * MPEG-4 file whose first bytes read as a video, and the server takes it as one (M8 review
+ * LT 9): it goes as a video, so at most 90 seconds, and the tenant is told why.
+ */
+export function checkVoiceNote(
+  file: Pick<ChosenMedia, 'contentType' | 'sizeBytes' | 'durationSeconds'>,
+): { ok: true; kind: RepairFileKind; notice?: string } | { ok: false; problem: string } {
+  const checked = checkRepairFile(file);
+  if (mediaKindOf(file.contentType) !== 'video') return checked;
+  const limit = MEDIA_RULES.video.maxSeconds ?? 90;
+  if (!checked.ok) {
+    if (file.durationSeconds !== null && file.durationSeconds > limit)
+      return {
+        ok: false,
+        problem: `That voice note is saved in a video format (MPEG-4), so it is sent as a video, which can be at most ${secondsLabel(limit)}. Choose a shorter one, or one saved as AAC or MP3.`,
+      };
+    return checked;
+  }
+  return {
+    ...checked,
+    notice: 'That voice note is saved in a video format (MPEG-4), so it is sent as a video.',
+  };
+}
+
 /** "Photo", "Video", "Voice note", with its size or length. */
 export function fileLabel(
   file: Pick<RepairFile, 'kind' | 'sizeBytes' | 'durationSeconds'>,
@@ -171,5 +196,5 @@ const STEP_WORDS: Readonly<Record<TenantRepairView['steps'][number]['kind'], str
 };
 
 /** "Work done, 5 Nov 2026, 14:20 GMT (Africa/Accra)". */
-export const stepLabel = (step: TenantRepairView['steps'][number]): string =>
-  `${STEP_WORDS[step.kind]}, ${formatTime(step.at)}`;
+export const stepLabel = (step: TenantRepairView['steps'][number], timeZone?: string): string =>
+  `${STEP_WORDS[step.kind]}, ${formatTime(step.at, timeZone)}`;

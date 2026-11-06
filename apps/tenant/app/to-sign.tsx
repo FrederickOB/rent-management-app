@@ -3,7 +3,7 @@ import { Redirect, useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
-import { formatTime, SIGNER_STATUS_LABELS } from '../src/format';
+import { formatTime, SIGNER_STATUS_LABELS, zoneOf } from '../src/format';
 import { openFetchedUrl } from '../src/open-url';
 import { toProblem, type Problem } from '../src/problems';
 import { useSession } from '../src/session';
@@ -184,7 +184,7 @@ function SigningItem({
             {item.tenancy.unitCode}, {item.tenancy.propertyName}
           </Small>
         ) : null}
-        {item.sentAt ? <Small>Sent {formatTime(item.sentAt)}</Small> : null}
+        {item.sentAt ? <Small>Sent {formatTime(item.sentAt, zoneOf(item.landlord))}</Small> : null}
       </View>
       {report ? (
         <Body testID="move-in-report-about">
@@ -198,7 +198,9 @@ function SigningItem({
         {item.signer.status === 'signed' ? (
           <>
             <Badge label="You have signed" tone="ok" />
-            {item.signer.signedAt ? <Small>Signed {formatTime(item.signer.signedAt)}</Small> : null}
+            {item.signer.signedAt ? (
+              <Small>Signed {formatTime(item.signer.signedAt, zoneOf(item.landlord))}</Small>
+            ) : null}
             <Small>When everyone has signed, your copy will be with your tenancy.</Small>
           </>
         ) : item.signer.status === 'declined' ? (
@@ -258,7 +260,11 @@ function NoticeItem({ item, busy, onReview }: { item: Item; busy: boolean; onRev
             {item.tenancy.unitCode}, {item.tenancy.propertyName}
           </Small>
         ) : null}
-        {notice ? noticeDates(notice).map((line) => <Small key={line}>{line}</Small>) : null}
+        {notice
+          ? noticeDates(notice, zoneOf(item.landlord)).map((line) => (
+              <Small key={line}>{line}</Small>
+            ))
+          : null}
       </View>
       {notice ? <Body testID="notice-statement">{noticeStatement(notice)}</Body> : null}
 
@@ -268,7 +274,7 @@ function NoticeItem({ item, busy, onReview }: { item: Item; busy: boolean; onRev
           <>
             <Badge label="You have acknowledged it" tone="ok" />
             {item.signer.signedAt ? (
-              <Small>Acknowledged {formatTime(item.signer.signedAt)}</Small>
+              <Small>Acknowledged {formatTime(item.signer.signedAt, zoneOf(item.landlord))}</Small>
             ) : null}
           </>
         ) : item.status === 'pending' ? (

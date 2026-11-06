@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
+import { keptUploads } from '../../../lib/job-sheet-store';
 import { clientFrom, isToken, openJobSheet } from '../../../lib/links-api';
 import { ClosedScreen, DoneScreen, SheetScreen, Trouble } from './screens';
 
@@ -36,7 +37,14 @@ export default async function JobSheetPage({
   const sheet = opened.value;
   switch (sheet.screen) {
     case 'sheet':
-      return <SheetScreen token={token} sheet={sheet} query={query} />;
+      return (
+        <SheetScreen
+          token={token}
+          sheet={sheet}
+          query={query}
+          kept={sheet.actions.complete ? keptUploads(token).length : 0}
+        />
+      );
     case 'done':
       return <DoneScreen sheet={sheet} done={query.done === 'completed'} />;
     default:

@@ -87,15 +87,27 @@ function fromResult(result: ImagePicker.ImagePickerResult, max: number): Capture
   return { status: 'chosen', media: (result.assets ?? []).slice(0, max).map(toMedia) };
 }
 
-/** Takes a photo or a video with the camera, asking for the camera the first time. */
-export async function takeWithCamera(): Promise<Capture> {
+/** What the camera takes: Android's camera opens for one or the other, never both. */
+export type CameraKind = 'photo' | 'video';
+
+const CAMERA_MEDIA: Readonly<Record<CameraKind, ImagePicker.MediaType[]>> = {
+  photo: ['images'],
+  video: ['videos'],
+};
+
+/**
+ * Takes a photo or records a video with the camera, asking for the camera the first time. The
+ * screen offers the two as separate actions (M8 review LT 4): asked for both, Android opens the
+ * photo camera only. With no kind, the camera offers both where the phone can (iOS).
+ */
+export async function takeWithCamera(kind?: CameraKind): Promise<Capture> {
   try {
     let permission = await ImagePicker.getCameraPermissionsAsync();
     if (!permission.granted && permission.canAskAgain)
       permission = await ImagePicker.requestCameraPermissionsAsync();
     if (!permission.granted) return { status: 'denied' };
     const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images', 'videos'],
+      mediaTypes: kind ? CAMERA_MEDIA[kind] : ['images', 'videos'],
       quality: 0.7,
       exif: false,
       videoMaxDuration: VIDEO_SECONDS,
@@ -133,16 +145,22 @@ export async function chooseVoiceFile(): Promise<Capture> {
 
 /**
  * Records a voice note, asking for the microphone the first time; it stops by itself at the
- * longest a voice note may be (3 minutes).
+ * longest a voice note may be (3 minutes), and then hands the note to `onAutoStop` (M8 review
+ * LT 5), as `stop()` hands it to whoever stops it. Each note goes to one of them only: a stop
+ * that comes while another is under way answers null.
  */
-export function useVoiceRecorder(): VoiceRecorder {
+export function useVoiceRecorder(onAutoStop?: (note: ChosenMedia | null) => void): VoiceRecorder {
   const recorder = useAudioRecorder(VOICE_PRESET);
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const stopping = useRef<Promise<ChosenMedia | null> | null>(null);
+  const autoStopped = useRef(onAutoStop);
+  useEffect(() => {
+    autoStopped.current = onAutoStop;
+  }, [onAutoStop]);
 
   const stop = useCallback(async (): Promise<ChosenMedia | null> => {
-    if (stopping.current) return stopping.current;
+    if (stopping.current) return stopping.current.then(() => null);
     const run = (async () => {
       const length = recorder.currentTime;
       try {
@@ -192,7 +210,10 @@ export function useVoiceRecorder(): VoiceRecorder {
     const timer = setInterval(() => {
       const now = recorder.currentTime;
       setSeconds(now);
-      if (now >= VOICE_SECONDS) void stop();
+      if (now >= VOICE_SECONDS)
+        void stop().then((note) => {
+          if (note) autoStopped.current?.(note);
+        });
     }, 250);
     return () => clearInterval(timer);
   }, [recording, recorder, stop]);

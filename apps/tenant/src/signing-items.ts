@@ -67,9 +67,12 @@ export function toSignSummary(items: readonly Item[]): ToSignSummary {
   };
 }
 
-/** "Issued 4 Nov 2026, 09:00 GMT (Africa/Accra)", and the notice's date where it has one. */
-export function noticeDates(notice: ItemNotice): string[] {
-  const lines = [`Issued ${formatTime(notice.issuedAt)}`];
+/**
+ * "Issued 4 Nov 2026, 09:00 GMT (Africa/Accra)", in the landlord's zone, and the notice's date
+ * where it has one.
+ */
+export function noticeDates(notice: ItemNotice, timeZone?: string): string[] {
+  const lines = [`Issued ${formatTime(notice.issuedAt, timeZone)}`];
   if (notice.effectiveDate) lines.push(`Effective date ${formatDate(notice.effectiveDate)}`);
   return lines;
 }

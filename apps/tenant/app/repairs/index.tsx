@@ -4,7 +4,7 @@ import { Redirect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api } from '../../src/api';
-import { formatTime } from '../../src/format';
+import { formatTime, zoneOf } from '../../src/format';
 import { openFetchedUrl } from '../../src/open-url';
 import { toProblem } from '../../src/problems';
 import {
@@ -35,7 +35,7 @@ import {
 import { useCachedLoad } from '../../src/use-cached-load';
 import { useReloadOnReturn } from '../../src/use-load';
 
-type Group = { companyId: string; name: string };
+type Group = { companyId: string; name: string; timeZone: string };
 
 /**
  * Repairs (MI-01, MI-06, CM-04; M8 plan 4.11): each landlord's repairs in a box of their own
@@ -65,10 +65,15 @@ export default function Repairs() {
   const view = repairs.view;
   const groups: Group[] = [];
   const seen = new Set<string>();
+  const zones = new Map(
+    view.status === 'ready'
+      ? view.data.map((group) => [group.landlord.companyId, zoneOf(group.landlord)] as const)
+      : [],
+  );
   const addGroup = (companyId: string, name: string) => {
     if (seen.has(companyId)) return;
     seen.add(companyId);
-    groups.push({ companyId, name });
+    groups.push({ companyId, name, timeZone: zones.get(companyId) ?? zoneOf(null) });
   };
   for (const item of queued) addGroup(item.companyId, item.landlordName);
   if (view.status === 'ready')
@@ -146,6 +151,7 @@ function LandlordRepairs({
           key={repair.jobId}
           repair={repair}
           landlordName={group.name}
+          timeZone={group.timeZone}
           onChanged={onChanged}
         />
       ))}
@@ -156,6 +162,7 @@ function LandlordRepairs({
 
 /** A request still on this phone: sending, waiting for the network, or refused. */
 function QueuedRow({ item, landlordName }: { item: QueuedRepair; landlordName: string }) {
+  const [confirming, setConfirming] = useState(false);
   return (
     <View style={styles.row} testID="queued-repair">
       <View style={styles.rowTop}>
@@ -183,12 +190,34 @@ function QueuedRow({ item, landlordName }: { item: QueuedRepair; landlordName: s
           onPress={() => void flushRepairs(item.personId, item.companyId)}
         />
       ) : null}
-      {item.state !== 'sending' ? (
+      {item.state !== 'sending' && confirming ? (
+        <View style={styles.answer} testID="confirm-discard-box">
+          <Body>
+            Discard this request? It has not reached {landlordName} yet, and it would still go by
+            itself.
+          </Body>
+          <Button
+            label="Discard it"
+            testID="confirm-discard"
+            onPress={() => discardRepair(item.clientId)}
+          />
+          <Button
+            label="Keep it"
+            variant="quiet"
+            testID="keep-queued"
+            onPress={() => setConfirming(false)}
+          />
+        </View>
+      ) : item.state !== 'sending' ? (
         <Button
           label="Discard"
           variant="quiet"
           testID="discard-queued"
-          onPress={() => discardRepair(item.clientId)}
+          onPress={() =>
+            // One that will still go is discarded only once the tenant confirms (M8 review
+            // LT 9); one that can never go simply goes.
+            item.retryable ? setConfirming(true) : discardRepair(item.clientId)
+          }
         />
       ) : null}
       <Small>Written for {landlordName}.</Small>
@@ -206,10 +235,13 @@ function toneOf(repair: TenantRepairView): 'ok' | 'waiting' | 'past' {
 function RepairRow({
   repair,
   landlordName,
+  timeZone,
   onChanged,
 }: {
   repair: TenantRepairView;
   landlordName: string;
+  /** The landlord's zone, for the repair's times (DO-04). */
+  timeZone: string;
   onChanged: () => void;
 }) {
   const { expire } = useSession();
@@ -289,11 +321,13 @@ function RepairRow({
           steps will not show here.
         </Notice>
       ) : null}
-      {repair.visitAt ? <Small>Visit planned for {formatTime(repair.visitAt)}</Small> : null}
+      {repair.visitAt ? (
+        <Small>Visit planned for {formatTime(repair.visitAt, timeZone)}</Small>
+      ) : null}
       {repair.steps.length > 0 ? (
         <View style={styles.steps} testID="repair-steps">
           {repair.steps.map((step, index) => (
-            <Small key={`${step.kind}-${index}`}>{stepLabel(step)}</Small>
+            <Small key={`${step.kind}-${index}`}>{stepLabel(step, timeZone)}</Small>
           ))}
         </View>
       ) : null}
@@ -355,7 +389,7 @@ function RepairRow({
         </View>
       ) : null}
       {problem ? <ErrorText testID="repair-error">{problem}</ErrorText> : null}
-      <Small>Reported {formatTime(repair.createdAt)}</Small>
+      <Small>Reported {formatTime(repair.createdAt, timeZone)}</Small>
     </View>
   );
 }
