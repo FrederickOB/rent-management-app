@@ -29,14 +29,21 @@ export interface TenancyCard {
   readonly documentId: string | null;
 }
 
+/** The landlord or agency, with its time zone for the app to show its times in (M8 review). */
+export interface Landlord {
+  readonly companyId: string;
+  readonly name: string;
+  readonly timeZone: string;
+}
+
 export interface TenancyGroup {
   /** The landlord or agency the tenant rents from. */
-  readonly landlord: { readonly companyId: string; readonly name: string };
+  readonly landlord: Landlord;
   readonly tenancies: readonly TenancyCard[];
 }
 
 export interface TenancyDetail extends TenancyCard {
-  readonly landlord: { readonly companyId: string; readonly name: string };
+  readonly landlord: Landlord;
   readonly depositMinor: number | null;
   readonly serviceChargeMonthlyMinor: number | null;
   readonly noticeDays: number;
@@ -48,7 +55,7 @@ export interface TenancyDetail extends TenancyCard {
  * app opens the signing page in its browser with a fresh link from POST /me/signing/{signerId}/link.
  */
 export interface TenantSigningCard extends TenantSigningRequest {
-  readonly landlord: { readonly companyId: string; readonly name: string };
+  readonly landlord: Landlord;
   readonly tenancy: TenancyCard | null;
 }
 
@@ -114,11 +121,11 @@ export class TenantAppService {
     const groups: TenancyGroup[] = [];
     for (const [companyId, tenantIds] of await this.companies(tenant)) {
       const group = await this.inCompany(tenant, companyId, tenantIds, async (tx) => {
-        const name = await this.landlordName(tx, companyId);
+        const landlord = await this.landlordOf(tx, companyId);
         const rows = await tx.execute<CardRow>(
           sql`${CARD_SELECT} where l.status <> 'cancelled' order by l.start_date desc`,
         );
-        return { landlord: { companyId, name }, tenancies: rows.rows.map(card) };
+        return { landlord, tenancies: rows.rows.map(card) };
       });
       if (group.tenancies.length > 0) groups.push(group);
     }
@@ -137,7 +144,7 @@ export class TenantAppService {
         );
         return {
           ...card(row),
-          landlord: { companyId, name: await this.landlordName(tx, companyId) },
+          landlord: await this.landlordOf(tx, companyId),
           depositMinor: row.deposit_minor === null ? null : Number(row.deposit_minor),
           serviceChargeMonthlyMinor:
             row.service_charge === null ? null : Number(row.service_charge),
@@ -187,14 +194,14 @@ export class TenantAppService {
       const found = await this.inCompany(tenant, companyId, tenantIds, async (tx) => {
         const requests = await this.esign.tenantRequests(tx);
         if (requests.length === 0) return [];
-        const name = await this.landlordName(tx, companyId);
+        const landlord = await this.landlordOf(tx, companyId);
         const out: TenantSigningCard[] = [];
         for (const request of requests) {
           const rows = await tx.execute<CardRow>(
             sql`${CARD_SELECT} where l.id = ${request.leaseId}`,
           );
           const row = rows.rows[0];
-          out.push({ ...request, landlord: { companyId, name }, tenancy: row ? card(row) : null });
+          out.push({ ...request, landlord, tenancy: row ? card(row) : null });
         }
         return out;
       });
@@ -278,7 +285,12 @@ export class TenantAppService {
     );
   }
 
-  private async landlordName(tx: Tx, companyId: string): Promise<string> {
-    return (await companyRecord(tx, companyId))?.displayName ?? '';
+  private async landlordOf(tx: Tx, companyId: string): Promise<Landlord> {
+    const company = await companyRecord(tx, companyId);
+    return {
+      companyId,
+      name: company?.displayName ?? '',
+      timeZone: company?.timeZone ?? 'Africa/Accra',
+    };
   }
 }

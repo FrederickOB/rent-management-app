@@ -118,6 +118,10 @@ export const signingRequest = pgTable(
       .where(
         sql`${t.leaseId} is not null and ${t.status} in ('preparing', 'pending') and ${t.subjectType} = 'lease'`,
       ),
+    // M8 review: one move-in report out for signature per lease at a time.
+    uniqueIndex('signing_request_one_live_move_in_report')
+      .on(t.companyId, t.leaseId)
+      .where(sql`${t.status} in ('preparing', 'pending') and ${t.subjectType} = 'move_in_report'`),
     index('signing_request_notice_idx').on(t.companyId, t.noticeId),
     check(
       'signing_request_subject_check',
@@ -278,6 +282,12 @@ export const secureLink = pgTable(
     lastOpenedAt: ts(),
     openCount: integer().notNull().default(0),
     usedAt: ts(),
+    /**
+     * M8 review: a job sheet's wrong completion codes across all its codes, and the lock they set
+     * (five wrong codes lock the link for 30 minutes, as M3's signer lock).
+     */
+    failedCodeAttempts: integer().notNull().default(0),
+    codeLockedUntil: ts(),
     createdBy: uuid().references(() => person.id),
     createdAt: tsNow(),
   },

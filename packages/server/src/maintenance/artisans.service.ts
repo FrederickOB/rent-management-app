@@ -272,6 +272,86 @@ export class ArtisansService {
       await this.recordArtisanConsent(tx, row, channel, false, null, 'stop_keyword');
   }
 
+  /**
+   * STOP, STOP ALL and START from a phone the company knows as an artisan or a staff member (CM-09;
+   * M8 review), on the channels the keyword names: each such contact's consent there changes. A
+   * staff member's SMS needs no consent, but a STOP on it is honoured and a START undoes it.
+   * Returns whether the phone was known.
+   */
+  async honourKeyword(
+    tx: Tx,
+    companyId: string,
+    phone: string,
+    effect: { readonly action: 'grant' | 'withdraw'; readonly channels: readonly string[] },
+  ): Promise<boolean> {
+    const channels = effect.channels.filter((c): c is Channel => c === 'sms' || c === 'whatsapp');
+    const artisans = await tx.select().from(schema.artisan).where(eq(schema.artisan.phone, phone));
+    const members = await tx
+      .select({ id: schema.membership.id })
+      .from(schema.membership)
+      .innerJoin(schema.person, eq(schema.person.id, schema.membership.personId))
+      .where(
+        and(
+          eq(schema.membership.companyId, companyId),
+          eq(schema.membership.status, 'active'),
+          eq(schema.person.phoneNumber, phone),
+        ),
+      );
+    if (artisans.length === 0 && members.length === 0) return false;
+    const granted = effect.action === 'grant';
+    const version = granted ? 'start.v1' : 'stop.v1';
+    const source = granted ? ('self' as const) : ('stop_keyword' as const);
+    const artisanNow = await this.consentOf(
+      tx,
+      'artisan',
+      artisans.map((a) => a.id),
+    );
+    const staffNow = await this.consentOf(
+      tx,
+      'staff',
+      members.map((m) => m.id),
+    );
+    const now = this.clock.now();
+    for (const channel of channels) {
+      for (const a of artisans) {
+        const latest = artisanNow.get(a.id)?.[channel]?.action;
+        // A START restores only what a STOP withdrew; staff record an artisan's first consent.
+        if (granted ? latest !== 'withdraw' : latest !== 'grant') continue;
+        await tx.insert(schema.contactConsentEvent).values({
+          companyId,
+          subjectType: 'artisan',
+          artisanId: a.id,
+          channel,
+          action: effect.action,
+          textVersion: version,
+          textSha256: sha(textOf(version, channel)),
+          source,
+          recordedBy: null,
+          recordedAt: now,
+        });
+      }
+      for (const m of members) {
+        const latest = staffNow.get(m.id)?.[channel]?.action;
+        // Staff SMS goes out without consent: only a STOP is recorded, and a START after it.
+        if (granted ? latest !== 'withdraw' : latest === 'withdraw') continue;
+        if (!granted && channel === 'whatsapp' && latest !== 'grant') continue;
+        await tx.insert(schema.contactConsentEvent).values({
+          companyId,
+          subjectType: 'staff',
+          membershipId: m.id,
+          channel,
+          action: effect.action,
+          textVersion: version,
+          textSha256: sha(textOf(version, channel)),
+          source,
+          recordedBy: null,
+          recordedAt: now,
+        });
+      }
+    }
+    return true;
+  }
+
   /** How messaging reaches an artisan (decision 6): their phone, on the channels they agreed to. */
   async artisanReach(tx: Tx, artisanId: string): Promise<ContactReach | null> {
     const [row] = await tx.select().from(schema.artisan).where(eq(schema.artisan.id, artisanId));
@@ -292,14 +372,18 @@ export class ArtisansService {
   async staffReach(
     tx: Tx,
     personId: string,
-  ): Promise<{ whatsapp: { action: 'grant' | 'withdraw'; at: Date } | null }> {
+  ): Promise<{
+    whatsapp: { action: 'grant' | 'withdraw'; at: Date } | null;
+    /** M8 review: a STOP by SMS; staff SMS otherwise needs no consent. */
+    sms: { action: 'grant' | 'withdraw'; at: Date } | null;
+  }> {
     const [membership] = await tx
       .select({ id: schema.membership.id })
       .from(schema.membership)
       .where(and(eq(schema.membership.personId, personId), eq(schema.membership.status, 'active')));
-    if (!membership) return { whatsapp: null };
+    if (!membership) return { whatsapp: null, sms: null };
     const latest = (await this.consentOf(tx, 'staff', [membership.id])).get(membership.id);
-    return { whatsapp: latest?.whatsapp ?? null };
+    return { whatsapp: latest?.whatsapp ?? null, sms: latest?.sms ?? null };
   }
 
   private async recordArtisanConsent(

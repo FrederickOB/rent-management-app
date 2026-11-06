@@ -124,6 +124,8 @@ export class ExpensesService {
   ): Promise<{ readonly expenseId: string }> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'expense.record');
+    // Every check before the receipt is staged: staged files are kept write-once (M8 review).
+    await this.write(staff, (tx) => this.validate(tx, staff, input));
     const receipt: StagedMedia | null = input.receiptUploadId
       ? await this.documents.stageMediaUpload(
           { companyId: staff.companyId, personId: staff.personId, actorKind: 'staff' },
@@ -134,50 +136,7 @@ export class ExpensesService {
       : null;
     const id = await this.write(staff, async (tx) => {
       await claim?.claim(tx);
-      const company = await companyRecord(tx, staff.companyId);
-      const today = isoNow(this.clock, company?.timeZone ?? 'Africa/Accra');
-      try {
-        checkExpense({
-          amountMinor: input.amountMinor,
-          supplierName: input.supplierName,
-          expenseDate: input.expenseDate,
-          today,
-          paidBy: input.paidBy,
-          companyKind: company?.kind ?? 'landlord',
-        });
-      } catch (error) {
-        domainInvalid(error);
-      }
-      const [property] = await tx
-        .select({ id: schema.property.id })
-        .from(schema.property)
-        .where(eq(schema.property.id, input.propertyId));
-      if (!property) throw notFound('Property');
-      if (input.unitId) {
-        const [unit] = await tx
-          .select({ propertyId: schema.unit.propertyId })
-          .from(schema.unit)
-          .where(eq(schema.unit.id, input.unitId));
-        if (!unit || unit.propertyId !== input.propertyId) throw notFound('Unit');
-      }
-      if (input.jobId) {
-        const [job] = await tx
-          .select({ propertyId: schema.maintenanceJob.propertyId })
-          .from(schema.maintenanceJob)
-          .where(eq(schema.maintenanceJob.id, input.jobId));
-        if (!job || job.propertyId !== input.propertyId) throw notFound('Repair');
-      }
-      const owners = await ownersOn(tx, input.propertyId, input.expenseDate);
-      if (owners.length !== 1 || owners[0]!.shareBps !== 10_000)
-        throw conflict(
-          owners.length === 0 ? 'no_owner' : 'joint_owners',
-          owners.length === 0
-            ? 'This property has no owner on the expense date'
-            : 'This property has more than one owner, so its expenses cannot be posted yet (PR-07)',
-        );
-      const ownerId = owners[0]!.ownerId;
-      const bookId = await ownerBook(tx, ownerId);
-      if (!bookId) throw conflict('no_owner', 'The owner has no book');
+      const { ownerId, bookId } = await this.validate(tx, staff, input);
       const expenseId = uuidv7();
       const posted = await this.posting.post(tx, {
         companyId: staff.companyId,
@@ -242,6 +201,67 @@ export class ExpensesService {
     return { expenseId: id };
   }
 
+  /** What makes an expense recordable, checked before its receipt is staged and again in it. */
+  private async validate(
+    tx: Tx,
+    staff: StaffActor,
+    input: {
+      readonly propertyId: string;
+      readonly unitId?: string | null;
+      readonly supplierName: string;
+      readonly amountMinor: number;
+      readonly expenseDate: string;
+      readonly paidBy: ExpensePaidBy;
+      readonly jobId?: string | null;
+    },
+  ): Promise<{ ownerId: string; bookId: string }> {
+    const company = await companyRecord(tx, staff.companyId);
+    const today = isoNow(this.clock, company?.timeZone ?? 'Africa/Accra');
+    try {
+      checkExpense({
+        amountMinor: input.amountMinor,
+        supplierName: input.supplierName,
+        expenseDate: input.expenseDate,
+        today,
+        paidBy: input.paidBy,
+        companyKind: company?.kind ?? 'landlord',
+      });
+    } catch (error) {
+      domainInvalid(error);
+    }
+    const [property] = await tx
+      .select({ id: schema.property.id })
+      .from(schema.property)
+      .where(eq(schema.property.id, input.propertyId));
+    if (!property) throw notFound('Property');
+    if (input.unitId) {
+      const [unit] = await tx
+        .select({ propertyId: schema.unit.propertyId })
+        .from(schema.unit)
+        .where(eq(schema.unit.id, input.unitId));
+      if (!unit || unit.propertyId !== input.propertyId) throw notFound('Unit');
+    }
+    if (input.jobId) {
+      const [job] = await tx
+        .select({ propertyId: schema.maintenanceJob.propertyId })
+        .from(schema.maintenanceJob)
+        .where(eq(schema.maintenanceJob.id, input.jobId));
+      if (!job || job.propertyId !== input.propertyId) throw notFound('Repair');
+    }
+    const owners = await ownersOn(tx, input.propertyId, input.expenseDate);
+    if (owners.length !== 1 || owners[0]!.shareBps !== 10_000)
+      throw conflict(
+        owners.length === 0 ? 'no_owner' : 'joint_owners',
+        owners.length === 0
+          ? 'This property has no owner on the expense date'
+          : 'This property has more than one owner, so its expenses cannot be posted yet (PR-07)',
+      );
+    const ownerId = owners[0]!.ownerId;
+    const bookId = await ownerBook(tx, ownerId);
+    if (!bookId) throw conflict('no_owner', 'The owner has no book');
+    return { ownerId, bookId };
+  }
+
   /** A payable paid later (P15: Dr 2500, Cr 1010 or 1070), once. */
   async pay(
     actor: Actor | null,
@@ -265,6 +285,12 @@ export class ExpensesService {
       const company = await companyRecord(tx, staff.companyId);
       if (input.paidOn > isoNow(this.clock, company?.timeZone ?? 'Africa/Accra'))
         throw invalid('paid_on', 'Record a payment once it has been made');
+      // A self-managing landlord has no agency account: 1070 never enters a landlord's book.
+      if (input.paidFrom === 'agency_account' && company?.kind !== 'agency')
+        throw invalid(
+          'agency_account_not_available',
+          'Only an agency pays from its own account; record it as paid from the owner’s account',
+        );
       const posted = await this.posting.post(tx, {
         companyId: staff.companyId,
         rule: 'P15',

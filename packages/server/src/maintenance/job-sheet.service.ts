@@ -4,6 +4,7 @@ import {
   desc,
   eq,
   gte,
+  inArray,
   schema,
   sql,
   withCompany,
@@ -14,8 +15,6 @@ import {
 import { SIGNING_CODE, SIGNING_LIMITS } from '@rent/domain/esign';
 import {
   formatTicketNumber,
-  type MaintenanceAttachmentKind,
-  type MaintenanceAttachmentStage,
   type MaintenanceCategory,
   type MaintenanceJobStatus,
   type MaintenancePriority,
@@ -54,18 +53,20 @@ export interface JobSheetView {
   readonly screen: 'sheet' | 'done' | 'closed' | 'expired' | 'revoked';
   readonly ticket: string;
   readonly status: MaintenanceJobStatus;
-  readonly description: string;
+  /** Null on a dead link (closed, expired or revoked). */
+  readonly description: string | null;
   readonly category: MaintenanceCategory | null;
   readonly priority: MaintenancePriority | null;
   readonly property: { readonly name: string; readonly address: string | null };
   readonly unitCode: string | null;
-  readonly contact: { readonly name: string; readonly phone: string | null };
+  readonly contact: { readonly name: string; readonly phone: string | null } | null;
   readonly artisan: { readonly name: string; readonly response: 'accepted' | 'declined' | null };
   readonly visitAt: Date | null;
+  /** F1: the report's photos and videos only. */
   readonly attachments: readonly {
     readonly id: string;
-    readonly kind: MaintenanceAttachmentKind;
-    readonly stage: MaintenanceAttachmentStage;
+    readonly kind: 'image' | 'video';
+    readonly stage: 'report';
     readonly contentType: string;
   }[];
   readonly timeZone: string;
@@ -85,6 +86,20 @@ export interface JobSheetView {
     readonly lockedUntil: Date | null;
   } | null;
 }
+
+/** F1: what the job sheet shows of the job's files, the report's photos and videos. */
+const SHEET_FILE_STAGE = 'report';
+const SHEET_FILE_KINDS = ['image', 'video'] as const;
+/** A link that shows only the closed screen's facts and serves nothing. */
+const DEAD_SCREENS: readonly JobSheetView['screen'][] = ['closed', 'expired', 'revoked'];
+
+const codeLocked = (until: Date) =>
+  new AppError(
+    429,
+    'code_locked',
+    'Too many wrong codes. Try again in 30 minutes, or ask the property contact.',
+    { lockedUntil: until.toISOString() },
+  );
 
 const tooMany = () =>
   new AppError(429, 'too_many_requests', 'Too many tries. Wait a few minutes and try again.');
@@ -114,12 +129,20 @@ export class JobSheetService {
 
   // The link messages carry (messaging's `job_sheet` link resolver) -----------------------------
 
-  /** Mints the job's sheet link for its current artisan at send time; only its hash is stored. */
+  /**
+   * Mints the job's sheet link at send time for the artisan the message is addressed to, while the
+   * job is still theirs; only its hash is stored.
+   */
   async messageLinkUrl(companyId: string, jobId: string, messageId: string): Promise<string> {
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
       const job = await this.maintenance.lockJob(tx, jobId);
-      if (job.assigneeKind !== ARTISAN_KIND || !job.assigneeArtisanId)
-        throw conflict('job_sheet_unassigned', 'The job is no longer with an artisan');
+      const [message] = await tx
+        .select({ artisanId: schema.message.artisanId })
+        .from(schema.message)
+        .where(eq(schema.message.id, messageId));
+      const artisanId = message?.artisanId ?? null;
+      if (!artisanId || job.assigneeKind !== ARTISAN_KIND || job.assigneeArtisanId !== artisanId)
+        throw conflict('job_sheet_unassigned', 'The job is no longer with this artisan');
       if (job.status === 'closed' || job.status === 'cancelled')
         throw conflict('maintenance_closed', 'The job is closed');
       const token = newToken();
@@ -130,7 +153,7 @@ export class JobSheetService {
         purpose: 'job_sheet',
         tokenHash: tokenHash(token),
         jobId: job.id,
-        artisanId: job.assigneeArtisanId,
+        artisanId,
         messageId,
         expiresAt: new Date(now.getTime() + JOB_SHEET_LINK_DAYS * 24 * 60 * MINUTE),
         createdAt: now,
@@ -139,8 +162,25 @@ export class JobSheetService {
     });
   }
 
-  /** The message was sent: the artisan's earlier links for the job stop working. */
+  /**
+   * The message was sent: the same artisan's earlier links for the job stop working. Another
+   * artisan's link is never touched, nor a newer link of this artisan's (an older message that
+   * sends late supersedes nothing).
+   */
   async messageLinkSent(tx: Tx, jobId: string, messageId: string): Promise<void> {
+    const [sent] = await tx
+      .select({ artisanId: schema.secureLink.artisanId, createdAt: schema.secureLink.createdAt })
+      .from(schema.secureLink)
+      .where(
+        and(
+          eq(schema.secureLink.jobId, jobId),
+          eq(schema.secureLink.purpose, 'job_sheet'),
+          eq(schema.secureLink.messageId, messageId),
+        ),
+      )
+      .orderBy(desc(schema.secureLink.createdAt))
+      .limit(1);
+    if (!sent?.artisanId) return;
     await tx
       .update(schema.secureLink)
       .set({ revokedAt: this.clock.now(), revokeReason: 'superseded' })
@@ -148,8 +188,10 @@ export class JobSheetService {
         and(
           eq(schema.secureLink.jobId, jobId),
           eq(schema.secureLink.purpose, 'job_sheet'),
+          eq(schema.secureLink.artisanId, sent.artisanId),
           sql`${schema.secureLink.revokedAt} is null`,
           sql`${schema.secureLink.messageId} is distinct from ${messageId}`,
+          sql`${schema.secureLink.createdAt} < ${sent.createdAt}`,
         ),
       );
   }
@@ -257,6 +299,13 @@ export class JobSheetService {
   ): Promise<JobSheetView> {
     await this.limit('action', client, SIGNING_LIMITS.actionsPerIp);
     const { companyId, linkId } = await this.resolve(token);
+    // The state first: staged files are kept write-once, so nothing is staged for a refused step.
+    await this.expect(companyId, linkId, (job) => {
+      if (job.artisanResponse !== 'accepted')
+        throw conflict('job_sheet_not_accepted', 'Accept the job before starting it');
+      if (job.status !== 'assigned')
+        throw conflict('maintenance_transition', 'This job has already started');
+    });
     const media = await this.stage(companyId, linkId, input.uploadIds);
     return this.act(
       companyId,
@@ -285,10 +334,13 @@ export class JobSheetService {
     await this.limit('code', client, SIGNING_LIMITS.codeSendsPerIp);
     const { companyId, linkId } = await this.resolve(token);
     const prepared = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { link, job } = await this.rows(tx, linkId, true);
+      // The link row is locked, so two sends at once are counted one after the other.
+      const { link, job } = await this.rows(tx, linkId, true, true);
       if (job.status !== 'in_progress')
         throw conflict('job_sheet_not_started', 'A code is sent once the work has started');
       const now = this.clock.now();
+      if (link.codeLockedUntil && link.codeLockedUntil > now)
+        throw codeLocked(link.codeLockedUntil);
       const since = new Date(
         now.getTime() - SIGNING_LIMITS.codeSendsPerLink.windowMinutes * MINUTE,
       );
@@ -384,7 +436,12 @@ export class JobSheetService {
   ): Promise<JobSheetView> {
     await this.limit('action', client, SIGNING_LIMITS.actionsPerIp);
     const { companyId, linkId } = await this.resolve(token);
-    // The code first, in its own transaction, so a wrong code's attempt is recorded.
+    await this.expect(companyId, linkId, (job) => {
+      if (job.status !== 'in_progress')
+        throw conflict('job_sheet_not_started', 'Start the work before sending the completion');
+    });
+    // The code next, in its own transaction, so a wrong code's attempt is recorded; files are
+    // staged only once it is right.
     await this.checkCode(companyId, linkId, input.code);
     const media = await this.stage(companyId, linkId, input.uploadIds);
     return this.act(
@@ -421,7 +478,9 @@ export class JobSheetService {
     await this.limit('open', client, SIGNING_LIMITS.opensPerIp);
     const { companyId, linkId } = await this.resolve(token);
     const documentId = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { job } = await this.rows(tx, linkId);
+      const { link, job } = await this.rows(tx, linkId);
+      // A dead link serves nothing (M8 review); a live one only the files it lists (F1).
+      if (DEAD_SCREENS.includes(this.screen(link, job))) return null;
       const [row] = await tx
         .select({ documentId: schema.maintenanceJobAttachment.documentId })
         .from(schema.maintenanceJobAttachment)
@@ -429,6 +488,8 @@ export class JobSheetService {
           and(
             eq(schema.maintenanceJobAttachment.id, attachmentId),
             eq(schema.maintenanceJobAttachment.jobId, job.id),
+            eq(schema.maintenanceJobAttachment.stage, SHEET_FILE_STAGE),
+            inArray(schema.maintenanceJobAttachment.kind, [...SHEET_FILE_KINDS]),
           ),
         );
       return row?.documentId ?? null;
@@ -441,9 +502,11 @@ export class JobSheetService {
   // Internals -------------------------------------------------------------------------------------
 
   private async checkCode(companyId: string, linkId: string, code: string): Promise<void> {
-    const ok = await withCompany(this.database, this.context(companyId), async (tx) => {
-      const { link } = await this.rows(tx, linkId, true);
+    const result = await withCompany(this.database, this.context(companyId), async (tx) => {
+      const { link } = await this.rows(tx, linkId, true, true);
       const now = this.clock.now();
+      if (link.codeLockedUntil && link.codeLockedUntil > now)
+        return { refused: codeLocked(link.codeLockedUntil) };
       const [challenge] = await tx
         .select()
         .from(schema.jobSheetCode)
@@ -456,26 +519,58 @@ export class JobSheetService {
         .orderBy(desc(schema.jobSheetCode.createdAt))
         .limit(1)
         .for('update');
-      if (!challenge || challenge.expiresAt <= now) return 'expired' as const;
-      if (challenge.attempts >= challenge.maxAttempts) return 'locked' as const;
+      if (!challenge || challenge.expiresAt <= now)
+        return { refused: invalid('code_expired', 'Ask for a new code and try again') };
       if (
         /^\d{6}$/.test(code.trim()) &&
         this.hasher.codeMatches(challenge.id, code.trim(), challenge.codeHash)
-      )
-        return 'ok' as const;
+      ) {
+        if (link.failedCodeAttempts > 0)
+          await tx
+            .update(schema.secureLink)
+            .set({ failedCodeAttempts: 0 })
+            .where(eq(schema.secureLink.id, link.id));
+        return { refused: null };
+      }
+      // Wrong codes count across every code the link was sent, as M3's signer lock (five lock
+      // the link for 30 minutes); a new code does not reset them.
+      const failed = link.failedCodeAttempts + 1;
+      const lockedUntil =
+        failed >= SIGNING_CODE.maxAttempts
+          ? new Date(now.getTime() + SIGNING_CODE.lockMinutes * MINUTE)
+          : null;
       await tx
         .update(schema.jobSheetCode)
         .set({ attempts: challenge.attempts + 1 })
         .where(eq(schema.jobSheetCode.id, challenge.id));
-      return challenge.attempts + 1 >= challenge.maxAttempts
-        ? ('locked' as const)
-        : ('wrong' as const);
+      await tx
+        .update(schema.secureLink)
+        .set({ failedCodeAttempts: lockedUntil ? 0 : failed, codeLockedUntil: lockedUntil })
+        .where(eq(schema.secureLink.id, link.id));
+      if (lockedUntil) return { refused: codeLocked(lockedUntil) };
+      const left = SIGNING_CODE.maxAttempts - failed;
+      return {
+        refused: new AppError(
+          400,
+          'code_wrong',
+          `That code is not right. You have ${left} ${left === 1 ? 'try' : 'tries'} left.`,
+          { attemptsLeft: String(left) },
+        ),
+      };
     });
-    if (ok === 'expired') throw invalid('code_expired', 'Ask for a new code and try again');
-    if (ok === 'locked')
-      throw new AppError(429, 'code_locked', 'Too many wrong codes. Ask for a new code.');
-    if (ok === 'wrong')
-      throw invalid('code_wrong', 'That code is not right. Check it and try again');
+    if (result.refused) throw result.refused;
+  }
+
+  /** Refuses a step the job's state does not allow, before anything is staged. */
+  private async expect(
+    companyId: string,
+    linkId: string,
+    check: (job: JobRow) => void,
+  ): Promise<void> {
+    await withCompany(this.database, this.context(companyId), async (tx) => {
+      const { job } = await this.rows(tx, linkId, true);
+      check(job);
+    });
   }
 
   private async act(
@@ -519,12 +614,10 @@ export class JobSheetService {
     return out;
   }
 
-  /** The link and its job. `usable` refuses a link that no longer works. */
-  private async rows(tx: Tx, linkId: string, usable = false) {
-    const [link] = await tx
-      .select()
-      .from(schema.secureLink)
-      .where(eq(schema.secureLink.id, linkId));
+  /** The link and its job. `usable` refuses a link that no longer works; `lock` locks the link. */
+  private async rows(tx: Tx, linkId: string, usable = false, lock = false) {
+    const query = tx.select().from(schema.secureLink).where(eq(schema.secureLink.id, linkId));
+    const [link] = lock ? await query.for('update') : await query;
     if (!link || link.purpose !== 'job_sheet' || !link.jobId || !link.artisanId)
       throw notFound('Link');
     const [job] = await tx
@@ -579,7 +672,13 @@ export class JobSheetService {
           eq(schema.document.id, schema.maintenanceJobAttachment.documentId),
         ),
       )
-      .where(eq(schema.maintenanceJobAttachment.jobId, job.id));
+      .where(
+        and(
+          eq(schema.maintenanceJobAttachment.jobId, job.id),
+          eq(schema.maintenanceJobAttachment.stage, SHEET_FILE_STAGE),
+          inArray(schema.maintenanceJobAttachment.kind, [...SHEET_FILE_KINDS]),
+        ),
+      );
     const [code] = await tx
       .select()
       .from(schema.jobSheetCode)
@@ -588,6 +687,8 @@ export class JobSheetService {
       .limit(1);
     const screen = this.screen(link, job);
     const mine = screen === 'sheet';
+    // A dead link shows only the closed screen's facts (M8 review).
+    const dead = DEAD_SCREENS.includes(screen);
     const now = this.clock.now();
     const since = new Date(now.getTime() - SIGNING_LIMITS.codeSendsPerLink.windowMinutes * MINUTE);
     const recent = await tx
@@ -607,23 +708,28 @@ export class JobSheetService {
       screen,
       ticket: formatTicketNumber(job.ticketNumber),
       status: job.status as MaintenanceJobStatus,
-      description: job.description,
+      description: dead ? null : job.description,
       category: job.category as MaintenanceCategory | null,
       priority: job.priority as MaintenancePriority | null,
-      property: { name: property?.name ?? facts.propertyName, address: property?.address ?? null },
+      property: {
+        name: property?.name ?? facts.propertyName,
+        address: dead ? null : (property?.address ?? null),
+      },
       unitCode: facts.unitCode,
-      contact,
+      contact: dead ? null : contact,
       artisan: {
         name: artisan?.name ?? '',
         response: job.artisanResponse as 'accepted' | 'declined' | null,
       },
-      visitAt: job.visitAt,
-      attachments: files.map((f) => ({
-        id: f.id,
-        kind: f.kind as MaintenanceAttachmentKind,
-        stage: f.stage as MaintenanceAttachmentStage,
-        contentType: f.contentType,
-      })),
+      visitAt: dead ? null : job.visitAt,
+      attachments: dead
+        ? []
+        : files.map((f) => ({
+            id: f.id,
+            kind: f.kind as 'image' | 'video',
+            stage: SHEET_FILE_STAGE,
+            contentType: f.contentType,
+          })),
       timeZone: facts.timeZone,
       linkExpiresAt: link.expiresAt,
       actions: {
@@ -638,18 +744,13 @@ export class JobSheetService {
               destinationMasked: maskPhone(artisan.phone),
               sentAt: code && !code.consumedAt ? code.createdAt : null,
               expiresAt: code && !code.consumedAt ? code.expiresAt : null,
-              attemptsLeft:
-                code && !code.consumedAt
-                  ? code.maxAttempts - code.attempts
-                  : SIGNING_CODE.maxAttempts,
+              attemptsLeft: SIGNING_CODE.maxAttempts - link.failedCodeAttempts,
               sendsLeft: Math.max(
                 0,
                 SIGNING_LIMITS.codeSendsPerLink.count - Number(recent[0]?.n ?? 0),
               ),
               lockedUntil:
-                code && !code.consumedAt && code.attempts >= code.maxAttempts
-                  ? new Date(code.createdAt.getTime() + SIGNING_CODE.lockMinutes * MINUTE)
-                  : null,
+                link.codeLockedUntil && link.codeLockedUntil > now ? link.codeLockedUntil : null,
             }
           : null,
     };

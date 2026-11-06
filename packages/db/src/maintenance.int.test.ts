@@ -747,7 +747,7 @@ describe('MI-01 and TL-12 a tenant sees the files of their own repairs, and no o
     expect(
       await update(
         'move_out',
-        "statement_document_id = $2, statement_sha256 = repeat('a', 64)",
+        "statement_document_id = $2, statement_sha256 = repeat('0', 64)",
         move,
         [statement],
       ),
@@ -792,7 +792,7 @@ describe('TL-11 a closed settlement takes its final statement once (0043)', () =
     expect(
       await update(
         'move_out',
-        "statement_document_id = $2, statement_sha256 = repeat('a', 64), note = 'Late'",
+        "statement_document_id = $2, statement_sha256 = repeat('0', 64), note = 'Late'",
         move,
         [statement],
       ),
@@ -802,7 +802,7 @@ describe('TL-11 a closed settlement takes its final statement once (0043)', () =
     expect(
       await update(
         'move_out',
-        "statement_document_id = $2, statement_sha256 = repeat('a', 64), updated_at = now()",
+        "statement_document_id = $2, statement_sha256 = repeat('0', 64), updated_at = now()",
         move,
         [statement],
       ),
@@ -811,7 +811,7 @@ describe('TL-11 a closed settlement takes its final statement once (0043)', () =
     expect(
       await update(
         'move_out',
-        "statement_document_id = $2, statement_sha256 = repeat('b', 64)",
+        "statement_document_id = $2, statement_sha256 = repeat('0', 64)",
         move,
         [other],
       ),
@@ -831,10 +831,164 @@ describe('TL-11 a closed settlement takes its final statement once (0043)', () =
     expect(
       await update(
         'move_out',
-        "statement_document_id = $2, statement_sha256 = repeat('a', 64)",
+        "statement_document_id = $2, statement_sha256 = repeat('0', 64)",
         move,
         [statement],
       ),
     ).toBe('RA088');
+  });
+});
+
+describe('MI-04 and MI-11 the M8 review rules in the database (0044, 0045)', () => {
+  it('keeps a revoked secure link revoked (RA091), while its opens are still counted', async () => {
+    const jobId = await job(here);
+    const link = await tx(async () => {
+      const artisan = await one(
+        "insert into artisan (company_id, name, phone, trades, created_by) values ($1, 'Kojo Fix', '+233200000088', '{plumbing}', $2) returning id",
+        [companyId, manager],
+      );
+      return one(
+        `insert into secure_link (company_id, property_id, purpose, token_hash, job_id, artisan_id, expires_at)
+         values ($1, $2, 'job_sheet', $3, $4, $5, now() + interval '30 days') returning id`,
+        [companyId, here.property, randomUUID().replace(/-/g, '').repeat(2), jobId, artisan.id],
+      );
+    });
+    expect(
+      await update('secure_link', "revoked_at = now(), revoke_reason = 'superseded'", link.id),
+    ).toBeNull();
+    expect(await update('secure_link', 'revoked_at = null', link.id)).toBe('RA091');
+    expect(await update('secure_link', "revoke_reason = 'expired'", link.id)).toBe('RA091');
+    expect(await update('secure_link', 'open_count = open_count + 1', link.id)).toBeNull();
+  });
+
+  it('refuses a deduction on a move-out that does not exist (RA085), and keeps a withdrawal on its deduction’s property', async () => {
+    const at = await place('RV');
+    await deposit(at, 50_000);
+    expect(await deduct(at, randomUUID(), 1_000)).toBe('RA085');
+    const move = await moveOut(at);
+    expect(await deduct(at, move, 50_001)).toBe('RA086');
+    expect(await deduct(at, move, 20_000)).toBeNull();
+    const { id: deduction } = await tx(() =>
+      one('select id from deposit_deduction where move_out_id = $1', [move]),
+    );
+    const withdraw = (property: string) =>
+      sqlState(
+        tx(() =>
+          app.query(
+            'insert into deposit_deduction_withdrawal (company_id, property_id, move_out_id, deduction_id) values ($1, $2, $3, $4)',
+            [companyId, property, move, deduction],
+          ),
+        ),
+      );
+    expect(await withdraw(here.property)).toBe('23503');
+    expect(await withdraw(at.property)).toBeNull();
+  });
+
+  it('shows an owner’s advisers the children of that owner’s move-outs only (owner scope through the parent)', async () => {
+    const mine = await place('OA');
+    const theirs = await place('OB');
+    await deposit(mine, 40_000);
+    await deposit(theirs, 40_000);
+    const myMove = await moveOut(mine);
+    const theirMove = await moveOut(theirs);
+    expect(await deduct(mine, myMove, 10_000)).toBeNull();
+    expect(await deduct(theirs, theirMove, 10_000)).toBeNull();
+    const seen = (owner: string) =>
+      tx(async () => {
+        await app.query("select set_config('app.owner_scope', $1, true)", [`{${owner}}`]);
+        return (
+          await app.query<{ move_out_id: string }>(
+            'select move_out_id from deposit_deduction where move_out_id = any($1::uuid[])',
+            [[myMove, theirMove]],
+          )
+        ).rows.map((r) => r.move_out_id);
+      });
+    expect(await seen(mine.owner)).toEqual([myMove]);
+    expect(await seen(theirs.owner)).toEqual([theirMove]);
+  });
+
+  it('keeps one move-in report out for signature per lease', async () => {
+    const at = await place('MR');
+    const open = (inspectionId: string) =>
+      sqlState(
+        tx(() =>
+          app.query(
+            `insert into signing_request (company_id, property_id, tenant_id, lease_id, subject_type, inspection_id,
+               status, created_by)
+             values ($1, $2, $3, $4, 'move_in_report', $5, 'preparing', $6)`,
+            [companyId, at.property, at.tenant, at.lease, inspectionId, manager],
+          ),
+        ),
+      );
+    const first = await inspection(at, 'move_in');
+    const second = await inspection(at, 'move_in');
+    expect(await open(first.id)).toBeNull();
+    expect(await open(second.id)).toBe('23505');
+  });
+});
+
+describe('MI-01 a tenant sees the before files of their own repair (0042, M8 review)', () => {
+  it('shows the tenant a before file of their own job, and not another tenant’s', async () => {
+    const own = await job(here);
+    const doc = await documentId();
+    await tx(() =>
+      app.query(
+        `insert into maintenance_job_attachment (company_id, property_id, job_id, document_id, kind, stage, added_by_kind)
+         values ($1, $2, $3, $4, 'image', 'before', 'staff')`,
+        [companyId, here.property, own, doc],
+      ),
+    );
+    const visible = (tenant: string) =>
+      scoped({ tenant: [tenant], property: [here.property, there.property] }, async () => ({
+        files: (
+          await app.query('select 1 from maintenance_job_attachment where job_id = $1', [own])
+        ).rowCount,
+        documents: (await app.query('select 1 from document where id = $1', [doc])).rowCount,
+      }));
+    expect(await visible(here.tenant)).toEqual({ files: 1, documents: 1 });
+    expect(await visible(there.tenant)).toEqual({ files: 0, documents: 0 });
+  });
+});
+
+describe('TL-11 a final statement carries its document’s own hash (0046; founder, 2026-11-06)', () => {
+  it('refuses a statement whose hash is not its document’s, on an approved and on a closed move-out (RA092)', async () => {
+    for (const close of [false, true]) {
+      const at = await place(close ? 'HC' : 'HA');
+      const move = await moveOut(at);
+      await update('move_out', "status = 'settlement_drafted'", move);
+      const request = await approval(move);
+      await update('move_out', "status = 'awaiting_approval', approval_request_id = $2", move, [
+        request,
+      ]);
+      await inContext(app, { companyId, personId: approver }, () =>
+        app.query(
+          "insert into approval_decision (company_id, request_id, decided_by, decided_by_membership_id, kind, payload_hash) values ($1, $2, $3, $4, 'approve', 'h')",
+          [companyId, request, approver, approverMembership],
+        ),
+      );
+      await update(
+        'move_out',
+        "status = 'approved', approved_on = current_date, approved_at = now(), statement = '{}'",
+        move,
+      );
+      if (close) await update('move_out', "status = 'closed', closed_at = now()", move);
+      const statement = await documentId();
+      expect(
+        await update(
+          'move_out',
+          "statement_document_id = $2, statement_sha256 = repeat('f', 64)",
+          move,
+          [statement],
+        ),
+      ).toBe('RA092');
+      expect(
+        await update(
+          'move_out',
+          "statement_document_id = $2, statement_sha256 = repeat('0', 64)",
+          move,
+          [statement],
+        ),
+      ).toBeNull();
+    }
   });
 });

@@ -3,7 +3,7 @@ import { and, eq, schema, sql, withCompany, withSystem, type Database, type Tx }
 import type { MaintenanceCategory } from '@rent/domain/maintenance';
 import type { Actor } from '@rent/domain/policy';
 import { companyRecord } from '../companies/companies.service';
-import { forbidden, notFound } from '../core/errors';
+import { AppError, forbidden, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
 import {
   DocumentsService,
@@ -15,6 +15,14 @@ import { MaintenanceService, type TenantRepairView } from './maintenance.service
 import { TENANT_KIND } from './kinds';
 
 type TenantActor = Extract<Actor, { kind: 'tenant' }>;
+
+/** F2: no files on Starter, refused before anything is stored. */
+const filesNotOnPlan = () =>
+  new AppError(
+    403,
+    'repair_files_not_on_plan',
+    'Describe the problem in words; your landlord will be in touch about it.',
+  );
 
 /**
  * The tenant app's repairs (MI-01, CM-04; decision 3), by landlord (TL-12: never another
@@ -32,14 +40,28 @@ export class TenantRepairsService {
 
   async list(actor: Actor | null) {
     const tenant = this.tenantActor(actor);
-    const out: { landlord: { companyId: string; name: string }; repairs: TenantRepairView[] }[] =
-      [];
+    const out: {
+      landlord: { companyId: string; name: string; timeZone: string };
+      filesAllowed: boolean;
+      repairs: TenantRepairView[];
+    }[] = [];
     for (const [companyId, tenantIds] of await this.companies(tenant)) {
       const group = await this.inCompany(tenant, companyId, tenantIds, async (tx) => ({
-        landlord: { companyId, name: (await companyRecord(tx, companyId))?.displayName ?? '' },
+        landlord: await (async () => {
+          const company = await companyRecord(tx, companyId);
+          return {
+            companyId,
+            name: company?.displayName ?? '',
+            timeZone: company?.timeZone ?? 'Africa/Accra',
+          };
+        })(),
         repairs: await this.maintenance.tenantRepairs(tx),
       }));
-      out.push(group);
+      out.push({
+        landlord: group.landlord,
+        filesAllowed: await this.maintenance.repairFilesAllowed(companyId),
+        repairs: group.repairs,
+      });
     }
     return out;
   }
@@ -55,6 +77,7 @@ export class TenantRepairsService {
   ) {
     const tenant = this.tenantActor(actor);
     const { companyId } = await this.ownLease(tenant, input.leaseId);
+    if (!(await this.maintenance.repairFilesAllowed(companyId))) throw filesNotOnPlan();
     return this.documents.createMediaUpload(
       { companyId, personId: null, actorKind: 'system' },
       tenant.personId,
@@ -90,6 +113,10 @@ export class TenantRepairsService {
       return row ? (await this.maintenance.tenantViews(tx, [row.id]))[0] : undefined;
     });
     if (existing) return existing;
+    // Every state check comes before a file is staged: staged files are kept write-once.
+    await this.maintenance.checkTenantReport(companyId, input.leaseId, tenantId);
+    if (input.uploadIds.length > 0 && !(await this.maintenance.repairFilesAllowed(companyId)))
+      throw filesNotOnPlan();
     const media: StagedMedia[] = [];
     for (const id of new Set(input.uploadIds))
       media.push(

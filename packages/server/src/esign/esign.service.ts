@@ -555,6 +555,58 @@ export class EsignService {
   }
 
   /**
+   * M8 review: a lease has one move-in report out at a time. A newer report (from a correcting
+   * inspection) cancels the lease's other open ones and revokes their links, in the caller's
+   * transaction. A report everyone has signed is left to finalise.
+   */
+  async cancelMoveInReports(
+    tx: Tx,
+    leaseId: string,
+    input: { readonly exceptInspectionId: string; readonly by: string | null },
+  ): Promise<number> {
+    const open = await tx
+      .select()
+      .from(schema.signingRequest)
+      .where(
+        and(
+          eq(schema.signingRequest.leaseId, leaseId),
+          eq(schema.signingRequest.subjectType, 'move_in_report'),
+          inArray(schema.signingRequest.status, ['preparing', 'pending']),
+          sql`${schema.signingRequest.inspectionId} is distinct from ${input.exceptInspectionId}`,
+        ),
+      )
+      .for('update');
+    const now = this.clock.now();
+    let cancelled = 0;
+    for (const request of open) {
+      const complete = signingCompleteBy(
+        completionOf(request),
+        (await signersOf(tx, request.id)).map((x) => ({
+          required: x.required,
+          status: x.status as SignerStatus,
+        })),
+      );
+      if (complete) continue;
+      cancelled += 1;
+      const reason = 'Replaced by a corrected move-in report';
+      await tx
+        .update(schema.signingRequest)
+        .set({ status: 'cancelled', cancelledAt: now, cancelReason: reason, updatedAt: now })
+        .where(eq(schema.signingRequest.id, request.id));
+      const revoked = await revokeLinks(tx, { requestId: request.id }, 'request_closed', now);
+      await signingEvent(tx, request, 'request.cancelled', now, { data: { reason, revoked } });
+      await this.audit.append(tx, {
+        companyId: request.companyId,
+        action: 'signing.cancelled',
+        recordType: 'signing_request',
+        recordId: request.id,
+        data: { leaseId, reason, by: input.by },
+      });
+    }
+    return cancelled;
+  }
+
+  /**
    * Closes a lease's open request when staff recall it (plan 4.7), in the caller's transaction:
    * the request is cancelled and its links revoked. A request everyone has signed cannot be
    * recalled. Returns the request closed, if there was one.

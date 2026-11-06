@@ -23,6 +23,8 @@ export interface ExpenseRowView {
   readonly owner: { readonly id: string; readonly name: string };
   readonly job: { readonly id: string; readonly ticket: string } | null;
   readonly hasReceipt: boolean;
+  /** F3: receipts are optional; one without is flagged "No receipt" (M9 carries it on). */
+  readonly noReceipt: boolean;
   readonly note: string | null;
   readonly paidOn: string | null;
   readonly reversal: {
@@ -136,6 +138,7 @@ export async function expenseRows(tx: Tx, f: ExpenseFilter): Promise<ExpenseRowV
         ? { id: r.job_id, ticket: formatTicketNumber(r.ticket_number) }
         : null,
     hasReceipt: r.receipt_document_id !== null,
+    noReceipt: r.receipt_document_id === null,
     note: r.note,
     paidOn: r.paid_on ?? (r.paid_by === 'unpaid' ? null : r.expense_date),
     reversal:

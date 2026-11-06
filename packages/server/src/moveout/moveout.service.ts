@@ -23,6 +23,7 @@ import { formatBusinessDate, parseBusinessDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import {
   checkDeduction,
+  checkStatementBalances,
   DEDUCTION_KIND_LABELS,
   finalStatement,
   LIVE_MOVE_OUT_STATUSES,
@@ -36,7 +37,7 @@ import {
 import type { Actor } from '@rent/domain/policy';
 import { v5 as uuidv5 } from 'uuid';
 import { z } from 'zod';
-import { ApprovalsService } from '../approvals/approvals.service';
+import { ApprovalsService, payloadHash } from '../approvals/approvals.service';
 import { BillingEngine, creditNoteWithheld, lineLabel, type LeaseState } from '../billing/engine';
 import { InvoicingService } from '../billing/invoicing.service';
 import { MONEY_APPROVERS } from '../billing/money.service';
@@ -55,6 +56,9 @@ import { PolicyService, staffContext } from '../policy/policy.service';
 import { RentTaxService } from '../tax/rent-tax.service';
 import { billingLeaseOf } from '../tenancy/billing-facts';
 import { LeaseLifecycleService } from '../tenancy/lease-lifecycle.service';
+
+/** Deductions always shown from the move-out inspection's items or photos (MI-11; founder). */
+const EVIDENCED_KINDS: readonly DeductionKind[] = ['damage', 'missing_items'];
 
 /** M8 (plan 4.8): the settlement's two-person approval. */
 export const MOVE_OUT_SETTLEMENT_ACTION = 'lease.move_out_settlement';
@@ -200,7 +204,7 @@ export class MoveOutService {
   ) {
     const staff = this.manager(actor);
     parseBusinessDate(input.plannedDate);
-    const id = await this.write(staff, async (tx) => {
+    const id = await this.write(staff, { leaseId }, async (tx) => {
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, leaseId));
       const lease = await billingLeaseOf(tx, leaseId);
       if (!['active', 'holding_over', 'ending'].includes(lease.status))
@@ -208,6 +212,7 @@ export class MoveOutService {
       if (input.plannedDate < lease.startDate)
         throw invalid('planned_date', 'The move-out is after the lease starts');
       await this.refuseSecond(tx, leaseId);
+      await this.refuseWhileM5Refund(tx, leaseId);
       const state = await this.engine.load(tx, staff.companyId, leaseId);
       const book = requireBook(state.book);
       if (input.noticeId) {
@@ -255,7 +260,7 @@ export class MoveOutService {
    */
   async settleDeposit(actor: Actor | null, leaseId: string, note?: string | null) {
     const staff = this.manager(actor);
-    const id = await this.write(staff, async (tx) => {
+    const id = await this.write(staff, { leaseId }, async (tx) => {
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, leaseId));
       const lease = await billingLeaseOf(tx, leaseId);
       if (!['ended', 'terminated'].includes(lease.status))
@@ -266,20 +271,7 @@ export class MoveOutService {
       await this.refuseSecond(tx, leaseId);
       const held = await this.engine.depositHeld(tx, leaseId);
       if (held <= 0) throw conflict('no_deposit_held', 'This lease holds no deposit');
-      const [live] = await tx
-        .select({ id: schema.earlyTermination.id })
-        .from(schema.earlyTermination)
-        .where(
-          and(
-            eq(schema.earlyTermination.leaseId, leaseId),
-            eq(schema.earlyTermination.status, 'awaiting_approval'),
-          ),
-        );
-      if (live)
-        throw conflict(
-          'move_out_exists',
-          'An early-termination refund is waiting for approval on this lease. Decide it first.',
-        );
+      await this.refuseWhileM5Refund(tx, leaseId);
       const state = await this.engine.load(tx, staff.companyId, leaseId);
       const book = requireBook(state.book);
       const moveIn = await this.inspections.latestMoveIn(tx, leaseId);
@@ -296,7 +288,11 @@ export class MoveOutService {
           kind: 'deposit_settlement',
           reason: null,
           plannedDate: lease.moveOutDate ?? lease.endedOn ?? lease.endDate,
-          early: false,
+          // M3's quick move-out before the end date is an early end: the break clause applies as
+          // on any early end (M8 review). An M5 early termination already credited its days.
+          early:
+            lease.status === 'ended' &&
+            (lease.moveOutDate ?? lease.endedOn ?? lease.endDate) < lease.endDate,
           note: note?.trim() || null,
           status: 'settlement_drafted',
           moveInInspectionId: moveIn?.id ?? null,
@@ -357,7 +353,17 @@ export class MoveOutService {
       : null;
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const [view] = await this.views(tx, [row]);
-      return this.detail(tx, staff, row, view!, statement, unavailable, approval);
+      // The live comparison (M8 review): do the figures asked for still hold now?
+      const waiting =
+        row.status === 'awaiting_approval' &&
+        approval !== null &&
+        ['pending', 'cooling_off'].includes(approval.request.status);
+      const figuresHold = waiting
+        ? statement !== null &&
+          payloadHash(payload.parse(await this.payloadOf(tx, row, statement))) ===
+            approval.request.payloadHash
+        : null;
+      return this.detail(tx, staff, row, view!, statement, unavailable, approval, figuresHold);
     });
   }
 
@@ -378,7 +384,7 @@ export class MoveOutService {
   async startInspection(actor: Actor | null, moveOutId: string) {
     const staff = this.manager(actor);
     this.policy.assert(staff, 'inspection.perform');
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
       const row = await this.row(tx, moveOutId, true);
       this.move(row, 'inspect');
       if (row.inspectionId) {
@@ -415,6 +421,7 @@ export class MoveOutService {
       inspectionItemIds: readonly string[];
       photoIds: readonly string[];
     },
+    options: { readonly claim?: IdempotencyClaim | null } = {},
   ) {
     const staff = this.manager(actor);
     try {
@@ -422,9 +429,24 @@ export class MoveOutService {
     } catch (error) {
       domainOf(error);
     }
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
+      await options.claim?.claim(tx);
       const row = await this.row(tx, moveOutId, true);
       const next = this.move(row, 'draft');
+      // Damage and missing items are always shown from the move-out inspection, by its items or
+      // photos (MI-11; founder, 2026-11-06). A deposit settlement's inspection is optional
+      // otherwise, so the message says to do it first.
+      if (
+        EVIDENCED_KINDS.includes(input.kind) &&
+        input.inspectionItemIds.length === 0 &&
+        input.photoIds.length === 0
+      )
+        throw invalid(
+          'deduction_evidence_required',
+          row.inspectionId
+            ? 'Choose the inspection items or photos that show the damage or what is missing'
+            : 'Damage and missing items need the move-out inspection’s evidence. Do the move-out inspection first, then choose the items or photos that show it',
+        );
       await tx.insert(schema.depositDeduction).values({
         companyId: staff.companyId,
         propertyId: row.propertyId,
@@ -439,13 +461,20 @@ export class MoveOutService {
         createdBy: staff.personId,
       });
       await this.setStatus(tx, row, next);
+      await options.claim?.done(tx, { moveOutId });
     });
     return this.get(actor, moveOutId);
   }
 
-  async withdrawDeduction(actor: Actor | null, moveOutId: string, deductionId: string) {
+  async withdrawDeduction(
+    actor: Actor | null,
+    moveOutId: string,
+    deductionId: string,
+    options: { readonly claim?: IdempotencyClaim | null } = {},
+  ) {
     const staff = this.manager(actor);
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
+      await options.claim?.claim(tx);
       const row = await this.row(tx, moveOutId, true);
       this.move(row, 'draft');
       const [deduction] = await tx
@@ -468,6 +497,7 @@ export class MoveOutService {
           createdBy: staff.personId,
         })
         .onConflictDoNothing();
+      await options.claim?.done(tx, { moveOutId });
     });
     return this.get(actor, moveOutId);
   }
@@ -476,9 +506,11 @@ export class MoveOutService {
     actor: Actor | null,
     moveOutId: string,
     charges: readonly { description: string; amountMinor: number }[],
+    options: { readonly claim?: IdempotencyClaim | null } = {},
   ) {
     const staff = this.manager(actor);
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
+      await options.claim?.claim(tx);
       const row = await this.row(tx, moveOutId, true);
       const next = this.move(row, 'draft');
       await tx
@@ -492,13 +524,14 @@ export class MoveOutService {
           updatedAt: this.clock.now(),
         })
         .where(eq(schema.moveOut.id, moveOutId));
+      await options.claim?.done(tx, { moveOutId });
     });
     return this.get(actor, moveOutId);
   }
 
   async cancel(actor: Actor | null, moveOutId: string, reason: string) {
     const staff = this.manager(actor);
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
       const row = await this.row(tx, moveOutId, true);
       this.move(row, 'cancel');
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, row.leaseId));
@@ -523,7 +556,7 @@ export class MoveOutService {
    */
   async submit(actor: Actor | null, moveOutId: string, note?: string | null) {
     const staff = this.manager(actor);
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
       const row = await this.row(tx, moveOutId, true);
       // A move-out with nothing to deduct or charge is drafted as it is asked for.
       if (row.status !== 'settlement_drafted') {
@@ -537,7 +570,6 @@ export class MoveOutService {
           `The settlement is asked for once the tenant has moved out, on or after ${formatBusinessDate(row.plannedDate)}`,
         );
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, row.leaseId));
-      await lockCounters(tx, staff.companyId);
       const statement = await this.simulate(tx, row);
       const p = await this.payloadOf(tx, row, statement);
       const approvalId = await this.approvals.createInTx(tx, staff, {
@@ -580,12 +612,20 @@ export class MoveOutService {
     parseBusinessDate(input.paidOn);
     if (input.paidFrom === 'agency_account' && staff.companyKind !== 'agency')
       throw invalid('paid_from', 'Only an agency has an agency account');
+    // Scope and state before the proof is staged: staged files are kept write-once (M8 review).
+    const visible = (await this.inScope(staff, { moveOutId }))!;
+    if (
+      visible.status !== 'approved' ||
+      (visible.creditRefundMinor ?? 0) + (visible.depositRefundMinor ?? 0) <= 0
+    )
+      throw conflict('refund_not_payable', 'There is no approved refund waiting to be paid');
+    await this.refuseIfDepositReversed(visible);
     const staged = await this.documents.stageEvidenceUpload(
       { companyId: staff.companyId, personId: staff.personId },
       input.proofUploadId,
       REFUND_PROOF_UPLOAD,
     );
-    await this.write(staff, async (tx) => {
+    await this.write(staff, { moveOutId }, async (tx) => {
       await options.claim?.claim(tx);
       const found = await this.row(tx, moveOutId);
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, found.leaseId));
@@ -593,6 +633,7 @@ export class MoveOutService {
       const refund = (row.creditRefundMinor ?? 0) + (row.depositRefundMinor ?? 0);
       if (row.status !== 'approved' || refund <= 0)
         throw conflict('refund_not_payable', 'There is no approved refund waiting to be paid');
+      await this.refuseIfDepositReversed(row, tx);
       const company = await companyRecord(tx, staff.companyId);
       if (input.paidOn > isoNow(this.clock, company!.timeZone))
         throw invalid('paid_in_future', 'The day it was paid cannot be in the future');
@@ -621,6 +662,8 @@ export class MoveOutService {
           updatedAt: this.clock.now(),
         })
         .where(eq(schema.moveOut.id, moveOutId));
+      // Paid and its statement attached: the settlement is done (else the statement closes it).
+      if (row.statementDocumentId) await this.close(tx, moveOutId);
       await options.claim?.done(tx, { moveOutId });
     });
     await this.documents.discardStagedUpload(staged);
@@ -799,6 +842,8 @@ export class MoveOutService {
           updatedAt: this.clock.now(),
         })
         .where(eq(schema.moveOut.id, moveOutId));
+      // The refund was paid before the statement came: the settlement is done now (M8 review).
+      if (row.status === 'refund_paid') await this.close(tx, moveOutId);
       const facts = await this.facts(tx, row);
       await queueMessage(tx, companyId, {
         messageId: uuidv5(`${moveOutId}:final-statement`, NAMESPACE),
@@ -836,10 +881,10 @@ export class MoveOutService {
   // The settlement --------------------------------------------------------------------------------
 
   /** The statement as it would be done now, without keeping anything. */
+  /** The statement as it would be done now: no invoice number, so no counter lock (M8 review). */
   private async preview(staff: StaffActor, row: MoveOutRow): Promise<FinalStatementView> {
     return withCompany(this.database, this.unscoped(staff), async (tx) => {
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, row.leaseId));
-      await lockCounters(tx, staff.companyId);
       return this.simulate(tx, row);
     });
   }
@@ -868,15 +913,24 @@ export class MoveOutService {
     preview: boolean,
   ): Promise<FinalStatementView> {
     const companyId = row.companyId;
-    // 0. The lease ends on the last day (a move-out), and billing credits what lies after it.
+    // 0. The lease ends on the last day (a move-out), and billing credits what lies after it. A
+    // lease that already ended on that day (its successor started, so the scheduler ended it) is
+    // settled as it is; one that ended on another day is settled as a deposit settlement instead.
     if (row.kind === 'move_out') {
       const lease = await billingLeaseOf(tx, row.leaseId);
-      if (!['active', 'holding_over', 'ending'].includes(lease.status))
-        throw conflict('lease_not_current', 'The lease is no longer current');
-      await this.lifecycle.endForMoveOutIn(tx, row.leaseId, {
-        lastDay: row.plannedDate,
-        terminated: row.early,
-      });
+      if (['active', 'holding_over', 'ending'].includes(lease.status))
+        await this.lifecycle.endForMoveOutIn(tx, row.leaseId, {
+          lastDay: row.plannedDate,
+          terminated: row.early,
+        });
+      else if (['ended', 'terminated'].includes(lease.status)) {
+        const ended = lease.moveOutDate ?? lease.endedOn;
+        if (ended !== row.plannedDate)
+          throw conflict(
+            'lease_ended_first',
+            `The lease ended on ${ended ? formatBusinessDate(ended) : 'another day'}, not on this move-out’s last day. Cancel this move-out and settle the deposit instead.`,
+          );
+      } else throw conflict('lease_not_current', 'The lease is no longer current');
     }
     let state = await this.engine.load(tx, companyId, row.leaseId);
     requireBook(state.book);
@@ -894,11 +948,18 @@ export class MoveOutService {
       );
     await this.engine.carryOverIfStarted(tx, state, today);
     await this.engine.accrue(tx, state, today);
-    const creditBefore = sum(creditPools(state.payments, state.allocations));
-    const arrearsBefore = this.openLines(state).reduce((s, l) => s + l.outstandingMinor, 0);
-    // 1. Agreed charges (P01) and, when early and the break clause allows, unused days (P27).
+    // 1. Charges (P01) and, when early and the break clause allows, unused days (P27). A preview
+    // takes no invoice number, so no company-wide counter lock (M8 review): its charges are lines
+    // in memory, the newest debt, as the real ones would be.
     const charges = (row.charges as { description: string; amountMinor: number }[]) ?? [];
-    await this.engine.issueCharges(tx, state, charges, today, causedBy);
+    const virtualCharges = preview
+      ? charges.map((c, i) => ({
+          lineId: `charge:${i}`,
+          outstandingMinor: c.amountMinor,
+          label: lineLabel({ kind: 'one_off' }),
+        }))
+      : [];
+    if (!preview) await this.engine.issueCharges(tx, state, charges, today, causedBy);
     let breakCredit = 0;
     if (row.early && lease.terms.breakClause?.creditUnusedDays === true) {
       for (const credit of unusedDaysCredits(state.lines, state.allocations, lastDay)) {
@@ -914,6 +975,12 @@ export class MoveOutService {
         breakCredit += credit.creditMinor;
       }
     }
+    // The statement starts from here: credit and arrears after the early steps (M8 review), so
+    // the charges are in arrears and the break-clause credit in credit or off arrears.
+    const creditAfterEarly = sum(creditPools(state.payments, state.allocations));
+    const arrearsAfterEarly =
+      this.openLines(state).reduce((x, l) => x + l.outstandingMinor, 0) +
+      virtualCharges.reduce((x, l) => x + l.outstandingMinor, 0);
     // 2. The credit pays open lines, oldest first (P13 apply).
     const creditApplied = await this.engine.applyCreditToOpen(tx, state, {
       terminationId: row.id,
@@ -930,9 +997,26 @@ export class MoveOutService {
     const s = finalStatement({
       depositHeldMinor: depositHeld,
       creditMinor: creditLeft,
-      openLines: open.map((l) => ({ lineId: l.id, outstandingMinor: l.outstandingMinor })),
+      openLines: [
+        ...open.map((l) => ({ lineId: l.id, outstandingMinor: l.outstandingMinor })),
+        ...virtualCharges,
+      ],
       deductions: deductions.map((d) => ({ amountMinor: d.amountMinor })),
     });
+    // Steps 4 to 6 only post: a preview's figures are complete here, and it raises nothing (no
+    // rent tax alert, M8 review).
+    if (preview)
+      return this.statementView(tx, state, row, {
+        lastDay,
+        depositHeld,
+        creditAfterEarly,
+        arrearsAfterEarly,
+        charges,
+        breakCredit,
+        creditApplied,
+        s,
+        virtualCharges,
+      });
     // Deductions the deposit no longer covers after arrears are charged (P01) and stay owed.
     if (s.deductionsChargedMinor > 0)
       await this.engine.issueCharges(
@@ -983,41 +1067,77 @@ export class MoveOutService {
         valueDate: today,
         causedBy,
       });
+    return this.statementView(tx, state, row, {
+      lastDay,
+      depositHeld,
+      creditAfterEarly,
+      arrearsAfterEarly,
+      charges,
+      breakCredit,
+      creditApplied,
+      s,
+      virtualCharges: [],
+    });
+  }
+
+  /** The statement as published: its two identities hold over exactly these fields. */
+  private async statementView(
+    tx: Tx,
+    state: LeaseState,
+    row: MoveOutRow,
+    f: {
+      lastDay: string;
+      depositHeld: number;
+      creditAfterEarly: number;
+      arrearsAfterEarly: number;
+      charges: readonly { amountMinor: number }[];
+      breakCredit: number;
+      creditApplied: readonly { lineId: string; amountMinor: number }[];
+      s: ReturnType<typeof finalStatement>;
+      virtualCharges: readonly { lineId: string; label: string }[];
+    },
+  ): Promise<FinalStatementView> {
     const lines = await this.lineFacts(tx, state);
+    const virtual = new Map(f.virtualCharges.map((c) => [c.lineId, c.label]));
     const view = (l: { lineId: string; amountMinor: number }): LineAmountView => {
-      const f = lines.get(l.lineId);
+      const v = virtual.get(l.lineId);
+      const facts = lines.get(l.lineId);
       return {
         lineId: l.lineId,
-        invoiceNumber: f?.invoiceNumber ?? '',
-        label: f?.label ?? '',
-        periodStart: f?.periodStart ?? null,
-        periodEnd: f?.periodEnd ?? null,
+        invoiceNumber: facts?.invoiceNumber ?? '',
+        label: v ?? facts?.label ?? '',
+        periodStart: facts?.periodStart ?? null,
+        periodEnd: facts?.periodEnd ?? null,
         amountMinor: l.amountMinor,
       };
     };
-    const creditToArrears = [...creditApplied, ...s.creditToArrears].filter(
+    const s = f.s;
+    const creditToArrears = [...f.creditApplied, ...s.creditToArrears].filter(
       (l) => l.amountMinor > 0,
     );
-    return {
-      lastDay,
+    const statement: FinalStatementView = {
+      lastDay: f.lastDay,
       early: row.early,
-      depositHeldMinor: depositHeld,
-      creditMinor: creditBefore,
-      arrearsMinor: arrearsBefore,
-      chargesMinor: sum(charges),
-      breakCreditMinor: breakCredit,
+      depositHeldMinor: f.depositHeld,
+      creditMinor: f.creditAfterEarly,
+      arrearsMinor: f.arrearsAfterEarly,
+      chargesMinor: sum(f.charges),
+      breakCreditMinor: f.breakCredit,
       creditToArrears: creditToArrears.map(view),
       depositToArrears: s.depositToArrears.map(view),
       deductionsMinor: s.deductionsMinor,
       retainedMinor: s.retainedMinor,
       deductionsChargedMinor: s.deductionsChargedMinor,
-      creditAppliedMinor: sum(creditToArrears),
+      creditAppliedMinor: sum(creditToArrears) + s.creditToDeductionChargeMinor,
       depositAppliedMinor: s.depositAppliedMinor,
       creditRefundMinor: s.creditRefundMinor,
       depositRefundMinor: s.depositRefundMinor,
       refundMinor: s.refundMinor,
       stillOwedMinor: s.stillOwedMinor,
     };
+    // What the web, the approver and the tenant's PDF check (M8 review): never publish otherwise.
+    checkStatementBalances(statement);
+    return statement;
   }
 
   /** Charged lines still owed, oldest first: what credit and the deposit pay. */
@@ -1164,13 +1284,114 @@ export class MoveOutService {
     return { companyId: staff.companyId, personId: staff.personId, actorKind: 'staff' as const };
   }
 
-  private async write<T>(staff: StaffActor, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  /**
+   * Every move-out write (CLAUDE.md section 5; M8 review): the caller's own scope is read first, as
+   * M5's TerminationService.request does, so a lease or move-out outside it is not found before
+   * anything is written. The write then runs unscoped, because the settlement reads the whole of
+   * the lease's money (its book, its payments and the deposit).
+   */
+  private async write<T>(
+    staff: StaffActor,
+    subject: { readonly leaseId: string } | { readonly moveOutId: string },
+    fn: (tx: Tx) => Promise<T>,
+  ): Promise<T> {
+    await this.inScope(staff, subject);
     try {
       return await withCompany(this.database, this.unscoped(staff), fn);
     } catch (error) {
       if (error instanceof AppError) throw error;
       return domainOf(error);
     }
+  }
+
+  /**
+   * A deposit payment behind this settlement was charged back after it (P21b, M8 review): its
+   * figures no longer hold, so its refund is not recorded as paid until a person sorts it out.
+   */
+  private async refuseIfDepositReversed(row: MoveOutRow, tx?: Tx): Promise<void> {
+    const check = async (t: Tx) => {
+      const [hit] = await t
+        .select({ id: schema.depositApplication.id })
+        .from(schema.depositApplication)
+        .where(
+          and(
+            eq(schema.depositApplication.moveOutId, row.id),
+            eq(schema.depositApplication.kind, 'unwound'),
+          ),
+        )
+        .limit(1);
+      if (hit)
+        throw conflict(
+          'deposit_charged_back',
+          'A deposit payment behind this settlement was charged back, so its refund is no longer what was approved. Check the lease’s money before paying anything.',
+        );
+    };
+    if (tx) return check(tx);
+    await withCompany(this.database, { companyId: row.companyId, actorKind: 'system' }, check);
+  }
+
+  /** M5's early-termination refund and an M8 move-out never settle the same lease (M8 review). */
+  private async refuseWhileM5Refund(tx: Tx, leaseId: string): Promise<void> {
+    const [live] = await tx
+      .select({ id: schema.earlyTermination.id })
+      .from(schema.earlyTermination)
+      .where(
+        and(
+          eq(schema.earlyTermination.leaseId, leaseId),
+          eq(schema.earlyTermination.status, 'awaiting_approval'),
+        ),
+      );
+    if (live)
+      throw conflict(
+        'move_out_exists',
+        'An early-termination refund is waiting for approval on this lease. Decide it first.',
+      );
+  }
+
+  /** Whether the lease has a move-out, other than a cancelled one (M5's refund then waits). */
+  async existsFor(tx: Tx, leaseId: string): Promise<boolean> {
+    const [row] = await tx
+      .select({ id: schema.moveOut.id })
+      .from(schema.moveOut)
+      .where(and(eq(schema.moveOut.leaseId, leaseId), ne(schema.moveOut.status, 'cancelled')))
+      .limit(1);
+    return row !== undefined;
+  }
+
+  /** Whether the lease has a move-out not yet approved or cancelled (M3's quick move-out waits). */
+  async liveFor(tx: Tx, leaseId: string): Promise<boolean> {
+    const [row] = await tx
+      .select({ id: schema.moveOut.id })
+      .from(schema.moveOut)
+      .where(
+        and(
+          eq(schema.moveOut.leaseId, leaseId),
+          inArray(schema.moveOut.status, [...LIVE_MOVE_OUT_STATUSES]),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  }
+
+  /** Refund paid and statement attached, or no refund: a settlement is done. */
+  private async close(tx: Tx, moveOutId: string): Promise<void> {
+    const now = this.clock.now();
+    await tx
+      .update(schema.moveOut)
+      .set({ status: 'closed', closedAt: now, updatedAt: now })
+      .where(eq(schema.moveOut.id, moveOutId));
+  }
+
+  /** 404 unless the lease or move-out is within the caller's property and owner scope. */
+  private async inScope(
+    staff: StaffActor,
+    subject: { readonly leaseId: string } | { readonly moveOutId: string },
+  ): Promise<MoveOutRow | null> {
+    return withCompany(this.database, staffContext(staff), async (tx) => {
+      if ('moveOutId' in subject) return this.row(tx, subject.moveOutId);
+      await billingLeaseOf(tx, subject.leaseId);
+      return null;
+    });
   }
 
   private async row(tx: Tx, moveOutId: string, lock = false): Promise<MoveOutRow> {
@@ -1267,6 +1488,7 @@ export class MoveOutService {
     statement: FinalStatementView | null,
     unavailable: { code: string; message: string } | null,
     approval: Awaited<ReturnType<ApprovalsService['get']>> | null,
+    approvalFiguresHold: boolean | null = null,
   ) {
     const [lease] = await tx
       .select({ status: schema.lease.status })
@@ -1283,6 +1505,7 @@ export class MoveOutService {
       statement,
       statementUnavailable: unavailable,
       approval,
+      approvalFiguresHold,
       approvedOn: row.approvedOn,
       refundPaid:
         row.paidOn && row.paidFrom && row.paidReference

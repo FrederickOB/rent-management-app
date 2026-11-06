@@ -34,19 +34,29 @@ const lineAmount = z.object({
 });
 
 /**
- * The final statement (plan 4.8). It always balances: deposit held + credit = arrears settled +
- * deductions retained + refund; arrears + deductions charged = arrears settled + still owed.
+ * The final statement (plan 4.8). It always balances, by two identities (`statementBalances` in
+ * `@rent/domain/moveout` checks exactly these fields):
+ *
+ *   depositHeld + credit = creditApplied + depositApplied + retained + creditRefund + depositRefund
+ *   arrears + deductionsCharged = creditApplied + depositApplied + stillOwed
+ *
+ * `credit` and `arrears` are taken after the early steps: the charges (P01) are already in
+ * `arrears`, and the break-clause credit (P27) is already in `credit` (on a paid month) or off
+ * `arrears` (on an unpaid one). `chargesMinor` and `breakCreditMinor` show those steps; they are
+ * not added again.
  */
 export const finalStatementSchema = z.object({
   lastDay: isoDate,
   /** An early end (before the lease's end date): M5's early steps apply. */
   early: z.boolean(),
   depositHeldMinor: minor,
+  /** The lease's credit (2010) after the early steps, the break-clause credit included. */
   creditMinor: minor,
+  /** What is owed after the early steps: open lines, the charges included. */
   arrearsMinor: minor,
-  /** P01: agreed charges (early) and damage beyond the deposit, raised as one-off lines. */
+  /** P01: charges on any move-out (agreed early charges, damage beyond the deposit). In `arrears`. */
   chargesMinor: minor,
-  /** P27: the unused days of the last month, where the break clause allows (early only). */
+  /** P27: the unused days of the last month, where the break clause allows (early only). In `credit` or off `arrears`. */
   breakCreditMinor: minor,
   /** P13 apply: the credit on each open line, oldest first. */
   creditToArrears: z.array(lineAmount),
@@ -119,13 +129,20 @@ export const moveOutSchema = z.object({
 
 export const moveOutDetailSchema = moveOutSchema.extend({
   deductions: z.array(deductionSchema),
-  /** Agreed early charges and damage beyond the deposit (P01), while the settlement is drafted. */
+  /** Charges (P01) on any move-out: agreed early charges and damage beyond the deposit. */
   charges: z.array(moveOutChargeSchema),
   /** The statement as it would be done now; once approved, as it was done. */
   statement: finalStatementSchema.nullable(),
   /** Why no statement can be shown yet (for example the end not yet processed). */
   statementUnavailable: z.object({ code: z.string(), message: z.string() }).nullable(),
   approval: approvalSchema.nullable(),
+  /**
+   * While the settlement waits for approval: whether the figures asked for still hold, compared
+   * live with the statement as it would be done now. False means "The figures no longer hold":
+   * the lease's money moved, or the request was replaced; approving it would cancel it. Null when
+   * nothing waits for approval.
+   */
+  approvalFiguresHold: z.boolean().nullable(),
   approvedOn: isoDate.nullable(),
   refundPaid: z
     .object({
@@ -204,7 +221,7 @@ export const moveOutsContract = {
       method: 'POST',
       path: '/move-outs/{moveOutId}/deductions',
       summary:
-        'Add a deduction: kind, amount, reason, and the inspection items and photos behind it. The deductions never exceed the deposit held (409 DEDUCTIONS_EXCEED_DEPOSIT); damage beyond it is a charge',
+        'Add a deduction: kind, amount, reason, and the inspection items and photos behind it. A damage or missing-items deduction always cites the move-out inspection’s items or photos (400 DEDUCTION_EVIDENCE_REQUIRED); with no inspection yet, do it first (a deposit settlement’s is optional otherwise). The deductions never exceed the deposit held (409 DEDUCTIONS_EXCEED_DEPOSIT); damage beyond it is a charge. Requires an Idempotency-Key: a retry never records two deductions',
     })
     .input(
       z.object({
@@ -221,7 +238,8 @@ export const moveOutsContract = {
     .route({
       method: 'POST',
       path: '/move-outs/{moveOutId}/deductions/{deductionId}/withdraw',
-      summary: 'Withdraw a deduction while the settlement is drafted (recorded, never deleted)',
+      summary:
+        'Withdraw a deduction while the settlement is drafted (recorded, never deleted). Requires an Idempotency-Key',
     })
     .input(z.object({ moveOutId: uuid, deductionId: uuid }))
     .output(moveOutDetailSchema),
@@ -230,7 +248,7 @@ export const moveOutsContract = {
       method: 'PUT',
       path: '/move-outs/{moveOutId}/charges',
       summary:
-        'Agreed early-termination charges and damage beyond the deposit (P01), while drafting',
+        'Charges (P01) on any move-out, while drafting: agreed early-termination charges and damage beyond the deposit. Replaces the list. Requires an Idempotency-Key',
     })
     .input(z.object({ moveOutId: uuid, charges: z.array(moveOutChargeSchema).max(20) }))
     .output(moveOutDetailSchema),

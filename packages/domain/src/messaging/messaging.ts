@@ -67,6 +67,17 @@ export const STAFF_PURPOSES: readonly MessagePurpose[] = [
   'maintenance_alert',
 ];
 
+/**
+ * Automatic prompts the system sends on its own in a conversation: the WhatsApp consent question
+ * (plan 4.8) and the confirmation after STOP or START. They never become a conversation's preview
+ * or last message in the inbox (M8 review), so the tenant's own message stays the one shown and
+ * unanswered. Staff replies and the bot's answers still do.
+ */
+export const SYSTEM_PROMPT_PURPOSES: readonly MessagePurpose[] = [
+  'consent_request',
+  'opt_out_confirmation',
+];
+
 /** Purposes that answer a tenant who wrote in (M6 decision 6). */
 export const REPLY_PURPOSES: readonly MessagePurpose[] = [
   'conversation_reply',

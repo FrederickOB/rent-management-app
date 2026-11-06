@@ -12,6 +12,13 @@ import {
   type Database,
   type Tx,
 } from '@rent/db';
+import {
+  addDays,
+  businessDateOf,
+  instantFrom,
+  parseBusinessDate,
+  toIsoDate,
+} from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import {
   autoCloseDue,
@@ -34,8 +41,8 @@ import {
   type MaintenanceStepFacts,
   type MaintenanceTargetKind,
 } from '@rent/domain/maintenance';
-import type { Actor, PolicyAction } from '@rent/domain/policy';
-import { scopeOf } from '@rent/domain/policy';
+import type { Actor, EmergencyAlertRole, PolicyAction } from '@rent/domain/policy';
+import { emergencyAlertRole, scopeOf } from '@rent/domain/policy';
 import { parseCompanySettings } from '@rent/domain/settings';
 import type { TaskKind, TaskStatus } from '@rent/domain/tasks';
 import { v5 as uuidv5 } from 'uuid';
@@ -44,6 +51,7 @@ import { EntitlementsService } from '../companies/entitlements.service';
 import type { Clock } from '../core/clock';
 import { maintenanceCheckConflict } from '../core/db-errors';
 import { AppError, conflict, forbidden, invalid, notFound } from '../core/errors';
+import type { IdempotencyClaim } from '../core/idempotency';
 import { queueMessage, type NewMessage } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
@@ -86,6 +94,8 @@ type JobRow = typeof schema.maintenanceJob.$inferSelect;
 
 /** Outbox jobs (plan 4.13). */
 export const MAINTENANCE_EMERGENCY_ALERT_JOB = 'maintenance.emergency-alert';
+/** A former tenant reports repairs from the app until this many days after the last day. */
+export const REPAIRS_AFTER_END_DAYS = 30;
 export const MAINTENANCE_SLA_JOB = 'maintenance.sla-check';
 export const MAINTENANCE_AUTO_CLOSE_JOB = 'maintenance.auto-close';
 
@@ -456,25 +466,19 @@ export class MaintenanceService {
       readonly conversationId?: string | null;
       readonly messageIds: readonly string[];
     },
+    options: { readonly claim?: IdempotencyClaim | null } = {},
   ): Promise<MaintenanceJobDetail> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'maintenance.report');
     await this.entitlements.assert(staff.companyId, 'maintenance');
+    // Every check before a file is staged (staged files are kept write-once; M8 review).
+    await withCompany(this.database, staffContext(staff), (tx) => this.whoReported(tx, input));
     const media = await this.stage(staff, input.uploadIds);
     const jobId = await this.write(
       staff,
       async (tx) => {
-        const facts = await this.unitFacts(tx, input.propertyId, input.unitId ?? null);
-        let conversationTenant: string | null = null;
-        if (input.conversationId) {
-          const [conversation] = await tx
-            .select({ tenantId: schema.conversation.tenantId })
-            .from(schema.conversation)
-            .where(eq(schema.conversation.id, input.conversationId));
-          if (!conversation) throw notFound('Conversation');
-          conversationTenant = conversation.tenantId;
-        }
-        const tenantId = facts.tenantId ?? conversationTenant;
+        await options.claim?.claim(tx);
+        const { facts, tenantId } = await this.whoReported(tx, input);
         const source = input.conversationId
           ? await this.conversationSource(tx, input.conversationId, input.messageIds)
           : 'staff';
@@ -496,11 +500,52 @@ export class MaintenanceService {
         });
         if (!job.created)
           throw conflict('maintenance_already_reported', 'This repair was already logged');
+        await options.claim?.done(tx, { jobId: job.jobId });
         return job.jobId;
       },
       media,
     );
     return this.get(actor, jobId);
+  }
+
+  /**
+   * The unit's facts and whose repair it is (M8 review): from a conversation, the conversation's
+   * tenant, never the unit's current one; and only that conversation's own messages are linked.
+   */
+  private async whoReported(
+    tx: Tx,
+    input: {
+      readonly propertyId: string;
+      readonly unitId?: string | null;
+      readonly conversationId?: string | null;
+      readonly messageIds: readonly string[];
+    },
+  ) {
+    const facts = await this.unitFacts(tx, input.propertyId, input.unitId ?? null);
+    if (!input.conversationId) return { facts, tenantId: facts.tenantId };
+    const [conversation] = await tx
+      .select({ tenantId: schema.conversation.tenantId })
+      .from(schema.conversation)
+      .where(eq(schema.conversation.id, input.conversationId));
+    if (!conversation) throw notFound('Conversation');
+    const ids = [...new Set(input.messageIds)];
+    if (ids.length > 0) {
+      const own = await tx
+        .select({ id: schema.message.id })
+        .from(schema.message)
+        .where(
+          and(
+            inArray(schema.message.id, ids),
+            eq(schema.message.conversationId, input.conversationId),
+          ),
+        );
+      if (own.length !== ids.length)
+        throw invalid(
+          'messages_not_in_conversation',
+          'Choose messages from this conversation only',
+        );
+    }
+    return { facts, tenantId: conversation.tenantId ?? facts.tenantId };
   }
 
   private async conversationSource(
@@ -928,8 +973,26 @@ export class MaintenanceService {
     now: Date,
   ): Promise<void> {
     await this.recordMedia(tx, job, media, 'after', actor);
+    // After a dispute, the work is done again only with an after photo taken since (founder,
+    // 2026-11-06): the first completion's photos showed work the tenant said was not right.
+    // The last dispute recorded how many after photos the job had then.
+    const [disputed] = await tx
+      .select({ data: schema.maintenanceJobEvent.data })
+      .from(schema.maintenanceJobEvent)
+      .where(
+        and(
+          eq(schema.maintenanceJobEvent.jobId, job.id),
+          eq(schema.maintenanceJobEvent.kind, 'disputed'),
+        ),
+      )
+      .orderBy(desc(schema.maintenanceJobEvent.at), desc(schema.maintenanceJobEvent.id))
+      .limit(1);
+    const before = Number((disputed?.data as { afterPhotos?: unknown } | null)?.afterPhotos ?? 0);
     const facts = await this.evidence(tx, job.id);
-    this.move(job, 'complete', { afterPhotos: facts.afterPhotos, completionNote });
+    this.move(job, 'complete', {
+      afterPhotos: Number.isFinite(before) ? facts.afterPhotos - before : facts.afterPhotos,
+      completionNote,
+    });
     await tx
       .update(schema.maintenanceJob)
       .set({
@@ -1041,7 +1104,13 @@ export class MaintenanceService {
       await this.event(tx, job, 'closed', actor, { via });
       await this.revokeSheets(tx, job.id, now, 'job_closed');
     } else {
-      await this.event(tx, job, 'disputed', actor, { reason: reason?.trim() ?? '', via });
+      // How many after photos the work had when the tenant disputed it: the work is done again
+      // only with a new one (founder, 2026-11-06).
+      await this.event(tx, job, 'disputed', actor, {
+        reason: reason?.trim() ?? '',
+        via,
+        afterPhotos: (await this.evidence(tx, job.id)).afterPhotos,
+      });
       await this.notifyManagers(
         tx,
         job,
@@ -1115,6 +1184,50 @@ export class MaintenanceService {
    * checked, in the tenant's own scoped transaction, that the lease is theirs; this writes in the
    * company's system context, as the tenant (events record them).
    */
+  /** F2: the tenant app takes repair files on Growth only; Starter asks for a description. */
+  repairFilesAllowed(companyId: string): Promise<boolean> {
+    return this.entitlements.has(companyId, 'maintenance');
+  }
+
+  /**
+   * Whether the tenant may report a repair on the lease now: a former tenant may, until
+   * REPAIRS_AFTER_END_DAYS after the last day (M8 review). Checked before any file is staged.
+   */
+  async checkTenantReport(companyId: string, leaseId: string, tenantId: string): Promise<void> {
+    await withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
+      const [lease] = await tx
+        .select({
+          status: schema.lease.status,
+          endedOn: schema.lease.endedOn,
+          moveOutDate: schema.lease.moveOutDate,
+        })
+        .from(schema.lease)
+        .where(and(eq(schema.lease.id, leaseId), eq(schema.lease.tenantId, tenantId)));
+      if (!lease || ['draft', 'cancelled'].includes(lease.status)) throw notFound('Tenancy');
+      await this.assertReportable(tx, companyId, lease);
+    });
+  }
+
+  private async assertReportable(
+    tx: Tx,
+    companyId: string,
+    lease: { status: string; endedOn: string | null; moveOutDate: string | null },
+  ): Promise<void> {
+    // A former tenant may still report a repair for a while after the end (M8 review).
+    const lastDay = lease.moveOutDate ?? lease.endedOn;
+    if (['ended', 'terminated'].includes(lease.status) && lastDay) {
+      const company = await companyRecord(tx, companyId);
+      const today = toIsoDate(
+        businessDateOf(instantFrom(this.clock.now()), company?.timeZone ?? 'Africa/Accra'),
+      );
+      if (toIsoDate(addDays(parseBusinessDate(lastDay), REPAIRS_AFTER_END_DAYS)) < today)
+        throw conflict(
+          'lease_ended',
+          'This tenancy ended some time ago. Contact the landlord directly about a repair.',
+        );
+    }
+  }
+
   async tenantReport(
     companyId: string,
     input: {
@@ -1136,10 +1249,13 @@ export class MaintenanceService {
           unitId: schema.lease.unitId,
           tenantId: schema.lease.tenantId,
           status: schema.lease.status,
+          endedOn: schema.lease.endedOn,
+          moveOutDate: schema.lease.moveOutDate,
         })
         .from(schema.lease)
         .where(and(eq(schema.lease.id, input.leaseId), eq(schema.lease.tenantId, input.tenantId)));
       if (!lease || ['draft', 'cancelled'].includes(lease.status)) throw notFound('Tenancy');
+      await this.assertReportable(tx, companyId, lease);
       if (!(await this.entitlements.hasIn(tx, companyId, 'maintenance')))
         return this.forward(tx, companyId, lease, input);
       const job = await this.report(tx, companyId, {
@@ -1473,7 +1589,13 @@ export class MaintenanceService {
         .from(schema.maintenanceJob)
         .where(
           and(
-            inArray(schema.maintenanceJob.status, ['triaged', 'assigned', 'in_progress']),
+            // A Reported job with a priority (a staff-logged emergency) has its targets too (M8 review).
+            inArray(schema.maintenanceJob.status, [
+              'reported',
+              'triaged',
+              'assigned',
+              'in_progress',
+            ]),
             sql`${schema.maintenanceJob.priority} is not null`,
           ),
         );
@@ -1699,7 +1821,11 @@ export class MaintenanceService {
       rows
         .filter((r) => r.stage === stage && (!kind || r.kind === kind))
         .reduce((s, r) => s + Number(r.n), 0);
-    return { before: count('before'), afterPhotos: count('after', 'image') };
+    // Before evidence is something seen: a photo or a video, never a voice note (M8 review).
+    return {
+      before: count('before', 'image') + count('before', 'video'),
+      afterPhotos: count('after', 'image'),
+    };
   }
 
   /** Tells the tenant about a step (CM-04), on their channel with their consent. */
@@ -1826,9 +1952,14 @@ export class MaintenanceService {
     if (!company) return [];
     const actors = await memberActors(tx, company);
     const covered = await this.coveredBy(tx, actors, job.propertyId);
-    let ids = covered
-      .filter((a) => this.policy.can(a, 'maintenance.alert').allowed)
-      .map((a) => a.personId);
+    // The property's managers and caretakers, a self-managing landlord with them; an agency's
+    // admins only when no manager covers the property (M8 review).
+    const by = (kind: EmergencyAlertRole) =>
+      covered
+        .filter((a) => emergencyAlertRole(a.role, a.companyKind) === kind)
+        .map((a) => a.personId);
+    const managers = by('manages');
+    let ids = [...managers, ...by('attends'), ...(managers.length === 0 ? by('fallback') : [])];
     if (ids.length === 0) ids = await this.tasks.managersFor(tx, job.companyId, job.propertyId);
     const people = ids.length
       ? await tx

@@ -448,6 +448,13 @@ export class LeaseLifecycleService {
       const row = await leaseRow(tx, leaseId, { lock: true });
       if (!['active', 'holding_over', 'ending'].includes(row.status))
         throw conflict('lease_not_current', 'Only a current lease can record a move-out');
+      // M8 review: a lease with a live move-out ends through it, never around it.
+      for (const live of this.moveOutGuards)
+        if (await live(tx, leaseId))
+          throw conflict(
+            'move_out_live',
+            'A move-out is in progress for this lease. Finish it on the move-out page instead.',
+          );
       const company = await companyFacts(tx, row.companyId);
       const date = parseBusinessDate(input.moveOutDate);
       if (
@@ -489,6 +496,13 @@ export class LeaseLifecycleService {
   }
 
   // M8 move-out (plan 4.8): the moveout module moves the lease in its own transaction ---------------
+
+  /** M8 review: the moveout module says whether a lease has a live move-out (it is above us). */
+  private readonly moveOutGuards: ((tx: Tx, leaseId: string) => Promise<boolean>)[] = [];
+
+  useMoveOutGuard(live: (tx: Tx, leaseId: string) => Promise<boolean>): void {
+    this.moveOutGuards.push(live);
+  }
 
   /**
    * A move-out was planned: an active or held-over lease becomes Ending (decision 12). Returns the

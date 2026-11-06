@@ -32,6 +32,7 @@ export interface MoveInReportView {
     readonly signedAt: Date | null;
   }[];
   readonly late: boolean;
+  readonly lateAfterDays: number;
 }
 
 /**
@@ -133,6 +134,16 @@ export class MoveInReportService {
         },
         requestedBy,
       });
+      // One report out per lease (M8 review): a correction's report replaces the one before it.
+      await tx
+        .select({ id: schema.lease.id })
+        .from(schema.lease)
+        .where(eq(schema.lease.id, inspection.leaseId))
+        .for('update');
+      await this.esign.cancelMoveInReports(tx, inspection.leaseId, {
+        exceptInspectionId: inspectionId,
+        by: requestedBy,
+      });
       await this.esign.openMoveInReportRequest(tx, {
         companyId,
         propertyId: inspection.propertyId,
@@ -182,6 +193,7 @@ export class MoveInReportService {
         signedSha256: null,
         signers: [],
         late,
+        lateAfterDays: MOVE_IN_REPORT_DAYS,
       };
     const signers = await tx
       .select()
@@ -210,6 +222,7 @@ export class MoveInReportService {
         signedAt: s.signedAt,
       })),
       late,
+      lateAfterDays: MOVE_IN_REPORT_DAYS,
     };
   }
 

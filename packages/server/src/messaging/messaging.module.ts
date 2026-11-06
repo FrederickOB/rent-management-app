@@ -68,6 +68,7 @@ export class MessagingModule implements OnModuleInit {
     @Inject(TenantsService) private readonly tenants: TenantsService,
     @Inject(ArtisansService) private readonly artisans: ArtisansService,
     @Inject(JobSheetService) private readonly sheets: JobSheetService,
+    @Inject(InboundService) private readonly inbound: InboundService,
   ) {}
 
   onModuleInit(): void {
@@ -75,5 +76,9 @@ export class MessagingModule implements OnModuleInit {
     registerMessageTimeline(this.tenants, this.messaging);
     // M8: staff WhatsApp for emergency alerts, artisans, and job-sheet links.
     registerMaintenanceRecipients(this.messaging, this.artisans, this.sheets);
+    // M8 review: STOP and START from artisans and staff (CM-09).
+    this.inbound.useContactKeywords((tx, companyId, phone, effect) =>
+      this.artisans.honourKeyword(tx, companyId, phone, effect),
+    );
   }
 }

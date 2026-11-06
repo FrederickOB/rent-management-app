@@ -934,7 +934,12 @@ const tenancyCardSchema = z.object({
   documentId: uuid.nullable(),
 });
 
-const landlordSchema = z.object({ companyId: uuid, name: z.string() });
+const landlordSchema = z.object({
+  companyId: uuid,
+  name: z.string(),
+  /** The landlord company's time zone (IANA), for showing its times; always sent. */
+  timeZone: z.string().optional(),
+});
 
 export const tenancyGroupSchema = z.object({
   landlord: landlordSchema,

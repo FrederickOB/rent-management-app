@@ -19,6 +19,7 @@ import { serialize } from '../http/serialize';
 import { LinksKeyGuard } from '../links/links-key.guard';
 
 const required = { required: true } as const;
+const optional = { required: false } as const;
 
 /** The browser's address and device as apps/links reported them; evidence, never logged. */
 const clientOf = (client: { ip: string; userAgent: string }) => ({
@@ -33,7 +34,10 @@ const clientOf = (client: { ip: string; userAgent: string }) => ({
  */
 @Controller()
 export class MaintenanceController {
-  constructor(@Inject(MaintenanceService) private readonly maintenance: MaintenanceService) {}
+  constructor(
+    @Inject(MaintenanceService) private readonly maintenance: MaintenanceService,
+    @Inject(IdempotencyStore) private readonly idempotency: IdempotencyStore,
+  ) {}
 
   @Implement(contract.maintenance)
   maintenanceRouter(@Ctx() ctx: RequestContext) {
@@ -53,8 +57,17 @@ export class MaintenanceController {
       createUpload: implement(contract.maintenance.createUpload).handler(async ({ input }) =>
         serialize(await m.createUpload(a, input)),
       ),
+      // An Idempotency-Key is honoured when sent (M8 review): a retry returns the first job.
       report: implement(contract.maintenance.report).handler(async ({ input }) =>
-        serialize(await m.logRepair(a, input)),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'maintenance.report',
+          input,
+          async (claim) => ({ jobId: (await m.logRepair(a, input, { claim })).id }),
+          async (w) => serialize(await m.get(a, w.jobId)),
+          optional,
+        ),
       ),
       triage: implement(contract.maintenance.triage).handler(async ({ input }) =>
         serialize(await m.triage(a, input.jobId, input)),
@@ -340,14 +353,48 @@ export class MoveOutsController {
       startInspection: implement(contract.moveOuts.startInspection).handler(async ({ input }) =>
         out(await m.startInspection(a, input.moveOutId)),
       ),
+      // Deductions and charges change what the tenant gets back: each needs a key (M8 review).
       addDeduction: implement(contract.moveOuts.addDeduction).handler(async ({ input }) =>
-        out(await m.addDeduction(a, input.moveOutId, input)),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'moveouts.add-deduction',
+          input,
+          async (claim) => {
+            await m.addDeduction(a, input.moveOutId, input, { claim });
+            return { moveOutId: input.moveOutId };
+          },
+          async (w) => out(await m.get(a, w.moveOutId)),
+          required,
+        ),
       ),
       withdrawDeduction: implement(contract.moveOuts.withdrawDeduction).handler(async ({ input }) =>
-        out(await m.withdrawDeduction(a, input.moveOutId, input.deductionId)),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'moveouts.withdraw-deduction',
+          input,
+          async (claim) => {
+            await m.withdrawDeduction(a, input.moveOutId, input.deductionId, { claim });
+            return { moveOutId: input.moveOutId };
+          },
+          async (w) => out(await m.get(a, w.moveOutId)),
+          required,
+        ),
       ),
       setCharges: implement(contract.moveOuts.setCharges).handler(async ({ input }) =>
-        out(await m.setCharges(a, input.moveOutId, input.charges)),
+        idempotent(
+          this.idempotency,
+          ctx,
+          'moveouts.set-charges',
+          input,
+          async (claim) => {
+            await m.setCharges(a, input.moveOutId, input.charges, { claim });
+            return { moveOutId: input.moveOutId };
+          },
+          async (w) => out(await m.get(a, w.moveOutId)),
+          required,
+        ),
       ),
       submit: implement(contract.moveOuts.submit).handler(async ({ input }) =>
         out(await m.submit(a, input.moveOutId, input.note)),

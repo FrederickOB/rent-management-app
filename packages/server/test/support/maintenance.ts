@@ -79,6 +79,10 @@ export function maintenanceServices(
   );
   moveOuts.registerApprovals();
   inspections.useMoveInReports((tx, id) => reports.forInspection(tx, id));
+  // As MoveOutModule.onModuleInit (M8 review): the tenant's documents, and M3's quick move-out guard.
+  s.tenantApp.useDocumentOwner((tx, id) => reports.tenantOwns(tx, id));
+  s.lifecycle.useMoveOutGuard((tx, leaseId) => moveOuts.liveFor(tx, leaseId));
+  t.termination.useMoveOutGuard((tx, leaseId) => moveOuts.existsFor(tx, leaseId));
   return {
     entitlements,
     tasks,

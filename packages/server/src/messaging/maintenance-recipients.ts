@@ -26,10 +26,13 @@ export function registerMaintenanceRecipients(
         ...(person.email ? { email: person.email } : {}),
         ...(person.phone ? { sms: person.phone } : {}),
       };
+      const reachNow = person.phone ? await artisans.staffReach(tx, recipient.personId) : null;
+      // A staff member who sent STOP by SMS is not texted until they send START (M8 review).
+      if (reachNow?.sms?.action === 'withdraw') delete addresses.sms;
       const consented = new Set<ConsentChannel>(Object.keys(addresses) as ConsentChannel[]);
       let consent: Partial<Record<ConsentChannel, ConsentFacts>> | undefined;
       if (purpose === 'maintenance_alert' && person.phone) {
-        const { whatsapp } = await artisans.staffReach(tx, recipient.personId);
+        const whatsapp = reachNow?.whatsapp ?? null;
         consent = {
           whatsapp: whatsapp
             ? { latest: { action: whatsapp.action, at: instantFrom(whatsapp.at) } }

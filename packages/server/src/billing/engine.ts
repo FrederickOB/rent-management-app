@@ -60,6 +60,7 @@ import {
   creditNoteLines,
   depositApplicationLines,
   depositRefundApprovedLines,
+  depositUnwindLines,
   lateDrawLines,
   oneOffChargeLines,
   paymentReversalLines,
@@ -1345,9 +1346,18 @@ export class BillingEngine {
       readonly requestedBy: string | null;
       readonly today: string;
     },
-  ): Promise<{ reversalId: string; receiptId: string | null }> {
+  ): Promise<{
+    reversalId: string;
+    receiptId: string | null;
+    /** P21b (M8 review): the deposit shares a move-out had used, taken back, by move-out. */
+    depositUnwound: readonly DepositUnwound[];
+  }> {
     if (payment.reversedAccountingDate)
       throw conflict('payment_reversed', 'This payment was already reversed');
+    // A deposit a move-out has used is never reversed by a staff correction (M8 review): its
+    // settlement stands. A chargeback cannot be refused, so it takes the share back (P21b below).
+    if (input.approvalRequestId !== null && (await this.depositUsed(tx, payment.id)) > 0)
+      throw depositSettled();
     const reversalId = uuidv7();
     const companyId = payment.row.companyId;
     if (!payment.leaseId) {
@@ -1372,7 +1382,7 @@ export class BillingEngine {
         accountingDate: posted!.accountingDate,
         requestedBy: input.requestedBy,
       });
-      return { reversalId, receiptId: null };
+      return { reversalId, receiptId: null, depositUnwound: [] };
     }
     const lines = states.flatMap((s) => s.lines);
     const allocations = dedupe(states.flatMap((s) => s.allocations));
@@ -1486,6 +1496,11 @@ export class BillingEngine {
       reverses: { reversalId, reason: input.note },
       linesFrom: lines,
     });
+    const depositUnwound = await this.unwindDepositShares(tx, states, payment, {
+      reversalId,
+      today: input.today,
+      causedBy: input.requestedBy,
+    });
     for (const s of states) await this.drawCreditToOpen(tx, s, input.today, input.requestedBy);
     // The payment's rent tax is mirrored (P21; M5 plan 5.1).
     await this.taxHooks?.afterReversal(tx, states, payment, {
@@ -1493,7 +1508,167 @@ export class BillingEngine {
       valueDate: input.today,
       causedBy: input.requestedBy,
     });
-    return { reversalId, receiptId };
+    return { reversalId, receiptId, depositUnwound };
+  }
+
+  /**
+   * What move-outs have used of a payment's deposit share and not yet given back: applied to
+   * lines, retained for deductions or approved for refund (P11, P12), less what a P21b took back.
+   */
+  async depositUsed(tx: Tx, paymentId: string): Promise<number> {
+    const [row] = (
+      await tx.execute<{ total: number }>(
+        sql`select coalesce(sum(case when kind = 'unwound' then -amount_minor else amount_minor end), 0)::bigint as total
+            from deposit_application where payment_id = ${paymentId}`,
+      )
+    ).rows;
+    return Number(row?.total ?? 0);
+  }
+
+  /**
+   * P21b on a deposit share a move-out already used (M8 review; CLAUDE.md section 4: a reversal is
+   * built from the payment's current allocations, its deposit applications included). For each
+   * move-out that used the payment's share, the share comes back to 2100 from where the settlement
+   * put it: the lines its deposit paid are owed again (negative `deposit` allocations, newest
+   * first), and the deductions kept and the refund approved from it are taken back. The reversal
+   * then takes it out of 2100, so no deposit goes below zero. Recorded as an `unwound` deposit
+   * application, once per move-out and payment.
+   */
+  private async unwindDepositShares(
+    tx: Tx,
+    states: readonly LeaseState[],
+    payment: PaymentRecord,
+    input: {
+      readonly reversalId: string;
+      readonly today: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<DepositUnwound[]> {
+    const rows = (
+      await tx.execute<{ move_out_id: string; lease_id: string; kind: string; total: number }>(
+        sql`select move_out_id, lease_id, kind, sum(amount_minor)::bigint as total
+            from deposit_application where payment_id = ${payment.id}
+            group by move_out_id, lease_id, kind`,
+      )
+    ).rows;
+    const byMoveOut = new Map<
+      string,
+      { leaseId: string; applied: number; retained: number; refund: number; unwound: number }
+    >();
+    for (const r of rows) {
+      const g = byMoveOut.get(r.move_out_id) ?? {
+        leaseId: r.lease_id,
+        applied: 0,
+        retained: 0,
+        refund: 0,
+        unwound: 0,
+      };
+      const amount = Number(r.total);
+      if (r.kind === 'applied') g.applied += amount;
+      else if (r.kind === 'retained') g.retained += amount;
+      else if (r.kind === 'refund') g.refund += amount;
+      else if (r.kind === 'unwound') g.unwound += amount;
+      byMoveOut.set(r.move_out_id, g);
+    }
+    const out: DepositUnwound[] = [];
+    for (const [moveOutId, g] of byMoveOut) {
+      if (g.unwound > 0 || g.applied + g.retained + g.refund === 0) continue;
+      const state =
+        states.find((s) => s.lease.id === g.leaseId) ??
+        (await this.load(tx, payment.row.companyId, g.leaseId));
+      const book = requireBook(state.book);
+      // The lines the move-out's deposit paid, newest first, up to this payment's applied share.
+      const paid = new Map<string, { amount: number; at: number }>();
+      for (const a of state.allocations)
+        if (a.source === 'deposit' && a.recordType === 'move_out' && a.recordId === moveOutId) {
+          const p = paid.get(a.lineId) ?? { amount: 0, at: 0 };
+          paid.set(a.lineId, {
+            amount: p.amount + a.amountMinor,
+            at: Math.max(p.at, a.createdAt.getTime()),
+          });
+        }
+      for (const a of state.allocations)
+        if (a.source === 'deposit' && a.recordType === 'reversal' && paid.has(a.lineId)) {
+          const p = paid.get(a.lineId)!;
+          p.amount += a.amountMinor;
+        }
+      const order = [...paid.entries()]
+        .filter(([, p]) => p.amount > 0)
+        .sort((x, y) => y[1].at - x[1].at || (x[0] < y[0] ? 1 : -1));
+      let left = g.applied;
+      const lines: { invoiceLineId: string; amountMinor: number }[] = [];
+      for (const [lineId, p] of order) {
+        if (left === 0) break;
+        const take = Math.min(left, p.amount);
+        lines.push({ invoiceLineId: lineId, amountMinor: take });
+        left -= take;
+      }
+      // Every applied share was paid onto these lines: anything left is a broken ledger, which a
+      // person must see rather than an account guessed for it.
+      if (left > 0)
+        throw new Error(
+          `Move-out ${moveOutId}: the deposit lines no longer cover payment ${payment.id}'s share`,
+        );
+      const applied = g.applied;
+      const total = applied + g.retained + g.refund;
+      const posted = await this.posting.post(tx, {
+        companyId: state.company.id,
+        rule: 'P21',
+        key: `P21:${payment.id}:deposit:${moveOutId}`,
+        valueDate: input.today,
+        lines: depositUnwindLines({
+          bookId: book.bookId,
+          lease: dimsOf(state.lease),
+          paymentId: payment.id,
+          lines,
+          retainedMinor: g.retained,
+          refundMinor: g.refund,
+        }),
+        record: { type: 'payment_reversal', id: input.reversalId },
+        causedBy: input.causedBy,
+      });
+      await this.writeAllocations(
+        tx,
+        state,
+        lines.map((l) => ({
+          lineId: l.invoiceLineId,
+          source: 'deposit' as const,
+          paymentId: null,
+          amountMinor: -l.amountMinor,
+        })),
+        {
+          valueDate: input.today,
+          accountingDate: posted!.accountingDate,
+          recordType: 'reversal',
+          recordId: input.reversalId,
+          entryId: posted!.entryId,
+        },
+      );
+      await tx.insert(schema.depositApplication).values({
+        companyId: state.company.id,
+        propertyId: state.lease.propertyId,
+        tenantId: state.lease.tenantId,
+        leaseId: state.lease.id,
+        moveOutId,
+        kind: 'unwound',
+        paymentId: payment.id,
+        amountMinor: total,
+        entryId: posted!.entryId,
+        valueDate: input.today,
+        accountingDate: posted!.accountingDate,
+      });
+      out.push({
+        moveOutId,
+        leaseId: state.lease.id,
+        propertyId: state.lease.propertyId,
+        ownerId: book.ownerId,
+        amountMinor: total,
+        appliedMinor: applied,
+        retainedMinor: g.retained,
+        refundMinor: g.refund,
+      });
+    }
+    return out;
   }
 
   private cashSideFor(
@@ -2727,6 +2902,25 @@ export class BillingEngine {
 }
 
 /** Decision 9: the plain refusal of a credit note on tax a tenant withheld. */
+/** P21b's take-back of one move-out's use of a reversed payment's deposit share (M8 review). */
+export interface DepositUnwound {
+  readonly moveOutId: string;
+  readonly leaseId: string;
+  readonly propertyId: string;
+  readonly ownerId: string;
+  readonly amountMinor: number;
+  readonly appliedMinor: number;
+  readonly retainedMinor: number;
+  readonly refundMinor: number;
+}
+
+/** A staff reversal of a deposit a move-out has settled (M8 review). */
+export const depositSettled = () =>
+  conflict(
+    'payment_deposit_settled',
+    'A move-out has settled the deposit this payment paid, so it cannot be reversed here.',
+  );
+
 export const creditNoteWithheld = () =>
   new AppError(
     422,

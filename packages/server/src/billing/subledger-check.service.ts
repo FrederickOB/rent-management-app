@@ -137,10 +137,11 @@ export class SubledgerCheckService {
         sql`select coalesce(sum(case when lease_id = ${leaseId} then amount_minor else -amount_minor end), 0)::bigint as net
             from credit_carry_over where kind = 'deposit' and (lease_id = ${leaseId} or from_lease_id = ${leaseId})`,
       );
-      // M8: what a move-out applied, retained or approved for refund left the deposit (P11, P12).
+      // M8: what a move-out applied, retained or approved for refund left the deposit (P11, P12),
+      // less what a chargeback's P21b gave back to it (M8 review).
       const used = await tx.execute<{ total: number }>(
-        sql`select coalesce(sum(amount_minor), 0)::bigint as total from deposit_application
-            where lease_id = ${leaseId}`,
+        sql`select coalesce(sum(case when kind = 'unwound' then -amount_minor else amount_minor end), 0)::bigint as total
+            from deposit_application where lease_id = ${leaseId}`,
       );
       add({
         check: 'deposit',

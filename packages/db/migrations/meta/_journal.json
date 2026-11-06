@@ -309,6 +309,27 @@
       "when": 1793913165558,
       "tag": "0043_closed_move_out_statement",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1793921816580,
+      "tag": "0044_review_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1793921828390,
+      "tag": "0045_review_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1793924661132,
+      "tag": "0046_statement_hash",
+      "breakpoints": true
     }
   ]
 }

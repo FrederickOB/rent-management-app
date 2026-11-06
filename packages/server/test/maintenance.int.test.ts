@@ -201,7 +201,7 @@ describe('MI-06 and CM-04 a job from report to close', () => {
     });
     expect(disputed.status).toBe('in_progress');
     await m.maintenance.complete(c.caretakerA, job.id, {
-      uploadIds: [],
+      uploadIds: [await jpegUpload(c.caretakerA)],
       completionNote: 'Tightened it again',
     });
     const closed = await m.maintenance.recordResponse(c.manager, job.id, { response: 'confirmed' });

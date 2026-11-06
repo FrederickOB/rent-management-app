@@ -691,6 +691,30 @@ export function taskAssigneeOrder(role: StaffRole, companyKind: CompanyKind): nu
   }
 }
 
+/**
+ * Who an emergency alert reaches (decision 5, widened by the M8 review), by role: the property's
+ * managers and caretakers; a self-managing landlord, who is their own property's manager; and an
+ * agency's admins, who are alerted only when no manager covers the property (the caller decides).
+ */
+export type EmergencyAlertRole = 'manages' | 'attends' | 'fallback';
+
+export function emergencyAlertRole(
+  role: StaffRole,
+  companyKind: CompanyKind,
+): EmergencyAlertRole | null {
+  switch (staffKey(role, companyKind)) {
+    case 'property_manager':
+    case 'owner:own_company':
+      return 'manages';
+    case 'caretaker':
+      return 'attends';
+    case 'agency_admin':
+      return 'fallback';
+    default:
+      return null;
+  }
+}
+
 /** The role an actor acts with, for display (never for decisions; use can()). */
 export function roleOf(actor: Actor | null): string | null {
   if (!actor) return null;

@@ -246,6 +246,7 @@ export const depositDeduction = pgTable(
   (t) => [
     unique('deposit_deduction_company_id_id_key').on(t.companyId, t.id),
     unique('deposit_deduction_move_out_key').on(t.companyId, t.moveOutId, t.id),
+    unique('deposit_deduction_scope_key').on(t.companyId, t.propertyId, t.moveOutId, t.id),
     foreignKey({
       name: 'deposit_deduction_move_out_fk',
       columns: [t.companyId, t.leaseId, t.moveOutId],
@@ -285,10 +286,16 @@ export const depositDeductionWithdrawal = pgTable(
   (t) => [
     unique('deposit_deduction_withdrawal_company_id_id_key').on(t.companyId, t.id),
     unique('deposit_deduction_withdrawal_once').on(t.companyId, t.deductionId),
+    // M8 review: the property is in the key, so a withdrawal is always on its deduction's property.
     foreignKey({
       name: 'deposit_deduction_withdrawal_deduction_fk',
-      columns: [t.companyId, t.moveOutId, t.deductionId],
-      foreignColumns: [depositDeduction.companyId, depositDeduction.moveOutId, depositDeduction.id],
+      columns: [t.companyId, t.propertyId, t.moveOutId, t.deductionId],
+      foreignColumns: [
+        depositDeduction.companyId,
+        depositDeduction.propertyId,
+        depositDeduction.moveOutId,
+        depositDeduction.id,
+      ],
     }),
   ],
 );
@@ -340,7 +347,11 @@ export const depositApplication = pgTable(
       foreignColumns: [journalEntry.companyId, journalEntry.id],
     }),
     index('deposit_application_lease_idx').on(t.companyId, t.leaseId),
-    check('deposit_application_kind_check', sql`${t.kind} in ('applied', 'retained', 'refund')`),
+    // `unwound` (M8 review): a chargeback's P21b gave a payment's share back (counted negatively).
+    check(
+      'deposit_application_kind_check',
+      sql`${t.kind} in ('applied', 'retained', 'refund', 'unwound')`,
+    ),
     check('deposit_application_amount_check', sql`${t.amountMinor} > 0`),
     check('deposit_application_dates_check', sql`${t.accountingDate} >= ${t.valueDate}`),
   ],

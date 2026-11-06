@@ -81,6 +81,49 @@ export function depositRefundApprovedLines(input: {
 }
 
 /**
+ * P21b on a deposit a move-out already used (M8 review): a payment reversed after its deposit
+ * share was settled (a provider chargeback) first takes that share back from where the settlement
+ * put it, so the reversal that follows leaves no deposit below zero. Cr 2100 for the payment's
+ * share; Dr 1100 on the lines its deposit paid (they are owed again), Dr 4300 for the deductions
+ * it was kept for, Dr 2400 for the refund approved from it. The mirror of P11 and P12 for one
+ * payment, built from its deposit applications.
+ */
+export function depositUnwindLines(input: {
+  readonly bookId: string;
+  readonly lease: LeaseDimensions;
+  readonly paymentId: string;
+  readonly lines: readonly { readonly invoiceLineId: string; readonly amountMinor: number }[];
+  readonly retainedMinor: number;
+  readonly refundMinor: number;
+}): JournalLineDraft[] {
+  const applied = input.lines.reduce((s, l) => s + positive(l.amountMinor, 'A line'), 0);
+  for (const [value, what] of [
+    [input.retainedMinor, 'The deductions kept'],
+    [input.refundMinor, 'The refund approved'],
+  ] as const)
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new DomainError('ledger.bad_amount', `${what} are zero or more`);
+  const total = applied + input.retainedMinor + input.refundMinor;
+  if (total === 0) throw new DomainError('ledger.empty_unwind', 'Nothing of the deposit was used');
+  const dims = { bookId: input.bookId, ...input.lease };
+  return compactLines([
+    { ...dims, accountCode: '2100', amountMinor: -total, paymentId: input.paymentId },
+    ...input.lines.map((l) => ({
+      ...dims,
+      accountCode: '1100' as const,
+      amountMinor: l.amountMinor,
+      invoiceLineId: l.invoiceLineId,
+    })),
+    ...(input.retainedMinor > 0
+      ? [{ ...dims, accountCode: '4300' as const, amountMinor: input.retainedMinor }]
+      : []),
+    ...(input.refundMinor > 0
+      ? [{ ...dims, accountCode: '2400' as const, amountMinor: input.refundMinor }]
+      : []),
+  ]);
+}
+
+/**
  * P12 and P13 paid outside the platform (D1), with a reference and proof: Dr 2400, Cr 1010 (the
  * owner's account) or 1070 (held by the agent).
  */

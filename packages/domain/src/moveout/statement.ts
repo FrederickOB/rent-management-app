@@ -149,18 +149,52 @@ export function finalStatement(input: FinalStatementInput): FinalStatement {
   return statement;
 }
 
-/** The two identities of the statement; a statement that breaks either is never used. */
-export function checkStatementBalances(s: FinalStatement): void {
-  const inMoney = s.depositHeldMinor + s.creditMinor;
-  const outMoney =
-    s.creditAppliedMinor +
-    s.depositAppliedMinor +
-    s.retainedMinor +
-    s.creditRefundMinor +
-    s.depositRefundMinor;
-  const owed = s.arrearsMinor + s.deductionsChargedMinor;
-  const settled = s.creditAppliedMinor + s.depositAppliedMinor + s.stillOwedMinor;
-  if (inMoney !== outMoney || owed !== settled || s.retainedMinor > s.depositHeldMinor)
+/**
+ * The figures the statement's identities read: exactly the API contract's statement fields, so the
+ * web checks a statement it was sent with the same function. `credit` and `arrears` are after the
+ * early steps (charges in arrears, the break-clause credit in credit or off arrears).
+ */
+export interface StatementFigures {
+  readonly depositHeldMinor: number;
+  readonly creditMinor: number;
+  readonly arrearsMinor: number;
+  readonly retainedMinor: number;
+  readonly deductionsChargedMinor: number;
+  readonly creditAppliedMinor: number;
+  readonly depositAppliedMinor: number;
+  readonly creditRefundMinor: number;
+  readonly depositRefundMinor: number;
+  readonly stillOwedMinor: number;
+}
+
+/** What came in and what went out (the first identity), and what was owed and how it settled. */
+export function statementTotals(s: StatementFigures) {
+  return {
+    in: s.depositHeldMinor + s.creditMinor,
+    out:
+      s.creditAppliedMinor +
+      s.depositAppliedMinor +
+      s.retainedMinor +
+      s.creditRefundMinor +
+      s.depositRefundMinor,
+    owed: s.arrearsMinor + s.deductionsChargedMinor,
+    settled: s.creditAppliedMinor + s.depositAppliedMinor + s.stillOwedMinor,
+  };
+}
+
+/**
+ * The two identities of the statement, and that the deposit never keeps more than it held:
+ *   depositHeld + credit = creditApplied + depositApplied + retained + creditRefund + depositRefund
+ *   arrears + deductionsCharged = creditApplied + depositApplied + stillOwed
+ */
+export function statementBalances(s: StatementFigures): boolean {
+  const t = statementTotals(s);
+  return t.in === t.out && t.owed === t.settled && s.retainedMinor <= s.depositHeldMinor;
+}
+
+/** A statement that breaks either identity is never used. */
+export function checkStatementBalances(s: StatementFigures): void {
+  if (!statementBalances(s))
     throw new DomainError('moveout.statement_unbalanced', 'The final statement does not balance');
 }
 

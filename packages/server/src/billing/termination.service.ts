@@ -332,6 +332,13 @@ export class TerminationService {
     };
   }
 
+  /** M8 review: the moveout module (above billing) says whether a lease has a move-out. */
+  private readonly moveOutGuards: ((tx: Tx, leaseId: string) => Promise<boolean>)[] = [];
+
+  useMoveOutGuard(exists: (tx: Tx, leaseId: string) => Promise<boolean>): void {
+    this.moveOutGuards.push(exists);
+  }
+
   /** Asks for the settlement and its refund (`lease.refund`); a second person approves. */
   async request(
     actor: Actor | null,
@@ -346,6 +353,14 @@ export class TerminationService {
     return withCompany(this.database, this.unscoped(staff), async (tx) => {
       await options.claim?.claim(tx);
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, leaseId));
+      // M8 review: once a lease has a move-out, its money is settled there; an early-termination
+      // refund here would credit the same unused days a second time.
+      for (const exists of this.moveOutGuards)
+        if (await exists(tx, leaseId))
+          throw conflict(
+            'move_out_exists',
+            'This lease has a move-out. Settle its money on the move-out instead.',
+          );
       await lockCounters(tx, staff.companyId);
       await this.closeStale(tx, leaseId);
       const figures = await this.simulate(tx, staff.companyId, leaseId, input);

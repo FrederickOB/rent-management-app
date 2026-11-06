@@ -275,7 +275,7 @@ export const maintenanceContract = {
       method: 'POST',
       path: '/maintenance-jobs',
       summary:
-        'Log a repair for a unit or a common area (staff and caretakers; CM-04). An emergency alerts the property’s managers and caretakers at once (decision 5)',
+        'Log a repair for a unit or a common area (staff and caretakers; CM-04). An emergency alerts the property’s managers and caretakers at once (decision 5). Send an Idempotency-Key: a retry with it returns the first job, never a second job or a second alert. `messageIds` must be messages of `conversationId` (400 MESSAGES_NOT_IN_CONVERSATION); the job’s tenant is the conversation’s',
     })
     .input(reportInput)
     .output(maintenanceJobDetailSchema),
@@ -500,28 +500,37 @@ const sheetInput = z.object({
 });
 
 /**
- * What the job sheet shows (decision 6): the unit, the description, the tenant's photos and the
- * property contact's phone. Never the tenant's own phone number or anything else about them.
+ * What the job sheet shows (decision 6, widened by F1): the unit, the description, the tenant's
+ * photos and videos from the report, and the property contact's phone. Never a voice note, a before
+ * or after file, a staff file, the tenant's own phone number or anything else about them.
+ *
+ * A dead link (`closed`, `expired` or `revoked`) shows only the closed screen's facts: the ticket,
+ * status, property name, unit and artisan. Its `description`, `property.address`, `contact` and
+ * `visitAt` are null, `attachments` is empty, `code` is null and no action is offered. Its files
+ * are refused (404).
  */
 export const jobSheetSchema = z.object({
   /** `sheet` accepts actions; the rest explain. */
   screen: z.enum(['sheet', 'done', 'closed', 'expired', 'revoked']),
   ticket: z.string(),
   status: z.enum(MAINTENANCE_JOB_STATUSES),
-  description: z.string(),
+  /** Null on a dead link. */
+  description: z.string().nullable(),
   category: z.enum(MAINTENANCE_CATEGORIES).nullable(),
   priority: z.enum(MAINTENANCE_PRIORITIES).nullable(),
+  /** `address` is null on a dead link. */
   property: z.object({ name: z.string(), address: z.string().nullable() }),
   unitCode: z.string().nullable(),
-  /** Who to call about the job: the property's contact, never the tenant. */
-  contact: z.object({ name: z.string(), phone: z.string().nullable() }),
+  /** Who to call about the job: the property's contact, never the tenant. Null on a dead link. */
+  contact: z.object({ name: z.string(), phone: z.string().nullable() }).nullable(),
   artisan: z.object({ name: z.string(), response: z.enum(['accepted', 'declined']).nullable() }),
   visitAt: iso.nullable(),
+  /** F1: the report's photos and videos only. Empty on a dead link. */
   attachments: z.array(
     z.object({
       id: uuid,
-      kind: z.enum(MAINTENANCE_ATTACHMENT_KINDS),
-      stage: z.enum(MAINTENANCE_ATTACHMENT_STAGES),
+      kind: z.enum(['image', 'video']),
+      stage: z.literal('report'),
       contentType: z.string(),
     }),
   ),
@@ -616,7 +625,8 @@ export const jobSheetContract = {
     .route({
       method: 'POST',
       path: '/job-sheets/attachment',
-      summary: 'A 5-minute link to one of the job’s files',
+      summary:
+        'A 5-minute link to one of the photos or videos the sheet lists (F1), from a live link only: a dead link’s files, and any other file, answer 404',
     })
     .input(sheetInput.extend({ attachmentId: uuid }))
     .output(z.object({ url: z.string() })),
@@ -724,8 +734,10 @@ export const moveInReportSchema = z.object({
       signedAt: iso.nullable(),
     }),
   ),
-  /** Offered from lease signing until 14 days after the start; later it warns (decision 11). */
+  /** Offered from lease signing until `lateAfterDays` after the start; later it warns (decision 11). */
   late: z.boolean(),
+  /** The days after the lease's start within which the report is on time (decision 11: 14). */
+  lateAfterDays: z.number().int(),
 });
 export type MoveInReportView = z.infer<typeof moveInReportSchema>;
 
@@ -870,6 +882,11 @@ export const expenseRowSchema = z.object({
   owner: named,
   job: z.object({ id: uuid, ticket: z.string() }).nullable(),
   hasReceipt: z.boolean(),
+  /**
+   * F3: receipts are optional. True when the expense has no receipt; the list shows it as
+   * "No receipt", and M9 carries it onto the owner statement.
+   */
+  noReceipt: z.boolean(),
   note: z.string().nullable(),
   paidOn: isoDate.nullable(),
   /** The reversal that cancelled it, if any (P21a). */
@@ -910,7 +927,7 @@ export const expensesContract = {
       method: 'POST',
       path: '/expenses',
       summary:
-        'Record an expense with its receipt, on a property or unit, optionally for a job. Posts P15: Dr 5000 or 5400; Cr 2500 if unpaid, 1070 if the agent paid, 1010 if the owner paid. Requires an Idempotency-Key',
+        'Record an expense on a property or unit, optionally for a job, with its receipt if there is one (F3: optional; without one it is flagged `noReceipt`). Posts P15: Dr 5000 or 5400; Cr 2500 if unpaid, 1070 if the agent paid, 1010 if the owner paid. Only an agency pays as the agent (400 EXPENSE_PAID_BY). Requires an Idempotency-Key',
     })
     .input(
       z.object({
@@ -932,7 +949,7 @@ export const expensesContract = {
       method: 'POST',
       path: '/expenses/{expenseId}/payment',
       summary:
-        'Record an unpaid expense as paid (P15: Dr 2500, Cr 1010 or 1070). Requires an Idempotency-Key',
+        'Record an unpaid expense as paid (P15: Dr 2500, Cr 1010 or 1070). A self-managing landlord has no agency account (400 AGENCY_ACCOUNT_NOT_AVAILABLE). Requires an Idempotency-Key',
     })
     .input(
       z.object({
@@ -1005,21 +1022,40 @@ export const tenantRepairSchema = z.object({
 });
 export type TenantRepairView = z.infer<typeof tenantRepairSchema>;
 
-const landlordSchema = z.object({ companyId: uuid, name: z.string() });
+const landlordSchema = z.object({
+  companyId: uuid,
+  name: z.string(),
+  /** The landlord company's time zone (IANA), for showing its times; always sent. */
+  timeZone: z.string().optional(),
+});
 
 export const tenantRepairsContract = {
   list: oc
     .route({
       method: 'GET',
       path: '/me/repairs',
-      summary: 'The signed-in tenant’s repairs, by landlord (TL-12: never another landlord’s)',
+      summary:
+        'The signed-in tenant’s repairs, by landlord (TL-12: never another landlord’s). One group per landlord, with or without repairs',
     })
-    .output(z.array(z.object({ landlord: landlordSchema, repairs: z.array(tenantRepairSchema) }))),
+    .output(
+      z.array(
+        z.object({
+          landlord: landlordSchema,
+          /**
+           * F2: false on Starter. The repair form then asks for a description only and says the
+           * landlord will be in touch; uploads and `uploadIds` are refused (403 REPAIR_FILES_NOT_ON_PLAN).
+           */
+          filesAllowed: z.boolean(),
+          repairs: z.array(tenantRepairSchema),
+        }),
+      ),
+    ),
   createUpload: oc
     .route({
       method: 'POST',
       path: '/me/repair-uploads',
-      summary: 'Upload a photo, video or voice note for a repair request (decision 2 limits)',
+      summary:
+        'Upload a photo, video or voice note for a repair request (decision 2 limits). Growth only: on Starter, 403 REPAIR_FILES_NOT_ON_PLAN (F2)',
     })
     .input(mediaUploadInputSchema.extend({ leaseId: uuid }))
     .output(presignedUpload),
@@ -1028,7 +1064,7 @@ export const tenantRepairsContract = {
       method: 'POST',
       path: '/me/repairs',
       summary:
-        'Report a repair from the app: category, description, the emergency flag and up to 10 files. Idempotent by the app’s client id, so a retry or an offline send makes one job',
+        'Report a repair from the app: category, description, the emergency flag and up to 10 files (Growth only; on Starter, any `uploadIds` answer 403 REPAIR_FILES_NOT_ON_PLAN before anything is stored, F2). Idempotent by the app’s client id, so a retry or an offline send makes one job. A lease that ended more than 30 days ago answers 409 LEASE_ENDED',
     })
     .input(
       z.object({

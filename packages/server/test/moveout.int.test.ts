@@ -200,11 +200,14 @@ describe('TL-11 and MI-11 the move-out settlement', () => {
       plannedDate: today,
       reason: 'end_of_term',
     });
+    // The move-out inspection first: damage is shown by its items (MI-11).
+    const inspected = await m.moveOuts.startInspection(c.manager, planned.id);
+    const item = (await m.inspections.get(c.manager, inspected.inspectionId!)).items[0]!.id;
     await m.moveOuts.addDeduction(c.manager, planned.id, {
       kind: 'damage',
       amountMinor: 50_000,
       reason: 'Broken window',
-      inspectionItemIds: [],
+      inspectionItemIds: [item],
       photoIds: [],
     });
     await expect(
@@ -313,11 +316,14 @@ describe('TL-11 a settlement with no refund closes, then takes its final stateme
       plannedDate: today,
       reason: 'end_of_term',
     });
+    // The move-out inspection first: damage is shown by its items (MI-11).
+    const inspected = await m.moveOuts.startInspection(c.manager, planned.id);
+    const item = (await m.inspections.get(c.manager, inspected.inspectionId!)).items[0]!.id;
     await m.moveOuts.addDeduction(c.manager, planned.id, {
       kind: 'damage',
       amountMinor: 50_000,
       reason: 'Broken window',
-      inspectionItemIds: [],
+      inspectionItemIds: [item],
       photoIds: [],
     });
     const submitted = await m.moveOuts.submit(c.manager, planned.id);
