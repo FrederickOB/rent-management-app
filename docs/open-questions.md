@@ -1,6 +1,6 @@
 # Open questions
 
-60 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+61 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -55,6 +55,7 @@
 | OQ-56 | When rent on a month is credited back (a correction, or the unused days of an early end), how is tax the tenant withheld on that month treated: does the owner reclaim it from GRA, carry it as a credit, or return it to the tenant? And when a tenant withholds less than the rate on a month, does the amount withheld replace the month's rent tax? (M5 decision 9; review N4 and N7) | Tax adviser | Before the commercial pilot | A credit note that would take back withheld tax is refused (`credit_note_withheld`); staff settle it by hand, and the withheld tax stays on the month. There is no tool yet for withheld tax on months after an early end (review N4). The amount withheld replaces the month's tax, whatever it is (N7). | |
 | OQ-48 | Services carry VAT with no registration threshold. Must the platform register for VAT, and charge VAT and levies on subscription invoices? | Tax adviser | M10 | Register, and show VAT and levies on subscription invoices. | |
 | OQ-60 | Does an agency's management fee carry VAT and levies? If so, at what rates, and how should it appear on the owner's statement? (AC-02) | Tax adviser | M9 | Fees post gross, with no VAT, until answered (M9 decision 4). A later rules row would add VAT to new fees without changing past ones. | |
+| OQ-61 | When is a VAT return due to GRA, and does it depend on the filing period? (P33; the compliance list, M9 decision 14) | Tax adviser | Before the commercial pilot | No due date is shown or computed. The rules table holds `vat.return_due_days` with no value, `unverified`, and the compliance list shows each unpaid VAT return as "Due date unverified" until the adviser supplies the value and its source. A value, once supplied, is read as days after the end of the month the VAT was charged in; if the answer depends on the filing period, the key's shape changes with it. | |
 
 ## Platform and providers
 
