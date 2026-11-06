@@ -1,0 +1,23 @@
+{
+  "data": [
+    {
+      "name": "rent_reminder_v1",
+      "language": "en",
+      "status": "APPROVED",
+      "category": "UTILITY",
+      "id": "1111111111",
+      "rejected_reason": "NONE"
+    },
+    {
+      "name": "receipt_ready_v1",
+      "language": "en",
+      "status": "PENDING",
+      "category": "UTILITY",
+      "id": "2222222222"
+    }
+  ],
+  "paging": {
+    "cursors": { "before": "a", "after": "b" },
+    "next": "https://graph.facebook.test/v23.0/102290129340398/message_templates?after=b"
+  }
+}

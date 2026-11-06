@@ -166,6 +166,16 @@ export function timelineLabel(action: string): string {
   return `${noun}: ${humanise(verb)}`;
 }
 
+/** The consent text the API records when a changed address resets consent (decision 8). */
+const ADDRESS_CHANGED_TEXT = 'address_changed.v1';
+
+const CONSENT_EVENT_CHANNELS: Readonly<Record<string, string>> = {
+  sms: 'SMS',
+  email: 'Email',
+  whatsapp: 'WhatsApp',
+  push: 'App notification',
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -191,8 +201,13 @@ const QUIET_FIELDS = new Set([
 export function timelineDetail(action: string, data: unknown): string | null {
   if (!isRecord(data)) return null;
   if (action === 'consent_event.insert' && isRecord(data.after)) {
-    const channel = data.after.channel === 'email' ? 'Email' : 'SMS';
+    // M6 adds WhatsApp and app notifications (CM-09).
+    const channel = CONSENT_EVENT_CHANNELS[String(data.after.channel)] ?? 'SMS';
     const granted = data.after.action === 'grant';
+    // Decision 8 (C3): a changed phone or email resets consent; nobody withdrew it.
+    const version = data.after.text_version ?? data.after.textVersion;
+    if (!granted && version === ADDRESS_CHANGED_TEXT)
+      return `${channel}: consent reset because the ${data.after.channel === 'email' ? 'email address' : 'phone number'} changed`;
     return `${channel}: ${granted ? 'agreed to messages' : 'withdrew consent'}`;
   }
   if ((action === 'id_number.revealed' || action === 'tin.revealed') && data.reason)

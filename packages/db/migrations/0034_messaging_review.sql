@@ -1,0 +1,2 @@
+ALTER TABLE "unsubscribe_token" ADD COLUMN "address_hash" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "message_event_failure_report_key" ON "message_event" USING btree ("provider","provider_message_id","status") WHERE "message_event"."status" = 'failed' and "message_event"."provider_message_id" is not null;

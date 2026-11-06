@@ -9,6 +9,7 @@ import { cn } from '@/lib/cn';
 import { isHexColour, textOn } from '@/lib/colour';
 import { initials } from '@/lib/format';
 import { activeNavHref } from '@/lib/nav-match';
+import { companyFeatures } from '@/lib/plan';
 import { AppProvider } from './app-context';
 import { navFor } from './nav';
 import { SignOutButton } from './sign-out-button';
@@ -44,7 +45,7 @@ export interface AppShellProps {
 /** The signed-in frame (AD-01): the active company's logo, name and colours, and the person. */
 export function AppShell({ me, company, children }: AppShellProps) {
   const pathname = usePathname();
-  const items = navFor(me);
+  const items = navFor(me, companyFeatures(company));
   const activeHref = activeNavHref(
     pathname,
     items.map((item) => item.href),

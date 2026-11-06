@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "name": "pay_link_v1",
+      "language": "en",
+      "status": "REJECTED",
+      "category": "UTILITY",
+      "id": "3333333333",
+      "rejected_reason": "INVALID_FORMAT"
+    }
+  ],
+  "paging": { "cursors": { "before": "b", "after": "c" } }
+}

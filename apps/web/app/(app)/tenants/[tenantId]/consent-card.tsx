@@ -1,46 +1,57 @@
 'use client';
 
-import type { TenantDetailView } from '@rent/contracts';
-import type { MessageChannel } from '@rent/domain/messaging';
+import type { ConsentChannel } from '@rent/domain/messaging';
 import { useState } from 'react';
+import { useApp } from '@/components/app-context';
+import { LoadFailed, Loading } from '@/components/load-state';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
-import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
-import { CONSENT_VERSION, consentWording, type ConsentDraft } from '@/lib/tenant-form';
+import { formatTime } from '@/lib/format';
+import {
+  consentChannelName,
+  consentHistoryText,
+  NO_ADDRESS_TEXT,
+  type ChannelConsent,
+} from '@/lib/messaging-consent';
+import { CONSENT_VERSION, consentWording } from '@/lib/tenant-form';
 
-const CHANNEL_NAMES: Record<MessageChannel, string> = { sms: 'SMS', email: 'Email' };
-const BY_CHANNEL: Record<MessageChannel, string> = { sms: 'by SMS', email: 'by email' };
+const BY_CHANNEL: Record<ConsentChannel, string> = {
+  sms: 'by SMS',
+  email: 'by email',
+  whatsapp: 'on WhatsApp',
+  push: 'by app notification',
+};
 
-type Confirming = { readonly channel: MessageChannel; readonly action: 'grant' | 'withdraw' };
+type Confirming = { readonly channel: ConsentChannel; readonly action: 'grant' | 'withdraw' };
 
 /**
- * Consent per channel (CM-09; decision 2). Each grant or withdrawal is a new record with the
- * consent text's version; nothing is overwritten, so both are confirmed before they are recorded.
- * Without consent on a channel, the business sends nothing on it; one-time codes the person asks
- * for are exempt.
+ * Consent per channel (CM-09; M3 decision 2, M6 plan 4.8): app notifications, WhatsApp, SMS and
+ * email. Each grant or withdrawal is a new record with the consent text's version; nothing is
+ * overwritten, so both are confirmed before they are recorded. Without consent on a channel, the
+ * business starts nothing on it; one-time codes the person asks for, and replies within 24 hours
+ * of their own message, are exempt.
  */
 export function ConsentRows({
-  consent,
-  addresses,
+  channels,
   canManage,
   who,
   onRecord,
 }: {
-  readonly consent: ConsentDraft;
-  readonly addresses: Readonly<Record<MessageChannel, string | null>>;
+  readonly channels: readonly ChannelConsent[];
   readonly canManage: boolean;
   /** For labels: "the tenant", or a contact's name. */
   readonly who: string;
-  readonly onRecord: (channel: MessageChannel, action: 'grant' | 'withdraw') => Promise<void>;
+  readonly onRecord: (channel: ConsentChannel, action: 'grant' | 'withdraw') => Promise<void>;
 }) {
+  const { timeZone } = useApp();
   const [confirming, setConfirming] = useState<Confirming | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function record(channel: MessageChannel, action: 'grant' | 'withdraw') {
+  async function record(channel: ConsentChannel, action: 'grant' | 'withdraw') {
     setPending(true);
     setError(null);
     try {
@@ -57,34 +68,31 @@ export function ConsentRows({
     <div className="space-y-3">
       {error ? <Alert tone="error">{error}</Alert> : null}
       <ul className="space-y-3" aria-label={`Consent for ${who}`}>
-        {(['sms', 'email'] as const).map((channel) => {
-          const granted = consent[channel];
-          const address = addresses[channel];
+        {channels.map(({ channel, granted, source, recordedAt, reachable, reason }) => {
+          const name = consentChannelName(channel);
           return (
             <li key={channel} data-testid={`consent-${channel}`} className="space-y-2 text-sm">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="w-14 font-medium">{CHANNEL_NAMES[channel]}</span>
+                <span className="min-w-28 font-medium">{name}</span>
                 {granted ? <Badge tone="green">Agreed</Badge> : <Badge>Not agreed</Badge>}
-                {!address ? (
-                  <span className="text-slate-600">
-                    No {channel === 'sms' ? 'phone' : 'email'} on file
-                  </span>
+                {!reachable ? (
+                  <span className="text-slate-600">{NO_ADDRESS_TEXT[channel]}</span>
                 ) : null}
                 {canManage && confirming?.channel !== channel ? (
                   granted ? (
                     <Button
                       size="sm"
                       variant="ghost"
-                      aria-label={`Record that ${who} withdrew ${CHANNEL_NAMES[channel]} consent`}
+                      aria-label={`Record that ${who} withdrew ${name} consent`}
                       onClick={() => setConfirming({ channel, action: 'withdraw' })}
                     >
                       Record a withdrawal
                     </Button>
-                  ) : address ? (
+                  ) : reachable ? (
                     <Button
                       size="sm"
                       variant="secondary"
-                      aria-label={`Record ${CHANNEL_NAMES[channel]} consent for ${who}`}
+                      aria-label={`Record ${name} consent for ${who}`}
                       onClick={() => setConfirming({ channel, action: 'grant' })}
                     >
                       Record consent
@@ -92,10 +100,16 @@ export function ConsentRows({
                   ) : null
                 ) : null}
               </div>
+              {recordedAt && (source || reason) ? (
+                <p className="text-slate-600" data-testid="consent-source">
+                  {consentHistoryText({ channel, granted, source, reason: reason ?? null })},{' '}
+                  <time dateTime={recordedAt}>{formatTime(recordedAt, timeZone)}</time>
+                </p>
+              ) : null}
               {confirming?.channel === channel && confirming.action === 'withdraw' ? (
                 <div
                   role="group"
-                  aria-label={`Confirm ${CHANNEL_NAMES[channel]} withdrawal`}
+                  aria-label={`Confirm ${name} withdrawal`}
                   className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-red-900"
                 >
                   <p>
@@ -121,7 +135,7 @@ export function ConsentRows({
               {confirming?.channel === channel && confirming.action === 'grant' ? (
                 <div
                   role="group"
-                  aria-label={`Confirm ${CHANNEL_NAMES[channel]} consent`}
+                  aria-label={`Confirm ${name} consent`}
                   className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3"
                 >
                   <p>
@@ -152,35 +166,38 @@ export function ConsentRows({
 
 /** The tenant's own consent, by channel. */
 export function ConsentCard({
-  tenant,
+  channels,
+  problem,
+  onRetry,
   canManage,
-  onChanged,
+  onRecord,
 }: {
-  readonly tenant: TenantDetailView;
+  /** Null while loading, or when the read failed (`problem`). */
+  readonly channels: readonly ChannelConsent[] | null;
+  readonly problem: string | null;
+  readonly onRetry: () => void;
   readonly canManage: boolean;
-  readonly onChanged: (text: string) => Promise<void>;
+  readonly onRecord: (channel: ConsentChannel, action: 'grant' | 'withdraw') => Promise<void>;
 }) {
   return (
     <Card data-testid="consent">
       <CardHeader
         title="Messages"
-        description="What the tenant agreed to receive, by channel. Every change is kept."
+        description="What the tenant agreed to receive, by channel. Every change is kept, and a changed phone or email starts with no consent."
       />
       <CardBody>
-        <ConsentRows
-          consent={tenant.consent}
-          addresses={{ sms: tenant.phone, email: tenant.email }}
-          canManage={canManage}
-          who="the tenant"
-          onRecord={async (channel, action) => {
-            await api().tenants.recordConsent({ tenantId: tenant.id, channel, action });
-            await onChanged(
-              action === 'grant'
-                ? `Recorded ${CHANNEL_NAMES[channel]} consent for ${tenant.displayName}.`
-                : `Recorded that ${tenant.displayName} withdrew ${CHANNEL_NAMES[channel]} consent.`,
-            );
-          }}
-        />
+        {channels ? (
+          <ConsentRows
+            channels={channels}
+            canManage={canManage}
+            who="the tenant"
+            onRecord={onRecord}
+          />
+        ) : problem ? (
+          <LoadFailed message={`Consent could not be loaded. ${problem}`} onRetry={onRetry} />
+        ) : (
+          <Loading what="consent" />
+        )}
       </CardBody>
     </Card>
   );

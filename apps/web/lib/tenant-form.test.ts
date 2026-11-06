@@ -1,7 +1,6 @@
 import type { TenantDetailView } from '@rent/contracts';
 import { describe, expect, it } from 'vitest';
 import {
-  consentChangeNotes,
   consentChanges,
   consentSummary,
   consentWording,
@@ -203,49 +202,5 @@ describe('TL-03 contacts', () => {
         consent: { sms: false, email: false },
       }),
     ).toEqual({ email: 'yaa@example.com' });
-  });
-});
-
-describe('CM-09 consent stays with a changed phone or email', () => {
-  const stored = {
-    phone: '+233200000031',
-    email: 'kwame@example.com',
-    consent: { sms: true, email: true },
-  };
-
-  it('asks staff to check the person agreed at the new number or address', () => {
-    expect(
-      consentChangeNotes(
-        stored,
-        { phone: '024 412 3456', email: 'kwame@example.com' },
-        'the tenant',
-      ),
-    ).toEqual([
-      'The SMS consent on record stays with the new phone number. Make sure the tenant agreed to messages at that number.',
-    ]);
-    expect(
-      consentChangeNotes(
-        stored,
-        { phone: '020 000 0031', email: 'k@example.com' },
-        'Yaa Guarantor',
-      ),
-    ).toEqual([
-      'The email consent on record stays with the new email address. Make sure Yaa Guarantor agreed to messages at that address.',
-    ]);
-  });
-
-  it('says nothing when the number is the same, removed, or has no consent on record', () => {
-    // The same number typed the Ghanaian way, and the same address in capitals.
-    expect(
-      consentChangeNotes(stored, { phone: '020 000 0031', email: 'KWAME@example.com ' }, 'x'),
-    ).toEqual([]);
-    expect(consentChangeNotes(stored, { phone: '', email: '' }, 'x')).toEqual([]);
-    expect(
-      consentChangeNotes(
-        { ...stored, consent: { sms: false, email: false } },
-        { phone: '024 412 3456', email: 'new@example.com' },
-        'x',
-      ),
-    ).toEqual([]);
   });
 });

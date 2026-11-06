@@ -263,7 +263,8 @@ export const receiptSchema = z.object({
   delivery: z
     .object({
       status: z.enum(['queued', 'sent', 'not_sent', 'failed']),
-      channel: z.enum(['sms', 'email']).nullable(),
+      /** M6: the channel it went by, push and WhatsApp included (plan 4.9). */
+      channel: z.enum(['push', 'whatsapp', 'sms', 'email']).nullable(),
       sentAt: iso.nullable(),
       latencyMs: z.number().int().nullable(),
     })

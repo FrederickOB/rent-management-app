@@ -141,6 +141,78 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
   return result;
 }
 
+export interface ExpoPushOptions {
+  /** An Expo access token, when the project requires one for sending (enhanced security). */
+  readonly accessToken?: string;
+  readonly baseUrl?: string;
+  readonly fetch?: typeof fetch;
+}
+
+/**
+ * Expo's push service (docs.expo.dev/push/sending-notifications): `POST /send` with up to 100
+ * notifications, then `POST /getReceipts` for what Apple and Google said. No SDK.
+ */
+export class ExpoPush implements PushPort {
+  readonly provider: string = 'expo';
+  protected readonly baseUrl: string;
+
+  constructor(private readonly options: ExpoPushOptions = {}) {
+    this.baseUrl = options.baseUrl ?? 'https://exp.host/--/api/v2/push';
+  }
+
+  private request(path: string, body: unknown): Promise<unknown> {
+    return requestJson<unknown>(this.provider, `${this.baseUrl}${path}`, {
+      body,
+      headers: this.options.accessToken
+        ? { authorization: `Bearer ${this.options.accessToken}` }
+        : {},
+      ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
+    });
+  }
+
+  async send(message: PushMessage): Promise<PushTicket[]> {
+    const tickets: PushTicket[] = [];
+    for (const batch of chunks(message.tokens, SEND_BATCH)) {
+      const body = batch.map((to) => ({
+        to,
+        title: message.title,
+        body: message.body,
+        sound: 'default',
+        ...(message.data === undefined ? {} : { data: message.data }),
+      }));
+      const parsed = sendResponse.safeParse(await this.request('/send', body));
+      if (!parsed.success || parsed.data.data.length !== batch.length)
+        throw unexpectedResponse(this.provider);
+      const results = parsed.data.data;
+      batch.forEach((token, i) => {
+        const result = results[i];
+        tickets.push(
+          result?.status === 'ok'
+            ? { token, ticketId: result.id }
+            : { token, error: toErrorCode(result?.details?.error) },
+        );
+      });
+    }
+    return tickets;
+  }
+
+  async getReceipts(ticketIds: readonly string[]): Promise<PushReceipt[]> {
+    const receipts: PushReceipt[] = [];
+    for (const ids of chunks(ticketIds, RECEIPT_BATCH)) {
+      const parsed = receiptsResponse.safeParse(await this.request('/getReceipts', { ids }));
+      if (!parsed.success) throw unexpectedResponse(this.provider);
+      for (const ticketId of ids) {
+        const receipt = parsed.data.data[ticketId];
+        if (!receipt) receipts.push({ ticketId, status: 'pending' });
+        else if (receipt.status === 'ok') receipts.push({ ticketId, status: 'ok' });
+        else
+          receipts.push({ ticketId, status: 'error', error: toErrorCode(receipt.details?.error) });
+      }
+    }
+    return receipts;
+  }
+}
+
 /** Talks to `apps/fake-providers` over HTTP, with the request shapes of Expo's push API. */
 export class FakeProvidersPush implements PushPort {
   readonly provider = 'fake-providers';

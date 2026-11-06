@@ -19,6 +19,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
+import { UnitConversations } from './unit-conversations';
 import { UnitLeases } from './unit-leases';
 import { useApp } from '@/components/app-context';
 import { ConfirmBox } from '@/components/confirm-box';
@@ -56,6 +57,8 @@ export interface UnitPermissions {
   /** lease.view and lease.manage (M3): the unit's leases, and drafting one. */
   readonly seeLeases?: boolean;
   readonly draftLease?: boolean;
+  /** M6 (CM-05): every conversation with the unit's tenants since each lease began. */
+  readonly conversations?: boolean;
 }
 
 /**
@@ -187,6 +190,7 @@ export function UnitDetail({
       )}
 
       {can.seeLeases ? <UnitLeases unit={unit} canDraft={Boolean(can.draftLease) && live} /> : null}
+      {can.conversations ? <UnitConversations unitId={unit.id} /> : null}
 
       <AvailabilityCard unit={unit} canChange={can.manage && live} onSaved={saved} />
       <BandCard unit={unit} canOverride={can.overrideBand && live} onSaved={saved} />

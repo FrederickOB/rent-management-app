@@ -8,6 +8,7 @@ import type { JobsService } from '../core/jobs/jobs.service';
 import type { AppLogger } from '../core/logging/logger';
 import type { PaymentProviders } from '../core/payment-providers';
 import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
+import { MESSAGING_INBOUND_JOB, MESSAGING_WEBHOOK_PREFIX } from '../core/messages';
 import { ALERT_PORT, CLOCK, CONFIG, DATABASE, PAYMENT_PROVIDERS } from '../core/tokens';
 import { SigningHasher } from '../esign/secrets';
 import { ProviderPaymentsService } from './provider-payments.service';
@@ -249,12 +250,16 @@ export class WebhookInboxRelay {
     let total = 0;
     for (;;) {
       const published = await withSystem(this.database, {}, async (tx) => {
-        const claimed = await tx.execute<{ id: string }>(
-          sql`select id from app.claim_webhook_inbox(${this.batchSize})`,
+        const claimed = await tx.execute<{ id: string; provider: string }>(
+          sql`select id, provider from app.claim_webhook_inbox(${this.batchSize})`,
         );
+        // M6: messaging providers' rows go to the messaging pipeline (plan 4.4); the rest are
+        // payments', as in M4b.
         for (const row of claimed.rows)
           await this.jobs.send(
-            PROCESS_WEBHOOK_JOB,
+            row.provider.startsWith(MESSAGING_WEBHOOK_PREFIX)
+              ? MESSAGING_INBOUND_JOB
+              : PROCESS_WEBHOOK_JOB,
             { inboxId: row.id },
             { singletonKey: row.id, tx },
           );

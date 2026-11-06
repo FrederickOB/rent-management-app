@@ -18,8 +18,9 @@ export function proxy(request: NextRequest): NextResponse {
   });
   response.headers.set('Content-Security-Policy', csp);
   for (const [name, value] of SECURITY_HEADERS) response.headers.set(name, value);
-  // Link pages show personal documents and money: never stored by the browser or anything between.
+  // Link pages show personal documents and money, and the unsubscribe page a person's email: never
+  // stored by the browser or anything between.
   const { pathname } = request.nextUrl;
-  if (/^\/[lpr]\//.test(pathname)) response.headers.set('Cache-Control', 'no-store');
+  if (/^\/[lpru]\//.test(pathname)) response.headers.set('Cache-Control', 'no-store');
   return response;
 }

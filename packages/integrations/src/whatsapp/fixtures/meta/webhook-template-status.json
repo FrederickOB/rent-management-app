@@ -1,0 +1,21 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "102290129340398",
+      "time": 1798448400,
+      "changes": [
+        {
+          "field": "message_template_status_update",
+          "value": {
+            "event": "REJECTED",
+            "message_template_id": 3333333333,
+            "message_template_name": "pay_link_v1",
+            "message_template_language": "en",
+            "reason": "INVALID_FORMAT"
+          }
+        }
+      ]
+    }
+  ]
+}

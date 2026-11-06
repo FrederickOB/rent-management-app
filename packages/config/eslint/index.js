@@ -32,7 +32,25 @@ export const MODULE_MAP = {
     'audit',
     'identity',
   ],
-  messaging: ['tenancy', 'esign', 'companies', 'identity', 'audit', 'policy'],
+  // M6 (plan 4.1): messaging reads billing figures for the bot, stores and serves documents,
+  // reports repairs to maintenance (a downward import, so the reply carries the ticket number) and
+  // reads the register for unit conversations and broadcasts. Payments still registers its pay and
+  // receipt links with messaging (M4b), so messaging never imports payments.
+  messaging: [
+    'tenancy',
+    'esign',
+    'companies',
+    'identity',
+    'audit',
+    'policy',
+    'billing',
+    'documents',
+    'maintenance',
+    'portfolio',
+    'rules',
+  ],
+  // M6 (decision 12): the maintenance stub in layer 6; M8 adds esign, tasks and approvals.
+  maintenance: ['tenancy', 'portfolio', 'documents', 'policy', 'audit', 'companies'],
   // M4a (plan 4.1): the ledger in layer 1 (it audits each entry), billing in layer 5.
   ledger: ['audit'],
   billing: [

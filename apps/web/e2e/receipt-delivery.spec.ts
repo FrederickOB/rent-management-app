@@ -12,7 +12,7 @@ import { nav, PEOPLE, signIn } from './helpers';
 const PAID_BY_CARD = 'ACC-ELG-B1-06';
 const OVERDUE = 'ACC-LEG-B2-01';
 const DELIVERY_LABELS =
-  /^(Sent by SMS|Sent by email|On its way to the tenant|Not sent: no channel we may use|Could not be sent|Not sent to the tenant)$/;
+  /^(Sent by SMS|Sent by email|Sent by WhatsApp|Sent by app notification|On its way to the tenant|Not sent: no channel we may use|Could not be sent|Not sent to the tenant)$/;
 
 test.describe('BC-06 a receipt’s delivery to the tenant', () => {
   test('the payment page shows the receipt sent by SMS, and how long after confirmation', async ({

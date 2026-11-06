@@ -232,7 +232,11 @@ export class IdChecksService {
     return new Date(startedAt.getTime() + minutes * 60_000);
   }
 
-  /** The capture link goes by SMS only, and only with consent (plan 4.4; CM-09). */
+  /**
+   * The capture link goes to the tenant's phone, and only with consent (plan 4.4; CM-09): by
+   * WhatsApp first from M6 (plan 4.9), then SMS. Not by push or email: the selfie is taken on
+   * the phone the link opens on.
+   */
   private async queueCaptureLink(
     tx: Tx,
     companyId: string,
@@ -244,7 +248,7 @@ export class IdChecksService {
       purpose: 'id_check_link',
       body: `${company?.senderName ?? 'Your landlord'}: to verify your Ghana Card for your tenancy, take a selfie on our identity provider's page: {{link}}. Never share this link.`,
       link: { purpose: 'id_capture', targetId: check.id },
-      channels: ['sms'],
+      channels: ['whatsapp', 'sms'],
       related: { type: 'id_check', id: check.id },
       requestedBy: check.startedBy,
     });

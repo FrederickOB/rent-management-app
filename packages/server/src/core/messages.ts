@@ -1,5 +1,11 @@
 import type { Tx } from '@rent/db';
-import { MESSAGE_CHANNELS, MESSAGE_PURPOSES, redactLinkTokens } from '@rent/domain/messaging';
+import {
+  BUSINESS_CHANNEL_ORDER,
+  CONSENT_CHANNELS,
+  INBOUND_CHANNELS,
+  MESSAGE_PURPOSES,
+  redactLinkTokens,
+} from '@rent/domain/messaging';
 import { v7 as uuidv7 } from 'uuid';
 import { z } from 'zod';
 import { enqueueOutbox } from './outbox';
@@ -14,6 +20,14 @@ import { enqueueOutbox } from './outbox';
  * messaging module, which sits above them (architecture section 2).
  */
 export const MESSAGE_SEND_JOB = 'messaging.send';
+
+/**
+ * M6 (plan 4.4): stored messaging webhooks (provider `messaging.whatsapp`, `messaging.sms`,
+ * `messaging.email`) are processed by this job. The inbox relay, which lives with the payments
+ * webhooks it was built for, routes by this prefix, so it needs nothing from the messaging module.
+ */
+export const MESSAGING_INBOUND_JOB = 'messaging.process-inbound';
+export const MESSAGING_WEBHOOK_PREFIX = 'messaging.';
 
 /** Where the send job puts the link in the body. Stored as `[link]`, never as a live token. */
 export const LINK_PLACEHOLDER = '{{link}}';
@@ -49,8 +63,11 @@ export const messageRequestSchema = z
       })
       .strict()
       .nullable(),
-    /** The channels it may go by, in order; the consented ones are tried in this order. */
-    channels: z.array(z.enum(MESSAGE_CHANNELS)).min(1).max(MESSAGE_CHANNELS.length),
+    /**
+     * The channels it may go by. M6: push, WhatsApp, SMS and email, tried in that order (decision
+     * 5) among those listed; each needs an address and consent.
+     */
+    channels: z.array(z.enum(CONSENT_CHANNELS)).min(1).max(CONSENT_CHANNELS.length),
     propertyId: uuid.nullable(),
     /** What the message is about, for timelines: lease, id_check, signing_request. */
     related: z
@@ -58,6 +75,38 @@ export const messageRequestSchema = z
       .strict()
       .nullable(),
     requestedBy: uuid.nullable(),
+    // M6 (plan 4.3 and 4.6), optional so earlier callers' requests stay valid.
+    /**
+     * Values for the WhatsApp template's parameters beyond the landlord, the recipient's name and
+     * the link, which the send job fills in (CM-07).
+     */
+    templateParams: z
+      .record(z.string().regex(/^[a-z_]{1,30}$/), z.string().min(1).max(500))
+      .optional(),
+    /** A stored PDF to send with it: a WhatsApp document, an email attachment (plan 4.3). */
+    document: z
+      .object({ documentId: uuid, filename: z.string().min(1).max(120) })
+      .strict()
+      .optional(),
+    /** A reply in a conversation, on the channel the tenant used (plan 4.6; decision 6). */
+    reply: z
+      .object({
+        conversationId: uuid,
+        channel: z.enum(INBOUND_CHANNELS),
+        authorType: z.enum(['staff', 'bot', 'system']),
+        authorPersonId: uuid.nullable(),
+        /** Staff sending the reopen template outside WhatsApp's window (CM-07). */
+        template: z.literal('conversation_reopen').nullable(),
+        /** The bot's reply buttons or list rows. */
+        choices: z
+          .array(
+            z.object({ id: z.string().min(1).max(200), title: z.string().min(1).max(24) }).strict(),
+          )
+          .max(10)
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .refine((m) => !m.link || m.body.includes(LINK_PLACEHOLDER), {
@@ -65,16 +114,9 @@ export const messageRequestSchema = z
   });
 export type MessageRequest = z.infer<typeof messageRequestSchema>;
 
-export type NewMessage = Omit<
-  MessageRequest,
-  'messageId' | 'channels' | 'link' | 'propertyId' | 'related' | 'requestedBy' | 'subject'
-> &
-  Partial<
-    Pick<
-      MessageRequest,
-      'messageId' | 'channels' | 'link' | 'propertyId' | 'related' | 'requestedBy' | 'subject'
-    >
-  >;
+type Optional =
+  'messageId' | 'channels' | 'link' | 'propertyId' | 'related' | 'requestedBy' | 'subject';
+export type NewMessage = Omit<MessageRequest, Optional> & Partial<Pick<MessageRequest, Optional>>;
 
 /**
  * The body as it is recorded: the link shown as [link], and any secure-link token the body
@@ -96,10 +138,14 @@ export async function queueMessage(
     subject: message.subject ?? null,
     body: message.body,
     link: message.link ?? null,
-    channels: message.channels ?? ['sms', 'email'],
+    // M6: every channel by default, in the business order (decision 5).
+    channels: message.channels ?? [...BUSINESS_CHANNEL_ORDER],
     propertyId: message.propertyId ?? null,
     related: message.related ?? null,
     requestedBy: message.requestedBy ?? null,
+    ...(message.templateParams ? { templateParams: message.templateParams } : {}),
+    ...(message.document ? { document: message.document } : {}),
+    ...(message.reply ? { reply: message.reply } : {}),
   });
   await enqueueOutbox(tx, {
     companyId,

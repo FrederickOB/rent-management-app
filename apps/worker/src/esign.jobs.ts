@@ -64,6 +64,11 @@ export function esignJobs(
     readonly esign: EsignService;
     readonly lifecycle: LeaseLifecycleService;
     readonly render: PdfRender;
+    /** M6: others waiting on a rendered PDF (the bot's tenant statements, plan 4.5). */
+    readonly onRendered?: readonly ((
+      companyId: string,
+      renderRequestId: string,
+    ) => Promise<boolean>)[];
   },
 ): JobDefinition<never>[] {
   return [
@@ -75,6 +80,8 @@ export function esignJobs(
       async handle({ companyId, renderRequestId }, ctx) {
         if (await deps.esign.onDocumentRendered(companyId, renderRequestId))
           ctx.logger.info('signing request opened');
+        for (const next of deps.onRendered ?? [])
+          if (await next(companyId, renderRequestId)) ctx.logger.info('rendered document sent');
       },
     }),
     defineJob({

@@ -3,12 +3,18 @@ import { eq, schema, withCompany, type Database, type Tx } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import {
   brandingSchema,
+  DEFAULT_INTERIM_PLAN,
+  featuresOf,
+  isInterimPlan,
   mergeCompanySettings,
+  messagingSettingsOf,
   paidUntilPromptDaysOf,
   parseCompanySettings,
   signingReminderHoursOf,
   tenancySettingsOf,
   type CompanySettings,
+  type InterimPlan,
+  type PlanFeature,
 } from '@rent/domain/settings';
 import { forbidden, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
@@ -30,6 +36,9 @@ export interface CompanyProfileView {
     logoUrl: string | null;
   };
   readonly settings: CompanySettings;
+  /** M6 decision 9: the interim plan and what it includes, so screens show only what is there. */
+  readonly plan: InterimPlan;
+  readonly features: PlanFeature[];
 }
 
 export type StaffActor = Extract<Actor, { kind: 'staff' }>;
@@ -91,6 +100,8 @@ export class CompaniesService {
         logoUrl,
       },
       settings: settingsInForce(parseCompanySettings(company.settings)),
+      plan: planOf(company.interimPlan),
+      features: [...featuresOf(planOf(company.interimPlan))],
     };
   }
 
@@ -156,9 +167,13 @@ export class CompaniesService {
   }
 }
 
+const planOf = (value: string): InterimPlan =>
+  isInterimPlan(value) ? value : DEFAULT_INTERIM_PLAN;
+
 /** Stored settings with the M3 keys' defaults applied, so screens show the values in force. */
 function settingsInForce(settings: CompanySettings): CompanySettings {
   const tenancy = tenancySettingsOf(settings);
+  const messaging = messagingSettingsOf(settings);
   return {
     ...settings,
     witnessRequired: tenancy.witnessRequired,
@@ -168,5 +183,8 @@ function settingsInForce(settings: CompanySettings): CompanySettings {
     signingReminderHours: [...signingReminderHoursOf(settings)],
     // M5 (AR-06): the renewal prompt's lead, 90 days unless the company sets another.
     paidUntilPromptDays: paidUntilPromptDaysOf(settings),
+    // M6 (CM-06, decision 10): the response target and the conversation tags in force.
+    inboxFirstResponseMinutes: messaging.inboxFirstResponseMinutes,
+    inboxTags: [...messaging.inboxTags],
   };
 }

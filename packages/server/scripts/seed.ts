@@ -8,7 +8,10 @@
  * receipt (the tax module's hooks), the commercial tenant's withholding with one certificate
  * confirmed and one waiting, a GRA payment settling part of an owner's rent tax, a VAT payment,
  * one early termination with its refund waiting for approval, and a second landlord company under
- * `advance_rent_policy = warn` with a flagged advance (plan 5.10). Every
+ * `advance_rent_policy = warn` with a flagged advance (plan 5.10). M6 adds messaging (plan 4.14,
+ * scripts/seed-messaging.ts): WhatsApp numbers and template approvals, consent and a STOP, the
+ * inbox's conversations through the real pipeline, a reported repair, a broadcast and the plans.
+ * Every
  * person is fictional and flagged as a test contact, and only fake providers are configured
  * locally, so nothing is ever sent.
  *
@@ -41,6 +44,17 @@ import {
   type AppConfig,
 } from '../src/core';
 import { OwnersService } from '../src/companies/owners.service';
+import { EntitlementsService } from '../src/companies/entitlements.service';
+import { MaintenanceModule } from '../src/maintenance';
+import {
+  BroadcastsService,
+  InboundService,
+  InboxService,
+  MessagingConsentService,
+  MessagingModule,
+  MessagingSettingsService,
+} from '../src/messaging';
+import { ensureMessaging } from './seed-messaging';
 import { IdentityModule, PersonAccounts } from '../src/identity';
 import {
   MetersService,
@@ -274,6 +288,9 @@ const seedClock: Clock & { offsetMs: number } = {
     PaymentsModule,
     // M5: rent tax is assessed on every receipt once this module starts (its billing hooks).
     TaxModule,
+    // M6: messaging, the bot and the maintenance stub (plan 4.14).
+    MaintenanceModule,
+    MessagingModule,
   ],
 })
 class SeedModule {}
@@ -2367,6 +2384,19 @@ try {
     storage,
     cfg,
   });
+  const messaging = await ensureMessaging({
+    database,
+    config: cfg,
+    clock: seedClock,
+    entitlements: app.get(EntitlementsService),
+    settings: app.get(MessagingSettingsService),
+    consent: app.get(MessagingConsentService),
+    inbound: app.get(InboundService),
+    inbox: app.get(InboxService),
+    broadcasts: app.get(BroadcastsService),
+    companies: { platform: PLATFORM, agency: AGENCY, landlord: LANDLORD },
+    actor: (companyId, signIn) => actorFor(database, companyId, signIn),
+  });
   let checkProblems = 0;
   for (const companyId of BILLING_COMPANIES)
     checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
@@ -2395,6 +2425,14 @@ try {
   );
   console.log('Rent tax and advance rent (M5):');
   for (const line of await taxSummary(database)) console.log(line);
+  console.log(
+    `Messaging (M6): agency on Growth, ${COMPANIES[2]!.displayName} on Starter; ${messaging.numbers} new WhatsApp numbers (shared ${'100000000000001'}, agency ${'100000000000002'}); ${messaging.consents} new WhatsApp consents; broadcast ${messaging.broadcast}; ${messaging.repairs} reported repairs.`,
+  );
+  console.log(
+    `Messaging inbound: ${Object.entries(messaging.inbound)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ')}; agency conversations by state: ${JSON.stringify(messaging.conversations)}.`,
+  );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(
     `TOTP for every demo staff member: otpauth://totp/Rent%20Platform:demo?secret=${base32(DEMO_TOTP_SECRET)}&issuer=Rent%20Platform`,

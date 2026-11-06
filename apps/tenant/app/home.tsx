@@ -1,6 +1,6 @@
 import type { TenancyGroupView, TenantSigningView } from '@rent/contracts';
 import { Redirect, useRouter } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
 import {
@@ -11,6 +11,11 @@ import {
   rentLabel,
   termLabel,
 } from '../src/format';
+import { conversationsForCache, loadConversations } from '../src/messages';
+import { toProblem } from '../src/problems';
+import { usePush } from '../src/push-context';
+import { landlordList, markPromptAnswered, promptAnswered } from '../src/push-prompt';
+import type { TurnOn } from '../src/push-registration';
 import { useSession } from '../src/session';
 import { isBilled, TenancyMoney } from '../src/tenancy-money';
 import {
@@ -46,17 +51,28 @@ export default function Home() {
   const { me, loading } = useSession();
   const tenancies = useCachedLoad('tenancies', loadTenancies, Boolean(me));
   const signing = useLoad(loadSigning, Boolean(me));
+  const conversations = useCachedLoad(
+    'conversations',
+    loadConversations,
+    Boolean(me),
+    conversationsForCache,
+  );
   // Each tenancy's money reloads when this goes up: on coming back to the screen or the app.
   const [moneyTick, setMoneyTick] = useState(0);
   const { reload: reloadTenancies } = tenancies;
   const { reload: reloadSigning } = signing;
+  const { reload: reloadConversations } = conversations;
   useReloadOnReturn(
     useCallback(() => {
       reloadTenancies();
       reloadSigning();
+      reloadConversations();
       setMoneyTick((tick) => tick + 1);
-    }, [reloadTenancies, reloadSigning]),
+    }, [reloadTenancies, reloadSigning, reloadConversations]),
   );
+  const newMessages =
+    conversations.view.status === 'ready' &&
+    conversations.view.data.some((conversation) => conversation.unreadCount > 0);
 
   if (!loading && !me) return <Redirect href="/sign-in" />;
   return (
@@ -69,6 +85,8 @@ export default function Home() {
         moneyTick={moneyTick}
         onOpen={(leaseId) => router.push(`/tenancy/${leaseId}`)}
       />
+      {me && tenancies.view.status === 'ready' ? <PushPrompt personId={me.personId} /> : null}
+      <MessagesEntry newMessages={newMessages} onOpen={() => router.push('/messages')} />
       <Button
         label="Payments and receipts"
         variant="quiet"
@@ -82,6 +100,148 @@ export default function Home() {
         onPress={() => router.push('/profile')}
       />
     </Screen>
+  );
+}
+
+/**
+ * Messages (CM-05): the way in, marked when any landlord has written since the tenant last looked.
+ * The marker says only that there is something new: Home never totals one landlord's records with
+ * another's (TL-12).
+ */
+function MessagesEntry({ newMessages, onOpen }: { newMessages: boolean; onOpen: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={newMessages ? 'Messages, new messages' : 'Messages'}
+      testID="open-messages"
+      onPress={onOpen}
+      style={({ pressed }) => [styles.entry, pressed && styles.pressed]}
+    >
+      <Text style={styles.entryText}>Messages</Text>
+      {newMessages ? <Badge label="New" tone="ok" testID="new-messages" /> : null}
+    </Pressable>
+  );
+}
+
+type PromptStage = 'checking' | 'ask' | 'busy' | 'on' | 'denied' | 'unavailable' | 'hidden';
+
+/**
+ * Asks once whether the tenant wants notifications on this phone (M6 decision 5), after Home has
+ * shown their tenancies, never on first launch. It names each landlord the notifications would
+ * come from: each decides what it sends. It asks while the phone has not been asked, and also
+ * when the phone already allows notifications (Android 12 and older never ask) but a landlord
+ * has no consent from the app yet. "Turn on" shows the phone's own prompt where needed, then
+ * registers this device and records consent from the app for the landlords named. "Not now" is
+ * remembered on this phone for this person; Profile has the toggles either way.
+ */
+function PushPrompt({ personId }: { personId: string }) {
+  const { expire } = useSession();
+  const push = usePush();
+  const [stage, setStage] = useState<PromptStage>('checking');
+  const [named, setNamed] = useState<{ companyId: string; landlordName: string }[]>([]);
+  const [everyone, setEveryone] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const allowedAlready = push.permission === 'granted';
+  const askable = push.supported && (push.permission === 'undetermined' || allowedAlready);
+
+  useEffect(() => {
+    if (!askable) return;
+    let live = true;
+    void (async () => {
+      const answered = await promptAnswered(personId);
+      const consent = answered ? null : await api.tenantMessaging.pushConsent().catch(() => null);
+      if (!live) return;
+      const landlords = consent
+        ? allowedAlready
+          ? consent.filter((landlord) => !landlord.granted)
+          : consent
+        : [];
+      setNamed(landlords);
+      setEveryone(consent !== null && landlords.length === consent.length);
+      // Without the landlords' names there is nothing honest to ask.
+      setStage((current) =>
+        current === 'checking' ? (landlords.length > 0 ? 'ask' : 'hidden') : current,
+      );
+    })();
+    return () => {
+      live = false;
+    };
+  }, [askable, allowedAlready, personId]);
+
+  if (stage === 'on')
+    return (
+      <Notice testID="push-on" tone="ok">
+        Notifications are on. You can turn them off in Profile.
+      </Notice>
+    );
+  if (stage === 'denied')
+    return (
+      <Notice testID="push-denied">
+        Notifications are off for this app. To get them later, allow them in your phone’s settings,
+        then turn them on in Profile.
+      </Notice>
+    );
+  if (stage === 'unavailable')
+    return (
+      <Notice testID="push-unavailable">
+        Notifications are not available on this phone just now. Your landlord will reach you by
+        WhatsApp, SMS or email.
+      </Notice>
+    );
+  if (!askable || (stage !== 'ask' && stage !== 'busy')) return null;
+
+  async function turnOnFor(): Promise<TurnOn> {
+    // One consent for every landlord when all are named; otherwise one for each named.
+    if (everyone) return push.turnOn();
+    let outcome: TurnOn = { result: 'denied' };
+    for (const landlord of named) {
+      outcome = await push.turnOn(landlord.companyId);
+      if (outcome.result !== 'on') break;
+    }
+    return outcome;
+  }
+
+  function turnOn() {
+    setStage('busy');
+    setProblem(null);
+    turnOnFor().then(
+      (outcome) => {
+        void markPromptAnswered(personId);
+        setStage(outcome.result);
+      },
+      (error: unknown) => {
+        const found = toProblem(error);
+        if (found.status === 401) return expire();
+        setProblem(`We could not turn notifications on. ${found.message}`);
+        setStage('ask');
+      },
+    );
+  }
+
+  function notNow() {
+    setStage('hidden');
+    void markPromptAnswered(personId);
+  }
+
+  return (
+    <Card testID="push-prompt" label="Notifications">
+      <Heading>Get notifications on this phone</Heading>
+      <Body>
+        We can tell you when a receipt is ready, when rent is due and when your landlord writes to
+        you. A notification says what has arrived; the details open in the app.
+      </Body>
+      <Body testID="push-landlords">
+        {`Notifications from ${landlordList(named.map((landlord) => landlord.landlordName))}. You can turn each one off in Profile.`}
+      </Body>
+      {problem ? <ErrorText testID="push-error">{problem}</ErrorText> : null}
+      <Button
+        label="Turn on notifications"
+        testID="push-turn-on"
+        busy={stage === 'busy'}
+        onPress={turnOn}
+      />
+      <Button label="Not now" variant="quiet" testID="push-not-now" onPress={notNow} />
+    </Card>
   );
 }
 
@@ -263,4 +423,14 @@ const styles = StyleSheet.create({
   unit: { fontSize: 17, fontWeight: '700', color: colours.ink },
   property: { fontSize: 16, color: colours.ink },
   more: { fontSize: 15, fontWeight: '600', color: colours.brand, marginTop: 4 },
+  entry: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    minHeight: 50,
+    borderRadius: 10,
+    paddingVertical: 14,
+  },
+  entryText: { color: colours.brand, fontSize: 16, fontWeight: '600' },
 });

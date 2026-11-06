@@ -1,5 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { asc, eq, schema, sql, withCompany, withSystem, type Database, type Tx } from '@rent/db';
+import type { ConsentChannel } from '@rent/domain/messaging';
 import { invoiceRemainingMinor, PAY_LINK_DAYS } from '@rent/domain/payments';
 import type { Actor } from '@rent/domain/policy';
 import { format, money } from '@rent/domain/money';
@@ -13,6 +14,7 @@ import { AppError, conflict, forbidden, notFound } from '../core/errors';
 import { queueMessage } from '../core/messages';
 import { CLOCK, CONFIG, DATABASE } from '../core/tokens';
 import { newToken, tokenHash, TOKEN_PATTERN } from '../esign/secrets';
+import { MessagingService } from '../messaging/messaging.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { TenantsService } from '../tenancy/tenants.service';
 
@@ -47,6 +49,10 @@ export class PayLinksService {
     @Inject(PolicyService) private readonly policy: PolicyService,
     @Inject(BillingEngine) private readonly engine: BillingEngine,
     @Inject(TenantsService) private readonly tenants: TenantsService,
+    /** M6 (review C2): the channels the send job will try, push and WhatsApp included. */
+    @Optional()
+    @Inject(MessagingService)
+    private readonly messaging: MessagingService | null = null,
   ) {}
 
   /** The URL the links app serves the pay page at. */
@@ -126,7 +132,7 @@ export class PayLinksService {
   async send(
     actor: Actor | null,
     invoiceId: string,
-  ): Promise<{ channels: ('sms' | 'email')[]; notSentReason: string | null }> {
+  ): Promise<{ channels: ConsentChannel[]; notSentReason: string | null }> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'billing.manage');
     const scoped = await withCompany(this.database, staffContext(staff), (tx) =>
@@ -139,12 +145,13 @@ export class PayLinksService {
         const invoice = scoped;
         const reason = await this.unavailableReason(tx, staff.companyId, invoice);
         if (reason) return { channels: [], notSentReason: reason };
-        const channels = await this.consentedChannels(tx, invoice.tenantId);
+        const channels = await this.consentedChannels(tx, staff.companyId, invoice.tenantId);
         if (channels.length === 0)
           return {
             channels: [],
-            notSentReason:
-              'The tenant has not agreed to messages by SMS or email; hand them the link in person',
+            notSentReason: this.messaging
+              ? 'The tenant has not agreed to messages on any channel we can reach them on; hand them the link in person'
+              : 'The tenant has not agreed to messages by SMS or email; hand them the link in person',
           };
         const company = await tx
           .select({ name: schema.company.displayName })
@@ -157,6 +164,7 @@ export class PayLinksService {
           subject: `Pay ${formatInvoiceNumber(invoice.number)}`,
           body: `${company[0]?.name ?? 'Your landlord'}: ${format(money(due))} is due on ${formatInvoiceNumber(invoice.number)}. Pay by MoMo or card here: {{link}}`,
           link: { purpose: 'pay', targetId: invoice.id },
+          // Exactly the channels the answer names, in the order the send job tries them.
           channels,
           propertyId: invoice.propertyId,
           related: { type: 'invoice', id: invoice.id },
@@ -167,8 +175,19 @@ export class PayLinksService {
     );
   }
 
-  /** The tenant's channels with an address and consent now (CM-09), in send order. */
-  async consentedChannels(tx: Tx, tenantId: string): Promise<('sms' | 'email')[]> {
+  /**
+   * The tenant's channels with an address and consent now (CM-09), in send order. M6 (review C2):
+   * push, WhatsApp (with the window or an approved template), SMS and email, as the send job would
+   * try them; without the messaging core (M4b tests), SMS and email only.
+   */
+  async consentedChannels(tx: Tx, companyId: string, tenantId: string): Promise<ConsentChannel[]> {
+    if (this.messaging)
+      return this.messaging.plannedChannels(tx, companyId, {
+        recipient: { type: 'tenant', tenantId },
+        purpose: 'pay_link',
+        channels: ['push', 'whatsapp', 'sms', 'email'],
+        link: { purpose: 'pay', targetId: tenantId },
+      });
     const reach = await this.tenants.reach(tx, { tenantId });
     if (!reach) return [];
     const out: ('sms' | 'email')[] = [];

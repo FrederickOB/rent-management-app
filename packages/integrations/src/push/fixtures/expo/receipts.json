@@ -1,0 +1,10 @@
+{
+  "data": {
+    "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX": { "status": "ok" },
+    "YYYYYYYY-YYYY-YYYY-YYYY-YYYYYYYYYYYY": {
+      "status": "error",
+      "message": "The recipient device is not registered with FCM.",
+      "details": { "error": "DeviceNotRegistered" }
+    }
+  }
+}

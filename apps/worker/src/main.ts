@@ -30,7 +30,16 @@ import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
 import { LedgerModule } from '@rent/server/ledger';
-import { MessagingModule, MessagingService } from '@rent/server/messaging';
+import { MaintenanceModule } from '@rent/server/maintenance';
+import {
+  BotService,
+  BroadcastsService,
+  InboundService,
+  MessagingModule,
+  MessagingOperationsService,
+  MessagingService,
+  TemplatesService,
+} from '@rent/server/messaging';
 import {
   PaymentsModule,
   ProviderPaymentsService,
@@ -58,6 +67,7 @@ import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
+import { MESSAGING_EVENT_TYPES, messagingJobs } from './messaging.jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
 import { taxJobs } from './tax.jobs';
@@ -75,6 +85,7 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     PortfolioModule,
     EsignModule,
     TenancyModule,
+    MaintenanceModule,
     MessagingModule,
     LedgerModule,
     BillingModule,
@@ -128,6 +139,17 @@ const definitions = [
     esign: app.get(EsignService),
     lifecycle: app.get(LeaseLifecycleService),
     render: renderOnPool,
+    onRendered: [
+      (companyId: string, renderRequestId: string) =>
+        app.get(BotService).onDocumentRendered(companyId, renderRequestId),
+    ],
+  }),
+  ...messagingJobs({
+    ...deps,
+    inbound: app.get(InboundService),
+    broadcasts: app.get(BroadcastsService),
+    operations: app.get(MessagingOperationsService),
+    templates: app.get(TemplatesService),
   }),
   ...billingJobs({
     ...deps,
@@ -167,6 +189,7 @@ const relay = new OutboxRelay(
     ...ESIGN_EVENT_TYPES,
     ...BILLING_EVENT_TYPES,
     ...PAYMENTS_EVENT_TYPES,
+    ...MESSAGING_EVENT_TYPES,
   ]),
 );
 await relay.start();

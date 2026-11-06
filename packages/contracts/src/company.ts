@@ -1,4 +1,5 @@
 import { oc } from '@orpc/contract';
+import { inboxTag, INTERIM_PLANS, PLAN_FEATURES } from '@rent/domain/settings';
 import { z } from 'zod';
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex colour such as #0F766E');
@@ -47,6 +48,16 @@ export const companySettingsSchema = z.object({
   // M5 (plan 5.5), optional so clients written before M5 keep their types.
   /** AR-06: days before paid-until that the renewal prompt goes; GET returns 90 when unset. */
   paidUntilPromptDays: z.number().int().min(7).max(366).optional(),
+  // M6 (CM-06, decision 10), optional so clients written before M6 keep their types.
+  /** Clock minutes from a tenant's message to the first staff reply; GET returns 240 when unset. */
+  inboxFirstResponseMinutes: z
+    .number()
+    .int()
+    .min(15)
+    .max(7 * 24 * 60)
+    .optional(),
+  /** The tags staff may put on conversations. */
+  inboxTags: z.array(inboxTag).min(1).max(30).optional(),
 });
 
 export const companyProfileSchema = z.object({
@@ -65,6 +76,12 @@ export const companyProfileSchema = z.object({
     logoUrl: z.string().url().nullable(),
   }),
   settings: companySettingsSchema,
+  /**
+   * M6 decision 9: the interim plan (set by a platform admin) and what it includes. Starter has no
+   * inbox, broadcasts, tenant groups or maintenance. Always sent; optional for older clients.
+   */
+  plan: z.enum(INTERIM_PLANS).optional(),
+  features: z.array(z.enum(PLAN_FEATURES)).optional(),
 });
 
 export type CompanyProfile = z.infer<typeof companyProfileSchema>;
