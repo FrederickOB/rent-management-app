@@ -69,15 +69,35 @@ export function TerminationPanel({
   leaseId,
   agency,
   can,
+  deferToMoveOut = false,
 }: {
   readonly leaseId: string;
   readonly agency: boolean;
   readonly can: TerminationPermissions;
+  /**
+   * M8 (decision 12): new early ends go through the move-out. With this set, a new request is
+   * offered only where the move-out cannot settle it: no M8 move-out and no deposit held (the
+   * deposit settlement needs one). An early termination already recorded always shows.
+   */
+  readonly deferToMoveOut?: boolean;
 }) {
   const manage = can.manage;
   const load = useCallback(async () => {
     // The newest request first, as the API orders them.
     const [latest] = await api().earlyTermination.list({ leaseId });
+    if (!latest && deferToMoveOut) {
+      const [moveOuts, billing] = await Promise.all([
+        api()
+          .moveOuts.list({ leaseId })
+          .catch(() => []),
+        api()
+          .invoices.leaseBilling({ leaseId })
+          .catch(() => null),
+      ]);
+      const viaMoveOut =
+        moveOuts.some((m) => m.status !== 'cancelled') || (billing?.depositHeldMinor ?? 0) > 0;
+      if (viaMoveOut) return { current: null, figures: null, refused: null, hidden: true };
+    }
     // The settlement with nothing agreed yet: where the form starts. Working it out needs
     // billing.manage (M5 review), so a reader sees only a request already made. Decision 9: one
     // that would credit back tax the tenant withheld is refused, in the API's own words.
@@ -94,8 +114,8 @@ export function TerminationPanel({
               },
             )
         : { figures: null, refused: null };
-    return { current: latest ?? null, ...preview };
-  }, [leaseId, manage]);
+    return { current: latest ?? null, ...preview, hidden: false };
+  }, [leaseId, manage, deferToMoveOut]);
   const { state, reload } = useLoad(load);
   const [notice, setNotice] = useState<string | null>(null);
   const requestKeeper = useIdempotencyKeeper();
@@ -107,6 +127,11 @@ export function TerminationPanel({
   }
 
   const current = state.status === 'ready' ? state.data.current : null;
+  if (
+    deferToMoveOut &&
+    (state.status === 'loading' || (state.status === 'ready' && state.data.hidden))
+  )
+    return null;
   return (
     <Card data-testid="early-termination">
       <CardHeader

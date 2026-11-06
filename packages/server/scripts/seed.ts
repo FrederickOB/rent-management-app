@@ -45,7 +45,14 @@ import {
 } from '../src/core';
 import { OwnersService } from '../src/companies/owners.service';
 import { EntitlementsService } from '../src/companies/entitlements.service';
-import { MaintenanceModule } from '../src/maintenance';
+import {
+  ArtisansService,
+  ExpensesService,
+  InspectionsService,
+  MaintenanceModule,
+  MaintenanceService,
+} from '../src/maintenance';
+import { MoveInReportService, MoveOutModule, MoveOutService } from '../src/moveout';
 import {
   BroadcastsService,
   InboundService,
@@ -55,6 +62,7 @@ import {
   MessagingSettingsService,
 } from '../src/messaging';
 import { ensureMessaging } from './seed-messaging';
+import { ensureMaintenance } from './seed-maintenance';
 import { ensureNotices } from './seed-notices';
 import {
   NoticeAcknowledgementsService,
@@ -305,6 +313,7 @@ const seedClock: Clock & { offsetMs: number } = {
     // M7: staff tasks and legal notices (plan 4.13).
     TasksModule,
     NoticesModule,
+    MoveOutModule,
   ],
 })
 class SeedModule {}
@@ -796,6 +805,43 @@ const smsConsent = { sms: true };
 // block, and no ID number is seeded. The units the M2 end-to-end tests change by hand stay free:
 // ACC-LEG-B2-06 (under repair), ACC-OSU-G-03, ACC-OSU-G-04 (not lettable) and ACC-ELG-B1-08.
 const TENANCIES: DemoTenancy[] = [
+  // M8 (plan 4.14): two chamber-and-hall tenancies for the move-out demos, with deposits paid.
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'a move-out in progress (M8)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Nana Move-Out (demo)',
+      phone: '+233200000061',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B1-05',
+    startedMonthsAgo: 4,
+    months: 12,
+    monthlyRentMinor: 60_000,
+    cycle: 'monthly',
+    depositMinor: 120_000,
+    billFromStart: true,
+  },
+  {
+    companyId: AGENCY,
+    actorEmail: 'manager.one@demo.invalid',
+    what: 'an early end through the move-out flow (M8)',
+    tenant: {
+      kind: 'individual',
+      displayName: 'Akosua Early-Out (demo)',
+      phone: '+233200000062',
+      consent: smsConsent,
+    },
+    unitCode: 'ACC-LEG-B1-06',
+    startedMonthsAgo: 4,
+    months: 12,
+    monthlyRentMinor: 60_000,
+    cycle: 'monthly',
+    depositMinor: 120_000,
+    billFromStart: true,
+  },
   {
     companyId: AGENCY,
     actorEmail: 'manager.one@demo.invalid',
@@ -1338,6 +1384,25 @@ interface DemoMoney {
 
 const KOJO = '+233200000011';
 const MONEY: DemoMoney[] = [
+  // M8: each move-out demo paid its deposit and most of its rent in cash on the first day.
+  ...(
+    [
+      ['ACC-LEG-B1-05', 300_000],
+      ['ACC-LEG-B1-06', 400_000],
+    ] as const
+  ).map(([unitCode, amountMinor]): DemoMoney => ({
+    companyId: AGENCY,
+    unitCode,
+    steps: [
+      {
+        kind: 'cash',
+        collector: 'manager.one@demo.invalid',
+        approver: 'manager.two@demo.invalid',
+        amountMinor,
+        receivedOn: 0,
+      },
+    ],
+  })),
   {
     // Paid up in cash: the first two months to a manager, the last two to the caretaker Kojo.
     companyId: AGENCY,
@@ -2429,6 +2494,21 @@ try {
     actor: (companyId, signIn) => actorFor(database, companyId, signIn),
     paperScan: PAPER_SCAN,
   });
+  const maintenance = await ensureMaintenance({
+    database,
+    config: cfg,
+    storage,
+    maintenance: app.get(MaintenanceService),
+    artisans: app.get(ArtisansService),
+    expenses: app.get(ExpensesService),
+    inspections: app.get(InspectionsService),
+    reports: app.get(MoveInReportService),
+    moveOuts: app.get(MoveOutService),
+    approvals: app.get(ApprovalsService),
+    agency: AGENCY,
+    landlord: LANDLORD,
+    actor: (companyId, signIn) => actorFor(database, companyId, signIn),
+  });
   let checkProblems = 0;
   for (const companyId of BILLING_COMPANIES)
     checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
@@ -2455,6 +2535,8 @@ try {
   console.log(
     `Auto-match rate (M4b done criterion 3): provider payments ${rate(provider.provider.auto, provider.provider.total)}; direct transfers recorded against a lease ${rate(provider.transfers.withLease, provider.transfers.total)}, counted separately.`,
   );
+  console.log('Maintenance, inspections, expenses and move-out (M8):');
+  for (const line of maintenance) console.log(line);
   console.log('Rent tax and advance rent (M5):');
   for (const line of await taxSummary(database)) console.log(line);
   console.log(

@@ -1,3 +1,8 @@
+import {
+  CURRENT_CONSENT,
+  CURRENT_MOVE_IN_REPORT_CONSENT,
+  CURRENT_NOTICE_CONSENT,
+} from '@rent/domain/esign';
 import { asc, desc, eq, schema, sql, type Tx } from '@rent/db';
 import {
   maskEmail,
@@ -125,6 +130,18 @@ export const completionOf = (request: Pick<RequestRow, 'completionRule'>): Signi
 const NOTICE_SUBJECT: ReadonlySet<string> = new Set(['notice']);
 export const isNoticeRequest = (request: Pick<RequestRow, 'subjectType'>): boolean =>
   NOTICE_SUBJECT.has(request.subjectType);
+
+/** M8 (plan 4.7): a move-in report, signed by every party under its own consent text. */
+export const isMoveInReportRequest = (request: Pick<RequestRow, 'subjectType'>): boolean =>
+  request.subjectType === 'move_in_report';
+
+/** The consent text a request is signed under: M3's, a notice's (M7) or a move-in report's (M8). */
+export const consentVersionFor = (request: Pick<RequestRow, 'subjectType'>): string =>
+  isNoticeRequest(request)
+    ? CURRENT_NOTICE_CONSENT
+    : isMoveInReportRequest(request)
+      ? CURRENT_MOVE_IN_REPORT_CONSENT
+      : CURRENT_CONSENT;
 
 export interface CompanyFacts {
   readonly id: string;

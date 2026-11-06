@@ -16,6 +16,7 @@ import type { ApprovalRow } from '@/lib/approvals';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
+import { MOVE_OUT_REFUSAL_TEXT, moveOutRefusal } from '@/lib/move-out';
 import type { LeasePermissions } from './lease-detail';
 import { IssueForSigning } from './lease-signing';
 
@@ -329,6 +330,7 @@ function MoveOutForm({
   const [note, setNote] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [moveOutLive, setMoveOutLive] = useState(false);
   const outOfRange = !date || date < lease.terms.startDate || date > today;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -347,7 +349,10 @@ function MoveOutForm({
       });
       onChanged(next, 'Recorded the move-out. The lease has ended and the unit is free.');
     } catch (failure) {
-      setError(toProblem(failure).message);
+      // M8: an M8 move-out is under way, so the lease ends through it, never here.
+      const live = moveOutRefusal(failure) === 'move_out_live';
+      setMoveOutLive(live);
+      setError(live ? MOVE_OUT_REFUSAL_TEXT.move_out_live : toProblem(failure).message);
       setPending(false);
     }
   }
@@ -359,10 +364,26 @@ function MoveOutForm({
       aria-label="Record the move-out"
       className="space-y-3 rounded-md border border-slate-200 bg-slate-50 p-4"
     >
-      {error ? <Alert tone="error">{error}</Alert> : null}
+      {error ? (
+        <Alert tone="error">
+          <span data-testid={moveOutLive ? 'move-out-live' : undefined}>{error}</span>
+          {moveOutLive ? (
+            <>
+              {' '}
+              <Link
+                href={`/leases/${lease.id}/move-out`}
+                className="font-medium underline underline-offset-2"
+              >
+                Open the move-out
+              </Link>
+            </>
+          ) : null}
+        </Alert>
+      ) : null}
       <p className="text-sm text-slate-700">
-        The lease ends on the move-out date and the unit becomes vacant. The full move-out, with the
-        inspection and the deposit, comes later.
+        The lease ends on the move-out date and the unit becomes vacant. To inspect the unit and
+        settle the deposit with it, plan the move-out instead; after this, the deposit is settled
+        from the lease’s Move-out card.
       </p>
       <TextField
         label="Moved out on"

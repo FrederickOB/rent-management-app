@@ -178,8 +178,11 @@ export async function paymentsByIds(tx: Tx, ids: readonly string[]): Promise<Pay
       carriedTo: sql<string | null>`(select c.lease_id from credit_carry_over c
         where c.company_id = ${schema.payment.companyId} and c.payment_id = ${schema.payment.id}
           and c.kind = 'credit' order by c.created_at desc, c.id desc limit 1)`,
+      // M5's early-termination refunds and M8's move-out credit refunds (P13 approved).
       refunded: sql<string>`(select coalesce(sum(r.amount_minor), 0)::bigint from early_termination_refund_part r
-        where r.company_id = ${schema.payment.companyId} and r.payment_id = ${schema.payment.id})`,
+        where r.company_id = ${schema.payment.companyId} and r.payment_id = ${schema.payment.id})
+        + (select coalesce(sum(m.amount_minor), 0)::bigint from move_out_refund_part m
+        where m.company_id = ${schema.payment.companyId} and m.payment_id = ${schema.payment.id})`,
     })
     .from(schema.payment)
     .leftJoin(

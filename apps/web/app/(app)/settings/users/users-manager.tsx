@@ -162,6 +162,9 @@ export function UsersManager({
                         {row.nominatedApprover ? (
                           <p className="text-slate-600">Nominated approver</p>
                         ) : null}
+                        {row.whatsappConsent ? (
+                          <p className="text-slate-600">Emergency alerts on WhatsApp</p>
+                        ) : null}
                       </Td>
                       <Td>{STATUS_LABELS[row.status]}</Td>
                       <Td>{scopeSummary(row.scope, names)}</Td>

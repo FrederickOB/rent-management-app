@@ -68,11 +68,22 @@ export class JobsService {
       deadLetter: DEAD_LETTER_QUEUE,
     });
     if (options.workers === false) return;
-    await this.boss.work<Record<string, unknown>>(
+    // A draining queue (JobDefinition.drain) wakes its own worker as each job ends
+    // (`notifyWorker`), so the next fetch runs at once; only a fetch that finds nothing waits out
+    // the polling interval. Each fetch still takes one job, the next in queue order. pg-boss 12's
+    // burst option, `burstWhenReadyExceeds`, reads queue stats the monitor refreshes and the
+    // instance caches every 60 seconds, so a backlog queued at start-up could wait two minutes.
+    let workerId: string | null = null;
+    workerId = await this.boss.work<Record<string, unknown>>(
       definition.name,
       { batchSize: 1, pollingIntervalSeconds: this.pollingIntervalSeconds },
       async ([job]) => {
-        if (job) await this.run(definition, job);
+        if (!job) return;
+        try {
+          await this.run(definition, job);
+        } finally {
+          if (definition.drain && workerId) this.boss.notifyWorker(workerId);
+        }
       },
     );
     if (definition.cron) {

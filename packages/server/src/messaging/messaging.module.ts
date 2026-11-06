@@ -5,6 +5,8 @@ import { CompaniesModule } from '../companies/companies.module';
 import { DocumentsModule } from '../documents/documents.module';
 import { EsignModule } from '../esign/esign.module';
 import { EsignService } from '../esign/esign.service';
+import { ArtisansService } from '../maintenance/artisans.service';
+import { JobSheetService } from '../maintenance/job-sheet.service';
 import { MaintenanceModule } from '../maintenance/maintenance.module';
 import { PolicyModule } from '../policy/policy.module';
 import { TenancyModule } from '../tenancy/tenancy.module';
@@ -15,6 +17,7 @@ import { MessagingConsentService } from './consent.service';
 import { InboundService } from './inbound.service';
 import { InboxStreamService } from './inbox-stream.service';
 import { InboxService } from './inbox.service';
+import { registerMaintenanceRecipients } from './maintenance-recipients';
 import { MessagingService } from './messaging.service';
 import { MessagingOperationsService } from './operations.service';
 import { MessagingSettingsService } from './settings.service';
@@ -63,10 +66,19 @@ export class MessagingModule implements OnModuleInit {
     @Inject(MessagingService) private readonly messaging: MessagingService,
     @Inject(EsignService) private readonly esign: EsignService,
     @Inject(TenantsService) private readonly tenants: TenantsService,
+    @Inject(ArtisansService) private readonly artisans: ArtisansService,
+    @Inject(JobSheetService) private readonly sheets: JobSheetService,
+    @Inject(InboundService) private readonly inbound: InboundService,
   ) {}
 
   onModuleInit(): void {
     registerSigningRecipients(this.messaging, this.esign, this.tenants);
     registerMessageTimeline(this.tenants, this.messaging);
+    // M8: staff WhatsApp for emergency alerts, artisans, and job-sheet links.
+    registerMaintenanceRecipients(this.messaging, this.artisans, this.sheets);
+    // M8 review: STOP and START from artisans and staff (CM-09).
+    this.inbound.useContactKeywords((tx, companyId, phone, effect) =>
+      this.artisans.honourKeyword(tx, companyId, phone, effect),
+    );
   }
 }

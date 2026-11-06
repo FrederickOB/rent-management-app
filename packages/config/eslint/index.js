@@ -66,8 +66,40 @@ export const MODULE_MAP = {
     'identity',
     'portfolio',
   ],
-  // M6 (decision 12): the maintenance stub in layer 6; M8 adds esign, tasks and approvals.
-  maintenance: ['tenancy', 'portfolio', 'documents', 'policy', 'audit', 'companies'],
+  // M6 (decision 12): the maintenance stub in layer 6. M8 (decision 13): in-house work as tasks,
+  // job-sheet tokens and codes on the e-sign secrets, and expenses posted through the ledger (P15).
+  maintenance: [
+    'tenancy',
+    'portfolio',
+    'documents',
+    'policy',
+    'audit',
+    'companies',
+    'tasks',
+    'esign',
+    'ledger',
+    'identity',
+    'rules',
+  ],
+  // M8 (decision 13): move-in reports and the move-out settlement in layer 7, above billing, tax,
+  // approvals, e-sign and maintenance; it queues its messages through core.
+  moveout: [
+    'billing',
+    'tax',
+    'approvals',
+    'esign',
+    'ledger',
+    'maintenance',
+    'tenancy',
+    'documents',
+    'tasks',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+    'rules',
+  ],
   // M4a (plan 4.1): the ledger in layer 1 (it audits each entry), billing in layer 5.
   ledger: ['audit'],
   billing: [

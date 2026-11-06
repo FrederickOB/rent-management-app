@@ -50,5 +50,11 @@ export default async function ConversationPage({
     );
   }
   const since = typeof query.since === 'string' && ISO_DATE.test(query.since) ? query.since : null;
-  return <ThreadView conversationId={conversationId} since={since} />;
+  return (
+    <ThreadView
+      conversationId={conversationId}
+      since={since}
+      canLogRepair={allowed(me, 'maintenance.report') && hasFeature(company, 'maintenance')}
+    />
+  );
 }

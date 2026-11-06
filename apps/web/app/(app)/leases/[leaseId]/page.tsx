@@ -63,6 +63,15 @@ export default async function LeasePage({
         },
         agency:
           me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind === 'agency',
+        // M8 (plan 4.11): the move-in report and the move-out, on every plan (decision 1).
+        inspections: {
+          see: allowed(me, 'inspection.read'),
+          perform: allowed(me, 'inspection.perform'),
+        },
+        moveOut: {
+          manage: allowed(me, 'moveout.manage'),
+          see: allowed(me, 'moveout.manage') || allowed(me, 'moveout.settle'),
+        },
       }}
     />
   );

@@ -182,6 +182,18 @@ export class InboundService {
     @Optional() @Inject(WHATSAPP_PORT) private readonly whatsapp: WhatsAppPort | null = null,
   ) {}
 
+  /** M8 review: the maintenance module honours STOP and START from artisans and staff. */
+  private readonly contactKeywords: ((
+    tx: Tx,
+    companyId: string,
+    phone: string,
+    effect: { readonly action: 'grant' | 'withdraw'; readonly channels: readonly string[] },
+  ) => Promise<boolean>)[] = [];
+
+  useContactKeywords(honour: InboundService['contactKeywords'][number]): void {
+    this.contactKeywords.push(honour);
+  }
+
   // Intake (the API) ----------------------------------------------------------------------------
 
   /**
@@ -1125,7 +1137,15 @@ export class InboundService {
           settings.inboxFirstResponseMinutes,
           activity,
         );
-    if (!sender) return 'triage';
+    if (!sender) {
+      // STOP, STOP ALL and START from an artisan or a staff member (CM-09; M8 review).
+      const keyword = parseKeyword(inbound.text);
+      if (keyword && options.routingAnswer !== true)
+        for (const honour of this.contactKeywords)
+          if (await honour(tx, companyId, inbound.from, keywordEffect(keyword, inbound.channel)))
+            return keyword.kind === 'start' ? 'start' : 'stop';
+      return 'triage';
+    }
 
     const subject = {
       tenantId: sender.tenantId,

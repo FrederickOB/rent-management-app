@@ -448,6 +448,13 @@ export class LeaseLifecycleService {
       const row = await leaseRow(tx, leaseId, { lock: true });
       if (!['active', 'holding_over', 'ending'].includes(row.status))
         throw conflict('lease_not_current', 'Only a current lease can record a move-out');
+      // M8 review: a lease with a live move-out ends through it, never around it.
+      for (const live of this.moveOutGuards)
+        if (await live(tx, leaseId))
+          throw conflict(
+            'move_out_live',
+            'A move-out is in progress for this lease. Finish it on the move-out page instead.',
+          );
       const company = await companyFacts(tx, row.companyId);
       const date = parseBusinessDate(input.moveOutDate);
       if (
@@ -485,6 +492,97 @@ export class LeaseLifecycleService {
         payload: { leaseId, reason: 'moved_out' },
         idempotencyKey: `${LEASE_ENDED_EVENT}:${leaseId}`,
       });
+    });
+  }
+
+  // M8 move-out (plan 4.8): the moveout module moves the lease in its own transaction ---------------
+
+  /** M8 review: the moveout module says whether a lease has a live move-out (it is above us). */
+  private readonly moveOutGuards: ((tx: Tx, leaseId: string) => Promise<boolean>)[] = [];
+
+  useMoveOutGuard(live: (tx: Tx, leaseId: string) => Promise<boolean>): void {
+    this.moveOutGuards.push(live);
+  }
+
+  /**
+   * A move-out was planned: an active or held-over lease becomes Ending (decision 12). Returns the
+   * status it had, for a cancel to restore. An ending lease stays as it is.
+   */
+  async planEndingIn(
+    tx: Tx,
+    leaseId: string,
+    input: { readonly reason: 'non_renewal' | 'notice'; readonly note: string | null },
+  ): Promise<LeaseStatus> {
+    const row = await leaseRow(tx, leaseId, { lock: true });
+    if (!['active', 'holding_over', 'ending'].includes(row.status))
+      throw conflict('lease_not_current', 'Only a current lease can have a move-out planned');
+    if (row.status === 'ending') return row.status;
+    await this.statusReason(tx, 'Move-out planned');
+    await tx
+      .update(schema.lease)
+      .set({
+        status: 'ending',
+        endingReason: input.reason,
+        endingNote: input.note?.slice(0, 500) ?? null,
+        endingRecordedAt: this.clock.now(),
+        updatedAt: this.clock.now(),
+      })
+      .where(eq(schema.lease.id, leaseId));
+    return row.status as LeaseStatus;
+  }
+
+  /** A planned move-out was cancelled: the lease returns to what it was. */
+  async restoreFromEndingIn(tx: Tx, leaseId: string, prior: LeaseStatus): Promise<void> {
+    const row = await leaseRow(tx, leaseId, { lock: true });
+    if (row.status !== 'ending' || !['active', 'holding_over'].includes(prior)) return;
+    await this.statusReason(tx, 'Move-out cancelled');
+    await tx
+      .update(schema.lease)
+      .set({
+        status: prior,
+        endingReason: null,
+        endingNote: null,
+        endingRecordedAt: null,
+        updatedAt: this.clock.now(),
+      })
+      .where(eq(schema.lease.id, leaseId));
+  }
+
+  /**
+   * The move-out settlement was approved: the lease ends on the last day, as Terminated for an
+   * early end and Ended otherwise, and billing credits what lies after it (`lease.ended`).
+   */
+  async endForMoveOutIn(
+    tx: Tx,
+    leaseId: string,
+    input: { readonly lastDay: string; readonly terminated: boolean },
+  ): Promise<void> {
+    const row = await leaseRow(tx, leaseId, { lock: true });
+    if (!['active', 'holding_over', 'ending'].includes(row.status))
+      throw conflict('lease_not_current', 'Only a current lease can be moved out of');
+    await this.statusReason(tx, input.terminated ? 'Terminated early at move-out' : 'Moved out');
+    await tx
+      .update(schema.lease)
+      .set({
+        status: input.terminated ? 'terminated' : 'ended',
+        endReason: 'moved_out',
+        moveOutDate: input.lastDay,
+        endedOn: input.lastDay,
+        updatedAt: this.clock.now(),
+      })
+      .where(eq(schema.lease.id, leaseId));
+    await this.audit.append(tx, {
+      companyId: row.companyId,
+      action: 'lease.moved_out',
+      recordType: 'lease',
+      recordId: leaseId,
+      data: { moveOutDate: input.lastDay, terminated: input.terminated },
+    });
+    await enqueueOutbox(tx, {
+      companyId: row.companyId,
+      type: LEASE_ENDED_EVENT,
+      payload: { leaseId, reason: 'moved_out' },
+      idempotencyKey: `${LEASE_ENDED_EVENT}:${leaseId}`,
     });
   }
 

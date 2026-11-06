@@ -38,6 +38,8 @@ export function messagingJobs(
   return [
     defineJob({
       name: MESSAGING_INBOUND_JOB,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'system',
       schema: z.object({ inboxId: uuid }).passthrough(),
       // 10 tries, 1 minute rising to an hour, then the dead letter and an alert.
@@ -75,6 +77,8 @@ export function messagingJobs(
     }),
     defineJob({
       name: BROADCAST_FANOUT_JOB,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z
         .object({ companyId: uuid, broadcastId: uuid, batch: z.number().int().min(0) })

@@ -7,6 +7,7 @@ import {
   noticeLadderConfigSchema,
   noticeSendWindowSchema,
 } from '../notices/ladder';
+import { maintenanceTargetsSchema } from '../maintenance/jobs';
 import { LADDER_NOTICE_TYPES } from '../notices/types';
 
 /**
@@ -113,6 +114,12 @@ export const companySettingsSchema = z
     noticeSendWindow: noticeSendWindowSchema.optional(),
     /** LN-02, prd-issues 27: days a link works for a notice type without a period; 90. */
     noticeLinkExpiryDays: z.number().int().min(30).max(366).optional(),
+    // M8 maintenance (decisions 4 and 7), optional so stored settings stay valid;
+    // maintenanceSettingsOf() in packages/domain/maintenance applies the defaults.
+    /** MI-02: respond and complete targets per priority, calendar hours. */
+    maintenanceTargets: maintenanceTargetsSchema.optional(),
+    /** MI-06: days after work done that a job closes without the tenant's reply; 7. */
+    maintenanceAutoCloseDays: z.number().int().min(1).max(60).optional(),
   })
   .strict();
 

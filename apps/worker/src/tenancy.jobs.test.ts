@@ -100,3 +100,13 @@ describe('PLATFORM M3 worker jobs (plan 4.17)', () => {
     );
   });
 });
+
+describe('PLATFORM and CM-08 the send queue drains its backlog (M8)', () => {
+  it('drains messaging.send without the polling pause after each job, and no other M3 queue', () => {
+    const { byName } = harness();
+    expect(byName.get('messaging.send')!.drain).toBe(true);
+    expect([...byName.values()].filter((j) => j.drain).map((j) => j.name)).toEqual([
+      'messaging.send',
+    ]);
+  });
+});

@@ -25,6 +25,8 @@ export async function closeRenderer(): Promise<void> {
 export function renderPdfJob(deps: WorkerDeps & { storage: StoragePort }) {
   return defineJob({
     name: RENDER_PDF_JOB,
+    // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+    drain: true,
     scope: 'company',
     schema: z
       .object({ companyId: z.string().uuid(), renderRequestId: z.string().uuid() })

@@ -234,8 +234,8 @@ export interface SignerProgress {
 /** A signing request the tenant app lists for the signed-in tenant (GET /me/signing). */
 export interface TenantSigningRequest {
   readonly signingRequestId: string;
-  /** M7: a lease to sign, or a notice to acknowledge. */
-  readonly subject: 'lease' | 'notice';
+  /** M7: a lease to sign, or a notice to acknowledge; M8: a move-in report to sign. */
+  readonly subject: 'lease' | 'notice' | 'move_in_report';
   readonly noticeId: string | null;
   readonly leaseId: string;
   readonly status: SigningRequestStatus;

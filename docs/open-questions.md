@@ -1,6 +1,6 @@
 # Open questions
 
-58 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+60 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -42,6 +42,7 @@
 | OQ-50 | Must the platform register with the Data Protection Commission as a controller, a processor or both? Must each landlord register too? | Counsel | Pilot | The platform registers as both; onboarding tells landlords about their own duty. | |
 | OQ-57 | A tenant who sends STOP withdraws consent on that channel (CM-09). The lease's electronic-service clause is the consent for notices (`CLAUDE.md` section 8). After an opt-out, may a notice still be served electronically on that channel under the clause? (M7 decision 5) | Counsel | M7, Gate 1 | Honour the opt-out: the channel is withheld and recorded on the notice, and physical service is planned at issue. | |
 | OQ-58 | Does Ghana restrict when SMS may be sent (an SMS provider's guide mentions a promotional window of 8 a.m. to 7 p.m. with no Sundays), and do rent reminders, receipts, broadcasts and notice reminders count as promotional? Which rule and regulator (NCA)? (M6 risk 6) | Counsel | M6, pilot | No sending window is applied in code: these messages are transactional. Notice-ladder messages to tenants wait for 07:00 to 20:00 company time as a product setting (M7 decision 11). | |
+| OQ-59 | Does Ghana law limit security deposits: their size, what a landlord may deduct at move-out, how deductions must be evidenced, or how soon the balance must be refunded? (TL-11, MI-11) | Counsel | M8 | No limit or deadline is built in. Deductions need inspection evidence, never exceed the deposit held, and pass two-person approval (M8 decision 12). | |
 
 ## Tax (tax adviser)
 
@@ -53,6 +54,7 @@
 | OQ-20 | How do VAT and levies apply to commercial rent: rates, tax point, service charge, VAT withholding by designated agents, and GRA's E-VAT invoicing? | Tax adviser | M4a | VAT-registered commercial owners charge 15% VAT plus 2.5% NHIL and 2.5% GETFund on commercial rent (Act 1151, GRA guidance AG/26/001), at the invoice or the payment, whichever comes first (P32). Dwellings are exempt. | Decided 2026-10-28: commercial landlords are in the pilot, so VAT lines on commercial invoices are built in M4a. |
 | OQ-56 | When rent on a month is credited back (a correction, or the unused days of an early end), how is tax the tenant withheld on that month treated: does the owner reclaim it from GRA, carry it as a credit, or return it to the tenant? And when a tenant withholds less than the rate on a month, does the amount withheld replace the month's rent tax? (M5 decision 9; review N4 and N7) | Tax adviser | Before the commercial pilot | A credit note that would take back withheld tax is refused (`credit_note_withheld`); staff settle it by hand, and the withheld tax stays on the month. There is no tool yet for withheld tax on months after an early end (review N4). The amount withheld replaces the month's tax, whatever it is (N7). | |
 | OQ-48 | Services carry VAT with no registration threshold. Must the platform register for VAT, and charge VAT and levies on subscription invoices? | Tax adviser | M10 | Register, and show VAT and levies on subscription invoices. | |
+| OQ-60 | Does an agency's management fee carry VAT and levies? If so, at what rates, and how should it appear on the owner's statement? (AC-02) | Tax adviser | M9 | Fees post gross, with no VAT, until answered (M9 decision 4). A later rules row would add VAT to new fees without changing past ones. | |
 
 ## Platform and providers
 

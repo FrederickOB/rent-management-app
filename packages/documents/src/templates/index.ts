@@ -32,3 +32,9 @@ export {
   type RentTaxReportData,
   type RentTaxReportV2Data,
 } from './tax';
+export {
+  finalStatementV1,
+  moveInReportV1,
+  type FinalStatementDocumentData,
+  type MoveInReportDocumentData,
+} from './moveout';

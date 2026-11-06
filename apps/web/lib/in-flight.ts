@@ -41,3 +41,36 @@ export function holdPage(win: PageEvents, doc: PageEvents): () => void {
 export function useHoldWhileSending(sending: boolean): void {
   useEffect(() => (sending ? holdPage(window, document) : undefined), [sending]);
 }
+
+/**
+ * Asks before leaving a page that holds work not yet sent (review WEB 2: photos chosen on an
+ * inspection and not yet added). Closing or reloading the tab asks the browser's question; a link
+ * on the page asks `confirm` first and goes nowhere if the answer is no.
+ */
+export function warnOnLeave(win: PageEvents, doc: PageEvents, ask: () => boolean): () => void {
+  const onBeforeUnload = (event: Event) => {
+    event.preventDefault();
+    (event as BeforeUnloadEvent).returnValue = '';
+  };
+  const onClick = (event: Event) => {
+    const target = event.target as MaybeElement | null;
+    if (typeof target?.closest !== 'function' || !target.closest('a[href]')) return;
+    if (ask()) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  win.addEventListener('beforeunload', onBeforeUnload);
+  doc.addEventListener('click', onClick, true);
+  return () => {
+    win.removeEventListener('beforeunload', onBeforeUnload);
+    doc.removeEventListener('click', onClick, true);
+  };
+}
+
+/** Asks before leaving while `when` is true, with `message` for links on the page. */
+export function useWarnBeforeLeaving(when: boolean, message: string): void {
+  useEffect(
+    () => (when ? warnOnLeave(window, document, () => window.confirm(message)) : undefined),
+    [when, message],
+  );
+}

@@ -193,6 +193,22 @@ export class InvoicingService {
   }
 
   /**
+   * M8 (plan 4.8): `lease.ended`'s work in the caller's transaction, so a move-out settlement sees
+   * the lines after the last day already credited. The `lease.ended` job then finds nothing left.
+   */
+  async creditAfterEndIn(tx: Tx, state: LeaseState, today: string): Promise<number> {
+    const lastDay = state.lease.moveOutDate ?? state.lease.endedOn;
+    if (!lastDay || state.book.kind !== 'book') return 0;
+    return this.creditAll(
+      tx,
+      state,
+      linesAfterEnd(state.lines, lastDay),
+      `The lease ended on ${formatBusinessDate(lastDay)}`,
+      today,
+    );
+  }
+
+  /**
    * `lease.cancelled`: a signed lease cancelled before its start has every line cancelled the
    * same way. Money paid stays as the tenant's credit (a deposit stays held); refunds come later.
    */

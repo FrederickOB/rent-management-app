@@ -1,14 +1,15 @@
-import type {
-  MaintenanceAttachmentKind,
-  MaintenanceJobStatus,
-  MaintenanceSource,
+import {
+  MAINTENANCE_JOB_STATUS_LABELS,
+  type MaintenanceAttachmentKind,
+  type MaintenanceJobStatus,
+  type MaintenanceSource,
 } from '@rent/domain/maintenance';
 
-// Reported repairs (CM-04 stub; M6 decision 12). Only the first state exists until M8.
+// Reported repairs (CM-04; M6 decision 12). M8 widens the statuses; their names come from the
+// domain, so a new status can never leave a badge blank.
 
-export const REPAIR_STATUS_LABELS: Record<MaintenanceJobStatus, string> = {
-  reported: 'Reported',
-};
+export const REPAIR_STATUS_LABELS: Readonly<Record<MaintenanceJobStatus, string>> =
+  MAINTENANCE_JOB_STATUS_LABELS;
 
 export const REPAIR_SOURCE_LABELS: Record<MaintenanceSource, string> = {
   whatsapp: 'On WhatsApp',

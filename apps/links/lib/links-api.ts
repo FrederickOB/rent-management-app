@@ -2,6 +2,7 @@ import {
   DEV_LINKS_API_KEY,
   LINK_TOKEN_PATTERN,
   LINKS_API_KEY_HEADER,
+  type JobSheetView,
   type PayIntent,
   type PayPage,
   type ReceiptPage,
@@ -19,7 +20,7 @@ const API = (process.env.API_BASE_URL ?? 'http://localhost:3700').replace(/\/+$/
 const KEY = process.env.LINKS_API_KEY ?? DEV_LINKS_API_KEY;
 
 export { LINK_TOKEN_PATTERN };
-export type { PayIntent, PayPage, ReceiptPage, SigningPage, UnsubscribePage };
+export type { JobSheetView, PayIntent, PayPage, ReceiptPage, SigningPage, UnsubscribePage };
 
 /** The browser behind a request, as this server sees it: evidence for the signing record. */
 export interface Client {
@@ -148,6 +149,55 @@ export const openReceipt = (token: string, client: Client) =>
 
 export const receiptDocument = (token: string, client: Client) =>
   call<{ url: string }>('/links/receipt/document', { token, client });
+
+// The artisan's job sheet (MI-04, MI-06; M8 decision 6): the token is the only authorisation.
+
+export const openJobSheet = (token: string, client: Client) =>
+  call<JobSheetView>('/job-sheets/open', { token, client });
+
+export const respondJobSheet = (
+  token: string,
+  client: Client,
+  response: 'accepted' | 'declined',
+  reason: string | null,
+) => call<JobSheetView>('/job-sheets/respond', { token, client, response, reason });
+
+/** A presigned post for one photo, under the job-media limits (decision 2). */
+export const createJobSheetUpload = (
+  token: string,
+  client: Client,
+  file: { readonly contentType: string; readonly sizeBytes: number },
+) =>
+  call<{ uploadId: string; url: string; fields: Record<string, string>; expiresAt: string }>(
+    '/job-sheets/uploads',
+    { token, client, contentType: file.contentType, sizeBytes: file.sizeBytes },
+  );
+
+export const startJobSheet = (
+  token: string,
+  client: Client,
+  start: { readonly uploadIds: readonly string[]; readonly beforePhotoReason: string | null },
+) => call<JobSheetView>('/job-sheets/start', { token, client, ...start });
+
+export const sendJobSheetCode = (token: string, client: Client) =>
+  call<{ destinationMasked: string; expiresAt: string; sendsLeft: number }>('/job-sheets/code', {
+    token,
+    client,
+  });
+
+export const completeJobSheet = (
+  token: string,
+  client: Client,
+  completion: {
+    readonly code: string;
+    readonly uploadIds: readonly string[];
+    readonly completionNote: string;
+  },
+) => call<JobSheetView>('/job-sheets/complete', { token, client, ...completion });
+
+/** A 5-minute link to one of the job's files. */
+export const jobSheetAttachment = (token: string, client: Client, attachmentId: string) =>
+  call<{ url: string }>('/job-sheets/attachment', { token, client, attachmentId });
 
 // The email unsubscribe link (CM-09; M6 decision 7): the token is the only authorisation.
 

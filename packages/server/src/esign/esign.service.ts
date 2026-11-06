@@ -50,6 +50,7 @@ import type {
   LandlordContact,
   NewLeaseSigningRequest,
   NewNoticeSigningRequest,
+  NewSigner,
   NoticeFacts,
   SignerProgress,
   SignerSubject,
@@ -229,6 +230,81 @@ export class EsignService {
       type: SIGNING_REQUESTED_EVENT,
       payload: { signingRequestId: id, leaseId: input.leaseId },
       idempotencyKey: `${SIGNING_REQUESTED_EVENT}:${id}`,
+    });
+    return id;
+  }
+
+  /**
+   * M8 (plan 4.7): opens a move-in report's request in the caller's transaction: every tenant party
+   * and the landlord's representative, all required. It waits as `preparing` until the report's PDF
+   * is rendered; then each signer gets their link, as for a lease.
+   */
+  async openMoveInReportRequest(
+    tx: Tx,
+    input: {
+      readonly companyId: string;
+      readonly propertyId: string;
+      readonly tenantId: string;
+      readonly leaseId: string;
+      readonly inspectionId: string;
+      readonly renderRequestId: string;
+      readonly createdBy: string | null;
+      readonly signers: readonly NewSigner[];
+    },
+  ): Promise<string> {
+    const now = this.clock.now();
+    const [row] = await tx
+      .insert(schema.signingRequest)
+      .values({
+        companyId: input.companyId,
+        propertyId: input.propertyId,
+        tenantId: input.tenantId,
+        subjectType: 'move_in_report',
+        leaseId: input.leaseId,
+        inspectionId: input.inspectionId,
+        completionRule: 'all_required',
+        status: 'preparing',
+        renderRequestId: input.renderRequestId,
+        createdBy: input.createdBy,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: schema.signingRequest.id });
+    const id = row!.id;
+    await tx.insert(schema.signer).values(
+      input.signers.map((s, i) => ({
+        companyId: input.companyId,
+        propertyId: input.propertyId,
+        tenantId: input.tenantId,
+        signingRequestId: id,
+        leasePartyId: s.leasePartyId,
+        signerRole: s.role,
+        subjectType: s.subject.type,
+        tenantContactId: s.subject.type === 'tenant_contact' ? s.subject.contactId : null,
+        staffPersonId: s.subject.type === 'staff' ? s.subject.personId : null,
+        name: s.name,
+        phone: s.phone,
+        email: s.email,
+        required: true,
+        position: i + 1,
+        isTestContact: s.isTestContact,
+        createdAt: now,
+        updatedAt: now,
+      })),
+    );
+    await signingEvent(tx, { ...input, id }, 'request.created', now, {
+      data: { signers: input.signers.length, renderRequestId: input.renderRequestId },
+    });
+    await this.audit.append(tx, {
+      companyId: input.companyId,
+      action: 'signing.requested',
+      recordType: 'signing_request',
+      recordId: id,
+      data: {
+        leaseId: input.leaseId,
+        inspectionId: input.inspectionId,
+        signers: input.signers.map((s) => s.role),
+      },
     });
     return id;
   }
@@ -476,6 +552,58 @@ export class EsignService {
       }
       return opened;
     });
+  }
+
+  /**
+   * M8 review: a lease has one move-in report out at a time. A newer report (from a correcting
+   * inspection) cancels the lease's other open ones and revokes their links, in the caller's
+   * transaction. A report everyone has signed is left to finalise.
+   */
+  async cancelMoveInReports(
+    tx: Tx,
+    leaseId: string,
+    input: { readonly exceptInspectionId: string; readonly by: string | null },
+  ): Promise<number> {
+    const open = await tx
+      .select()
+      .from(schema.signingRequest)
+      .where(
+        and(
+          eq(schema.signingRequest.leaseId, leaseId),
+          eq(schema.signingRequest.subjectType, 'move_in_report'),
+          inArray(schema.signingRequest.status, ['preparing', 'pending']),
+          sql`${schema.signingRequest.inspectionId} is distinct from ${input.exceptInspectionId}`,
+        ),
+      )
+      .for('update');
+    const now = this.clock.now();
+    let cancelled = 0;
+    for (const request of open) {
+      const complete = signingCompleteBy(
+        completionOf(request),
+        (await signersOf(tx, request.id)).map((x) => ({
+          required: x.required,
+          status: x.status as SignerStatus,
+        })),
+      );
+      if (complete) continue;
+      cancelled += 1;
+      const reason = 'Replaced by a corrected move-in report';
+      await tx
+        .update(schema.signingRequest)
+        .set({ status: 'cancelled', cancelledAt: now, cancelReason: reason, updatedAt: now })
+        .where(eq(schema.signingRequest.id, request.id));
+      const revoked = await revokeLinks(tx, { requestId: request.id }, 'request_closed', now);
+      await signingEvent(tx, request, 'request.cancelled', now, { data: { reason, revoked } });
+      await this.audit.append(tx, {
+        companyId: request.companyId,
+        action: 'signing.cancelled',
+        recordType: 'signing_request',
+        recordId: request.id,
+        data: { leaseId, reason, by: input.by },
+      });
+    }
+    return cancelled;
   }
 
   /**
@@ -925,7 +1053,8 @@ export class EsignService {
           },
           idempotencyKey: `${NOTICE_SIGNING_EVENT}:completed:${requestId}`,
         });
-      else
+      // M8: a move-in report completing changes nothing on the lease (TL-08).
+      else if (current.subjectType === 'lease')
         await enqueueOutbox(tx, {
           companyId,
           type: SIGNING_COMPLETED_EVENT,
@@ -1217,7 +1346,11 @@ export class EsignService {
       const facts = await this.documentFacts(tx, request);
       out.push({
         signingRequestId: request.id,
-        subject: isNoticeRequest(request) ? 'notice' : 'lease',
+        subject: isNoticeRequest(request)
+          ? 'notice'
+          : request.subjectType === 'move_in_report'
+            ? 'move_in_report'
+            : 'lease',
         noticeId: request.noticeId,
         leaseId: request.leaseId!,
         status: request.status as SigningRequestStatus,

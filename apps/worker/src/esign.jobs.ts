@@ -74,6 +74,8 @@ export function esignJobs(
   return [
     defineJob({
       name: DOCUMENT_RENDERED_EVENT,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z.object({ companyId: uuid, renderRequestId: uuid }).passthrough(),
       retry: { limit: 5, delaySeconds: 30, backoff: true },
@@ -86,6 +88,8 @@ export function esignJobs(
     }),
     defineJob({
       name: SIGNING_FINALISE_JOB,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z.object({ companyId: uuid, signingRequestId: uuid }).passthrough(),
       retry: { limit: 5, delaySeconds: 30, backoff: true },

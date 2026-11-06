@@ -46,6 +46,8 @@ export function noticesJobs(
   return [
     defineJob({
       name: NOTICE_SIGNING_EVENT,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z
         .object({
@@ -85,6 +87,8 @@ export function noticesJobs(
     }),
     defineJob({
       name: MESSAGE_NOT_SENT_EVENT,
+      // The seed or bulk work can fill this queue: no pause between jobs (M8 §9).
+      drain: true,
       scope: 'company',
       schema: z
         .object({

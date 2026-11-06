@@ -9,6 +9,7 @@ import {
   type CompanyMember,
 } from '@rent/server/companies';
 import { DocumentsService, LOGO_UPLOAD } from '@rent/server/documents';
+import { ArtisansService } from '@rent/server/maintenance';
 import { PolicyService } from '@rent/server/policy';
 import { Ctx, type RequestContext } from '../http/request-context';
 
@@ -29,7 +30,20 @@ export class CompanyController {
     @Inject(MembershipsService) private readonly memberships: MembershipsService,
     @Inject(DocumentsService) private readonly documents: DocumentsService,
     @Inject(PolicyService) private readonly policy: PolicyService,
+    @Inject(ArtisansService) private readonly staffAlerts: ArtisansService,
   ) {}
+
+  /** M8 (decision 5): each member's WhatsApp opt-in for emergency alerts. */
+  private async withConsent<T extends { membershipId: string }>(
+    ctx: RequestContext,
+    members: readonly T[],
+  ) {
+    const consent = await this.staffAlerts.staffWhatsAppFor(
+      ctx.actor,
+      members.map((m) => m.membershipId),
+    );
+    return members.map((m) => ({ ...m, whatsappConsent: consent.get(m.membershipId) ?? false }));
+  }
 
   @Implement(contract.company)
   company(@Ctx() ctx: RequestContext) {
@@ -72,10 +86,24 @@ export class CompanyController {
   membershipsRouter(@Ctx() ctx: RequestContext) {
     return {
       list: implement(contract.memberships.list).handler(async () =>
-        (await this.memberships.list(ctx.actor)).map(toMembership),
+        this.withConsent(ctx, (await this.memberships.list(ctx.actor)).map(toMembership)),
       ),
-      invite: implement(contract.memberships.invite).handler(async ({ input }) =>
-        toMembership(await this.memberships.invite(ctx.actor, input)),
+      invite: implement(contract.memberships.invite).handler(async ({ input }) => {
+        const { whatsappConsent, ...invite } = input;
+        const member = toMembership(await this.memberships.invite(ctx.actor, invite));
+        if (whatsappConsent)
+          await this.staffAlerts.setStaffWhatsApp(ctx.actor, member.membershipId, true);
+        return (await this.withConsent(ctx, [member]))[0]!;
+      }),
+      whatsappConsent: implement(contract.memberships.whatsappConsent).handler(
+        async ({ input }) => {
+          await this.staffAlerts.setStaffWhatsApp(ctx.actor, input.membershipId, input.granted);
+          const member = (await this.memberships.list(ctx.actor))
+            .map(toMembership)
+            .find((m) => m.membershipId === input.membershipId);
+          if (!member) throw new Error('Member not found');
+          return (await this.withConsent(ctx, [member]))[0]!;
+        },
       ),
       update: implement(contract.memberships.update).handler(async ({ input }) => {
         const { membershipId, ...patch } = input;

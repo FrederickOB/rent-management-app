@@ -109,7 +109,13 @@ export interface Reach {
 
 /** Finds a recipient's addresses and consent inside the send job's company transaction. */
 export interface RecipientResolver {
-  reach(tx: Tx, companyId: string, recipient: MessageRecipient): Promise<Reach | null>;
+  /** M8: the purpose too, for channels kept to one purpose (staff WhatsApp for emergency alerts). */
+  reach(
+    tx: Tx,
+    companyId: string,
+    recipient: MessageRecipient,
+    purpose?: MessageRequest['purpose'],
+  ): Promise<Reach | null>;
 }
 
 /**
@@ -369,7 +375,9 @@ export class MessagingService {
 
   private async prepare(tx: Tx, companyId: string, request: MessageRequest): Promise<Prepared> {
     const resolver = this.recipients.get(request.recipient.type);
-    const reach = resolver ? await resolver.reach(tx, companyId, request.recipient) : null;
+    const reach = resolver
+      ? await resolver.reach(tx, companyId, request.recipient, request.purpose)
+      : null;
     await this.record(tx, companyId, request, reach);
     const events = await tx
       .select()
@@ -478,7 +486,9 @@ export class MessagingService {
     },
   ): Promise<ConsentChannel[]> {
     const resolver = this.recipients.get(input.recipient.type);
-    const reach = resolver ? await resolver.reach(tx, companyId, input.recipient) : null;
+    const reach = resolver
+      ? await resolver.reach(tx, companyId, input.recipient, input.purpose)
+      : null;
     if (!reach) return [];
     const prepared = await this.gather(
       tx,
@@ -1018,6 +1028,7 @@ export class MessagingService {
         staffPersonId: staffPersonOf(r),
         signerId: signerOf(r),
         ownerId: 'ownerId' in r ? r.ownerId : null,
+        artisanId: 'artisanId' in r ? r.artisanId : null,
         purpose: request.purpose,
         subject: request.subject,
         body: storedBody(request.body),
@@ -1194,6 +1205,8 @@ function recipientOf(m: typeof schema.message.$inferSelect): MessageRecipient | 
       return m.signerId ? { type: 'signer', signerId: m.signerId } : null;
     case 'owner':
       return m.ownerId ? { type: 'owner', ownerId: m.ownerId } : null;
+    case 'artisan':
+      return m.artisanId ? { type: 'artisan', artisanId: m.artisanId } : null;
     default:
       return null;
   }

@@ -10,6 +10,14 @@ import {
   type Branding,
 } from '@rent/documents';
 import { businessDateOf, instantFrom } from '@rent/domain/dates';
+import { DomainError } from '@rent/domain/errors';
+import {
+  checkDeclaredMedia,
+  checkStagedMedia,
+  MEDIA_RULES,
+  MEDIA_SNIFF_BYTES,
+  type MediaKind,
+} from '@rent/domain/maintenance';
 import { StorageError, type ObjectInfo, type StoragePort } from '@rent/integrations';
 import sharp from 'sharp';
 import { v7 as uuidv7 } from 'uuid';
@@ -85,7 +93,10 @@ export interface UploadPurpose {
     | 'notice_service_photo'
     | 'notice_affidavit'
     | 'notice_received'
-    | 'rent_assessment';
+    | 'rent_assessment'
+    | 'job_media'
+    | 'inspection_photo'
+    | 'expense_receipt';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
 }
@@ -155,6 +166,51 @@ export const NOTICE_RECEIVED_UPLOAD: UploadPurpose = {
 export const RENT_ASSESSMENT_UPLOAD: UploadPurpose = {
   purpose: 'rent_assessment',
   ...NOTICE_EVIDENCE,
+};
+
+/**
+ * M8 (decision 2): media for repairs, inspections and expenses. The kinds each purpose takes and
+ * their limits are the domain's (MEDIA_RULES); each upload's own limit is its kind's. Staging
+ * streams the file and checks its first bytes; nothing is transcoded.
+ */
+export interface MediaPurpose extends UploadPurpose {
+  readonly kinds: readonly MediaKind[];
+}
+const typesOf = (kinds: readonly MediaKind[]) => kinds.flatMap((k) => MEDIA_RULES[k].contentTypes);
+const maxOf = (kinds: readonly MediaKind[]) =>
+  Math.max(...kinds.map((k) => MEDIA_RULES[k].maxBytes));
+const media = (purpose: MediaPurpose['purpose'], kinds: readonly MediaKind[]): MediaPurpose => ({
+  purpose,
+  kinds,
+  contentTypes: typesOf(kinds),
+  maxBytes: maxOf(kinds),
+});
+export const JOB_MEDIA_UPLOAD = media('job_media', ['image', 'video', 'audio']);
+export const INSPECTION_PHOTO_UPLOAD = media('inspection_photo', ['image']);
+export const EXPENSE_RECEIPT_UPLOAD = media('expense_receipt', ['image', 'document']);
+
+/** A media upload checked and streamed to write-once storage, waiting to be recorded. */
+export interface StagedMedia {
+  readonly companyId: string;
+  readonly uploadId: string;
+  readonly uploadKey: string;
+  readonly kind: MediaKind;
+  /** What the first bytes show, which is what is recorded. */
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly durationSeconds: number | null;
+  readonly storageKey: string;
+  readonly storageVersionId: string;
+  readonly retentionMode: 'GOVERNANCE' | 'COMPLIANCE';
+  readonly retainUntil: Date;
+  readonly createdBy: string;
+}
+
+/** The domain's media refusals as named 400s (`MEDIA_TYPE_MISMATCH`, `MEDIA_TOO_LARGE`, ...). */
+export const mediaInvalid = (error: unknown): never => {
+  if (error instanceof DomainError) throw invalid(error.code.replace(/\./g, '_'), error.message);
+  throw error;
 };
 
 /** An upload checked and copied to write-once storage, waiting to be recorded as a document. */
@@ -384,6 +440,7 @@ export class DocumentsService {
       senderName: company.senderName,
       primaryColour: company.primaryColour,
       accentColour: company.accentColour,
+      ...(await this.thumbnails(companyId, request.data)),
     };
     const html = renderTemplateHtml(
       request.templateKey,
@@ -436,6 +493,44 @@ export class DocumentsService {
     });
   }
 
+  /**
+   * M8 (decision 11): the photos a document names (`photos: [{ documentId, sha256 }]` anywhere in
+   * its data), read from storage by id, checked against their fingerprints, and shrunk to JPEG
+   * thumbnails for the renderer. The frozen data keeps only ids and fingerprints.
+   */
+  private async thumbnails(
+    companyId: string,
+    data: unknown,
+  ): Promise<{ images?: Record<string, string> }> {
+    const wanted = new Map<string, string>();
+    const walk = (v: unknown): void => {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        if (Array.isArray(o.photos))
+          for (const p of o.photos as { documentId?: unknown; sha256?: unknown }[])
+            if (typeof p?.documentId === 'string' && typeof p.sha256 === 'string')
+              wanted.set(p.documentId, p.sha256);
+        Object.values(o).forEach(walk);
+      }
+    };
+    walk(data);
+    if (wanted.size === 0) return {};
+    const images: Record<string, string> = {};
+    for (const [documentId, sha256] of wanted) {
+      const file = await this.documentFile(companyId, documentId);
+      if (!file || !file.intact || file.sha256 !== sha256) continue;
+      const thumb = await sharp(file.bytes, { limitInputPixels: 50_000_000 })
+        .rotate()
+        .resize({ width: 320, height: 320, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 70 })
+        .toBuffer()
+        .catch(() => null);
+      if (thumb) images[documentId] = `data:image/jpeg;base64,${thumb.toString('base64')}`;
+    }
+    return { images };
+  }
+
   /** A presigned POST that only accepts the declared type, up to the purpose's size limit. */
   async createUpload(
     ctx: { companyId: string; personId: string; actorKind?: 'staff' | 'system' },
@@ -469,6 +564,235 @@ export class DocumentsService {
       expiresInSeconds: UPLOAD_SECONDS,
     });
     return { uploadId: id, url: post.url, fields: post.fields, expiresAt };
+  }
+
+  /**
+   * M8 (decision 2): a presigned POST for a photo, video, voice note or receipt, checked as
+   * declared (type, size and, for video and audio, length) against the purpose's kinds. Its limit
+   * is its kind's. `uploader` is the person, or for an artisan's job sheet the artisan, who must
+   * be the one who uses it.
+   */
+  async createMediaUpload(
+    ctx: { companyId: string; personId: string | null; actorKind: 'staff' | 'system' },
+    uploader: string,
+    purpose: MediaPurpose,
+    declared: {
+      readonly contentType: string;
+      readonly sizeBytes: number;
+      readonly durationSeconds?: number | null;
+    },
+  ) {
+    let kind: MediaKind;
+    try {
+      kind = checkDeclaredMedia({ kinds: purpose.kinds, ...declared });
+    } catch (error) {
+      return mediaInvalid(error);
+    }
+    const maxBytes = MEDIA_RULES[kind].maxBytes;
+    const id = uuidv7();
+    const key = `uploads/${ctx.companyId}/${purpose.purpose}/${id}`;
+    const expiresAt = new Date(this.clock.now().getTime() + UPLOAD_SECONDS * 1_000);
+    await withCompany(this.database, { ...ctx, personId: ctx.personId ?? undefined }, (tx) =>
+      tx.insert(schema.uploadIntent).values({
+        id,
+        companyId: ctx.companyId,
+        purpose: purpose.purpose,
+        storageKey: key,
+        contentType: declared.contentType,
+        maxBytes,
+        durationSeconds:
+          MEDIA_RULES[kind].maxSeconds === undefined || !declared.durationSeconds
+            ? null
+            : Math.ceil(declared.durationSeconds),
+        createdBy: uploader,
+        expiresAt,
+      }),
+    );
+    const post = await this.storage.createUploadUrl({
+      bucket: this.config.S3_BUCKET_FILES,
+      key,
+      contentType: declared.contentType,
+      maxBytes,
+      expiresInSeconds: UPLOAD_SECONDS,
+    });
+    return { uploadId: id, url: post.url, fields: post.fields, expiresAt };
+  }
+
+  /**
+   * M8 (decision 2): checks a media upload (its uploader, purpose, size, declared type, and its
+   * first bytes) and streams it to the evidence bucket under Object Lock, never holding the file in
+   * memory: it is read once to hash it and once to store it. Runs outside any transaction; record
+   * it with recordStagedMedia, then discardStagedMedia. Safe to repeat until it is recorded.
+   */
+  async stageMediaUpload(
+    ctx: { companyId: string; personId: string | null; actorKind: 'staff' | 'system' },
+    uploader: string,
+    uploadId: string,
+    purpose: MediaPurpose,
+  ): Promise<StagedMedia> {
+    const context = { ...ctx, personId: ctx.personId ?? undefined };
+    const [intent] = await withCompany(this.database, context, (tx) =>
+      tx
+        .select()
+        .from(schema.uploadIntent)
+        .where(
+          and(
+            eq(schema.uploadIntent.id, uploadId),
+            eq(schema.uploadIntent.companyId, ctx.companyId),
+          ),
+        ),
+    );
+    if (!intent || intent.purpose !== purpose.purpose || intent.createdBy !== uploader)
+      throw notFound('Upload');
+    if (intent.status !== 'pending' || intent.expiresAt.getTime() < this.clock.now().getTime())
+      throw invalid('upload_expired', 'That upload has expired; upload the file again');
+    const [company] = await withCompany(this.database, context, (tx) =>
+      tx
+        .select({ countryCode: schema.company.countryCode })
+        .from(schema.company)
+        .where(eq(schema.company.id, ctx.companyId)),
+    );
+    const retention = await this.evidenceRetention(company?.countryCode ?? 'GH');
+    const evidence = { bucket: this.config.S3_BUCKET_EVIDENCE, key: evidenceKeyOf(intent) };
+    const reject = async (reason: string, error: unknown): Promise<never> => {
+      await withCompany(this.database, context, (tx) =>
+        tx
+          .update(schema.uploadIntent)
+          .set({ status: 'rejected', rejectReason: reason })
+          .where(eq(schema.uploadIntent.id, uploadId)),
+      );
+      return mediaInvalid(error);
+    };
+    const check = (head: Buffer, size: number) =>
+      checkStagedMedia({
+        kinds: purpose.kinds,
+        declaredType: intent.contentType,
+        head,
+        sizeBytes: size,
+      });
+    const staged = (
+      checked: { readonly kind: MediaKind; readonly contentType: string },
+      size: number,
+      sha256: string,
+      versionId: string,
+      lock: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
+    ): StagedMedia => ({
+      companyId: ctx.companyId,
+      uploadId,
+      uploadKey: intent.storageKey,
+      kind: checked.kind,
+      contentType: checked.contentType,
+      sizeBytes: size,
+      sha256,
+      durationSeconds: intent.durationSeconds,
+      storageKey: evidence.key,
+      storageVersionId: versionId,
+      retentionMode: lock.mode,
+      retainUntil: lock.retainUntil,
+      createdBy: uploader,
+    });
+    const fromEarlier = async (info: ObjectInfo): Promise<StagedMedia> => {
+      if (!info.versionId || !info.sha256)
+        throw new Error('The evidence copy has no version or hash');
+      const head = await this.storage.getHead(
+        { ...evidence, versionId: info.versionId },
+        MEDIA_SNIFF_BYTES,
+      );
+      return staged(check(head, info.size), info.size, info.sha256, info.versionId, {
+        mode: info.retentionMode ?? retention.mode,
+        retainUntil: info.retainUntil ?? retention.retainUntil,
+      });
+    };
+    const earlier = await this.storage.head(evidence);
+    if (earlier) return fromEarlier(earlier);
+
+    const upload = { bucket: this.config.S3_BUCKET_FILES, key: intent.storageKey };
+    const info = await this.storage.head(upload);
+    if (!info) throw invalid('upload_missing', 'The file was not uploaded');
+    if (info.size > intent.maxBytes || info.contentType !== intent.contentType)
+      return reject(
+        'size or type does not match',
+        new DomainError('media.type_mismatch', 'The file does not match what was declared'),
+      );
+    let checked: { readonly kind: MediaKind; readonly contentType: string };
+    try {
+      checked = check(await this.storage.getHead(upload, MEDIA_SNIFF_BYTES), info.size);
+    } catch (error) {
+      return reject('contents do not match the declared type', error);
+    }
+    const hash = createHash('sha256');
+    let size = 0;
+    for await (const chunk of await this.storage.getStream(upload)) {
+      const bytes = chunk as Uint8Array;
+      size += bytes.length;
+      hash.update(bytes);
+    }
+    if (size !== info.size) throw new Error('The upload changed while it was read');
+    const sha256 = hash.digest('hex');
+    try {
+      const stored = await this.storage.putWriteOnceStream({
+        ...evidence,
+        body: await this.storage.getStream(upload),
+        sizeBytes: size,
+        sha256,
+        contentType: checked.contentType,
+        retainUntil: retention.retainUntil,
+        mode: retention.mode,
+      });
+      return staged(checked, size, sha256, stored.versionId, retention);
+    } catch (error) {
+      const raced =
+        error instanceof StorageError && error.code === 'already_exists'
+          ? await this.storage.head(evidence)
+          : null;
+      if (!raced) throw error;
+      return fromEarlier(raced);
+    }
+  }
+
+  /** Records staged media as a write-once document in the caller's transaction. */
+  async recordStagedMedia(tx: Tx, staged: StagedMedia, kind: string): Promise<string> {
+    const [row] = await tx
+      .insert(schema.document)
+      .values({
+        companyId: staged.companyId,
+        kind,
+        contentType: staged.contentType,
+        sizeBytes: staged.sizeBytes,
+        sha256: staged.sha256,
+        bucket: this.config.S3_BUCKET_EVIDENCE,
+        storageKey: staged.storageKey,
+        storageVersionId: staged.storageVersionId,
+        writeOnce: true,
+        retentionMode: staged.retentionMode,
+        retainUntil: staged.retainUntil,
+        createdBy: staged.createdBy,
+      })
+      .returning({ id: schema.document.id });
+    await this.audit.append(tx, {
+      companyId: staged.companyId,
+      action: 'document.stored',
+      recordType: 'document',
+      recordId: row!.id,
+      data: { kind, sha256: staged.sha256, writeOnce: true },
+    });
+    const updated = await tx
+      .update(schema.uploadIntent)
+      .set({ status: 'processed', documentId: row!.id })
+      .where(
+        and(eq(schema.uploadIntent.id, staged.uploadId), eq(schema.uploadIntent.status, 'pending')),
+      )
+      .returning({ id: schema.uploadIntent.id });
+    if (updated.length === 0)
+      throw invalid('upload_expired', 'That upload was already used; upload the file again');
+    return row!.id;
+  }
+
+  /** Removes a staged upload's plain copy once its record has committed; never throws. */
+  async discardStagedMedia(staged: StagedMedia): Promise<void> {
+    await this.storage
+      .delete({ bucket: this.config.S3_BUCKET_FILES, key: staged.uploadKey })
+      .catch(() => undefined);
   }
 
   /**

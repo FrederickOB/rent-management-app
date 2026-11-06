@@ -5,6 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
 import { formatTime, leaseStatusLabel, leaseStatusTone, rentLabel, termLabel } from '../src/format';
 import { conversationsForCache, loadConversations } from '../src/messages';
+import { loadRepairs } from '../src/repair-queue';
 import { toProblem } from '../src/problems';
 import { usePush } from '../src/push-context';
 import { landlordList, markPromptAnswered, promptAnswered } from '../src/push-prompt';
@@ -55,14 +56,17 @@ export default function Home() {
   const [moneyTick, setMoneyTick] = useState(0);
   const { reload: reloadTenancies } = tenancies;
   const { reload: reloadSigning } = signing;
+  const repairs = useCachedLoad('repairs', loadRepairs, Boolean(me));
   const { reload: reloadConversations } = conversations;
+  const { reload: reloadRepairs } = repairs;
   useReloadOnReturn(
     useCallback(() => {
       reloadTenancies();
       reloadSigning();
       reloadConversations();
+      reloadRepairs();
       setMoneyTick((tick) => tick + 1);
-    }, [reloadTenancies, reloadSigning, reloadConversations]),
+    }, [reloadTenancies, reloadSigning, reloadConversations, reloadRepairs]),
   );
   const newMessages =
     conversations.view.status === 'ready' &&
@@ -81,6 +85,13 @@ export default function Home() {
       />
       {me && tenancies.view.status === 'ready' ? <PushPrompt personId={me.personId} /> : null}
       <MessagesEntry newMessages={newMessages} onOpen={() => router.push('/messages')} />
+      <RepairsEntry
+        waiting={
+          repairs.view.status === 'ready' &&
+          repairs.view.data.some((group) => group.repairs.some((repair) => repair.awaitingResponse))
+        }
+        onOpen={() => router.push('/repairs')}
+      />
       <Button
         label="Payments and receipts"
         variant="quiet"
@@ -113,6 +124,25 @@ function MessagesEntry({ newMessages, onOpen }: { newMessages: boolean; onOpen: 
     >
       <Text style={styles.entryText}>Messages</Text>
       {newMessages ? <Badge label="New" tone="ok" testID="new-messages" /> : null}
+    </Pressable>
+  );
+}
+
+/**
+ * Repairs (MI-01, MI-06): the way in, marked when a repair's work is done and waits for the
+ * tenant to confirm it or say what is still wrong.
+ */
+function RepairsEntry({ waiting, onOpen }: { waiting: boolean; onOpen: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={waiting ? 'Repairs, waiting for you' : 'Repairs'}
+      testID="open-repairs"
+      onPress={onOpen}
+      style={({ pressed }) => [styles.entry, pressed && styles.pressed]}
+    >
+      <Text style={styles.entryText}>Repairs</Text>
+      {waiting ? <Badge label="Waiting for you" tone="waiting" testID="repairs-waiting" /> : null}
     </Pressable>
   );
 }

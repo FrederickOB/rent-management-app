@@ -24,6 +24,7 @@
     "./maintenance": "./src/maintenance/index.ts",
     "./notices": "./src/notices/index.ts",
     "./tasks": "./src/tasks/index.ts",
+    "./moveout": "./src/moveout/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

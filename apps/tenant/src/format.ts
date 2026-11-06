@@ -31,9 +31,25 @@ export function formatDate(iso: string): string {
 }
 
 /**
- * An instant, always with its time zone (DO-04): `29 Oct 2026, 17:05 GMT (Africa/Accra)`. The
- * tenant endpoints do not say which zone the landlord works in, so times are shown in the
- * product's default zone, named.
+ * The zone a landlord's times show in (DO-04; M8 review LT 9): the landlord company's own, as the
+ * tenant endpoints send it, or the product's default when it is missing or not a zone this phone
+ * knows.
+ */
+export function zoneOf(landlord: { readonly timeZone?: string | null } | null | undefined): string {
+  const zone = landlord?.timeZone;
+  if (!zone) return DEFAULT_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: zone });
+    return zone;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+/**
+ * An instant, always with its time zone (DO-04): `29 Oct 2026, 17:05 GMT (Africa/Accra)`. A
+ * landlord's times are shown in the landlord's zone (zoneOf); the app's own times, such as when a
+ * list was last fetched, in the product's default zone. Either way the zone is named.
  */
 export function formatTime(iso: string, timeZone: string = DEFAULT_TIME_ZONE): string {
   try {

@@ -42,6 +42,8 @@ export const messageRecipientSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('signer'), signerId: uuid }).strict(),
   // M4b: an owner in the register, for settlement-account alerts (ADR-008).
   z.object({ type: z.literal('owner'), ownerId: uuid }).strict(),
+  // M8 (decision 6): an artisan, for their job sheet; consent from contact_consent_event.
+  z.object({ type: z.literal('artisan'), artisanId: uuid }).strict(),
 ]);
 export type MessageRecipient = z.infer<typeof messageRecipientSchema>;
 
@@ -58,7 +60,7 @@ export const messageRequestSchema = z
     /** Made at send time: a signing link or a signed copy (targets a signer), an ID capture link. */
     link: z
       .object({
-        purpose: z.enum(['sign', 'signed_copy', 'id_capture', 'pay', 'receipt']),
+        purpose: z.enum(['sign', 'signed_copy', 'id_capture', 'pay', 'receipt', 'job_sheet']),
         targetId: uuid,
       })
       .strict()
