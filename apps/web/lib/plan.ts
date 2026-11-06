@@ -36,7 +36,8 @@ export function planLabel(plan: InterimPlan | undefined): string {
 
 /** Why a page is missing: "The inbox is not on the Starter plan." */
 export function notOnPlanText(feature: PlanFeature, plan: InterimPlan | undefined): string {
-  return `${PLAN_FEATURE_NAMES[feature]} ${feature === 'broadcasts' || feature === 'tenant_groups' ? 'are' : 'is'} not on the ${planLabel(plan)} plan.`;
+  const plural = feature === 'broadcasts' || feature === 'tenant_groups' || feature === 'notices';
+  return `${PLAN_FEATURE_NAMES[feature]} ${plural ? 'are' : 'is'} not on the ${planLabel(plan)} plan.`;
 }
 
 /** The API's refusal for a feature the plan leaves out (403 `not_on_plan`). */

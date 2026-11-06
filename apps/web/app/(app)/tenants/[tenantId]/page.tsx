@@ -58,6 +58,8 @@ export default async function TenantPage({
         lease: allowed(me, 'lease.manage'),
         messages: allowed(me, 'messaging.inbox.read') && hasFeature(company, 'inbox'),
         write: allowed(me, 'messaging.reply') && hasFeature(company, 'inbox'),
+        notices: allowed(me, 'notices.read') && hasFeature(company, 'notices'),
+        draftNotice: allowed(me, 'notices.draft') && hasFeature(company, 'notices'),
       }}
     />
   );

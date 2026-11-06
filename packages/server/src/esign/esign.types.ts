@@ -1,3 +1,4 @@
+import type { NoticeType } from '@rent/domain/notices';
 import type {
   SignatureMethod,
   SignerLinkPurpose,
@@ -37,6 +38,39 @@ export interface NewLeaseSigningRequest {
 }
 
 /** The browser behind a links API call, as apps/links saw it. Evidence, never logged. */
+/**
+ * M7 (plan 4.5): a notice's request for one party, which acknowledges it. One per tenant party
+ * (a company tenant's signatories share one, with `any_one`); every link expires at once, at the
+ * notice's link expiry, and none replaces another (decision 6).
+ */
+export interface NewNoticeSigningRequest {
+  readonly companyId: string;
+  readonly propertyId: string;
+  readonly tenantId: string;
+  readonly leaseId: string | null;
+  readonly noticeId: string;
+  readonly renderRequestId: string;
+  readonly createdBy: string | null;
+  readonly completionRule: 'all_required' | 'any_one';
+  readonly linksExpireAt: Date;
+  readonly signers: readonly NewSigner[];
+}
+
+/**
+ * What the notices module tells the signing page about a notice (M7 plan 4.5 and 4.8), through
+ * the describer it registers: the engine cannot read the notices tables.
+ */
+export interface NoticeFacts {
+  readonly number: string;
+  readonly type: NoticeType;
+  readonly typeLabel: string;
+  readonly issuedAt: Date;
+  readonly effectiveDate: string | null;
+  /** The notice that replaced this one (plan 4.8). */
+  readonly supersededBy: { readonly number: string } | null;
+  readonly closed: boolean;
+}
+
 export interface ClientInfo {
   readonly ip: string;
   readonly userAgent: string;
@@ -50,7 +84,16 @@ export type LinkScreen = 'sign' | 'signed' | 'declined' | 'copy' | 'expired' | '
  * sign has signed (`signed_by_all`, review finding 9).
  */
 export type LinkReason =
-  'superseded' | 'cancelled' | 'declined' | 'completed' | 'preparing' | 'signed_by_all' | null;
+  | 'superseded'
+  | 'cancelled'
+  | 'declined'
+  | 'completed'
+  | 'preparing'
+  | 'signed_by_all'
+  // M7: a notice corrected by a later one, or closed (plan 4.8).
+  | 'notice_superseded'
+  | 'notice_closed'
+  | null;
 
 /** Who to contact about a link: the company and the landlord's signatory on the request. */
 export interface LandlordContact {
@@ -110,6 +153,19 @@ export interface SigningPageView {
   }[];
   readonly code: SigningCodeState | null;
   readonly consent: { readonly version: string; readonly text: string } | null;
+  /** M7: a lease is signed; a notice is acknowledged and cannot be declined. */
+  readonly subject: 'lease' | 'notice';
+  readonly canDecline: boolean;
+  readonly notice: {
+    readonly number: string;
+    readonly type: NoticeType;
+    readonly typeLabel: string;
+    readonly issuedAt: Date;
+    readonly effectiveDate: string | null;
+    readonly statement: string;
+    readonly supersededBy: { readonly number: string } | null;
+    readonly acknowledgedByAnother: boolean;
+  } | null;
 }
 
 export interface SignInput {
@@ -178,6 +234,9 @@ export interface SignerProgress {
 /** A signing request the tenant app lists for the signed-in tenant (GET /me/signing). */
 export interface TenantSigningRequest {
   readonly signingRequestId: string;
+  /** M7: a lease to sign, or a notice to acknowledge. */
+  readonly subject: 'lease' | 'notice';
+  readonly noticeId: string | null;
   readonly leaseId: string;
   readonly status: SigningRequestStatus;
   readonly title: string;

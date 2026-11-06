@@ -37,8 +37,9 @@ function checked(url: string): string {
 }
 
 /**
- * Opens a short-lived URL that must be fetched first: a single-use signing link or a 5-minute link
- * to a signed copy. The URL is used once, here; it is never stored or logged.
+ * Opens a URL that must be fetched first: a signing link (for a lease it replaces the earlier
+ * ones; for a notice, earlier links keep working, M7 decision 6), or a 5-minute link to a
+ * document. The URL is used once, here; it is never stored or logged.
  *
  * Call it straight from the tap handler, before any `await`: on the web the tab must open while
  * the tap is still being handled.

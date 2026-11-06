@@ -23,6 +23,8 @@
     "./maintenance": "./src/maintenance/index.ts",
     "./payments": "./src/payments/index.ts",
     "./tax": "./src/tax/index.ts",
+    "./tasks": "./src/tasks/index.ts",
+    "./notices": "./src/notices/index.ts",
     "./testing": "./test/support/index.ts"
   },
   "scripts": {
@@ -30,7 +32,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
-    "seed": "tsx --env-file-if-exists=../../.env scripts/seed.ts",
+    "seed": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/seed.ts",
     "rules:add": "tsx --env-file-if-exists=../../.env scripts/rules-add.ts",
     "jobs:migrate": "tsx --env-file-if-exists=../../.env scripts/jobs-migrate.ts"
   },

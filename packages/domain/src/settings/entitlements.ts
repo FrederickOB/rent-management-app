@@ -23,6 +23,8 @@ export const PLAN_FEATURES = [
   'tenant_groups',
   'maintenance',
   'bot_full_menu',
+  // M7 decision 14: legal notices are part of Growth (PRD section 21).
+  'notices',
 ] as const;
 export type PlanFeature = (typeof PLAN_FEATURES)[number];
 
@@ -46,4 +48,5 @@ export const PLAN_FEATURE_NAMES: Record<PlanFeature, string> = {
   tenant_groups: 'Tenant groups',
   maintenance: 'Maintenance',
   bot_full_menu: 'The full WhatsApp menu',
+  notices: 'Legal notices',
 };

@@ -86,6 +86,8 @@ import {
 /** Sends per channel before the next consented channel is tried (plan 4.17). */
 export const SENDS_PER_CHANNEL = 5;
 export const MESSAGE_NOT_SENT_EVENT = 'messaging.not_sent';
+/** M7: delivery reports on notice messages, for the notices module (plan 4.12). */
+export const NOTICE_DELIVERY_STATUS_JOB = 'notices.delivery-status';
 /** Unsubscribe links in email stay open this long (M6 decision 7; a product choice, not law). */
 const UNSUBSCRIBE_DAYS = 365;
 
@@ -271,7 +273,18 @@ export class MessagingService {
       ),
     );
     const now = instantFrom(this.now());
-    const reachOf = (channel: ConsentChannel): ChannelReach => this.channelReach(prepared, channel);
+    const reachOf = (channel: ConsentChannel): ChannelReach => {
+      const reach = this.channelReach(prepared, channel);
+      // M7 (decision 4): on the electronic-service clause the clause is the consent, for the one
+      // channel listed; an opt-out there still withholds it (decision 5; CLAUDE.md section 8).
+      if (
+        request.serviceClause &&
+        request.channels.includes(channel) &&
+        reach.consent.latest?.action !== 'withdraw'
+      )
+        return { ...reach, consent: GRANTED };
+      return reach;
+    };
 
     let channel: InboundChannel | 'push';
     let whatsapp: WhatsAppContent | null;
@@ -923,6 +936,37 @@ export class MessagingService {
       idempotencyKey: `messaging.send:${m.id}:redeliver:${attempt}`,
     });
     return true;
+  }
+
+  /**
+   * M7 (plan 4.6 and 4.12): a delivery report on a message about a notice goes to the notices
+   * module, which records the confirming channel (`notices.delivery-status`, by event id).
+   */
+  async reportToRelated(
+    tx: Tx,
+    companyId: string,
+    messageId: string,
+    eventId: string,
+    report: { readonly status: string; readonly channel: string | null },
+  ): Promise<void> {
+    const [m] = await tx
+      .select({ relatedType: schema.message.relatedType, relatedId: schema.message.relatedId })
+      .from(schema.message)
+      .where(eq(schema.message.id, messageId));
+    if (m?.relatedType !== 'notice_recipient' || !m.relatedId) return;
+    await enqueueOutbox(tx, {
+      companyId,
+      type: NOTICE_DELIVERY_STATUS_JOB,
+      payload: {
+        recipientId: m.relatedId,
+        messageId,
+        eventId,
+        status: report.status,
+        channel: report.channel,
+        at: this.now().toISOString(),
+      },
+      idempotencyKey: `${NOTICE_DELIVERY_STATUS_JOB}:${eventId}`,
+    });
   }
 
   /** The latest status of each message, for timelines and signing progress. */

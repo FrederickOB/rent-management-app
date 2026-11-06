@@ -49,6 +49,23 @@ export const MODULE_MAP = {
     'portfolio',
     'rules',
   ],
+  // M7 (plan 4.1): staff tasks in layer 2; legal notices in layer 6, above billing (arrears from the
+  // ledger) and tenancy, signing on the e-sign engine and queueing messages through core.
+  tasks: ['policy', 'audit', 'identity'],
+  notices: [
+    'tasks',
+    'tenancy',
+    'esign',
+    'approvals',
+    'billing',
+    'rules',
+    'companies',
+    'policy',
+    'documents',
+    'audit',
+    'identity',
+    'portfolio',
+  ],
   // M6 (decision 12): the maintenance stub in layer 6; M8 adds esign, tasks and approvals.
   maintenance: ['tenancy', 'portfolio', 'documents', 'policy', 'audit', 'companies'],
   // M4a (plan 4.1): the ledger in layer 1 (it audits each entry), billing in layer 5.

@@ -3,20 +3,14 @@ import { Redirect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
-import {
-  formatTime,
-  leasesAre,
-  leaseStatusLabel,
-  leaseStatusTone,
-  rentLabel,
-  termLabel,
-} from '../src/format';
+import { formatTime, leaseStatusLabel, leaseStatusTone, rentLabel, termLabel } from '../src/format';
 import { conversationsForCache, loadConversations } from '../src/messages';
 import { toProblem } from '../src/problems';
 import { usePush } from '../src/push-context';
 import { landlordList, markPromptAnswered, promptAnswered } from '../src/push-prompt';
 import type { TurnOn } from '../src/push-registration';
 import { useSession } from '../src/session';
+import { toSignSummary } from '../src/signing-items';
 import { isBilled, TenancyMoney } from '../src/tenancy-money';
 import {
   Badge,
@@ -258,24 +252,21 @@ function ToSignEntry({
   if (state.status === 'error') {
     return state.problem.status === 401 ? null : (
       <Small testID="to-sign-error">
-        We could not check for leases to sign. {state.problem.message}
+        We could not check for anything to sign. {state.problem.message}
       </Small>
     );
   }
   const items = state.data;
   if (items.length === 0) return null;
-  const waiting = items.filter((i) => i.status === 'pending' && i.signer.status === 'pending');
+  // Leases to sign and notices to acknowledge (M7 plan 4.10).
+  const summary = toSignSummary(items);
   return (
-    <Card testID="to-sign-entry" label="To sign" highlight={waiting.length > 0}>
+    <Card testID="to-sign-entry" label="To sign" highlight={summary.waiting}>
       <Heading>To sign</Heading>
-      <Body>
-        {waiting.length > 0
-          ? `${leasesAre(waiting.length)} waiting for your signature.`
-          : 'You have signed. We are waiting for the others to sign.'}
-      </Body>
+      <Body>{summary.text}</Body>
       <Button
-        label={waiting.length > 0 ? 'Review and sign' : 'See who has signed'}
-        variant={waiting.length > 0 ? 'primary' : 'quiet'}
+        label={summary.action}
+        variant={summary.waiting ? 'primary' : 'quiet'}
         testID="open-to-sign"
         onPress={onOpen}
       />

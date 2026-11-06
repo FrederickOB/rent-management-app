@@ -564,7 +564,8 @@ export const companyCounter = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.companyId, t.name] }),
-    check('company_counter_name_check', sql`${t.name} in ('receipt', 'invoice')`),
+    // M7 decision 15: notice numbers on the same counter, gap-free per company.
+    check('company_counter_name_check', sql`${t.name} in ('receipt', 'invoice', 'notice')`),
     check('company_counter_value_check', sql`${t.value} >= 1`),
   ],
 );

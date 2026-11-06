@@ -970,8 +970,43 @@ export const tenantSigningSchema = z.object({
   signers: z.array(
     z.object({ roleLabel: z.string(), name: z.string(), status: z.enum(SIGNER_STATUSES) }),
   ),
+  /** M7 (plan 4.5): a lease to sign, or a notice to acknowledge. Always sent; optional before M7. */
+  subject: z.enum(['lease', 'notice']).optional(),
+  /** The notice, for a notice to acknowledge; null for a lease. */
+  notice: z
+    .object({
+      noticeId: uuid,
+      number: z.string(),
+      typeLabel: z.string(),
+      issuedAt: iso,
+      effectiveDate: isoDate.nullable(),
+      /** Signing acknowledges receipt, not agreement. */
+      statement: z.string(),
+    })
+    .nullable()
+    .optional(),
 });
 export type TenantSigningView = z.infer<typeof tenantSigningSchema>;
+
+/** A notice the tenant received from a landlord, for the tenancy's documents (M7 plan 4.10). */
+export const tenantNoticeSchema = z.object({
+  noticeId: uuid,
+  number: z.string(),
+  typeLabel: z.string(),
+  issuedAt: iso,
+  effectiveDate: isoDate.nullable(),
+  leaseId: uuid.nullable(),
+  unitCode: z.string().nullable(),
+  /** Whether this tenant (or, for a company, one of its signatories) acknowledged it. */
+  acknowledged: z.boolean(),
+  acknowledgedAt: iso.nullable(),
+  /** The notice was corrected by a later one, or closed. */
+  superseded: z.boolean(),
+  closed: z.boolean(),
+  /** The tenant's own signer, while it can still be acknowledged in the app. */
+  signerId: uuid.nullable(),
+});
+export type TenantNoticeView = z.infer<typeof tenantNoticeSchema>;
 
 export const tenantAppContract = {
   tenancies: oc
@@ -1000,12 +1035,27 @@ export const tenantAppContract = {
       summary: 'Leases out for the signed-in tenant’s own signature, by landlord (TL-07)',
     })
     .output(z.array(tenantSigningSchema)),
+  notices: oc
+    .route({
+      method: 'GET',
+      path: '/me/notices',
+      summary: 'Notices the signed-in tenant received, by landlord (M7 plan 4.10)',
+    })
+    .output(z.array(z.object({ landlord: landlordSchema, notices: z.array(tenantNoticeSchema) }))),
+  noticeDocument: oc
+    .route({
+      method: 'GET',
+      path: '/me/notices/{noticeId}/document',
+      summary: 'A short-lived link to the notice, or to the signed acknowledgement once signed',
+    })
+    .input(z.object({ noticeId: uuid }))
+    .output(z.object({ url: z.string() })),
   signingLink: oc
     .route({
       method: 'POST',
       path: '/me/signing/{signerId}/link',
       summary:
-        'A fresh signing link for the tenant’s own signer, to open in the app’s browser; it replaces the link sent by message',
+        'A fresh signing link for the tenant’s own signer, to open in the app’s browser. For a lease it replaces the link sent by message; for a notice, earlier links keep working (M7 decision 6)',
     })
     .input(z.object({ signerId: uuid }))
     .output(issuedLinkSchema),

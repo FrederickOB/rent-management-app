@@ -31,7 +31,7 @@ import {
   type InvoiceStatus,
 } from '@rent/domain/billing';
 import type { Actor } from '@rent/domain/policy';
-import { companyRecord, staffActor, type StaffActor } from '../companies/companies.service';
+import { companyRecord, staffActor } from '../companies/companies.service';
 import { ownerFacts } from '../companies/owners.service';
 import type { Clock } from '../core/clock';
 import { forbidden, notFound } from '../core/errors';
@@ -426,7 +426,7 @@ export class BillingReadService {
         .where(conditions.length ? and(...conditions) : undefined)
         .orderBy(desc(i.dueDate), desc(i.number))
         .limit(Math.min(filter.limit ?? 100, 500) * (filter.status || filter.overdue ? 5 : 1));
-      const views = await this.invoiceRows(tx, staff, rows);
+      const views = await this.invoiceRows(tx, staff.companyId, rows);
       return views
         .filter((v) => (filter.status ? v.status === filter.status : true))
         .filter((v) => (filter.overdue === undefined ? true : v.overdue === filter.overdue))
@@ -435,9 +435,43 @@ export class BillingReadService {
     });
   }
 
+  /**
+   * M7 (review M2): a lease's invoices with money still owed today (company date), in the caller's
+   * transaction, oldest due first: what a rent demand may name, with the amounts the ledger and its
+   * sub-ledgers give. `overdue` is past its due date.
+   */
+  async openInvoicesIn(
+    tx: Tx,
+    companyId: string,
+    leaseId: string,
+  ): Promise<
+    {
+      readonly id: string;
+      readonly number: string;
+      readonly dueDate: string;
+      readonly outstandingMinor: number;
+      readonly overdue: boolean;
+    }[]
+  > {
+    const rows = await tx
+      .select()
+      .from(schema.invoice)
+      .where(eq(schema.invoice.leaseId, leaseId))
+      .orderBy(asc(schema.invoice.dueDate), asc(schema.invoice.number));
+    return (await this.invoiceRows(tx, companyId, rows))
+      .filter((v) => v.outstandingMinor > 0)
+      .map((v) => ({
+        id: v.id,
+        number: v.number,
+        dueDate: v.dueDate,
+        outstandingMinor: v.outstandingMinor,
+        overdue: v.overdue,
+      }));
+  }
+
   private async invoiceRows(
     tx: Tx,
-    staff: StaffActor,
+    companyId: string,
     rows: (typeof schema.invoice.$inferSelect)[],
   ): Promise<(InvoiceRowView & { lines: LineRecord[]; allocations: AllocationRecord[] })[]> {
     if (rows.length === 0) return [];
@@ -453,12 +487,12 @@ export class BillingReadService {
           .where(inArray(schema.rule.id, ruleIds))
       : [];
     const unverified = new Set(rules.filter((r) => r.status !== 'verified').map((r) => r.id));
-    const today = await this.today(tx, staff.companyId);
+    const today = await this.today(tx, companyId);
     // Credit the lease holds pays periods as they start (P02): what is left to pay after it is
     // what the walk and ageing count, so an invoice paid ahead is never overdue (M4b review F5).
     const walks = new Map<string, ReturnType<BillingEngine['walk']>>();
     for (const leaseId of leaseIds)
-      walks.set(leaseId, this.engine.walk(await this.engine.load(tx, staff.companyId, leaseId)));
+      walks.set(leaseId, this.engine.walk(await this.engine.load(tx, companyId, leaseId)));
     return rows.map((r) => {
       const mine = lines.filter((l) => l.invoiceId === r.id);
       const balances = mine.map((l) => lineBalance(l, allocations));
@@ -501,7 +535,7 @@ export class BillingReadService {
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const [row] = await tx.select().from(schema.invoice).where(eq(schema.invoice.id, invoiceId));
       if (!row) throw notFound('Invoice');
-      const [view] = await this.invoiceRows(tx, staff, [row]);
+      const [view] = await this.invoiceRows(tx, staff.companyId, [row]);
       const lineIds = new Set(view!.lines.map((l) => l.id));
       const mineAllocations = view!.allocations.filter((a) => lineIds.has(a.lineId));
       const rules = await this.rulesUsed(tx, view!.lines);

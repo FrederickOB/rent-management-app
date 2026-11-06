@@ -55,6 +55,17 @@ import {
   MessagingSettingsService,
 } from '../src/messaging';
 import { ensureMessaging } from './seed-messaging';
+import { ensureNotices } from './seed-notices';
+import {
+  NoticeAcknowledgementsService,
+  NoticesModule,
+  NoticesService,
+  NoticeTrackingService,
+} from '../src/notices';
+import { TasksModule } from '../src/tasks';
+import { AuditService } from '../src/audit';
+import { DocumentsService } from '../src/documents';
+import { EsignService } from '../src/esign';
 import { IdentityModule, PersonAccounts } from '../src/identity';
 import {
   MetersService,
@@ -291,6 +302,9 @@ const seedClock: Clock & { offsetMs: number } = {
     // M6: messaging, the bot and the maintenance stub (plan 4.14).
     MaintenanceModule,
     MessagingModule,
+    // M7: staff tasks and legal notices (plan 4.13).
+    TasksModule,
+    NoticesModule,
   ],
 })
 class SeedModule {}
@@ -2397,6 +2411,24 @@ try {
     companies: { platform: PLATFORM, agency: AGENCY, landlord: LANDLORD },
     actor: (companyId, signIn) => actorFor(database, companyId, signIn),
   });
+  const notices = await ensureNotices({
+    database,
+    config: cfg,
+    clock: seedClock,
+    storage,
+    notices: app.get(NoticesService),
+    tracking: app.get(NoticeTrackingService),
+    acks: app.get(NoticeAcknowledgementsService),
+    approvals: app.get(ApprovalsService),
+    tenants: app.get(TenantsService),
+    leases: app.get(LeasesService),
+    esign: app.get(EsignService),
+    documents: app.get(DocumentsService),
+    audit: app.get(AuditService),
+    agency: AGENCY,
+    actor: (companyId, signIn) => actorFor(database, companyId, signIn),
+    paperScan: PAPER_SCAN,
+  });
   let checkProblems = 0;
   for (const companyId of BILLING_COMPANIES)
     checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
@@ -2432,6 +2464,11 @@ try {
     `Messaging inbound: ${Object.entries(messaging.inbound)
       .map(([k, v]) => `${k}=${v}`)
       .join(', ')}; agency conversations by state: ${JSON.stringify(messaging.conversations)}.`,
+  );
+  console.log(
+    `Notices (M7): ${Object.entries(notices)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('; ')}.`,
   );
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(

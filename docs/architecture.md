@@ -832,8 +832,10 @@ stateDiagram-v2
     Cancelled --> [*]
     note right of Closed
         Outcomes: complied, paid, vacated, disputed,
-        referred to Rent Control or court, superseded.
+        referred to Rent Control, referred to court,
+        withdrawn (the landlord takes it back), superseded.
         A correction is a new notice; the old one closes as superseded.
+        No outcome ends the lease or touches the unit (Act 220 s.17, s.27).
     end note
 ```
 
