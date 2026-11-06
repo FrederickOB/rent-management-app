@@ -330,6 +330,48 @@
       "when": 1793924661132,
       "tag": "0046_statement_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1793929448785,
+      "tag": "0047_reporting",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1793929494359,
+      "tag": "0048_reporting_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1793954183711,
+      "tag": "0049_reporting_platform",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1793959671484,
+      "tag": "0050_management_fee",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1793959682920,
+      "tag": "0051_management_fee_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1793965598208,
+      "tag": "0052_vat_return_due",
+      "breakpoints": true
     }
   ]
 }

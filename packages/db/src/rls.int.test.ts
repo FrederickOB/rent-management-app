@@ -261,7 +261,103 @@ async function seedCompany(companyId: string) {
       tenantId,
       leaseId: leases[0]!.id,
     });
+    await seedReporting(companyId, {
+      initiator,
+      documentId: docs[0]!.id,
+      ownerId: owners[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * Owner reporting (M9): one row in each of its company tables, around the fixture owner and lease.
+ * The remittance and funding entries are fixture entries, written as ledger_writer.
+ */
+async function seedReporting(
+  companyId: string,
+  ids: {
+    initiator: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    leaseId: string;
+  },
+) {
+  const { rows: books } = await app.query<{ id: string }>(
+    'select id from book where owner_id = $1',
+    [ids.ownerId],
+  );
+  const bookId = books[0]!.id;
+  const entry = randomUUID();
+  await app.query('set local role ledger_writer');
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_entry (id, company_id, rule, idempotency_key, value_date, accounting_date, record_type, record_id)
+     values ($1, $2, 'P30', $3, current_date, current_date, 'fixture', $1)`,
+    [entry, companyId, `P30:${entry}`],
+  );
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_line (id, company_id, entry_id, line_no, book_id, account_code, amount_minor)
+     values (gen_random_uuid(), $1, $2, 1, $3, '1070', 1000), (gen_random_uuid(), $1, $2, 2, $3, '1010', -1000)`,
+    [companyId, entry, bookId],
+  );
+  await app.query('set local role none');
+  await app.query(
+    `insert into management_fee_terms (company_id, owner_id, kind, rate_bps, gra_paid_by, effective_from, created_by)
+     values ($1, $2, 'percentage', 800, 'agency', current_date, $3)`,
+    [companyId, ids.ownerId, ids.initiator],
+  );
+  const { rows: statements } = await app.query<{ id: string }>(
+    `insert into owner_statement (company_id, owner_id, book_id, month, first_day, last_day, status, template_key,
+       template_version, generated_at, issued_at, issued_by)
+     values ($1, $2, $3, '2026-01', '2026-01-01', '2026-01-31', 'issued', 'reporting.owner_statement', 1, now(), now(), $4)
+     returning id`,
+    [companyId, ids.ownerId, bookId, ids.initiator],
+  );
+  await app.query(
+    `insert into owner_statement_figure (company_id, statement_id, owner_id, key, value_minor, position)
+     values ($1, $2, $3, 'summary.cash.collections', 1000, 0)`,
+    [companyId, statements[0]!.id, ids.ownerId],
+  );
+  await app.query(
+    `insert into remittance (company_id, owner_id, book_id, kind, paid_on, method, reference, proof_document_id,
+       net_minor, fees_retained_minor, entry_id, accounting_date, created_by)
+     values ($1, $2, $3, 'remittance', current_date, 'bank', 'REF', $4, 1000, 0, $5, current_date, $6)`,
+    [companyId, ids.ownerId, bookId, ids.documentId, entry, ids.initiator],
+  );
+  await app.query(
+    `insert into owner_funding (company_id, owner_id, book_id, received_on, method, reference, proof_document_id,
+       amount_minor, entry_id, accounting_date, created_by)
+     values ($1, $2, $3, current_date, 'bank', 'REF', $4, 1000, $5, current_date, $6)`,
+    [companyId, ids.ownerId, bookId, ids.documentId, entry, ids.initiator],
+  );
+  await app.query(
+    `insert into lease_snapshot (company_id, snapshot_date, lease_id, property_id, unit_id, owner_id, lease_status,
+       occupying, end_date, computed_at)
+     values ($1, current_date, $2, $3, $4, $5, 'active', true, current_date + 300, now())`,
+    [companyId, ids.leaseId, ids.propertyId, ids.unitId, ids.ownerId],
+  );
+  await app.query(
+    `insert into metric_daily (company_id, metric_date, month, figures, computed_at)
+     values ($1, current_date, to_char(current_date, 'YYYY-MM'), '{}', now())`,
+    [companyId],
+  );
+  await app.query(
+    `insert into management_fee (company_id, owner_id, book_id, property_id, lease_id, key, source, rate_bps,
+       base_minor, fee_minor, value_date, entry_id)
+     values ($1, $2, $3, $4, $5, $6, 'payment', 800, 1000, 80, current_date, $7)`,
+    [companyId, ids.ownerId, bookId, ids.propertyId, ids.leaseId, `P14:${entry}`, entry],
+  );
+  await app.query(
+    `insert into dashboard_export (company_id, format, filters, status, requested_by)
+     values ($1, 'xlsx', '{}', 'rendering', $2)`,
+    [companyId, ids.initiator],
+  );
 }
 
 /**

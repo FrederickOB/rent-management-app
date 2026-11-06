@@ -19,6 +19,14 @@ import {
 } from './maintenance';
 import { moveOutsContract } from './moveout';
 import {
+  complianceContract,
+  dashboardContract,
+  feeTermsContract,
+  ownerMoneyContract,
+  ownerStatementsContract,
+  platformMetricsContract,
+} from './reporting';
+import {
   broadcastsContract,
   inboxContract,
   messagingConsentContract,
@@ -73,6 +81,7 @@ export * from './notices';
 export * from './payments';
 export * from './memberships';
 export * from './register';
+export * from './reporting';
 export * from './rules';
 export * from './tax';
 export * from './tenancy';
@@ -135,6 +144,13 @@ export const contract = {
   expenses: expensesContract,
   tenantRepairs: tenantRepairsContract,
   moveOuts: moveOutsContract,
+  // M9: fee terms, owner statements, remittances, the dashboard, Gate 1 and the compliance list.
+  feeTerms: feeTermsContract,
+  ownerStatements: ownerStatementsContract,
+  ownerMoney: ownerMoneyContract,
+  dashboard: dashboardContract,
+  platformMetrics: platformMetricsContract,
+  compliance: complianceContract,
 };
 
 export type Contract = typeof contract;

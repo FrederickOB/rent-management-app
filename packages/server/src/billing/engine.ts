@@ -185,6 +185,67 @@ export interface TaxHooks {
   ): Promise<void>;
 }
 
+/**
+ * M9 (P14; plan 4.2, decisions 2 and 3): the management fee follows the rent and service charge
+ * the lease's money settles. Billing sits below reporting and never imports it, so reporting
+ * registers these when it starts. Each runs in the event's own transaction, after its postings.
+ */
+export interface SettledEvent {
+  /** The fee's idempotency key (`managementFeeKeys`). */
+  readonly key: string;
+  readonly source: 'payment' | 'deposit' | 'withholding' | 'credit_draw';
+  readonly valueDate: string;
+  /** The record the money came through: a payment, a move-out, a withholding or the draw's line. */
+  readonly recordType: string;
+  readonly recordId: string;
+  readonly causedBy: string | null;
+  /** What it settled, by line and the payment the money was (null for a deposit or withholding). */
+  readonly parts: readonly {
+    readonly lineId: string;
+    readonly paymentId: string | null;
+    readonly amountMinor: number;
+  }[];
+}
+
+export interface FeeHooks {
+  afterSettled(tx: Tx, state: LeaseState, event: SettledEvent): Promise<void>;
+  /** A payment reversed (P21b): its fees are mirrored. */
+  afterReversal(
+    tx: Tx,
+    states: readonly LeaseState[],
+    payment: PaymentRecord,
+    reversal: {
+      readonly reversalId: string;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<void>;
+  /** Credit refunded (P13 approved): each payment's fee follows the base refunded. */
+  afterRefund(
+    tx: Tx,
+    state: LeaseState,
+    refund: {
+      readonly refundId: string;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+      readonly credits: readonly PaymentAmount[];
+    },
+  ): Promise<void>;
+  /** A chargeback took back a deposit share a move-out had applied to rent (M8's P21b unwind). */
+  afterDepositUnwound(
+    tx: Tx,
+    state: LeaseState,
+    unwound: {
+      readonly moveOutId: string;
+      readonly paymentId: string;
+      readonly appliedMinor: number;
+      readonly reversalId: string;
+      readonly valueDate: string;
+      readonly causedBy: string | null;
+    },
+  ): Promise<void>;
+}
+
 /** The advance rule for a term (AR-05; Act 220 s.25(5), unverified; OQ-51 for 2 to 6 months). */
 export function advanceRuleKeyFor(periodCount: number): string | null {
   return periodCount <= 1
@@ -249,6 +310,7 @@ export function lastBillableDay(lease: BillingLease): string | null {
 @Injectable()
 export class BillingEngine {
   private taxHooks: TaxHooks | null = null;
+  private feeHooks: FeeHooks | null = null;
 
   constructor(
     @Inject(PostingService) private readonly posting: PostingService,
@@ -268,6 +330,33 @@ export class BillingEngine {
 
   get taxHooksRegistered(): boolean {
     return this.taxHooks !== null;
+  }
+
+  /** The reporting module registers its fee hooks once (M9); without them no fee is charged. */
+  useFeeHooks(hooks: FeeHooks): void {
+    this.feeHooks = hooks;
+  }
+
+  /** What credit draws settled, as fee events (P14 on drawn surplus; founder decision). */
+  private async drawSettled(
+    tx: Tx,
+    state: LeaseState,
+    drawKey: string,
+    lineId: string,
+    draws: readonly PaymentAmount[],
+    valueDate: string,
+    causedBy: string | null,
+  ): Promise<void> {
+    if (!this.feeHooks || draws.length === 0) return;
+    await this.feeHooks.afterSettled(tx, state, {
+      key: `P14:${drawKey}`,
+      source: 'credit_draw',
+      valueDate,
+      recordType: 'invoice_line',
+      recordId: lineId,
+      causedBy,
+      parts: draws.map((d) => ({ lineId, paymentId: d.paymentId, amountMinor: d.amountMinor })),
+    });
   }
 
   // Loading -------------------------------------------------------------------------------------
@@ -697,6 +786,7 @@ export class BillingEngine {
           entryId: posted?.entryId ?? null,
         },
       );
+      await this.drawSettled(tx, state, `P02:${record.id}`, record.id, plan.draws, valueDate, null);
       await tx.insert(schema.invoiceLineAccrual).values({
         companyId: state.company.id,
         propertyId: state.lease.propertyId,
@@ -902,6 +992,23 @@ export class BillingEngine {
   }
 
   /**
+   * BC-07, oldest debt first: money can arrive before the worker has handled the lease's signing
+   * (`lease.signed`), for example cash approved a moment after a paper lease is recorded. A lease
+   * with no invoice yet gets what that job issues (the deposit and the cycles due) before the
+   * money is allocated, so the money pays them instead of waiting as credit. Both steps are
+   * idempotent, so the job, when it runs, finds them issued. Callers hold the lease and counter
+   * locks, as for the receipt's number.
+   */
+  async issueAtSigningIfNone(tx: Tx, state: LeaseState, today: string): Promise<void> {
+    if (state.book.kind !== 'book' || state.lines.length > 0) return;
+    const carried = state.lease.renewsLeaseId
+      ? await this.depositHeld(tx, state.lease.renewsLeaseId)
+      : 0;
+    await this.issueDeposit(tx, state, carried, today);
+    await this.generate(tx, state, today);
+  }
+
+  /**
    * The one way money is taken for a lease (plan 4.5): the lease is accrued first, the payment is
    * allocated oldest debt first, posted with its cash side, and its receipt numbered and queued,
    * all in the caller's transaction. A payment is made once per source record.
@@ -938,6 +1045,7 @@ export class BillingEngine {
     if (input.receivedOn > today)
       throw invalid('received_in_future', 'The day the money was received cannot be in the future');
     await this.carryOverIfStarted(tx, state, today);
+    await this.issueAtSigningIfNone(tx, state, today);
     await this.issueForAdvance(tx, state, input.amountMinor, today, input.receivedOn);
     await this.accrue(tx, state, today);
     const paymentId = uuidv7();
@@ -1508,6 +1616,28 @@ export class BillingEngine {
       valueDate: input.today,
       causedBy: input.requestedBy,
     });
+    // And its management fees (P21b; M9 decision 2), the deposit fee of a chargeback included.
+    await this.feeHooks?.afterReversal(tx, states, payment, {
+      reversalId,
+      valueDate: input.today,
+      causedBy: input.requestedBy,
+    });
+    if (this.feeHooks)
+      for (const u of depositUnwound)
+        if (u.appliedMinor > 0)
+          await this.feeHooks.afterDepositUnwound(
+            tx,
+            states.find((st) => st.lease.id === u.leaseId) ??
+              (await this.load(tx, payment.row.companyId, u.leaseId)),
+            {
+              moveOutId: u.moveOutId,
+              paymentId: payment.id,
+              appliedMinor: u.appliedMinor,
+              reversalId,
+              valueDate: input.today,
+              causedBy: input.requestedBy,
+            },
+          );
     return { reversalId, receiptId, depositUnwound };
   }
 
@@ -1865,6 +1995,15 @@ export class BillingEngine {
           recordId: plan.lineId,
           entryId: posted?.entryId ?? null,
         },
+      );
+      await this.drawSettled(
+        tx,
+        state,
+        `P02:${plan.lineId}:redraw:${n}`,
+        plan.lineId,
+        plan.draws,
+        valueDate,
+        causedBy,
       );
     }
     return plans.length;
@@ -2279,6 +2418,24 @@ export class BillingEngine {
   ): Promise<void> {
     await this.recordAdvance(tx, state, payment);
     await this.taxHooks?.afterReceipt(tx, state, { payment, receiptId, causedBy });
+    // P14 per receipt: the rent and service charge the payment settles, advances included.
+    if (this.feeHooks) {
+      const byLine = new Map<string, number>();
+      for (const a of state.allocations)
+        if (a.paymentId === payment.id && a.source === 'payment')
+          byLine.set(a.lineId, (byLine.get(a.lineId) ?? 0) + a.amountMinor);
+      await this.feeHooks.afterSettled(tx, state, {
+        key: `P14:${payment.id}`,
+        source: 'payment',
+        valueDate: payment.row.receivedOn,
+        recordType: 'payment',
+        recordId: payment.id,
+        causedBy,
+        parts: [...byLine]
+          .filter(([, amount]) => amount > 0)
+          .map(([lineId, amountMinor]) => ({ lineId, paymentId: payment.id, amountMinor })),
+      });
+    }
   }
 
   /**
@@ -2511,6 +2668,18 @@ export class BillingEngine {
       recordId: input.withholdingId,
       entryId: posted!.entryId,
     });
+    // P14: tax withheld counts as settled (M9 decision 2).
+    await this.feeHooks?.afterSettled(tx, state, {
+      key: `P14:${input.withholdingId}`,
+      source: 'withholding',
+      valueDate: input.valueDate,
+      recordType: 'withholding',
+      recordId: input.withholdingId,
+      causedBy: input.causedBy,
+      parts: plan.rows
+        .filter((r) => r.source === 'withholding' && r.amountMinor > 0)
+        .map((r) => ({ lineId: r.lineId, paymentId: null, amountMinor: r.amountMinor })),
+    });
     if (plan.released.length > 0) {
       // Credit released on a lease whose renewal has started moves to it (review 11), and the
       // freed credit pays what is still owed, oldest first (M4b review F4).
@@ -2606,6 +2775,16 @@ export class BillingEngine {
       recordId: input.terminationId,
       entryId: posted!.entryId,
     });
+    // P14 on credit drawn onto open lines (P13 apply; founder decision).
+    await this.feeHooks?.afterSettled(tx, state, {
+      key: `P14:P13:${input.terminationId}:${input.key}`,
+      source: 'credit_draw',
+      valueDate: input.valueDate,
+      recordType: moveOut ? 'move_out' : 'early_termination',
+      recordId: input.terminationId,
+      causedBy: input.causedBy,
+      parts: rows.filter((r) => r.amountMinor > 0),
+    });
     return applications.map((a) => ({
       lineId: a.lineId,
       amountMinor: a.draws.reduce((sum, d) => sum + d.amountMinor, 0),
@@ -2652,6 +2831,13 @@ export class BillingEngine {
       lines: refundApprovedLines({ bookId: book.bookId, lease: dimsOf(state.lease), credits }),
       record: { type: moveOut ? 'move_out' : 'early_termination', id: input.terminationId },
       causedBy: input.causedBy,
+    });
+    // P14 follows the money the owner keeps: the fee on the refunded base is taken back (M9 decision 3).
+    await this.feeHooks?.afterRefund(tx, state, {
+      refundId: input.terminationId,
+      valueDate: input.valueDate,
+      causedBy: input.causedBy,
+      credits,
     });
     if (input.recordParts === false) return posted!;
     if (moveOut)
@@ -2786,6 +2972,18 @@ export class BillingEngine {
         entryId: posted!.entryId,
       },
     );
+    // P14 on rent settled from the deposit (M9 decision 2).
+    await this.feeHooks?.afterSettled(tx, state, {
+      key: `P14:${input.moveOutId}`,
+      source: 'deposit',
+      valueDate: input.valueDate,
+      recordType: 'move_out',
+      recordId: input.moveOutId,
+      causedBy: input.causedBy,
+      parts: input.lines
+        .filter((l) => l.amountMinor > 0)
+        .map((l) => ({ lineId: l.lineId, paymentId: null, amountMinor: l.amountMinor })),
+    });
     // The shares, split between what paid the lines and what was retained, in the same order.
     const { taken: toLines, left: toRetained } = takeShares(taken, applied);
     for (const [kind, shares] of [

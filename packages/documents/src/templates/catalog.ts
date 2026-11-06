@@ -2,6 +2,8 @@ import { invoiceV1, receiptV1 } from './billing';
 import { leaseV1 } from './lease';
 import { finalStatementV1, moveInReportV1 } from './moveout';
 import { noticeV1, servicePackV1 } from './notice';
+import { dashboardV1 } from './reporting-dashboard';
+import { ownerStatementV1 } from './reporting-statement';
 import { signingCertificateV1, signingCertificateV2 } from './signing-certificate';
 import { TemplateRegistry } from './registry';
 import { systemSampleV1 } from './system-sample';
@@ -26,4 +28,8 @@ export const templates = new TemplateRegistry([
   // M8: the move-in report every party signs, and the final statement at move-out.
   moveInReportV1,
   finalStatementV1,
+  // M9: the portfolio dashboard's PDF export (DA-06).
+  dashboardV1,
+  // M9: the monthly owner statement (AC-04).
+  ownerStatementV1,
 ]);

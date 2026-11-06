@@ -145,6 +145,25 @@ export const MODULE_MAP = {
     'portfolio',
     'identity',
   ],
+  // M9 (plan 4.1): reporting in layer 8, above billing, tax and the modules whose records the
+  // dashboard, Gate 1 metrics and compliance list read (payments' receipts, notices, maintenance).
+  reporting: [
+    'billing',
+    'tax',
+    'payments',
+    'notices',
+    'maintenance',
+    'tenancy',
+    'ledger',
+    'approvals',
+    'documents',
+    'rules',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+  ],
 };
 
 const DB_DRIVERS = [

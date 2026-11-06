@@ -59,6 +59,15 @@ import {
   PropertyFilesService,
   RegisterImportService,
 } from '@rent/server/portfolio';
+import {
+  DashboardService,
+  OwnerStatementsService,
+  ManagementFeesService,
+  ReportingDashboardModule,
+  ReportingMoneyModule,
+  ReportingRollupService,
+  ReportingStatementsModule,
+} from '@rent/server/reporting';
 import { TaxAlertsService, TaxAssessmentService, TaxModule } from '@rent/server/tax';
 import {
   IdChecksService,
@@ -75,6 +84,17 @@ import { MAINTENANCE_EVENT_TYPES, maintenanceJobs, moveOutOnRendered } from './m
 import { NOTICES_EVENT_TYPES, noticesJobs, noticesOnRendered } from './notices.jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
+import {
+  dashboardOnRendered,
+  REPORTING_DASHBOARD_EVENT_TYPES,
+  reportingDashboardJobs,
+} from './reporting-dashboard.jobs';
+import { reportingMoneyJobs } from './reporting-money.jobs';
+import {
+  REPORTING_STATEMENTS_EVENT_TYPES,
+  reportingStatementsJobs,
+  statementsOnRendered,
+} from './reporting-statements.jobs';
 import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
@@ -101,6 +121,13 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     TasksModule,
     NoticesModule,
     MoveOutModule,
+    // M9: the daily rollup, dashboard exports and Gate 1.
+    ReportingDashboardModule,
+    // M9: owner statements, drafted monthly, and their PDFs once rendered.
+    ReportingStatementsModule,
+    // M9: management fees are charged in every receipt's posting transaction once this module
+    // starts; fixed fees monthly and the nightly fee check.
+    ReportingMoneyModule,
   ],
 })
 class WorkerModule {}
@@ -155,6 +182,10 @@ const definitions = [
       noticesOnRendered(app.get(NoticeTrackingService)),
       // M8 (plan 4.13): the final statement recorded and sent to the tenant.
       moveOutOnRendered(app.get(MoveOutService)),
+      // M9 (DA-06): the dashboard's PDF export marked ready.
+      dashboardOnRendered(app.get(DashboardService)),
+      // M9 (AC-04): an issued statement's PDF recorded with its hash, and emailed to the owner.
+      statementsOnRendered(app.get(OwnerStatementsService)),
     ],
   }),
   ...messagingJobs({
@@ -193,6 +224,9 @@ const definitions = [
     taxAssessment: app.get(TaxAssessmentService),
     advance: app.get(AdvanceService),
   }),
+  ...reportingDashboardJobs({ ...deps, rollup: app.get(ReportingRollupService) }),
+  ...reportingStatementsJobs({ ...deps, statements: app.get(OwnerStatementsService) }),
+  ...reportingMoneyJobs({ ...deps, fees: app.get(ManagementFeesService) }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -212,6 +246,8 @@ const relay = new OutboxRelay(
     ...MESSAGING_EVENT_TYPES,
     ...NOTICES_EVENT_TYPES,
     ...MAINTENANCE_EVENT_TYPES,
+    ...REPORTING_DASHBOARD_EVENT_TYPES,
+    ...REPORTING_STATEMENTS_EVENT_TYPES,
   ]),
 );
 await relay.start();

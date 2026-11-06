@@ -17,6 +17,11 @@ import { NoticesModule } from '@rent/server/notices';
 import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
 import { PortfolioModule } from '@rent/server/portfolio';
+import {
+  ReportingDashboardModule,
+  ReportingMoneyModule,
+  ReportingStatementsModule,
+} from '@rent/server/reporting';
 import { RulesModule } from '@rent/server/rules';
 import { TasksModule } from '@rent/server/tasks';
 import { TaxModule } from '@rent/server/tax';
@@ -60,6 +65,13 @@ import { PayLinksController } from './payments/pay-links.controller';
 import { PaymentsController } from './payments/payments.controller';
 import { WebhooksController } from './payments/webhooks.controller';
 import { RegisterController } from './register/register.controller';
+import {
+  ComplianceController,
+  DashboardController,
+  PlatformMetricsController,
+} from './reporting/dashboard.controller';
+import { OwnerMoneyController } from './reporting/owner-money.controller';
+import { OwnerStatementsController } from './reporting/statements.controller';
 import { TaxController } from './tax/tax.controller';
 import {
   SigningRequestsController,
@@ -94,6 +106,13 @@ export class AppModule {
         // M7: staff tasks and legal notices.
         TasksModule,
         NoticesModule,
+        // M9: the dashboard, its rollup and exports, Gate 1 and the compliance list.
+        ReportingDashboardModule,
+        // M9: owner statements (AC-04).
+        ReportingStatementsModule,
+        // M9: management fees (charged in every receipt's posting transaction once this module
+        // starts), fee terms, remittances, fees taken and owner funding (AC-02, AC-05).
+        ReportingMoneyModule,
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -145,6 +164,13 @@ export class AppModule {
         QuitAcknowledgementController,
         RentAssessmentsController,
         TasksController,
+        // M9: the dashboard, Gate 1 per company and across companies, and the compliance list.
+        DashboardController,
+        PlatformMetricsController,
+        ComplianceController,
+        // M9: owner statements (AC-04).
+        OwnerStatementsController,
+        OwnerMoneyController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

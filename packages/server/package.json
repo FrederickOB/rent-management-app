@@ -26,6 +26,7 @@
     "./tasks": "./src/tasks/index.ts",
     "./notices": "./src/notices/index.ts",
     "./moveout": "./src/moveout/index.ts",
+    "./reporting": "./src/reporting/index.ts",
     "./testing": "./test/support/index.ts"
   },
   "scripts": {

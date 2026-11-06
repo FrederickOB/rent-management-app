@@ -130,6 +130,15 @@ export const POLICY_ACTIONS = [
   'moveout.settle',
   'expense.read',
   'expense.record',
+  // M9 (docs/plans/M9.md section 4.8): owner statements, remittances, fee terms, the dashboard,
+  // the compliance list, and Gate 1 across companies.
+  'statements.read',
+  'statements.issue',
+  'remittance.record',
+  'fees.manage',
+  'dashboard.read',
+  'compliance.read',
+  'metrics.platform.read',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -470,6 +479,38 @@ const STAFF_MATRIX: Record<
     'adviser',
   ],
   'expense.record': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  // M9 (plan 4.8): owners and advisers read within owner scope; a caretaker sees no owner's
+  // figures (PRD section 15). A manager, an agency admin or an accountant issues a statement
+  // (decision 7); a landlord issues their own. Remittances are an agency's. Fee terms are asked
+  // for by admins and managers, and approved by a second person.
+  'statements.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'statements.issue': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'remittance.record': ['agency_admin', 'property_manager', 'accountant'],
+  'fees.manage': ['agency_admin', 'property_manager'],
+  'dashboard.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'compliance.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'metrics.platform.read': [],
 };
 
 /** Platform-level actions: platform admins only, never staff of a company (M6 decisions 3 and 9). */
@@ -479,6 +520,8 @@ const PLATFORM_ACTIONS: readonly PolicyAction[] = [
   'session.manage_own',
   'whatsapp_account.manage',
   'company.plan.manage',
+  // M9 decision 13: Gate 1 across companies, through a system path.
+  'metrics.platform.read',
 ];
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {

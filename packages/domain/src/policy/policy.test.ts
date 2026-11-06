@@ -122,6 +122,14 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   'document.view': '11111110',
   'rules.view': '00000001',
   'rules.add': '00000001',
+  // M9 (docs/plans/M9.md section 4.8).
+  'statements.read': '11111010',
+  'statements.issue': '10111000',
+  'remittance.record': '00111000',
+  'fees.manage': '00110000',
+  'dashboard.read': '11111010',
+  'compliance.read': '11111010',
+  'metrics.platform.read': '00000001',
 };
 
 function actorFor(

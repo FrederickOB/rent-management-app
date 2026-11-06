@@ -38,3 +38,5 @@ export {
   type FinalStatementDocumentData,
   type MoveInReportDocumentData,
 } from './moveout';
+export { dashboardV1, type DashboardDocumentData } from './reporting-dashboard';
+export { ownerStatementV1, type OwnerStatementDocumentData } from './reporting-statement';

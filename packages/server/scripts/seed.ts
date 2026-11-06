@@ -11,7 +11,9 @@
  * `advance_rent_policy = warn` with a flagged advance (plan 5.10). M6 adds messaging (plan 4.14,
  * scripts/seed-messaging.ts): WhatsApp numbers and template approvals, consent and a STOP, the
  * inbox's conversations through the real pipeline, a reported repair, a broadcast and the plans.
- * Every
+ * M9 adds owner reporting (plan 4.10, scripts/seed-reporting.ts): the agency's two owners' fee
+ * terms, charged on every receipt, fixed fees, last month's statements issued with one later
+ * correction, a remittance with fees retained, an owner funding and the dashboards' rollup. Every
  * person is fictional and flagged as a test contact, and only fake providers are configured
  * locally, so nothing is ever sent.
  *
@@ -63,6 +65,16 @@ import {
 } from '../src/messaging';
 import { ensureMessaging } from './seed-messaging';
 import { ensureMaintenance } from './seed-maintenance';
+import { ensureFeeTerms, ensureReporting } from './seed-reporting';
+import {
+  ManagementFeesService,
+  OwnerMoneyService,
+  OwnerStatementsService,
+  ReportingDashboardModule,
+  ReportingMoneyModule,
+  ReportingRollupService,
+  ReportingStatementsModule,
+} from '../src/reporting';
 import { ensureNotices } from './seed-notices';
 import {
   NoticeAcknowledgementsService,
@@ -314,6 +326,11 @@ const seedClock: Clock & { offsetMs: number } = {
     TasksModule,
     NoticesModule,
     MoveOutModule,
+    // M9: management fees on every receipt once this module starts (its billing hooks), owner
+    // statements, remittances and the dashboards' rollup (plan 4.10).
+    ReportingMoneyModule,
+    ReportingStatementsModule,
+    ReportingDashboardModule,
   ],
 })
 class SeedModule {}
@@ -2417,6 +2434,8 @@ try {
     meters: app.get(MetersService),
   });
   await ensureScopes(database);
+  // M9: the agency's fee terms, before any money, so every receipt is charged its fee.
+  const feeTerms = await ensureFeeTerms({ database, clock: seedClock, agency: AGENCY });
   const storage = app.get<StoragePort>(STORAGE_PORT);
   await storage.ensureBuckets({ files: cfg.S3_BUCKET_FILES, evidence: cfg.S3_BUCKET_EVIDENCE });
   const leases = await ensureTenancies(database, {
@@ -2509,6 +2528,21 @@ try {
     landlord: LANDLORD,
     actor: (companyId, signIn) => actorFor(database, companyId, signIn),
   });
+  const reporting = await ensureReporting({
+    database,
+    config: cfg,
+    clock: seedClock,
+    storage,
+    fees: app.get(ManagementFeesService),
+    money: app.get(OwnerMoneyService),
+    statements: app.get(OwnerStatementsService),
+    rollup: app.get(ReportingRollupService),
+    billing: app.get(MoneyService),
+    approvals: app.get(ApprovalsService),
+    agency: AGENCY,
+    billingCompanies: BILLING_COMPANIES,
+    actor: (companyId, signIn) => actorFor(database, companyId, signIn),
+  });
   let checkProblems = 0;
   for (const companyId of BILLING_COMPANIES)
     checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
@@ -2552,6 +2586,8 @@ try {
       .map(([k, v]) => `${k}: ${v}`)
       .join('; ')}.`,
   );
+  console.log(`Owner reporting (M9): ${feeTerms} new fee terms.`);
+  for (const line of reporting) console.log(line);
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(
     `TOTP for every demo staff member: otpauth://totp/Rent%20Platform:demo?secret=${base32(DEMO_TOTP_SECRET)}&issuer=Rent%20Platform`,
