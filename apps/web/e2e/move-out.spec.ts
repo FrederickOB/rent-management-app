@@ -2,7 +2,7 @@ import { expect, test, type Browser } from '@playwright/test';
 import { money, toDecimal } from '@rent/domain/money';
 import { MOVE_OUT_STATUS_LABELS } from '@rent/domain/moveout';
 import { PEOPLE, ready, signIn, unique } from './helpers';
-import { draftedMoveOut, type MoveOutDetailRow } from './maintenance-helpers';
+import { draftedMoveOut, keyed, type MoveOutDetailRow } from './maintenance-helpers';
 import { apiGet, cedis, pesewasOf } from './tax-helpers';
 
 /**
@@ -46,6 +46,7 @@ test.describe('MI-11 ★ deductions never exceed the deposit held', () => {
     await expect(deductions.getByTestId('deduction')).toHaveCount(before);
 
     const refused = await page.request.post(`/api/v1/move-outs/${moveOut.id}/deductions`, {
+      headers: keyed(),
       data: { kind: 'cleaning', amountMinor: left + 100, reason: 'More than the deposit (e2e)' },
     });
     expect(refused.status()).toBe(409);

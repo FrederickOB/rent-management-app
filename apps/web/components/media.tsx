@@ -5,9 +5,11 @@ import { MEDIA_MAX_FILES_PER_REQUEST } from '@rent/domain/maintenance';
 import { useEffect, useId, useRef, useState, type ChangeEvent } from 'react';
 import { openFetchedLink } from '@/lib/browser-files';
 import { toProblem } from '@/lib/errors';
+import { formatTime } from '@/lib/format';
 import { durationText, mediaAccept, mediaHint } from '@/lib/maintenance';
 import { declareMedia, MediaRefused } from '@/lib/media-upload';
 import { sizeLabel } from '@/lib/upload';
+import { useApp } from './app-context';
 import { Alert } from './ui/alert';
 import { Button } from './ui/button';
 
@@ -53,7 +55,10 @@ export function MediaPicker({
   readonly disabled?: boolean;
   /** What the files must show, read with the field (for example "Both are required"). */
   readonly note?: string;
-  /** On a phone, open the camera first (inspections); the gallery stays a choice. */
+  /**
+   * On a phone, also offer "Take a photo", which opens the camera directly (review WEB 7: the
+   * picker itself keeps the gallery). It is one file input either way.
+   */
   readonly capture?: boolean;
 }) {
   const id = useId();
@@ -62,9 +67,20 @@ export function MediaPicker({
   const latest = useRef(files);
   latest.current = files;
 
+  /** Opens the camera: the same input, with `capture` set only for this one choice. */
+  function takePhoto() {
+    const element = input.current;
+    if (!element) return;
+    element.setAttribute('capture', 'environment');
+    element.click();
+    // The chooser reads `capture` as it opens; the next tap on the picker offers the gallery.
+    window.setTimeout(() => element.removeAttribute('capture'), 0);
+  }
+
   async function chosen(event: ChangeEvent<HTMLInputElement>) {
     const picked = Array.from(event.target.files ?? []);
     event.target.value = '';
+    event.target.removeAttribute('capture');
     if (picked.length === 0) return;
     setChecking(true);
     const checked = await Promise.all(
@@ -99,13 +115,23 @@ export function MediaPicker({
         type="file"
         multiple
         accept={mediaAccept(kinds)}
-        {...(capture ? { capture: 'environment' as const } : {})}
         disabled={disabled || checking}
         aria-describedby={[`${id}-hint`, errorId].filter(Boolean).join(' ')}
         aria-invalid={error || tooMany ? true : undefined}
         onChange={(event) => void chosen(event)}
         className="block w-full text-sm file:mr-3 file:min-h-11 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-2 file:text-sm file:font-medium"
       />
+      {capture ? (
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={disabled || checking}
+          onClick={takePhoto}
+          className="sm:hidden"
+        >
+          Take a photo
+        </Button>
+      ) : null}
       <p id={`${id}-hint`} className="text-sm text-slate-600">
         {mediaHint(kinds)}
       </p>
@@ -163,13 +189,20 @@ export function MediaView({
   name,
   durationSeconds,
   load,
+  when,
 }: {
   readonly kind: ViewerKind;
   /** "Photo 2, after the work": the accessible name and the button's words. */
   readonly name: string;
   readonly durationSeconds?: number | null;
   readonly load: () => Promise<string>;
+  /**
+   * Review WEB 5: the server's time the file was taken or added, shown with the time zone (the
+   * photo's own date is never trusted).
+   */
+  readonly when?: { readonly label: 'Taken' | 'Added'; readonly at: string } | null;
 }) {
+  const { timeZone } = useApp();
   const [url, setUrl] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
@@ -280,6 +313,13 @@ export function MediaView({
       <figcaption className="text-xs text-slate-600">
         {name}
         {length && url ? ` · ${length}` : ''}
+        {when ? (
+          <span data-testid="media-when">
+            {' · '}
+            {when.label.toLowerCase()}{' '}
+            <time dateTime={when.at}>{formatTime(when.at, timeZone)}</time>
+          </span>
+        ) : null}
         {url && !broken ? (
           <>
             {' · '}

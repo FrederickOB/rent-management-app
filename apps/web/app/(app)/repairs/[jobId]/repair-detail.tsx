@@ -20,7 +20,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { api } from '@/lib/api';
 import { openFetchedLink } from '@/lib/browser-files';
 import { formatBusinessDate } from '@/lib/business-dates';
-import { EXPENSE_STATUS_LABELS } from '@/lib/expenses';
+import { EXPENSE_STATUS_LABELS, NO_RECEIPT, needsReceiptFlag } from '@/lib/expenses';
 import { toProblem, type Problem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import {
@@ -28,6 +28,7 @@ import {
   assigneeLabel,
   attachmentsByStage,
   costText,
+  emergencyAlertText,
   EVENT_LABELS,
   eventActor,
   eventDetail,
@@ -128,8 +129,7 @@ export function RepairDetail({
       </div>
       {isEmergency(job) && job.status !== 'closed' && job.status !== 'cancelled' ? (
         <Alert tone="error" title="Emergency">
-          The property’s managers and caretakers were alerted on WhatsApp and by SMS when it became
-          an emergency.
+          <span data-testid="emergency-alerts">{emergencyAlertText(job.events)}</span>
           {job.priority === null
             ? ' The tenant flagged it; triage it to confirm or lower the priority.'
             : ''}
@@ -296,6 +296,7 @@ function JobFiles({ job }: { readonly job: MaintenanceJobDetail }) {
                       kind={playerOf(attachment)}
                       name={name}
                       durationSeconds={attachment.durationSeconds}
+                      when={{ label: 'Added', at: attachment.createdAt }}
                       load={async () =>
                         (
                           await api().maintenance.attachmentDownload({
@@ -399,6 +400,11 @@ function JobExpenses({ job }: { readonly job: MaintenanceJobDetail }) {
                   >
                     {EXPENSE_STATUS_LABELS[expense.status]}
                   </Badge>
+                  {needsReceiptFlag(expense) ? (
+                    <span data-testid="no-receipt">
+                      <Badge tone="red">{NO_RECEIPT}</Badge>
+                    </span>
+                  ) : null}
                   {expense.hasReceipt ? (
                     <button
                       type="button"

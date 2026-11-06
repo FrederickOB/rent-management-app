@@ -33,6 +33,8 @@ export function DeductionList({
   const { timeZone } = useApp();
   if (deductions.length === 0) return <p className="text-sm text-slate-600">No deductions.</p>;
   const byId = new Map(items.map((i) => [i.id, i]));
+  // Review WEB 5: each evidence photo with the server's time it was taken.
+  const takenAt = new Map(items.flatMap((i) => i.photos.map((p) => [p.id, p.takenAt] as const)));
   return (
     <ul className="space-y-3" aria-label="Deductions">
       {deductions.map((d) => {
@@ -97,6 +99,9 @@ export function DeductionList({
                     <MediaView
                       kind="image"
                       name={`Photo ${index + 1} for ${d.kindLabel.toLowerCase()}`}
+                      when={
+                        takenAt.has(photoId) ? { label: 'Taken', at: takenAt.get(photoId)! } : null
+                      }
                       load={async () =>
                         (await api().inspections.photoDownload({ inspectionId, photoId })).url
                       }

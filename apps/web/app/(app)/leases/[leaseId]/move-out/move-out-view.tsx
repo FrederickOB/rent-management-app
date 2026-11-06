@@ -23,7 +23,13 @@ import { RECEIVING_ACCOUNT_LABELS } from '@/lib/billing-format';
 import { openFetchedLink } from '@/lib/browser-files';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
 import { errorCode, toProblem } from '@/lib/errors';
-import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
+import {
+  isKeyReused,
+  moneyProblem,
+  sendOnce,
+  useIdempotencyKeeper,
+  useKeepers,
+} from '@/lib/idempotency';
 import { useHoldWhileSending } from '@/lib/in-flight';
 import { conditionLabel, progressText, type InspectionDetail } from '@/lib/inspections';
 import {
@@ -35,12 +41,16 @@ import {
   depositLeftMinor,
   emptyCharge,
   emptyDeduction,
+  evidenceGuidance,
+  FIGURES_NO_LONGER_HOLD,
   isEarly,
   liveDeductions,
   deductionsTotal,
   mayOfferDepositSettlement,
   MOVE_OUT_KIND_LABELS,
+  MOVE_OUT_REFUSAL_TEXT,
   moveOutNext,
+  moveOutRefusal,
   moveOutReasonText,
   PLANNABLE_LEASE_STATUSES,
   planInput,
@@ -88,6 +98,7 @@ export function MoveOutView({
   readonly can: MoveOutPermissions;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const load = useCallback(async (): Promise<Loaded> => {
     const [moveOuts, billing] = await Promise.all([
       api().moveOuts.list({ leaseId: lease.id }),
@@ -187,6 +198,8 @@ export function MoveOutView({
         detail={detail}
         lease={lease}
         canSeeApprovals={can.seeApprovals}
+        cancelling={cancelling}
+        onCancelling={setCancelling}
         onDone={changed}
       />
       <InspectionStep detail={detail} inspection={state.data.inspection} onDone={changed} />
@@ -196,14 +209,21 @@ export function MoveOutView({
         depositHeldMinor={detail.statement?.depositHeldMinor ?? state.data.depositHeldMinor}
         onDone={changed}
       />
-      {detail.statement?.early ||
-      detail.reason === 'early_termination' ||
-      detail.charges.length > 0 ? (
-        <ChargesStep detail={detail} onDone={changed} />
-      ) : null}
+      {/* Review WEB 1: damage beyond the deposit is a charge on any move-out, not only an early end. */}
+      <ChargesStep detail={detail} onDone={changed} />
       <StatementStep detail={detail} />
       {detail.actions.submit ? (
-        <SubmitStep detail={detail} canSeeApprovals={can.seeApprovals} onDone={changed} />
+        <SubmitStep
+          detail={detail}
+          canSeeApprovals={can.seeApprovals}
+          onCancelMoveOut={() => {
+            setCancelling(true);
+            document
+              .querySelector('[data-testid="move-out-summary"]')
+              ?.scrollIntoView({ block: 'start' });
+          }}
+          onDone={changed}
+        />
       ) : null}
       {detail.actions.recordRefundPaid || detail.refundPaid ? (
         <RefundStep detail={detail} agency={can.agency} onDone={changed} />
@@ -400,14 +420,18 @@ function MoveOutSummary({
   detail,
   lease,
   canSeeApprovals,
+  cancelling,
+  onCancelling: setCancelling,
   onDone,
 }: {
   readonly detail: MoveOutDetail;
   readonly lease: LeaseDetailView;
   readonly canSeeApprovals: boolean;
+  /** Open from here, or from a refusal elsewhere on the page (LEASE_ENDED_FIRST). */
+  readonly cancelling: boolean;
+  readonly onCancelling: (open: boolean) => void;
   readonly onDone: (text: string) => void;
 }) {
-  const [cancelling, setCancelling] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   return (
     <Card data-testid="move-out-summary">
@@ -455,6 +479,11 @@ function MoveOutSummary({
             </div>
           ) : null}
         </dl>
+        {detail.approvalFiguresHold === false ? (
+          <Alert tone="warning" title="The figures no longer hold" live={false}>
+            <span data-testid="figures-no-longer-hold">{FIGURES_NO_LONGER_HOLD}</span>
+          </Alert>
+        ) : null}
         {detail.status === 'awaiting_approval' && canSeeApprovals ? (
           <Link href="/approvals" className={secondaryLink}>
             Open Approvals
@@ -603,15 +632,21 @@ function DeductionsStep({
   const live = liveDeductions(detail.deductions);
   const total = deductionsTotal(live);
   const left = held === null ? null : depositLeftMinor(held, detail.deductions);
+  // Review WEB 3: one key per deduction withdrawn, so a retry never withdraws twice.
+  const keepers = useKeepers();
 
   async function withdraw(id: string) {
     setWithdrawing(id);
     setError(null);
+    const keeper = keepers(`withdraw:${id}`);
     try {
-      await api().moveOuts.withdrawDeduction({ moveOutId: detail.id, deductionId: id });
+      await sendOnce(keeper, (key) =>
+        keyedApi(key).moveOuts.withdrawDeduction({ moveOutId: detail.id, deductionId: id }),
+      );
       onDone('Withdrew the deduction. It stays in the history.');
     } catch (failure) {
-      setError(toProblem(failure).message);
+      setError(moneyProblem(failure));
+      if (isKeyReused(failure)) keeper.reset();
     } finally {
       setWithdrawing(null);
     }
@@ -625,7 +660,7 @@ function DeductionsStep({
       />
       <CardBody>
         {error ? <Alert tone="error">{error}</Alert> : null}
-        <dl className="grid gap-2 text-sm sm:grid-cols-3" data-testid="deposit-left">
+        <dl className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4" data-testid="deposit-left">
           <div>
             <dt className="text-slate-600">Deposit held</dt>
             <dd className="tabular-nums">
@@ -637,12 +672,31 @@ function DeductionsStep({
             <dd className="tabular-nums">{formatMinor(total)}</dd>
           </div>
           <div>
-            <dt className="text-slate-600">Left for more deductions</dt>
+            <dt className="text-slate-600">Most that can still be deducted</dt>
             <dd className="font-semibold tabular-nums" data-testid="deposit-left-amount">
               {left === null ? 'Not known yet' : formatMinor(left)}
             </dd>
           </div>
+          {/* Review WEB 7: the deposit pays unpaid rent first, so the API's own figure says what
+              is left of it; a deduction past that is charged to the tenant. */}
+          {detail.statement ? (
+            <div>
+              <dt className="text-slate-600">
+                Left of the deposit after unpaid rent and deductions
+              </dt>
+              <dd className="tabular-nums" data-testid="deposit-refund-left">
+                {formatMinor(detail.statement.depositRefundMinor)}
+              </dd>
+            </div>
+          ) : null}
         </dl>
+        {detail.statement && detail.statement.depositAppliedMinor > 0 ? (
+          <p className="text-sm text-slate-700" data-testid="deposit-pays-arrears">
+            The deposit pays {formatMinor(detail.statement.depositAppliedMinor)} of unpaid rent and
+            charges first. Deductions beyond what is then left are charged to the tenant, not kept
+            from the deposit.
+          </p>
+        ) : null}
         <DeductionList
           deductions={detail.deductions}
           items={inspection?.items ?? []}
@@ -690,12 +744,34 @@ function DeductionForm({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refused, setRefused] = useState<string | null>(null);
+  const router = useRouter();
+  const [starting, setStarting] = useState(false);
+  // Review WEB 3: the deduction's key belongs to what was typed; any change is a new deduction.
+  const keeper = useIdempotencyKeeper();
+  const keyedFor = useRef<string | null>(null);
   // Unknown until the statement can be shown: the API checks the limit regardless.
   const parsed = deductionInput(draft, leftMinor ?? Number.MAX_SAFE_INTEGER);
   const errors = tried ? parsed.errors : {};
   const items = [...(inspection?.items ?? [])].sort(
     (a, b) => Number(b.worsened) - Number(a.worsened),
   );
+  // Founder, 2026-11-06: damage and missing items need evidence; without an inspection, guide
+  // the person to do it first.
+  const guidance = evidenceGuidance(draft.kind, items.length > 0);
+
+  async function startInspection() {
+    setStarting(true);
+    setError(null);
+    try {
+      const next = await api().moveOuts.startInspection({ moveOutId: detail.id });
+      if (next.inspectionId) router.push(`/inspections/${next.inspectionId}`);
+      else setStarting(false);
+    } catch (failure) {
+      setError(toProblem(failure).message);
+      setStarting(false);
+    }
+  }
+
   const photos = items
     .filter((i) => draft.itemIds.includes(i.id))
     .flatMap((i) =>
@@ -707,21 +783,42 @@ function DeductionForm({
     setTried(true);
     setError(null);
     setRefused(null);
-    if (!parsed.input) return;
+    const input = parsed.input;
+    if (!input) return;
+    const content = JSON.stringify(input);
+    if (keyedFor.current !== content) {
+      keeper.reset();
+      keyedFor.current = content;
+    }
     setPending(true);
     try {
-      await api().moveOuts.addDeduction({ moveOutId: detail.id, ...parsed.input });
-      onDone(`Added the deduction of ${formatMinor(parsed.input.amountMinor)}.`);
+      await sendOnce(keeper, (key) =>
+        keyedApi(key).moveOuts.addDeduction({ moveOutId: detail.id, ...input }),
+      );
+      onDone(`Added the deduction of ${formatMinor(input.amountMinor)}.`);
     } catch (failure) {
       setPending(false);
       // ★ MI-11: the deductions never exceed the deposit held; the API refuses it (409).
+      // The API's evidence rule, on a move-out with an inspection: damage needs an inspection
+      // item or a photo behind it.
+      if (errorCode(failure) === 'DEDUCTION_EVIDENCE_REQUIRED') {
+        setError(
+          evidenceGuidance(draft.kind, items.length > 0) ??
+            'Damage and missing items need an inspection item or a photo behind them. Choose them from the inspection below.',
+        );
+        return;
+      }
       if (errorCode(failure) === 'DEDUCTIONS_EXCEED_DEPOSIT') {
         setRefused(
           `${toProblem(failure).message.replace(/\.$/, '')}.${leftMinor !== null ? ` Only ${formatMinor(leftMinor)} of the deposit is left.` : ''}`,
         );
         return;
       }
-      setError(toProblem(failure).message);
+      setError(moneyProblem(failure));
+      if (isKeyReused(failure)) {
+        keeper.reset();
+        keyedFor.current = null;
+      }
     }
   }
 
@@ -815,11 +912,25 @@ function DeductionForm({
             <p className="text-sm font-medium text-red-700">{errors.evidence}</p>
           ) : null}
         </fieldset>
+      ) : guidance ? (
+        <Alert tone="warning" title="Do the move-out inspection first" live={false}>
+          <p data-testid="evidence-guidance">{guidance}</p>
+          {detail.actions.inspect ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="mt-2"
+              pending={starting}
+              onClick={() => void startInspection()}
+            >
+              Start the move-out inspection
+            </Button>
+          ) : null}
+        </Alert>
       ) : (
         <Alert tone="warning" live={false}>
-          There is no move-out inspection, so this deduction will have no items or photos behind it.
-          The approver is told.
-          {errors.evidence ? ` ${errors.evidence}.` : ''}
+          There is no move-out inspection, so this deduction will have no items or photos behind it,
+          and the approver is told.
         </Alert>
       )}
       <div className="flex flex-wrap gap-2">
@@ -849,18 +960,33 @@ function ChargesStep({
   const [error, setError] = useState<string | null>(null);
   const parsed = chargesInput(rows);
   const editable = detail.actions.editSettlement;
+  // Review WEB 3: the charges' key belongs to the list sent; a changed list is a new request.
+  const keeper = useIdempotencyKeeper();
+  const keyedFor = useRef<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setTried(true);
     setError(null);
-    if (!parsed.charges) return;
+    const charges = parsed.charges;
+    if (!charges) return;
+    const content = JSON.stringify(charges);
+    if (keyedFor.current !== content) {
+      keeper.reset();
+      keyedFor.current = content;
+    }
     setPending(true);
     try {
-      await api().moveOuts.setCharges({ moveOutId: detail.id, charges: parsed.charges });
-      onDone('Saved the agreed charges. The final statement has been worked out again.');
+      await sendOnce(keeper, (key) =>
+        keyedApi(key).moveOuts.setCharges({ moveOutId: detail.id, charges }),
+      );
+      onDone('Saved the charges. The final statement has been worked out again.');
     } catch (failure) {
-      setError(toProblem(failure).message);
+      setError(moneyProblem(failure));
+      if (isKeyReused(failure)) {
+        keeper.reset();
+        keyedFor.current = null;
+      }
     } finally {
       setPending(false);
     }
@@ -869,12 +995,17 @@ function ChargesStep({
   return (
     <Card data-testid="move-out-charges">
       <CardHeader
-        title="3. Agreed charges for an early end"
-        description="What the tenant agreed to pay for leaving early (P01), and damage beyond the deposit. They are raised as one-off charges when the settlement is approved."
+        title="3. Charges to the tenant"
+        description="Damage beyond the deposit, on any move-out, and what the tenant agreed to pay for leaving early. They are raised as one-off charges (P01) when the settlement is approved, and the statement shows them in what is owed."
       />
       <CardBody>
         {editable ? (
-          <form onSubmit={submit} noValidate aria-label="Agreed charges" className="space-y-3">
+          <form
+            onSubmit={submit}
+            noValidate
+            aria-label="Charges to the tenant"
+            className="space-y-3"
+          >
             {error ? <Alert tone="error">{error}</Alert> : null}
             {rows.map((row, index) => (
               <div key={index} className="grid gap-2 sm:grid-cols-[1fr_10rem_auto] sm:items-end">
@@ -969,15 +1100,18 @@ function StatementStep({ detail }: { readonly detail: MoveOutDetail }) {
 function SubmitStep({
   detail,
   canSeeApprovals,
+  onCancelMoveOut,
   onDone,
 }: {
   readonly detail: MoveOutDetail;
   readonly canSeeApprovals: boolean;
+  readonly onCancelMoveOut: () => void;
   readonly onDone: (text: string) => void;
 }) {
   const [note, setNote] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [endedFirst, setEndedFirst] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -991,8 +1125,13 @@ function SubmitStep({
           : `Asked for the settlement. A second person must approve it${canSeeApprovals ? ' in Approvals' : ''}; you cannot approve it yourself.`,
       );
     } catch (failure) {
-      setError(toProblem(failure).message);
       setPending(false);
+      // The lease ended on another day: this settlement gives way to a deposit settlement.
+      if (moveOutRefusal(failure) === 'lease_ended_first') {
+        setEndedFirst(true);
+        return;
+      }
+      setError(toProblem(failure).message);
     }
   }
 
@@ -1005,6 +1144,22 @@ function SubmitStep({
       <CardBody>
         <form onSubmit={submit} noValidate aria-label="Ask for approval" className="space-y-3">
           {error ? <Alert tone="error">{error}</Alert> : null}
+          {endedFirst ? (
+            <Alert tone="error" title="The lease ended first">
+              <p data-testid="lease-ended-first">{MOVE_OUT_REFUSAL_TEXT.lease_ended_first}</p>
+              <div className="mt-2 flex flex-wrap gap-3">
+                <Button size="sm" variant="secondary" onClick={onCancelMoveOut}>
+                  Cancel this move-out
+                </Button>
+                <Link
+                  href={`/leases/${detail.leaseId}`}
+                  className="inline-flex min-h-9 items-center text-sm font-medium underline underline-offset-2"
+                >
+                  Settle the deposit, from the lease, once it is cancelled
+                </Link>
+              </div>
+            </Alert>
+          ) : null}
           <TextAreaField
             label="Note for the approver (optional)"
             rows={2}
@@ -1103,6 +1258,11 @@ function RefundStep({
         uploads.forget(file);
         if (proof.current) proof.current.value = '';
         setFileError(fileAgainMessage('proof'));
+        return;
+      }
+      // A deposit payment behind it was charged back: nothing was recorded, and a person looks.
+      if (moveOutRefusal(failure) === 'deposit_charged_back') {
+        setError(MOVE_OUT_REFUSAL_TEXT.deposit_charged_back);
         return;
       }
       setError(moneyProblem(failure));

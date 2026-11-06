@@ -1,10 +1,16 @@
 'use client';
 
 import type { MoveOutDetail } from '@rent/contracts';
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { api } from '@/lib/api';
 import type { InspectionDetail } from '@/lib/inspections';
-import { deductionEvidence, liveDeductions } from '@/lib/move-out';
+import {
+  deductionEvidence,
+  FIGURES_NO_LONGER_HOLD,
+  liveDeductions,
+  settlementVerdict,
+  type SettlementVerdict,
+} from '@/lib/move-out';
 import { useLoad } from '@/lib/use-load';
 import { DeductionList } from './deduction-list';
 import { FinalStatement } from './final-statement';
@@ -15,7 +21,14 @@ import { Alert } from './ui/alert';
  * statement, laid out to show it balances, and every deduction with its inspection items and
  * photos. A deduction without a photo is pointed out.
  */
-export function MoveOutApprovalSummary({ moveOutId }: { readonly moveOutId: string }) {
+export function MoveOutApprovalSummary({
+  moveOutId,
+  onVerdict,
+}: {
+  readonly moveOutId: string;
+  /** Review WEB 4: whether the statement loaded and balances, so Approve waits for it. */
+  readonly onVerdict?: (verdict: SettlementVerdict) => void;
+}) {
   const load = useCallback(async (): Promise<{
     detail: MoveOutDetail;
     inspection: InspectionDetail | null;
@@ -29,6 +42,11 @@ export function MoveOutApprovalSummary({ moveOutId }: { readonly moveOutId: stri
     return { detail, inspection };
   }, [moveOutId]);
   const { state } = useLoad(load);
+  const verdict = settlementVerdict(
+    state.status === 'ready' ? state.data.detail : null,
+    state.status === 'error',
+  );
+  useEffect(() => onVerdict?.(verdict), [onVerdict, verdict]);
 
   if (state.status === 'loading')
     return (
@@ -47,6 +65,11 @@ export function MoveOutApprovalSummary({ moveOutId }: { readonly moveOutId: stri
   const withoutPhoto = deductions.filter((d) => deductionEvidence(d) !== 'photos').length;
   return (
     <div className="space-y-4" data-testid="move-out-approval">
+      {detail.approvalFiguresHold === false ? (
+        <Alert tone="warning" title="The figures no longer hold" live={false}>
+          <span data-testid="figures-no-longer-hold">{FIGURES_NO_LONGER_HOLD}</span>
+        </Alert>
+      ) : null}
       {detail.statement ? (
         <FinalStatement statement={detail.statement} />
       ) : (

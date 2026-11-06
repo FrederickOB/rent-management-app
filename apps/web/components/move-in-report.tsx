@@ -35,8 +35,9 @@ export function MoveInReportStatus({ report }: { readonly report: MoveInReport }
       </p>
       {report.late ? (
         <Alert tone="warning" live={false}>
-          This report comes more than 14 days after the lease started, so it may say less about the
-          unit as it was at move-in.
+          This report comes more than {report.lateAfterDays}{' '}
+          {report.lateAfterDays === 1 ? 'day' : 'days'} after the lease started, so it may say less
+          about the unit as it was at move-in.
         </Alert>
       ) : null}
       {report.signers.length > 0 ? (

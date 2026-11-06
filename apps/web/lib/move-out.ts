@@ -6,12 +6,15 @@ import {
   MOVE_OUT_REASONS,
   MOVE_OUT_REASON_LABELS,
   MOVE_OUT_STATUS_LABELS,
+  statementBalances,
+  statementTotals,
   type DeductionKind,
   type MoveOutReason,
   type MoveOutStatus,
 } from '@rent/domain/moveout';
 import { money, toDecimal } from '@rent/domain/money';
 import { formatBusinessDate } from './business-dates';
+import { errorCode } from './errors';
 import { amountMinorOf } from './payment-form';
 import { formatMinor } from './tenancy-format';
 
@@ -143,6 +146,20 @@ export const EVIDENCE_TEXT: Record<'items' | 'none', string> = {
   none: 'No photo and no inspection item stand behind this deduction.',
 };
 
+/** Founder, 2026-11-06: damage and missing items always need an inspection item or a photo. */
+export const needsEvidence = (kind: DeductionKind | ''): boolean =>
+  kind === 'damage' || kind === 'missing_items';
+
+/**
+ * The guidance on the deduction form when a deduction needs evidence and there is no inspection
+ * to take it from (a deposit settlement after M3's quick move-out, or a move-out not yet
+ * inspected): do the inspection first. Null when nothing is in the way.
+ */
+export function evidenceGuidance(kind: DeductionKind | '', hasInspection: boolean): string | null {
+  if (!needsEvidence(kind) || hasInspection) return null;
+  return 'Damage and missing items need an inspection item or a photo behind them, so do the move-out inspection first. It is optional for other deductions, such as cleaning or keys.';
+}
+
 export interface DeductionDraft {
   readonly kind: DeductionKind | '';
   readonly amount: string;
@@ -209,7 +226,7 @@ export function deductionInput(
   };
 }
 
-// Agreed charges (P01) -------------------------------------------------------------------------
+// Charges (P01): damage beyond the deposit on any move-out, and agreed early-end charges ---------
 
 export interface ChargeRow {
   readonly description: string;
@@ -264,29 +281,20 @@ export interface StatementCheck {
 }
 
 /**
- * The two identities the statement always meets, worked out again on screen so the approver can
- * see it balances: deposit + credit = applied + retained + refunded, and arrears + deductions
- * charged = settled + still owed.
+ * The statement's identities, so the approver can see it balances (review WEB 7: the domain's
+ * check, not a copy): deposit + credit = applied + retained + refunded, and arrears + deductions
+ * charged = settled + still owed. Charges sit inside arrears and the break credit inside credit,
+ * so neither is added again. The verdict is `statementBalances`, plus refund = credit refund +
+ * deposit refund; the totals are the domain's too.
  */
 export function checkStatement(s: FinalStatementView): StatementCheck {
-  const inMinor = s.depositHeldMinor + s.creditMinor;
-  const outMinor =
-    s.creditAppliedMinor +
-    s.depositAppliedMinor +
-    s.retainedMinor +
-    s.creditRefundMinor +
-    s.depositRefundMinor;
-  const owedMinor = s.arrearsMinor + s.deductionsChargedMinor;
-  const settledMinor = s.creditAppliedMinor + s.depositAppliedMinor + s.stillOwedMinor;
+  const totals = statementTotals(s);
   return {
-    balances:
-      inMinor === outMinor &&
-      owedMinor === settledMinor &&
-      s.refundMinor === s.creditRefundMinor + s.depositRefundMinor,
-    inMinor,
-    outMinor,
-    owedMinor,
-    settledMinor,
+    balances: statementBalances(s) && s.refundMinor === s.creditRefundMinor + s.depositRefundMinor,
+    inMinor: totals.in,
+    outMinor: totals.out,
+    owedMinor: totals.owed,
+    settledMinor: totals.settled,
   };
 }
 
@@ -342,7 +350,7 @@ export function statementSections(s: FinalStatementView): StatementSection[] {
         },
         {
           key: 'charges',
-          label: 'Agreed early-termination charges, included above',
+          label: 'Charges: damage beyond the deposit and agreed early-end charges, included above',
           amountMinor: s.chargesMinor,
         },
         {
@@ -491,4 +499,84 @@ export function refundInput(
   if (!paidFrom) errors.paidFrom = 'Choose the account it was paid from';
   if (Object.keys(errors).length > 0 || !paidFrom) return { input: null, errors };
   return { input: { paidOn: draft.paidOn, reference, paidFrom }, errors: {} };
+}
+
+// The approval (review WEB 4) ---------------------------------------------------------------------
+
+/** Where the approver's copy of the statement stands. */
+export type SettlementVerdict =
+  'loading' | 'balances' | 'unbalanced' | 'unavailable' | 'stale' | 'failed';
+
+/**
+ * The approver's copy, checked: loaded, still the figures that were asked for (the API's live
+ * comparison, `approvalFiguresHold`), and balancing.
+ */
+export function settlementVerdict(
+  detail: Pick<MoveOutDetail, 'statement' | 'approvalFiguresHold'> | null,
+  failed = false,
+): SettlementVerdict {
+  if (failed) return 'failed';
+  if (!detail) return 'loading';
+  if (detail.approvalFiguresHold === false) return 'stale';
+  if (!detail.statement) return 'unavailable';
+  return checkStatement(detail.statement).balances ? 'balances' : 'unbalanced';
+}
+
+export const FIGURES_NO_LONGER_HOLD =
+  'The lease’s money has moved since the settlement was asked for, so these are not the figures that were asked for. Approving it would cancel it: reject it, and ask again with the figures as they are now.';
+
+/**
+ * Why Approve is off for a move-out settlement, or null when it may be approved: only once the
+ * statement has loaded and balances. Rejecting is always possible.
+ */
+export function settlementBlock(verdict: SettlementVerdict): string | null {
+  switch (verdict) {
+    case 'balances':
+      return null;
+    case 'loading':
+      return 'Approve is available once the final statement has loaded.';
+    case 'unbalanced':
+      return 'The final statement does not balance, so it cannot be approved. Reject it, or report it.';
+    case 'unavailable':
+      return 'There is no final statement to check yet, so it cannot be approved.';
+    case 'stale':
+      return 'The figures no longer hold, so it cannot be approved. Reject it, and ask again.';
+    case 'failed':
+      return 'The final statement could not be loaded, so it cannot be approved. Reload the page.';
+  }
+}
+
+// The API's named refusals (M8 review round), in plain words for the screen they arrive on -------
+
+export type MoveOutRefusal =
+  /** Submit: the lease ended on another day than the move-out's last day. */
+  | 'lease_ended_first'
+  /** Refund paid: a deposit payment behind the settlement was charged back. */
+  | 'deposit_charged_back'
+  /** A payment reversal: a move-out already used this payment's deposit. */
+  | 'payment_deposit_settled'
+  /** M3's quick move-out while an M8 move-out is live. */
+  | 'move_out_live';
+
+const REFUSALS: Readonly<Record<string, MoveOutRefusal>> = {
+  LEASE_ENDED_FIRST: 'lease_ended_first',
+  DEPOSIT_CHARGED_BACK: 'deposit_charged_back',
+  PAYMENT_DEPOSIT_SETTLED: 'payment_deposit_settled',
+  MOVE_OUT_LIVE: 'move_out_live',
+};
+
+export const MOVE_OUT_REFUSAL_TEXT: Record<MoveOutRefusal, string> = {
+  lease_ended_first:
+    'The lease ended on a different day from this move-out’s last day, so this settlement cannot go ahead. Cancel this move-out, then settle the deposit for the lease as it ended.',
+  deposit_charged_back:
+    'Nothing was recorded. A deposit payment behind this settlement was charged back by the payment provider, so the refund cannot be recorded until someone has looked at that payment.',
+  payment_deposit_settled:
+    'This payment cannot be reversed here: a move-out has already used its deposit. Look at the lease’s move-out first.',
+  move_out_live:
+    'A move-out is already under way for this lease, so it ends through that move-out, with its inspection and the deposit. Open the move-out to carry on.',
+};
+
+/** Which of these refusals the API sent, or null for any other answer. */
+export function moveOutRefusal(error: unknown): MoveOutRefusal | null {
+  return REFUSALS[errorCode(error)] ?? null;
 }

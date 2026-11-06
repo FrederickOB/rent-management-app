@@ -3,7 +3,7 @@
 import type { MediaKind } from '@rent/domain/maintenance';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '@/components/app-context';
 import { LoadFailed, Loading } from '@/components/load-state';
 import {
@@ -39,6 +39,7 @@ import {
   type InspectionItem,
 } from '@/lib/inspections';
 import { maintenanceMessage } from '@/lib/maintenance';
+import { useWarnBeforeLeaving } from '@/lib/in-flight';
 import { MediaRefused, MediaUploads } from '@/lib/media-upload';
 import { StorageUploadError } from '@/lib/upload';
 
@@ -80,6 +81,29 @@ export function InspectionForm({ inspectionId }: { readonly inspectionId: string
     );
   }, []);
 
+  // Review WEB 2: what each item still holds; Submit waits, and leaving the page asks first.
+  const [busy, setBusy] = useState<Readonly<Record<string, ItemBusy>>>({});
+  const onBusy = useCallback((itemId: string, next: ItemBusy) => {
+    setBusy((current) => {
+      const before = current[itemId];
+      if (before && before.unsent === next.unsent && before.saving === next.saving) return current;
+      return { ...current, [itemId]: next };
+    });
+  }, []);
+  const held = Object.values(busy).reduce(
+    (sum, b) => ({
+      unsentPhotos: sum.unsentPhotos + b.unsent,
+      saving: sum.saving + (b.saving ? 1 : 0),
+    }),
+    { unsentPhotos: 0, saving: 0 },
+  );
+  useWarnBeforeLeaving(
+    held.unsentPhotos > 0 || held.saving > 0,
+    held.unsentPhotos > 0
+      ? 'Photos you chose have not been added to the inspection yet. Leave anyway?'
+      : 'Something is still being saved. Leave anyway?',
+  );
+
   if (!inspection) {
     return (
       <>
@@ -98,7 +122,7 @@ export function InspectionForm({ inspectionId }: { readonly inspectionId: string
   }
 
   const rooms = roomsOf(inspection.items);
-  const readiness = submitReadiness(inspection.items);
+  const readiness = submitReadiness(inspection.items, held);
   const editable = inspection.status === 'in_progress' && inspection.actions.edit;
   const moveOut = inspection.kind === 'move_out';
   const worse = inspection.items.filter((i) => i.worsened).length;
@@ -258,6 +282,7 @@ export function InspectionForm({ inspectionId }: { readonly inspectionId: string
                 item={item}
                 editable={editable}
                 onChanged={itemChanged}
+                onBusy={onBusy}
               />
             ))}
           </ul>
@@ -322,57 +347,105 @@ export function InspectionForm({ inspectionId }: { readonly inspectionId: string
   );
 }
 
+export interface ItemBusy {
+  /** Photos chosen and not yet added to the item. */
+  readonly unsent: number;
+  /** A condition, a note or photos on their way. */
+  readonly saving: boolean;
+}
+
 function ItemRow({
   inspection,
   item,
   editable,
   onChanged,
+  onBusy,
 }: {
   readonly inspection: InspectionDetail;
   readonly item: InspectionItem;
   readonly editable: boolean;
   readonly onChanged: (item: InspectionItem) => void;
+  /** Review WEB 2: what this item still holds, so the page can hold Submit and warn on leaving. */
+  readonly onBusy: (itemId: string, busy: ItemBusy) => void;
 }) {
   const [note, setNote] = useState(item.note ?? '');
-  const [saving, setSaving] = useState<string | null>(null);
+  // Review WEB 2: each kind of save has its own state, so saving a note on blur never disables
+  // the next tap on a condition or the photo picker.
+  const [chosen, setChosen] = useState<InspectionItem['condition'] | undefined>(undefined);
+  const [savingCondition, setSavingCondition] = useState(false);
+  const [savingNote, setSavingNote] = useState(false);
+  const [uploading, setUploading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<PickedFile[]>([]);
   const [uploads] = useState(
     () => new MediaUploads(PHOTOS, (input) => api().inspections.createUpload(input)),
   );
+  // Only the newest save of a field is applied, so answers arriving out of order never undo a
+  // later choice.
+  const conditionSeq = useRef(0);
+  const noteSeq = useRef(0);
   const noteError = itemNoteProblem(note);
   const moveIn = moveInText(item);
   const groupName = `condition-${item.id}`;
+  const unsent = usableFiles(files).length;
+  const busy = savingCondition || savingNote || uploading !== null;
+  const shown = chosen === undefined ? item.condition : chosen;
 
-  async function save(
-    patch: { condition?: InspectionItem['condition']; note?: string | null },
-    text: string,
-  ) {
-    setSaving(text);
+  useEffect(() => {
+    onBusy(item.id, { unsent, saving: busy });
+  }, [onBusy, item.id, unsent, busy]);
+
+  async function saveCondition(condition: InspectionItem['condition']) {
+    const seq = (conditionSeq.current += 1);
+    setChosen(condition);
+    setSavingCondition(true);
     setError(null);
     try {
-      onChanged(
-        await api().inspections.updateItem({
-          inspectionId: inspection.id,
-          itemId: item.id,
-          ...patch,
-        }),
-      );
-      setSaving(null);
+      const next = await api().inspections.updateItem({
+        inspectionId: inspection.id,
+        itemId: item.id,
+        condition,
+      });
+      if (seq !== conditionSeq.current) return;
+      onChanged(next);
+      setChosen(undefined);
     } catch (failure) {
-      setSaving(null);
+      if (seq !== conditionSeq.current) return;
+      setChosen(undefined);
       setError(toProblem(failure).message);
+    } finally {
+      if (seq === conditionSeq.current) setSavingCondition(false);
+    }
+  }
+
+  async function saveNote(text: string | null) {
+    const seq = (noteSeq.current += 1);
+    setSavingNote(true);
+    setError(null);
+    try {
+      const next = await api().inspections.updateItem({
+        inspectionId: inspection.id,
+        itemId: item.id,
+        note: text,
+      });
+      if (seq !== noteSeq.current) return;
+      // Keep a condition chosen meanwhile: its own save brings it back.
+      onChanged(next);
+    } catch (failure) {
+      if (seq === noteSeq.current) setError(toProblem(failure).message);
+    } finally {
+      if (seq === noteSeq.current) setSavingNote(false);
     }
   }
 
   async function addPhotos() {
     const usable = usableFiles(files);
     if (usable.length === 0 || anyRefused(files)) return;
-    setSaving('Uploading the photos…');
+    setUploading('Uploading the photos…');
     setError(null);
     try {
       const uploadIds = await uploads.idsFor(usable, (done) =>
-        setSaving(`Uploading the photos… ${done} of ${usable.length}`),
+        setUploading(`Uploading the photos… ${done} of ${usable.length}`),
       );
       onChanged(
         await api().inspections.addPhotos({
@@ -382,9 +455,9 @@ function ItemRow({
         }),
       );
       setFiles([]);
-      setSaving(null);
+      setUploading(null);
     } catch (failure) {
-      setSaving(null);
+      setUploading(null);
       if (failure instanceof MediaRefused || failure instanceof StorageUploadError)
         setError(failure.message);
       else {
@@ -425,6 +498,7 @@ function ItemRow({
                   <MediaView
                     kind="image"
                     name={`Move-in photo ${index + 1} of ${item.itemLabel}`}
+                    when={{ label: 'Taken', at: photo.takenAt }}
                     load={async () =>
                       (
                         await api().inspections.photoDownload({
@@ -452,7 +526,7 @@ function ItemRow({
                 key={option.value}
                 className={cn(
                   'flex min-h-11 cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm',
-                  item.condition === option.value
+                  shown === option.value
                     ? 'border-slate-900 bg-slate-900 text-white'
                     : 'border-slate-300 bg-white text-slate-900',
                 )}
@@ -461,9 +535,8 @@ function ItemRow({
                   type="radio"
                   name={groupName}
                   value={option.value}
-                  checked={item.condition === option.value}
-                  disabled={saving !== null}
-                  onChange={() => void save({ condition: conditionOf(option.value) }, 'Saving…')}
+                  checked={shown === option.value}
+                  onChange={() => void saveCondition(conditionOf(option.value))}
                   className="size-4"
                 />
                 {option.label}
@@ -490,8 +563,7 @@ function ItemRow({
           onChange={(event) => setNote(event.target.value)}
           onBlur={() => {
             const next = note.trim();
-            if (!noteError && next !== (item.note ?? ''))
-              void save({ note: next || null }, 'Saving the note…');
+            if (!noteError && next !== (item.note ?? '')) void saveNote(next || null);
           }}
           className="[&_textarea]:font-sans"
         />
@@ -509,6 +581,7 @@ function ItemRow({
               <MediaView
                 kind="image"
                 name={`Photo ${index + 1} of ${item.itemLabel}`}
+                when={{ label: 'Taken', at: photo.takenAt }}
                 load={async () =>
                   (
                     await api().inspections.photoDownload({
@@ -530,11 +603,16 @@ function ItemRow({
             kinds={PHOTOS}
             files={files}
             onChange={setFiles}
-            disabled={saving !== null}
+            disabled={uploading !== null}
             capture
           />
+          {unsent > 0 ? (
+            <p className="text-sm font-medium text-slate-900" data-testid="photos-unsent">
+              Not added yet: tap below to add {unsent === 1 ? 'it' : 'them'} to the inspection.
+            </p>
+          ) : null}
           {usableFiles(files).length > 0 ? (
-            <Button size="sm" pending={saving !== null} onClick={() => void addPhotos()}>
+            <Button size="sm" pending={uploading !== null} onClick={() => void addPhotos()}>
               Add{' '}
               {usableFiles(files).length === 1
                 ? 'the photo'
@@ -543,9 +621,9 @@ function ItemRow({
           ) : null}
         </div>
       ) : null}
-      {saving ? (
+      {uploading || savingCondition || savingNote ? (
         <p role="status" className="text-sm text-slate-600">
-          {saving}
+          {uploading ?? (savingNote ? 'Saving the note…' : 'Saving…')}
         </p>
       ) : null}
       {error ? <Alert tone="error">{error}</Alert> : null}

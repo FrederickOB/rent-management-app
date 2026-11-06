@@ -20,6 +20,8 @@ import {
   DEFAULT_EXPENSE_FILTERS,
   EXPENSE_STATUS_LABELS,
   expenseCategoryOf,
+  NO_RECEIPT,
+  needsReceiptFlag,
   expenseQuery,
   expenseStatusOf,
   expensesTotal,
@@ -262,6 +264,11 @@ function ExpenseItem({
           >
             {EXPENSE_STATUS_LABELS[row.status]}
           </Badge>
+          {needsReceiptFlag(row) ? (
+            <span data-testid="no-receipt">
+              <Badge tone="red">{NO_RECEIPT}</Badge>
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -277,9 +284,7 @@ function ExpenseItem({
           >
             Open the receipt
           </Button>
-        ) : (
-          <span className="text-slate-600">No receipt</span>
-        )}
+        ) : null}
         {can.record && row.status === 'unpaid' && open === null ? (
           <Button size="sm" variant="secondary" onClick={() => onOpen('pay')}>
             Record as paid

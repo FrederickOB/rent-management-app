@@ -73,6 +73,8 @@ export function RepairsView({ can }: { readonly can: BoardPermissions }) {
   const load = useCallback(async () => {
     const current = gate.begin();
     setProblem(null);
+    // Review WEB 7: the old filters' next page is never fetched once the filters change.
+    setCursor(null);
     try {
       const page = await api().maintenance.list({ ...query, limit: PAGE });
       if (!current()) return;
@@ -106,13 +108,16 @@ export function RepairsView({ can }: { readonly can: BoardPermissions }) {
 
   async function more() {
     if (!cursor) return;
+    // The same gate as the first page: a filter changed meanwhile drops this page.
+    const current = gate.begin();
     setLoadingMore(true);
     try {
       const page = await api().maintenance.list({ ...query, cursor, limit: PAGE });
-      setRows((current) => [...(current ?? []), ...page.items]);
+      if (!current()) return;
+      setRows((rows) => [...(rows ?? []), ...page.items]);
       setCursor(page.nextCursor);
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      if (current()) setProblem(toProblem(failure).message);
     } finally {
       setLoadingMore(false);
     }

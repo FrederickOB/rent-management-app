@@ -208,3 +208,12 @@ export function expenseQuery(filters: ExpenseFilters): {
   if (UUID.test(filters.jobId)) query.jobId = filters.jobId;
   return query;
 }
+
+/**
+ * F3 (M8 review): a receipt is optional, and an expense without one is flagged "No receipt" on
+ * the list (M9 carries the flag onto the owner statement). The API decides the flag
+ * (`noReceipt`); a reversed expense is not flagged here, as it no longer counts.
+ */
+export const NO_RECEIPT = 'No receipt';
+export const needsReceiptFlag = (row: Pick<ExpenseRow, 'noReceipt' | 'status'>): boolean =>
+  row.noReceipt && row.status !== 'reversed';

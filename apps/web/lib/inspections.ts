@@ -69,23 +69,45 @@ export function progressText(done: number, total: number): string {
  * Whether it can be submitted (every item needs a condition, as the API checks), and if not, how
  * many are left: said beside the button so nobody wonders why it is off.
  */
-export function submitReadiness(items: readonly Pick<InspectionItem, 'condition'>[]): {
+export function submitReadiness(
+  items: readonly Pick<InspectionItem, 'condition'>[],
+  /**
+   * Review WEB 2: photos chosen but not yet added, and items still saving, hold the submission
+   * too, so nothing on the phone is lost when the inspection freezes.
+   */
+  pending?: { readonly unsentPhotos: number; readonly saving: number },
+): {
   readonly ready: boolean;
   readonly left: number;
   readonly text: string;
 } {
   const left = items.filter((i) => i.condition === null).length;
-  if (items.length === 0) return { ready: false, left: 0, text: 'This checklist has no items.' };
-  if (left === 0)
-    return {
-      ready: true,
-      left,
-      text: 'Every item has a condition. Once submitted, the inspection cannot change; a mistake is corrected by a new inspection.',
-    };
+  const base =
+    items.length === 0
+      ? { ready: false, left: 0, text: 'This checklist has no items.' }
+      : left === 0
+        ? {
+            ready: true,
+            left,
+            text: 'Every item has a condition. Once submitted, the inspection cannot change; a mistake is corrected by a new inspection.',
+          }
+        : {
+            ready: false,
+            left,
+            text: `${left} ${left === 1 ? 'item still needs' : 'items still need'} a condition before it can be submitted.`,
+          };
+  if (!pending) return base;
+  const held: string[] = [];
+  if (pending.unsentPhotos > 0)
+    held.push(
+      `${pending.unsentPhotos} chosen ${pending.unsentPhotos === 1 ? 'photo has' : 'photos have'} not been added yet: add or remove ${pending.unsentPhotos === 1 ? 'it' : 'them'} first.`,
+    );
+  if (pending.saving > 0) held.push('Wait until everything is saved.');
+  if (held.length === 0) return base;
   return {
     ready: false,
     left,
-    text: `${left} ${left === 1 ? 'item still needs' : 'items still need'} a condition before it can be submitted.`,
+    text: base.ready ? held.join(' ') : `${base.text} ${held.join(' ')}`,
   };
 }
 

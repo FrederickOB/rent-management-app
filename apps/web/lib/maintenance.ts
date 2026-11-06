@@ -436,6 +436,35 @@ export function eventDetail(
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 
+/**
+ * What the emergency alerts actually did (review WEB 7), from the timeline's `alerted` events, one
+ * per recipient: who was alerted and on which channels. Nothing is claimed that was not sent.
+ */
+export function emergencyAlertText(
+  events: readonly Pick<MaintenanceEvent, 'kind' | 'data'>[],
+): string {
+  const alerts = events.filter((e) => e.kind === 'alerted');
+  if (alerts.length === 0) return 'No emergency alert has been recorded on this job yet.';
+  const channels = new Set<string>();
+  const names = new Set<string>();
+  for (const alert of alerts) {
+    const data = alert.data ?? {};
+    if (Array.isArray(data.channels))
+      for (const c of data.channels)
+        if (typeof c === 'string' && c in CHANNEL_WORDS) channels.add(c);
+    const name = str(data, 'recipientName');
+    if (name) names.add(name);
+  }
+  const people =
+    names.size > 0
+      ? [...names].join(', ')
+      : `${alerts.length} ${alerts.length === 1 ? 'person' : 'people'}`;
+  const on = ['whatsapp', 'sms', 'email', 'app']
+    .filter((c) => channels.has(c))
+    .map((c) => CHANNEL_WORDS[c]);
+  return on.length > 0 ? `Alerted: ${people}, by ${on.join(' and ')}.` : `Alerted: ${people}.`;
+}
+
 // Forms -------------------------------------------------------------------------------------
 
 type Errors<F extends string> = Partial<Record<F, string>>;
