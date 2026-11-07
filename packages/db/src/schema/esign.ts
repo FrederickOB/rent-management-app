@@ -51,6 +51,14 @@ export const signingRequest = pgTable(
     tenantId: uuid(),
     subjectType: text().notNull(),
     leaseId: uuid(),
+    /** M7: the notice a `notice` request acknowledges (the FK is in 0037_notices_security.sql). */
+    noticeId: uuid(),
+    /** M8: the move-in inspection a `move_in_report` request signs (the FK is in 0041). */
+    inspectionId: uuid(),
+    /** M7 (plan 4.5): `all_required` (M3, leases) or `any_one` (a company's signatories, LN-07). */
+    completionRule: text().notNull().default('all_required'),
+    /** M7 (decision 6): when set, every link of the request expires then, none is superseded. */
+    linksExpireAt: ts(),
     /** preparing (the PDF is rendering), pending, completed, declined, cancelled. */
     status: text().notNull().default('preparing'),
     renderRequestId: uuid(),
@@ -104,10 +112,37 @@ export const signingRequest = pgTable(
       foreignColumns: [document.companyId, document.id],
     }),
     index('signing_request_lease_idx').on(t.companyId, t.leaseId),
+    // One lease out for signature at a time; notices on the same lease are their own requests.
     uniqueIndex('signing_request_one_open')
       .on(t.companyId, t.leaseId)
-      .where(sql`${t.leaseId} is not null and ${t.status} in ('preparing', 'pending')`),
-    check('signing_request_subject_check', sql`${t.subjectType} in ('lease')`),
+      .where(
+        sql`${t.leaseId} is not null and ${t.status} in ('preparing', 'pending') and ${t.subjectType} = 'lease'`,
+      ),
+    // M8 review: one move-in report out for signature per lease at a time.
+    uniqueIndex('signing_request_one_live_move_in_report')
+      .on(t.companyId, t.leaseId)
+      .where(sql`${t.status} in ('preparing', 'pending') and ${t.subjectType} = 'move_in_report'`),
+    index('signing_request_notice_idx').on(t.companyId, t.noticeId),
+    check(
+      'signing_request_subject_check',
+      sql`${t.subjectType} in ('lease', 'notice', 'move_in_report')`,
+    ),
+    // M8 (plan 4.7): a move-in report names its inspection and lease; every party signs.
+    check(
+      'signing_request_move_in_check',
+      sql`(${t.subjectType} = 'move_in_report') = (${t.inspectionId} is not null) and (${t.subjectType} <> 'move_in_report' or (${t.leaseId} is not null and ${t.tenantId} is not null))`,
+    ),
+    uniqueIndex('signing_request_one_move_in_report')
+      .on(t.companyId, t.inspectionId)
+      .where(sql`${t.inspectionId} is not null and ${t.status} <> 'cancelled'`),
+    check(
+      'signing_request_notice_check',
+      sql`(${t.subjectType} = 'notice') = (${t.noticeId} is not null) and (${t.subjectType} <> 'notice' or ${t.tenantId} is not null)`,
+    ),
+    check(
+      'signing_request_completion_check',
+      sql`${t.completionRule} in ('all_required', 'any_one') and (${t.subjectType} = 'notice' or ${t.completionRule} = 'all_required')`,
+    ),
     check(
       'signing_request_lease_check',
       sql`${t.subjectType} <> 'lease' or (${t.leaseId} is not null and ${t.tenantId} is not null)`,
@@ -234,13 +269,25 @@ export const secureLink = pgTable(
     invoiceId: uuid(),
     /** A receipt link's receipt (M4b plan 4.6); the FK is in the M4b security migration. */
     receiptId: uuid(),
+    /** M8 (decision 6): a job sheet's job and artisan; the FKs are in 0041. */
+    jobId: uuid(),
+    artisanId: uuid(),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
     revokedAt: ts(),
     revokeReason: text(),
     firstOpenedAt: ts(),
+    /** M7 (plan 4.5): the first open's address and device, as evidence for that token. */
+    firstOpenIp: text(),
+    firstOpenUserAgent: text(),
     lastOpenedAt: ts(),
     openCount: integer().notNull().default(0),
     usedAt: ts(),
+    /**
+     * M8 review: a job sheet's wrong completion codes across all its codes, and the lock they set
+     * (five wrong codes lock the link for 30 minutes, as M3's signer lock).
+     */
+    failedCodeAttempts: integer().notNull().default(0),
+    codeLockedUntil: ts(),
     createdBy: uuid().references(() => person.id),
     createdAt: tsNow(),
   },
@@ -271,6 +318,13 @@ export const secureLink = pgTable(
       'secure_link_pay_check',
       sql`(${t.purpose} = 'pay') = (${t.invoiceId} is not null) and (${t.purpose} = 'receipt') = (${t.receiptId} is not null)`,
     ),
+    check(
+      'secure_link_job_sheet_check',
+      sql`(${t.purpose} = 'job_sheet') = (${t.jobId} is not null and ${t.artisanId} is not null)`,
+    ),
+    index('secure_link_job_idx')
+      .on(t.companyId, t.jobId)
+      .where(sql`${t.jobId} is not null`),
     index('secure_link_invoice_idx')
       .on(t.companyId, t.invoiceId)
       .where(sql`${t.invoiceId} is not null`),

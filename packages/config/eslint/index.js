@@ -49,8 +49,57 @@ export const MODULE_MAP = {
     'portfolio',
     'rules',
   ],
-  // M6 (decision 12): the maintenance stub in layer 6; M8 adds esign, tasks and approvals.
-  maintenance: ['tenancy', 'portfolio', 'documents', 'policy', 'audit', 'companies'],
+  // M7 (plan 4.1): staff tasks in layer 2; legal notices in layer 6, above billing (arrears from the
+  // ledger) and tenancy, signing on the e-sign engine and queueing messages through core.
+  tasks: ['policy', 'audit', 'identity'],
+  notices: [
+    'tasks',
+    'tenancy',
+    'esign',
+    'approvals',
+    'billing',
+    'rules',
+    'companies',
+    'policy',
+    'documents',
+    'audit',
+    'identity',
+    'portfolio',
+  ],
+  // M6 (decision 12): the maintenance stub in layer 6. M8 (decision 13): in-house work as tasks,
+  // job-sheet tokens and codes on the e-sign secrets, and expenses posted through the ledger (P15).
+  maintenance: [
+    'tenancy',
+    'portfolio',
+    'documents',
+    'policy',
+    'audit',
+    'companies',
+    'tasks',
+    'esign',
+    'ledger',
+    'identity',
+    'rules',
+  ],
+  // M8 (decision 13): move-in reports and the move-out settlement in layer 7, above billing, tax,
+  // approvals, e-sign and maintenance; it queues its messages through core.
+  moveout: [
+    'billing',
+    'tax',
+    'approvals',
+    'esign',
+    'ledger',
+    'maintenance',
+    'tenancy',
+    'documents',
+    'tasks',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+    'rules',
+  ],
   // M4a (plan 4.1): the ledger in layer 1 (it audits each entry), billing in layer 5.
   ledger: ['audit'],
   billing: [
@@ -85,6 +134,25 @@ export const MODULE_MAP = {
   // engine, and queues its messages through core.
   tax: [
     'billing',
+    'tenancy',
+    'ledger',
+    'approvals',
+    'documents',
+    'rules',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
+  ],
+  // M9 (plan 4.1): reporting in layer 8, above billing, tax and the modules whose records the
+  // dashboard, Gate 1 metrics and compliance list read (payments' receipts, notices, maintenance).
+  reporting: [
+    'billing',
+    'tax',
+    'payments',
+    'notices',
+    'maintenance',
     'tenancy',
     'ledger',
     'approvals',

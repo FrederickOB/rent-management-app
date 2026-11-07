@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { PEOPLE, signIn, unique } from './helpers';
 import { fixture } from './register-helpers';
-import { apiGet, cedis } from './tax-helpers';
+import { apiGet, cedis, fundLeaseOwner } from './tax-helpers';
 
 /**
  * AR-04 on the lease page (M5 plan 5.4 and 5.8, decision 6). In the seed, one lease ended early by
@@ -82,6 +82,10 @@ test.describe('AR-04 early termination', () => {
         await expect(card).toContainText('Nothing is left to refund.');
         return;
       }
+
+      // F3 setup (founder-approved, 2026-11-07): the owner's funding first, so the agency holds the
+      // refund for the owner before it is paid from the agency's account.
+      await fundLeaseOwner(page, waiting!.leaseId, settled.refundMinor);
 
       // Paid outside the platform (D1): recorded with the reference and the proof.
       const form = card.getByRole('form', { name: 'Record the refund as paid' });

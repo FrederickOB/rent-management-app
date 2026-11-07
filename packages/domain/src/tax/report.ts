@@ -10,6 +10,8 @@ import { DomainError } from '../errors';
 export const TAX_ITEM_KINDS = [
   'receipt',
   'carry_over',
+  // M8: rent a move-out settled from the deposit (P11), received then.
+  'deposit_applied',
   'withholding',
   'reversal',
   'withholding_offset',
@@ -40,7 +42,10 @@ export const TAX_ITEM_STATUS_LABELS: Record<TaxItemStatus, string> = {
  * never came and was written off (P24): the owner pays that tax after all.
  */
 export const isPayableKind = (kind: TaxItemKind, withholdingWrittenOff = false): boolean =>
-  kind === 'receipt' || kind === 'carry_over' || (kind === 'withholding' && withholdingWrittenOff);
+  kind === 'receipt' ||
+  kind === 'carry_over' ||
+  kind === 'deposit_applied' ||
+  (kind === 'withholding' && withholdingWrittenOff);
 
 /**
  * An item's status: a correction (a reversal or an offset) is itself only a correction; tax the

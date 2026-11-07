@@ -84,7 +84,7 @@ export type RentTaxItemView = z.infer<typeof rentTaxItemSchema>;
 export const rentTaxNotAssessedSchema = z.object({
   /** The P17 key it is assessed on: `P17:<payment>`, `P17:<carry-over>` or `P17:<withholding>`. */
   eventKey: z.string(),
-  event: z.enum(['receipt', 'carry_over', 'withholding']),
+  event: z.enum(['receipt', 'carry_over', 'deposit_applied', 'withholding']),
   leaseId: uuid,
   ownerId: uuid,
   unitCode: z.string(),
@@ -267,7 +267,7 @@ export const rentTaxContract = {
       method: 'POST',
       path: '/gra-payments',
       summary:
-        'Record rent tax paid to GRA with its receipt, settling items: oldest due first unless chosen (P18)',
+        'Record rent tax paid to GRA with its receipt, settling items: oldest due first unless chosen (P18). 409 INSUFFICIENT_AGENT_CASH when paid from the agency’s account beyond what it holds for the owner (record the owner’s funding first)',
     })
     .input(
       z.object({
@@ -639,7 +639,8 @@ export const vatContract = {
     .route({
       method: 'POST',
       path: '/vat-payments',
-      summary: 'Record VAT and levies paid to GRA with a return, and GRA’s receipt (P33)',
+      summary:
+        'Record VAT and levies paid to GRA with a return, and GRA’s receipt (P33). 409 INSUFFICIENT_AGENT_CASH when paid from the agency’s account beyond what it holds for the owner (record the owner’s funding first)',
     })
     .input(
       z.object({

@@ -3,20 +3,15 @@ import { Redirect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
-import {
-  formatTime,
-  leasesAre,
-  leaseStatusLabel,
-  leaseStatusTone,
-  rentLabel,
-  termLabel,
-} from '../src/format';
+import { formatTime, leaseStatusLabel, leaseStatusTone, rentLabel, termLabel } from '../src/format';
 import { conversationsForCache, loadConversations } from '../src/messages';
+import { loadRepairs } from '../src/repair-queue';
 import { toProblem } from '../src/problems';
 import { usePush } from '../src/push-context';
 import { landlordList, markPromptAnswered, promptAnswered } from '../src/push-prompt';
 import type { TurnOn } from '../src/push-registration';
 import { useSession } from '../src/session';
+import { toSignSummary } from '../src/signing-items';
 import { isBilled, TenancyMoney } from '../src/tenancy-money';
 import {
   Badge,
@@ -61,14 +56,17 @@ export default function Home() {
   const [moneyTick, setMoneyTick] = useState(0);
   const { reload: reloadTenancies } = tenancies;
   const { reload: reloadSigning } = signing;
+  const repairs = useCachedLoad('repairs', loadRepairs, Boolean(me));
   const { reload: reloadConversations } = conversations;
+  const { reload: reloadRepairs } = repairs;
   useReloadOnReturn(
     useCallback(() => {
       reloadTenancies();
       reloadSigning();
       reloadConversations();
+      reloadRepairs();
       setMoneyTick((tick) => tick + 1);
-    }, [reloadTenancies, reloadSigning, reloadConversations]),
+    }, [reloadTenancies, reloadSigning, reloadConversations, reloadRepairs]),
   );
   const newMessages =
     conversations.view.status === 'ready' &&
@@ -87,6 +85,13 @@ export default function Home() {
       />
       {me && tenancies.view.status === 'ready' ? <PushPrompt personId={me.personId} /> : null}
       <MessagesEntry newMessages={newMessages} onOpen={() => router.push('/messages')} />
+      <RepairsEntry
+        waiting={
+          repairs.view.status === 'ready' &&
+          repairs.view.data.some((group) => group.repairs.some((repair) => repair.awaitingResponse))
+        }
+        onOpen={() => router.push('/repairs')}
+      />
       <Button
         label="Payments and receipts"
         variant="quiet"
@@ -119,6 +124,25 @@ function MessagesEntry({ newMessages, onOpen }: { newMessages: boolean; onOpen: 
     >
       <Text style={styles.entryText}>Messages</Text>
       {newMessages ? <Badge label="New" tone="ok" testID="new-messages" /> : null}
+    </Pressable>
+  );
+}
+
+/**
+ * Repairs (MI-01, MI-06): the way in, marked when a repair's work is done and waits for the
+ * tenant to confirm it or say what is still wrong.
+ */
+function RepairsEntry({ waiting, onOpen }: { waiting: boolean; onOpen: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={waiting ? 'Repairs, waiting for you' : 'Repairs'}
+      testID="open-repairs"
+      onPress={onOpen}
+      style={({ pressed }) => [styles.entry, pressed && styles.pressed]}
+    >
+      <Text style={styles.entryText}>Repairs</Text>
+      {waiting ? <Badge label="Waiting for you" tone="waiting" testID="repairs-waiting" /> : null}
     </Pressable>
   );
 }
@@ -258,24 +282,21 @@ function ToSignEntry({
   if (state.status === 'error') {
     return state.problem.status === 401 ? null : (
       <Small testID="to-sign-error">
-        We could not check for leases to sign. {state.problem.message}
+        We could not check for anything to sign. {state.problem.message}
       </Small>
     );
   }
   const items = state.data;
   if (items.length === 0) return null;
-  const waiting = items.filter((i) => i.status === 'pending' && i.signer.status === 'pending');
+  // Leases to sign and notices to acknowledge (M7 plan 4.10).
+  const summary = toSignSummary(items);
   return (
-    <Card testID="to-sign-entry" label="To sign" highlight={waiting.length > 0}>
+    <Card testID="to-sign-entry" label="To sign" highlight={summary.waiting}>
       <Heading>To sign</Heading>
-      <Body>
-        {waiting.length > 0
-          ? `${leasesAre(waiting.length)} waiting for your signature.`
-          : 'You have signed. We are waiting for the others to sign.'}
-      </Body>
+      <Body>{summary.text}</Body>
       <Button
-        label={waiting.length > 0 ? 'Review and sign' : 'See who has signed'}
-        variant={waiting.length > 0 ? 'primary' : 'quiet'}
+        label={summary.action}
+        variant={summary.waiting ? 'primary' : 'quiet'}
         testID="open-to-sign"
         onPress={onOpen}
       />

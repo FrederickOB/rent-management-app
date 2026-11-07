@@ -1,7 +1,8 @@
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { clientFrom, isToken, openLink } from '../../../lib/links-api';
-import { CopyScreen, Explanation, SignScreen, Trouble } from './screens';
+import { readOnlyReason } from '../../../lib/notice';
+import { CopyScreen, Explanation, NoticeReadOnly, SignScreen, Trouble } from './screens';
 
 /**
  * A secure link (CLAUDE.md section 9; M3 plan 4.8): the signing page, the signed-copy page, or
@@ -30,6 +31,8 @@ export default async function SecureLinkPage({
     return <Trouble busy={result.status === 429} />;
   }
   const page = result.value;
+  // A notice that was corrected or closed opens read-only, whatever else the link says (M7).
+  if (readOnlyReason(page)) return <NoticeReadOnly token={token} page={page} />;
   switch (page.screen) {
     case 'sign':
       return <SignScreen token={token} page={page} query={query} />;

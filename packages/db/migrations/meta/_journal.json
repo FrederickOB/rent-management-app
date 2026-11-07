@@ -253,6 +253,153 @@
       "when": 1793803723603,
       "tag": "0035_messaging_review_security",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1793811011021,
+      "tag": "0036_notices",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1793811026133,
+      "tag": "0037_notices_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1793819025411,
+      "tag": "0038_notices_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1793819042784,
+      "tag": "0039_notices_review_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1793894588640,
+      "tag": "0040_maintenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1793894604811,
+      "tag": "0041_maintenance_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1793910837483,
+      "tag": "0042_tenant_repair_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1793913165558,
+      "tag": "0043_closed_move_out_statement",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1793921816580,
+      "tag": "0044_review_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1793921828390,
+      "tag": "0045_review_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1793924661132,
+      "tag": "0046_statement_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1793929448785,
+      "tag": "0047_reporting",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1793929494359,
+      "tag": "0048_reporting_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1793954183711,
+      "tag": "0049_reporting_platform",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1793959671484,
+      "tag": "0050_management_fee",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1793959682920,
+      "tag": "0051_management_fee_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1793965598208,
+      "tag": "0052_vat_return_due",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1793973619067,
+      "tag": "0053_review_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1793973620412,
+      "tag": "0054_review_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1793973621883,
+      "tag": "0055_statement_locks",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1793973623292,
+      "tag": "0056_gate1_final",
+      "breakpoints": true
     }
   ]
 }

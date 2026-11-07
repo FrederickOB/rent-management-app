@@ -10,6 +10,7 @@ import { PostingService } from '../ledger/posting.service';
 import { leaseIdsIn, renewedLeaseOf, startedRenewalIds } from '../tenancy/billing-facts';
 import { BillingEngine, type LeaseState } from './engine';
 import { isoNow, leaseGroup, lockCounters, lockLeases } from './records';
+import { conflict } from '../core/errors';
 
 /** Lease states the daily invoice run bills (plan 4.4). */
 const BILLED_STATES = ['signed', 'active', 'ending', 'holding_over'] as const;
@@ -20,6 +21,9 @@ const BILLED_STATES = ['signed', 'active', 'ending', 'holding_over'] as const;
  * started, ended, cancelled). Each lease is worked in its own transaction under its billing lock,
  * and every effect is keyed, so a rerun or a replayed event changes nothing.
  */
+/** The posting service's refusal while an owner statement is being issued (M9 review). */
+const STATEMENT_ISSUING = 'statement_issuing';
+
 @Injectable()
 export class InvoicingService {
   constructor(
@@ -34,6 +38,11 @@ export class InvoicingService {
    * Runs one lease's part of a daily run in its own transaction. A lease that fails raises an
    * alert (its id and the error's code, nothing personal) and the run carries on; it is tried
    * again by the next run, and leases that succeeded are never redone (review 7).
+   *
+   * A lease whose owner's statement was being issued at that moment (409 `statement_issuing`,
+   * M9 review) is not a failure: the run finishes the other leases, then throws that conflict,
+   * so the job is retried with its backoff and the lease posted in the open month. Leases already
+   * done are no-ops on the retry (each posting is keyed).
    */
   private async eachLease(
     companyId: string,
@@ -42,6 +51,7 @@ export class InvoicingService {
     run: (id: string) => Promise<number>,
   ): Promise<number> {
     let done = 0;
+    let issuing = 0;
     for (const id of ids)
       try {
         done += await run(id);
@@ -51,6 +61,10 @@ export class InvoicingService {
           typeof (error as { code?: unknown }).code === 'string'
             ? (error as { code: string }).code
             : 'unexpected';
+        if (code === STATEMENT_ISSUING) {
+          issuing += 1;
+          continue;
+        }
         await this.alerts
           ?.raise({
             severity: 'critical',
@@ -60,6 +74,11 @@ export class InvoicingService {
           })
           .catch(() => undefined);
       }
+    if (issuing > 0)
+      throw conflict(
+        STATEMENT_ISSUING,
+        `${issuing} lease(s) met an owner statement being issued; the run is retried`,
+      );
     return done;
   }
 
@@ -153,10 +172,13 @@ export class InvoicingService {
       async (tx, state) => {
         await this.engine.ensureReference(tx, state.lease);
         if (state.book.kind !== 'book') return;
-        const carried = state.lease.renewsLeaseId
-          ? await this.engine.depositHeld(tx, state.lease.renewsLeaseId)
-          : 0;
-        await this.engine.issueDeposit(tx, state, carried, today);
+        // What the old lease holds, plus anything P29 already carried (M9 review #7).
+        await this.engine.issueDeposit(
+          tx,
+          state,
+          await this.engine.carriedDeposit(tx, state),
+          today,
+        );
         await this.engine.generate(tx, state, today);
         await this.engine.accrue(tx, state, today);
       },
@@ -189,6 +211,22 @@ export class InvoicingService {
         return this.creditAll(tx, state, linesAfterEnd(state.lines, lastDay), reason, today);
       },
       requestId,
+    );
+  }
+
+  /**
+   * M8 (plan 4.8): `lease.ended`'s work in the caller's transaction, so a move-out settlement sees
+   * the lines after the last day already credited. The `lease.ended` job then finds nothing left.
+   */
+  async creditAfterEndIn(tx: Tx, state: LeaseState, today: string): Promise<number> {
+    const lastDay = state.lease.moveOutDate ?? state.lease.endedOn;
+    if (!lastDay || state.book.kind !== 'book') return 0;
+    return this.creditAll(
+      tx,
+      state,
+      linesAfterEnd(state.lines, lastDay),
+      `The lease ended on ${formatBusinessDate(lastDay)}`,
+      today,
     );
   }
 

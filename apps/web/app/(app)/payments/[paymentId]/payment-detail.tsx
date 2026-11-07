@@ -43,6 +43,7 @@ import {
 } from '@/lib/idempotency';
 import { useHoldWhileSending } from '@/lib/in-flight';
 import { waitingNote } from '@/lib/money-requests';
+import { MOVE_OUT_REFUSAL_TEXT, moveOutRefusal } from '@/lib/move-out';
 import { CORRECTION_REASON_MIN, reversalForm, type ReversalDraft } from '@/lib/payment-form';
 import { formatMinor } from '@/lib/tenancy-format';
 import { queueOwnerOf } from '@/lib/unmatched-queue';
@@ -439,6 +440,7 @@ function ReversalForm({
   const [error, setError] = useState<string | null>(null);
   // An earlier attempt reached the API with other details: offer a fresh start, never a retry.
   const [reused, setReused] = useState(false);
+  const [depositSettled, setDepositSettled] = useState(false);
   const parsed = reversalForm(draft, payment.id, options);
   const errors = tried ? parsed.errors : {};
   useHoldWhileSending(pending);
@@ -467,7 +469,10 @@ function ReversalForm({
       );
       await onDone(`Asked to reverse this payment. ${waitingNote(approval, timeZone)}`);
     } catch (failure) {
-      setError(moneyProblem(failure));
+      // M8: a move-out has already used this payment's deposit, so it is not reversed here.
+      const settled = moveOutRefusal(failure) === 'payment_deposit_settled';
+      setDepositSettled(settled);
+      setError(settled ? MOVE_OUT_REFUSAL_TEXT.payment_deposit_settled : moneyProblem(failure));
       setReused(isKeyReused(failure));
       setPending(false);
     }
@@ -484,7 +489,22 @@ function ReversalForm({
         Every line it paid becomes owed again, and its credit goes. The receipt stays, and a credit
         receipt is issued. A second person must approve it.
       </p>
-      {error ? <Alert tone="error">{error}</Alert> : null}
+      {error ? (
+        <Alert tone="error">
+          <span data-testid={depositSettled ? 'payment-deposit-settled' : undefined}>{error}</span>
+          {depositSettled && payment.leaseId ? (
+            <>
+              {' '}
+              <Link
+                href={`/leases/${payment.leaseId}/move-out`}
+                className="font-medium underline underline-offset-2"
+              >
+                Open the move-out
+              </Link>
+            </>
+          ) : null}
+        </Alert>
+      ) : null}
       <SelectField
         label="Why"
         value={draft.reason}

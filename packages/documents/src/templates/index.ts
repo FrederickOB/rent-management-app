@@ -18,7 +18,13 @@ export {
   type ReceiptDocumentData,
 } from './billing';
 export { leaseV1, type LeaseDocumentData } from './lease';
-export { signingCertificateV1, type SigningCertificateData } from './signing-certificate';
+export { noticeV1, servicePackV1, type NoticeDocumentData, type ServicePackData } from './notice';
+export {
+  signingCertificateV1,
+  signingCertificateV2,
+  type SigningCertificateData,
+  type SigningCertificateV2Data,
+} from './signing-certificate';
 export { systemSampleV1, type SystemSampleData } from './system-sample';
 export {
   rentTaxReportV1,
@@ -26,3 +32,17 @@ export {
   type RentTaxReportData,
   type RentTaxReportV2Data,
 } from './tax';
+export {
+  finalStatementV1,
+  moveInReportV1,
+  type FinalStatementDocumentData,
+  type MoveInReportDocumentData,
+} from './moveout';
+export { dashboardV1, type DashboardDocumentData } from './reporting-dashboard';
+export {
+  dashboardV2,
+  DASHBOARD_LIVE_FIGURES,
+  DASHBOARD_SNAPSHOT_FIGURES,
+  type DashboardDocumentDataV2,
+} from './reporting-dashboard';
+export { ownerStatementV1, type OwnerStatementDocumentData } from './reporting-statement';

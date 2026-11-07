@@ -2,6 +2,7 @@ import { tryNormalisePhone } from '@rent/domain/phone';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { authClient } from '../src/auth-client';
+import { clearDroppedRepairs, droppedRepairs } from '../src/repair-dropped';
 import { useSession } from '../src/session';
 import { Body, Button, ErrorText, Field, Notice, Screen } from '../src/ui';
 
@@ -16,6 +17,9 @@ export default function SignIn() {
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Requests a session's end removed from the phone (M8 review LT 9): said here, once signed in
+  // no more.
+  const dropped = droppedRepairs();
 
   async function sendCode() {
     setError(null);
@@ -60,6 +64,7 @@ export default function SignIn() {
       return;
     }
     await refresh();
+    clearDroppedRepairs();
     setBusy(false);
     router.replace('/home');
   }
@@ -69,6 +74,13 @@ export default function SignIn() {
       <Screen title="Sign in">
         {ended ? (
           <Notice testID="session-ended">Your session has ended. Sign in again to continue.</Notice>
+        ) : null}
+        {dropped > 0 ? (
+          <Notice testID="repairs-dropped">
+            {dropped === 1
+              ? 'The repair request you had not sent yet was removed from this phone when your session ended. Write it again after you sign in.'
+              : `The ${dropped} repair requests you had not sent yet were removed from this phone when your session ended. Write them again after you sign in.`}
+          </Notice>
         ) : null}
         <Body>
           Enter the phone number your landlord has on record. We will text you a 6-digit code.

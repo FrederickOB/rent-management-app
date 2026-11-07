@@ -535,6 +535,51 @@ export class RentTaxService implements TaxHooks {
     return Math.max(0, credit.amountMinor - excess);
   }
 
+  /**
+   * M8 (P11, plan 4.8): rent a move-out settled from the deposit is rent received then, so it is
+   * taxed as a carry-over is: the rent the walk now covers, within what the deposit paid towards
+   * rent (and service charge while it is taxed). One key per settlement, `P17:P11:<move-out>`.
+   */
+  async afterDepositApplied(
+    tx: Tx,
+    state: LeaseState,
+    applied: {
+      readonly moveOutId: string;
+      readonly valueDate: string;
+      /** The deposit's draw on rent lines, and on service charge lines. */
+      readonly rentMinor: number;
+      readonly serviceChargeMinor: number;
+    },
+  ): Promise<void> {
+    const key = `P17:P11:${applied.moveOutId}`;
+    const a = await this.assessment(tx, state, applied.valueDate);
+    if (a.kind === 'not_per_receipt') return;
+    const cap =
+      applied.rentMinor +
+      (a.kind === 'assess' && !a.rules.includesServiceCharge ? 0 : applied.serviceChargeMinor);
+    if (cap <= 0) return;
+    if (a.kind === 'not_assessed') {
+      await this.notAssessed(tx, state, a, {
+        event: 'deposit_applied',
+        eventKey: key,
+        paymentId: null,
+        withholdingId: null,
+        valueDate: applied.valueDate,
+        capMinor: cap,
+        released: [],
+      });
+      return;
+    }
+    await this.assessCarryOver(tx, state, {
+      key,
+      paymentId: null,
+      valueDate: applied.valueDate,
+      capMinor: cap,
+      rules: a.rules,
+      kind: 'deposit_applied',
+    });
+  }
+
   /** P17 on credit carried to a renewal and applied to its rent, within the credit carried. */
   async assessCarryOver(
     tx: Tx,
@@ -545,6 +590,8 @@ export class RentTaxService implements TaxHooks {
       readonly valueDate: string;
       readonly capMinor: number;
       readonly rules: RentTaxRuleSet;
+      /** M8: the same assessment for rent the deposit settled at move-out. */
+      readonly kind?: 'carry_over' | 'deposit_applied';
     },
   ): Promise<string | null> {
     const periods = await this.periods(tx, to);
@@ -553,7 +600,7 @@ export class RentTaxService implements TaxHooks {
     const tax = receiptTax(pins, periods, input.rules.rateBps);
     const lineOf = this.lineOfPeriod(to);
     return this.writeItem(tx, to, {
-      kind: 'carry_over',
+      kind: input.kind ?? 'carry_over',
       rule: 'P17',
       key: input.key,
       paymentId: input.paymentId,

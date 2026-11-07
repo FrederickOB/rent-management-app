@@ -1,5 +1,15 @@
 import type { SigningPage } from '../../../lib/links-api';
+import {
+  canDecline,
+  noticeHeading,
+  noticeOf,
+  readOnlyBanner,
+  statementOf,
+  type Notice,
+} from '../../../lib/notice';
+import { day } from '../../../lib/pay';
 import { problemText } from '../../../lib/problems';
+import { sanitiseDocumentHtml } from '../../../lib/sanitize';
 import { DrawPad } from './draw-pad';
 
 type Query = Readonly<Record<string, string | undefined>>;
@@ -42,6 +52,131 @@ function Contact({ page }: { page: SigningPage }) {
   );
 }
 
+/** What a notice is: its number, type, when it was issued and its date (M7 plan 4.5). */
+function NoticeFacts({ notice, timeZone }: { notice: Notice; timeZone: string }) {
+  return (
+    <dl className="facts" aria-label="The notice">
+      <div>
+        <dt>Notice</dt>
+        <dd>{notice.number}</dd>
+      </div>
+      <div>
+        <dt>Type</dt>
+        <dd>{notice.typeLabel}</dd>
+      </div>
+      <div>
+        <dt>Issued</dt>
+        <dd>{when(notice.issuedAt, timeZone)}</dd>
+      </div>
+      {notice.effectiveDate ? (
+        <div>
+          <dt>Effective date</dt>
+          <dd>{day(notice.effectiveDate)}</dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
+/** For a company tenant: another authorised signatory has acknowledged for the company (LN-07). */
+function AcknowledgedByAnother({ notice }: { notice: Notice | null }) {
+  if (!notice?.acknowledgedByAnother) return null;
+  return (
+    <p className="panel done" role="status">
+      Someone else has already acknowledged this notice for your company.
+    </p>
+  );
+}
+
+/** The notice's PDF and its fingerprint, while the link may download it. */
+function NoticeDownload({ token, page }: { token: string; page: SigningPage }) {
+  if (!page.document.downloadable) return null;
+  return (
+    <p>
+      <a href={`/l/${token}/document`}>Download the notice (PDF)</a>
+      <br />
+      <span className="small">
+        Its fingerprint (SHA-256): <code className="hash">{page.document.sha256}</code>
+      </span>
+    </p>
+  );
+}
+
+/**
+ * A notice that was corrected by a later one, or closed (M7 plan 4.8): read-only, with a banner
+ * naming the new notice where there is one. It still opens, and its PDF still downloads.
+ */
+export function NoticeReadOnly({ token, page }: { token: string; page: SigningPage }) {
+  const notice = noticeOf(page);
+  return (
+    <>
+      <h1>{noticeHeading(page)}</h1>
+      <p className="panel notice" role="status">
+        {readOnlyBanner(page)}
+      </p>
+      {notice ? <NoticeFacts notice={notice} timeZone={page.timeZone} /> : null}
+      {page.document.html ? (
+        <article
+          className="document"
+          aria-label="The notice"
+          dangerouslySetInnerHTML={{ __html: sanitiseDocumentHtml(page.document.html) }}
+        />
+      ) : null}
+      <NoticeDownload token={token} page={page} />
+      <Contact page={page} />
+    </>
+  );
+}
+
+/** A notice's link that no longer signs: acknowledged, expired, or acknowledged by another. */
+function NoticeExplanation({
+  token,
+  page,
+  notice,
+  done,
+}: {
+  token: string;
+  page: SigningPage;
+  notice: Notice;
+  done?: string | undefined;
+}) {
+  let heading: string;
+  let body: string;
+  switch (page.screen) {
+    case 'signed':
+      heading =
+        done === 'signed'
+          ? 'Thank you: you have acknowledged receipt'
+          : 'You have already acknowledged receipt';
+      body = `You acknowledged notice ${notice.number}${page.signer.signedAt ? ` on ${when(page.signer.signedAt, page.timeZone)}` : ''}. This confirms that you received it, not that you agree with it.`;
+      break;
+    case 'expired':
+      heading = 'This link has expired';
+      body = `Links to a notice work until its notice period ends. Ask ${page.landlord.name} for a copy of notice ${notice.number}.`;
+      break;
+    case 'revoked':
+      heading = 'This link no longer works';
+      body = `Ask ${page.landlord.name} for a copy of notice ${notice.number}.`;
+      break;
+    default:
+      heading = 'This notice no longer needs your signature';
+      body = notice.acknowledgedByAnother
+        ? `Someone else has already acknowledged notice ${notice.number} for your company.`
+        : `Notice ${notice.number} no longer needs your signature.`;
+  }
+  return (
+    <>
+      <h1>{heading}</h1>
+      <p className={done ? 'panel done' : undefined}>{body}</p>
+      <NoticeFacts notice={notice} timeZone={page.timeZone} />
+      {page.screen === 'expired' || page.screen === 'revoked' ? null : (
+        <NoticeDownload token={token} page={page} />
+      )}
+      <Contact page={page} />
+    </>
+  );
+}
+
 function Signers({ page }: { page: SigningPage }) {
   return (
     <ul className="signers">
@@ -75,6 +210,8 @@ export function Explanation({
   page: SigningPage;
   done?: string | undefined;
 }) {
+  const notice = noticeOf(page);
+  if (notice) return <NoticeExplanation token={token} page={page} notice={notice} done={done} />;
   const { title } = page.document;
   let heading: string;
   let body: string;
@@ -139,6 +276,30 @@ export function Explanation({
 
 /** The signed-copy page: everyone has signed; download the copy with its certificate. */
 export function CopyScreen({ token, page }: { token: string; page: SigningPage }) {
+  const notice = noticeOf(page);
+  if (notice)
+    return (
+      <>
+        <h1>Your signed acknowledgement is ready</h1>
+        <p>
+          It is notice {notice.number} with a certificate page that records your acknowledgement:
+          that you received the notice, not that you agree with it.
+        </p>
+        <p>
+          <a className="button" href={`/l/${token}/document`}>
+            Download the signed acknowledgement (PDF)
+          </a>
+        </p>
+        <p className="small">
+          Fingerprint of the signed acknowledgement (SHA-256):{' '}
+          <code className="hash">{page.document.finalSha256}</code>
+        </p>
+        <p className="small">
+          Fingerprint of the notice (SHA-256): <code className="hash">{page.document.sha256}</code>
+        </p>
+        <Contact page={page} />
+      </>
+    );
   return (
     <>
       <h1>Your signed copy is ready</h1>
@@ -164,7 +325,11 @@ export function CopyScreen({ token, page }: { token: string; page: SigningPage }
   );
 }
 
-/** The signing page (plan 4.8): the document, then the code, the signature and consent. */
+/**
+ * The signing page (plan 4.8): the document, then the code, the signature and consent. For a
+ * notice (M7 plan 4.5): what the notice is, the statement that signing acknowledges receipt, not
+ * agreement, above the signature box, and no way to decline.
+ */
 export function SignScreen({
   token,
   page,
@@ -178,18 +343,32 @@ export function SignScreen({
   const code = page.code!;
   const locked = code.lockedUntil !== null;
   const draw = query.draw === '1';
-  const declining = query.step === 'decline';
+  const notice = noticeOf(page);
+  const declinable = canDecline(page);
+  const declining = declinable && query.step === 'decline';
   const base = `/l/${token}`;
   return (
     <>
-      <p className="panel notice">
-        {page.landlord.name} asks you, {page.signer.name}, to sign this document as{' '}
-        {page.signer.roleLabel.toLowerCase()}. Read it, then <a href="#sign">sign at the end</a>.
-      </p>
+      {notice ? (
+        <>
+          <h1>{noticeHeading(page)}</h1>
+          <p className="panel notice">
+            {page.landlord.name} has sent you, {page.signer.name}, this notice. Read it, then{' '}
+            <a href="#sign">acknowledge at the end</a> that you received it.
+          </p>
+          <NoticeFacts notice={notice} timeZone={page.timeZone} />
+          <AcknowledgedByAnother notice={notice} />
+        </>
+      ) : (
+        <p className="panel notice">
+          {page.landlord.name} asks you, {page.signer.name}, to sign this document as{' '}
+          {page.signer.roleLabel.toLowerCase()}. Read it, then <a href="#sign">sign at the end</a>.
+        </p>
+      )}
       <article
         className="document"
-        aria-label="The document"
-        dangerouslySetInnerHTML={{ __html: page.document.html ?? '' }}
+        aria-label={notice ? 'The notice' : 'The document'}
+        dangerouslySetInnerHTML={{ __html: sanitiseDocumentHtml(page.document.html) }}
       />
       <p>
         <a href={`${base}/document`}>Download the PDF</a>
@@ -200,8 +379,16 @@ export function SignScreen({
       </p>
 
       <section id="sign" aria-labelledby="sign-heading">
-        <h2 id="sign-heading">{declining ? 'Decline to sign' : 'Sign'}</h2>
-        <Signers page={page} />
+        <h2 id="sign-heading">
+          {notice ? 'Acknowledge receipt' : declining ? 'Decline to sign' : 'Sign'}
+        </h2>
+        {notice ? (
+          <p className="panel notice" id="statement">
+            <strong>{statementOf(notice)}</strong>
+          </p>
+        ) : (
+          <Signers page={page} />
+        )}
         {problem ? (
           <p className="panel problem" role="alert">
             {problem}
@@ -284,7 +471,7 @@ export function SignScreen({
                 <input type="checkbox" name="consent" value="yes" required />
                 <span>{page.consent?.text}</span>
               </label>
-              <button type="submit">Sign</button>
+              <button type="submit">{notice ? 'Sign to acknowledge receipt' : 'Sign'}</button>
             </form>
             <form method="post" action={`${base}/code`}>
               <button className="secondary" type="submit" disabled={code.sendsLeft === 0}>
@@ -293,11 +480,11 @@ export function SignScreen({
             </form>
           </>
         )}
-        {declining ? null : (
+        {declinable && !declining ? (
           <p className="small">
             <a href={`${base}?step=decline#sign`}>I do not want to sign</a>
           </p>
-        )}
+        ) : null}
       </section>
       <Contact page={page} />
     </>

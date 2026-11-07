@@ -19,12 +19,26 @@ export interface Cached<T> {
 
 const keyFor = (personId: string, name: string) => `${PREFIX}:${personId}:${name}`;
 
-/** Anything shaped like a link: a scheme, or a secure-link path. */
-const LINK = /:\/\/|\/[lp]\/[A-Za-z0-9_-]{43}/;
+/**
+ * Anything shaped like a link: a scheme, or a secure-link path (signing, pay, receipt,
+ * unsubscribe, and from M8 the artisan's job sheet).
+ */
+const LINK = /:\/\/|\/[lpruj]\/[A-Za-z0-9_-]{43}/;
 
 /** Whether a value may be cached: never one that holds a link or a token. */
 export function cacheable(json: string): boolean {
   return !LINK.test(json);
+}
+
+/**
+ * Text the tenant wrote, with any link taken out, so it can be cached (M8 review LT 9): an address
+ * (`scheme://…`) and a link token path each become `[link]`.
+ */
+export function withoutLinks(text: string): string {
+  return text
+    .replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\/\S*/g, '[link]')
+    .replace(/:\/\//g, ': //')
+    .replace(/\/([lpruj])\/[A-Za-z0-9_-]{43}/g, '/$1/[link]');
 }
 
 export async function readCache<T>(personId: string, name: string): Promise<Cached<T> | null> {

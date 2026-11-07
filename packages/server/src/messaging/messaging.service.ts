@@ -86,6 +86,8 @@ import {
 /** Sends per channel before the next consented channel is tried (plan 4.17). */
 export const SENDS_PER_CHANNEL = 5;
 export const MESSAGE_NOT_SENT_EVENT = 'messaging.not_sent';
+/** M7: delivery reports on notice messages, for the notices module (plan 4.12). */
+export const NOTICE_DELIVERY_STATUS_JOB = 'notices.delivery-status';
 /** Unsubscribe links in email stay open this long (M6 decision 7; a product choice, not law). */
 const UNSUBSCRIBE_DAYS = 365;
 
@@ -107,7 +109,13 @@ export interface Reach {
 
 /** Finds a recipient's addresses and consent inside the send job's company transaction. */
 export interface RecipientResolver {
-  reach(tx: Tx, companyId: string, recipient: MessageRecipient): Promise<Reach | null>;
+  /** M8: the purpose too, for channels kept to one purpose (staff WhatsApp for emergency alerts). */
+  reach(
+    tx: Tx,
+    companyId: string,
+    recipient: MessageRecipient,
+    purpose?: MessageRequest['purpose'],
+  ): Promise<Reach | null>;
 }
 
 /**
@@ -271,7 +279,18 @@ export class MessagingService {
       ),
     );
     const now = instantFrom(this.now());
-    const reachOf = (channel: ConsentChannel): ChannelReach => this.channelReach(prepared, channel);
+    const reachOf = (channel: ConsentChannel): ChannelReach => {
+      const reach = this.channelReach(prepared, channel);
+      // M7 (decision 4): on the electronic-service clause the clause is the consent, for the one
+      // channel listed; an opt-out there still withholds it (decision 5; CLAUDE.md section 8).
+      if (
+        request.serviceClause &&
+        request.channels.includes(channel) &&
+        reach.consent.latest?.action !== 'withdraw'
+      )
+        return { ...reach, consent: GRANTED };
+      return reach;
+    };
 
     let channel: InboundChannel | 'push';
     let whatsapp: WhatsAppContent | null;
@@ -356,7 +375,9 @@ export class MessagingService {
 
   private async prepare(tx: Tx, companyId: string, request: MessageRequest): Promise<Prepared> {
     const resolver = this.recipients.get(request.recipient.type);
-    const reach = resolver ? await resolver.reach(tx, companyId, request.recipient) : null;
+    const reach = resolver
+      ? await resolver.reach(tx, companyId, request.recipient, request.purpose)
+      : null;
     await this.record(tx, companyId, request, reach);
     const events = await tx
       .select()
@@ -465,7 +486,9 @@ export class MessagingService {
     },
   ): Promise<ConsentChannel[]> {
     const resolver = this.recipients.get(input.recipient.type);
-    const reach = resolver ? await resolver.reach(tx, companyId, input.recipient) : null;
+    const reach = resolver
+      ? await resolver.reach(tx, companyId, input.recipient, input.purpose)
+      : null;
     if (!reach) return [];
     const prepared = await this.gather(
       tx,
@@ -925,6 +948,37 @@ export class MessagingService {
     return true;
   }
 
+  /**
+   * M7 (plan 4.6 and 4.12): a delivery report on a message about a notice goes to the notices
+   * module, which records the confirming channel (`notices.delivery-status`, by event id).
+   */
+  async reportToRelated(
+    tx: Tx,
+    companyId: string,
+    messageId: string,
+    eventId: string,
+    report: { readonly status: string; readonly channel: string | null },
+  ): Promise<void> {
+    const [m] = await tx
+      .select({ relatedType: schema.message.relatedType, relatedId: schema.message.relatedId })
+      .from(schema.message)
+      .where(eq(schema.message.id, messageId));
+    if (m?.relatedType !== 'notice_recipient' || !m.relatedId) return;
+    await enqueueOutbox(tx, {
+      companyId,
+      type: NOTICE_DELIVERY_STATUS_JOB,
+      payload: {
+        recipientId: m.relatedId,
+        messageId,
+        eventId,
+        status: report.status,
+        channel: report.channel,
+        at: this.now().toISOString(),
+      },
+      idempotencyKey: `${NOTICE_DELIVERY_STATUS_JOB}:${eventId}`,
+    });
+  }
+
   /** The latest status of each message, for timelines and signing progress. */
   async statuses(
     tx: Tx,
@@ -974,6 +1028,7 @@ export class MessagingService {
         staffPersonId: staffPersonOf(r),
         signerId: signerOf(r),
         ownerId: 'ownerId' in r ? r.ownerId : null,
+        artisanId: 'artisanId' in r ? r.artisanId : null,
         purpose: request.purpose,
         subject: request.subject,
         body: storedBody(request.body),
@@ -1150,6 +1205,8 @@ function recipientOf(m: typeof schema.message.$inferSelect): MessageRecipient | 
       return m.signerId ? { type: 'signer', signerId: m.signerId } : null;
     case 'owner':
       return m.ownerId ? { type: 'owner', ownerId: m.ownerId } : null;
+    case 'artisan':
+      return m.artisanId ? { type: 'artisan', artisanId: m.artisanId } : null;
     default:
       return null;
   }

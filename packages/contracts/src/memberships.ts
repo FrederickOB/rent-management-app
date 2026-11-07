@@ -28,6 +28,11 @@ export const membershipSchema = z.object({
   status: z.enum(['invited', 'active', 'revoked']),
   nominatedApprover: z.boolean(),
   scope: scopeSchema,
+  /**
+   * M8 (decision 5): the person agreed to emergency alerts on WhatsApp. SMS alerts go to staff
+   * phones anyway. Always sent; optional for clients written before M8.
+   */
+  whatsappConsent: z.boolean().optional(),
   createdAt: z.string().datetime(),
 });
 
@@ -55,6 +60,8 @@ export const membershipsContract = {
           phone: z.string().trim().min(7).max(20).optional(),
           role: z.enum(STAFF_ROLES),
           nominatedApprover: z.boolean().optional(),
+          /** M8 (decision 5): they agreed to emergency alerts on WhatsApp (recorded as consent). */
+          whatsappConsent: z.boolean().optional(),
         })
         .refine((v) => (requiresPasswordAndTotp(v.role) ? Boolean(v.email) : Boolean(v.phone)), {
           message: 'Caretakers need a phone number; everyone else needs an email address',
@@ -75,6 +82,15 @@ export const membershipsContract = {
         nominatedApprover: z.boolean().optional(),
       }),
     )
+    .output(membershipSchema),
+  whatsappConsent: oc
+    .route({
+      method: 'POST',
+      path: '/memberships/{membershipId}/whatsapp-consent',
+      summary:
+        'Record that a staff member agreed to, or withdrew from, emergency alerts on WhatsApp (decision 5; a consent record, as tenants have)',
+    })
+    .input(z.object({ membershipId: z.string().uuid(), granted: z.boolean() }))
     .output(membershipSchema),
   revoke: oc
     .route({

@@ -127,9 +127,9 @@ flowchart TB
 | `billing` | 3 | Invoices, allocation, period accrual, prepayments, deposits, cash records and banking, arrears, reminders, paid-until, refunds (BC-01, BC-05, BC-07 to BC-11, BC-13, AR-01 to AR-04, AR-06) | tenancy, ledger, approvals, rules, documents, policy, audit, companies (owner facts, settings), portfolio (a property's owner on a date), identity (collector names, memberships) |
 | `payments` | 3 | Providers, pay links, webhooks, verification, matching, unmatched queue, receipts, reconciliation (BC-02 to BC-04, BC-06, BC-12, BC-14) | billing, ledger, companies, documents |
 | `tax` | 8 | Rent tax per receipt, due dates, GRA payments, withholding tax (TX-01 to TX-07) | billing, ledger, rules, documents |
-| `maintenance` | 6 | Jobs, priorities, assignment, artisan job sheets, inspections (MI-01 to MI-12). M6 stub: `maintenance_job` in its reported state, a ticket number per company and the media attached (CM-04, M6 decision 12) | tenancy, portfolio, documents, policy, audit, companies in M6; esign, tasks and approvals from M8 |
+| `maintenance` | 6 | Jobs, priorities, assignment, artisan job sheets, inspections (MI-01 to MI-12). M6 stub: `maintenance_job` in its reported state, a ticket number per company and the media attached (CM-04, M6 decision 12) | tenancy, portfolio, documents, policy, audit, companies in M6; from M8 tasks (in-house work), esign (job-sheet tokens and codes), ledger (expenses, P15), identity and rules. M8 adds expenses (AC-03) here |
 | `notices` | 4 | Templates, effective dates, issue, tracking, ladder, escalation, service records (LN-01 to LN-10) | tenancy, esign, approvals, rules, documents, tasks, billing |
-| `moveout` | 2, 6 | Move-in report signing and move-out: notice, inspection, deductions, final statement, refund (TL-08, TL-11, MI-11) | tenancy, maintenance, billing, approvals |
+| `moveout` | 2, 6 | Move-in report signing and move-out: notice, inspection, deductions, final statement, refund (TL-08, TL-11, MI-11) | tenancy, maintenance, billing, approvals, tax (P17 on P11), esign, ledger, documents, tasks, policy, audit, companies, portfolio, identity, rules (M8) |
 | `messaging` | 5 | Channels, inbox, menu bot, templates, consent, broadcasts, push (CM-01 to CM-12) | tenancy, esign, companies, identity (staff addresses), audit, policy in M3; billing (the bot's figures), documents, maintenance (repairs, CM-04), portfolio (units and blocks) and rules from M6. Payments registers its pay and receipt links with messaging (M4b), so messaging never imports payments |
 | `reporting` | 8, 13 | Fees, expenses, owner statements, remittances, dashboards, Gate 1 metrics (AC-02 to AC-08, DA-01 to DA-06) | ledger, billing, tax, portfolio, tenancy, maintenance, notices |
 | `subscription` | 14, section 21 | Plans, rate cards, snapshots, platform invoices, entitlements, dunning (AD-08, PB-01 to PB-11) | tenancy, ledger, payments, companies |
@@ -653,12 +653,21 @@ Office let at GH₵10,000 a month by an individual owner, managed by an agency a
 
 Result: income GH₵10,000; rent tax GH₵1,500, settled by the withholding; fee GH₵1,000; provider fee F; the owner received GH₵7,500 − F. Every account except 1010 and the income and expense accounts is back to zero.
 
+### The deposit at move-out: P11 and P12 as built (M8 plan 4.8)
+
+- **One settlement, one transaction.** The `lease.move_out_settlement` approval runs, in order: the lease's end (Ended, or Terminated when early) and the credit notes for lines after it; when early, the agreed charges (P01) and the break-clause credit (P27); the credit applied to open lines (P13 apply); then the domain's final statement (`finalStatement`, which balances to zero); P11; P17 on the rent P11 settled; and the refunds payable (P13 for credit, P12 for the deposit).
+- **P11** takes the deposit payment by payment, first in, first out (`P11:<move-out>`). Dr 2100 per deposit payment's share; Cr 1100 on each open line it pays, with an allocation of source `deposit` (record type `move_out`); Cr 4300 for the deductions retained. The deductions never exceed the deposit held: the domain checks it, and a trigger on `deposit_deduction` checks it against the lease's 2100 balance (RA086). Deductions the deposit can no longer cover after arrears are charged as a one-off line (P01) and stay owed.
+- **P17 on P11.** Rent and service charge settled from the deposit count as rent received on the settlement day. They are taxed as a carry-over is, with the rent tax item kind `deposit_applied` and key `P17:P11:<move-out>`.
+- **P12** approved (`P12:<move-out>:approved`): Dr 2100 per remaining share, Cr 2400. Paid (`P12:<move-out>:paid`): one entry for the whole refund, credit and deposit together, Dr 2400 and Cr 1010 or 1070, with its reference and proof (D1).
+- **The sub-ledger.** Each share P11 or P12 takes is a `deposit_application` row (applied, retained or refund), and invariant 4 counts them. A move-out's credit refund keeps its shares per payment in `move_out_refund_part`, as M5's early terminations do in `early_termination_refund_part`.
+- **A deposit settlement** (a lease already Ended or Terminated that still holds a deposit) runs the same steps without the end.
+
 ### Invariants (property-tested in M4a and M5)
 
 1. Every entry sums to zero within each book.
 2. Per invoice line, 1100 equals the line's outstanding amount once its period has started (one-off and VAT lines from issue); a line not yet started has no 1100 balance.
 3. Per lease, 2010 equals allocations to lines not yet started plus every payment's unallocated remainder.
-4. Per lease, 2100 equals deposits received less deposit-sourced allocations, deductions retained and refunds.
+4. Per lease, 2100 equals deposits received less deposit-sourced allocations, deductions retained and refunds (M8: the `deposit_application` rows of P11 and P12), plus deposits carried in and less those carried out (P29).
 5. For a lease with no refund, reversal, credit note or renewal carry-over, recognition from prepayments (P02) plus the 2010 balance equals everything prepaid.
 6. The rent tax on an owner report equals the P17 entries, net of their reversals, whose accounting date falls in the period.
 7. Per payment, allocations net of reversals, plus its unallocated remainder, equal the amount paid plus tax withheld.
@@ -832,8 +841,10 @@ stateDiagram-v2
     Cancelled --> [*]
     note right of Closed
         Outcomes: complied, paid, vacated, disputed,
-        referred to Rent Control or court, superseded.
+        referred to Rent Control, referred to court,
+        withdrawn (the landlord takes it back), superseded.
         A correction is a new notice; the old one closes as superseded.
+        No outcome ends the lease or touches the unit (Act 220 s.17, s.27).
     end note
 ```
 
@@ -1074,6 +1085,9 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `maintenance.sla-check` | every 15 min | job id + target | 3 | M8 |
 | `reporting.owner-statements` | monthly, 1st at 06:00 | owner id + month | 5 | M9 |
 | `reporting.metrics-rollup` | daily 04:00 | company + date | 3 | M9 |
+| `reporting.fixed-fees` | 23:00 from the 28th to the 1st; posts on the company's last day of a month, and on the 1st for last month | owner + unit + month (`P14:<owner>:<unit>:<month>`) | 5 | M9 |
+| `reporting.fee-check` | daily 03:15 | company + date; read-only, alerts `reporting.fee_mismatch` | 3 | M9 |
+| `ledger.agent-cash-check` | daily 03:30; fans out per company | company + date; read-only, alerts `ledger.agent_cash_negative` (critical) when an owner book's 1070 is below zero (F3: payments out of it are refused beyond what is held, but a chargeback cannot be) | 3 | M9 |
 | `subscription.snapshot` | monthly, 1st at 00:30 | company + month | 5 | M10 |
 | `subscription.invoice` | monthly, 1st at 01:00 | company + month | 5 | M10 |
 | `subscription.dunning` | daily 09:00 | invoice id + step | 3 | M10 |

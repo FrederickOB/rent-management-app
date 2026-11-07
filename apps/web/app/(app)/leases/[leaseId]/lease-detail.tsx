@@ -29,6 +29,7 @@ import {
 } from '@/lib/tenancy-format';
 import { LeaseActions } from './lease-actions';
 import { LeaseInvoices, LeaseMoney, LeasePayments, type MoneyPermissions } from './lease-money';
+import { MoveInReportCard, MoveOutCard } from './lease-move';
 import { LeaseDocuments, LeasePreview, LeaseSchedule } from './lease-panels';
 import { SigningPanel } from './lease-signing';
 import { LeaseTrackers } from './lease-trackers';
@@ -49,6 +50,10 @@ export interface LeasePermissions {
   readonly tax: { readonly manage: boolean; readonly confirm: boolean };
   /** An agency says which account money was paid from; a landlord pays from their own. */
   readonly agency: boolean;
+  /** M8: the move-in report (inspection.read, inspection.perform). */
+  readonly inspections: { readonly see: boolean; readonly perform: boolean };
+  /** M8: move-out (moveout.manage plans and drafts it; moveout.settle approves). */
+  readonly moveOut: { readonly manage: boolean; readonly see: boolean };
 }
 
 const SAVED_NOTES: Record<string, string> = {
@@ -171,13 +176,24 @@ export function LeaseDetail({
           can={can.money}
         />
       ) : null}
-      {/* AR-04: once a move-out ends the lease early, the settlement and the refund (P13). */}
+      {/* M8 (TL-11): the move-out, from the planned date to the refund, and the deposit. */}
+      {signed && can.moveOut.see ? (
+        <MoveOutCard lease={lease} can={{ manage: can.moveOut.manage, seeMoney: can.money.view }} />
+      ) : null}
+      {/* AR-04: an early termination's settlement and refund (P13). New early ends go through the
+          move-out (decision 12); this stays for M5's records, and for a quick move-out that left
+          credit but no deposit, which the deposit settlement cannot take. */}
       {signed && can.money.view && endedEarly(lease) ? (
         <TerminationPanel
           leaseId={lease.id}
           agency={can.agency}
           can={{ manage: can.tax.manage, seeApprovals: can.seeApprovals }}
+          deferToMoveOut
         />
+      ) : null}
+      {/* TL-08: the move-in report, signed by both parties. */}
+      {signed && can.inspections.see ? (
+        <MoveInReportCard lease={lease} canInspect={can.inspections.perform} />
       ) : null}
 
       <Card data-testid="lease-terms">

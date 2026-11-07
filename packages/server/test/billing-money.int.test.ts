@@ -1110,6 +1110,46 @@ describe('BC-07 allocation', () => {
     expect(await leaseAccount(ctx, agency.companyId, lease.id, '4000')).toBe(-200_000);
     expect(-(await leaseAccount(ctx, agency.companyId, lease.id, '2100'))).toBe(200_000);
   });
+
+  it('pays the deposit and the first month from money that arrives before billing handles the signing', async () => {
+    // A paper lease from yesterday, and cash approved before the worker's `lease.signed` job
+    // has issued its invoices (the M8 move-out e2e's order). The cash still pays the oldest debt
+    // first: the deposit and the first month, both due on the start date.
+    const start = plusDays(today, -1);
+    const lease = await s.leases.recordPaper(agency.manager, {
+      unitId: legUnit(),
+      tenantId: await tenant('Early Cash'),
+      startDate: start,
+      endDate: endAfter(start, 12),
+      monthlyRentMinor: 50_000,
+      depositMinor: 100_000,
+      cycle: 'monthly',
+      noticeDays: 30,
+      parties: [{ role: 'tenant', name: 'Early Cash' }],
+      scanUploadId: await uploadLeaseFile(ctx, s, agency.manager),
+      signedOn: plusDays(today, -3),
+      billingStartDate: start,
+    });
+    expect(await linesOf(agency.companyId, lease.id)).toEqual([]);
+    await approvedCash(ctx, s, b, agency.manager, agency.admin, {
+      leaseId: lease.id,
+      amountMinor: 150_000,
+      receivedOn: today,
+    });
+    const card = await moneyCard(ctx, b, agency.companyId, lease.id);
+    expect(card).toMatchObject({ depositHeldMinor: 100_000, creditMinor: 0 });
+    expect(-(await leaseAccount(ctx, agency.companyId, lease.id, '2100'))).toBe(100_000);
+    const lines = await linesOf(agency.companyId, lease.id);
+    expect(lines.map((l) => [l.kind, l.amountMinor]).sort()).toEqual([
+      ['deposit', 100_000],
+      ['rent', 50_000],
+    ]);
+    // The job, when it runs, finds the invoices issued and issues nothing twice.
+    await b.invoicing.onLeaseSigned(agency.companyId, lease.id);
+    expect(await linesOf(agency.companyId, lease.id)).toHaveLength(2);
+    expect((await moneyCard(ctx, b, agency.companyId, lease.id)).depositHeldMinor).toBe(100_000);
+    expect((await b.subledger.check(agency.companyId)).mismatches).toEqual([]);
+  });
 });
 
 describe('BC-03 payment references', () => {

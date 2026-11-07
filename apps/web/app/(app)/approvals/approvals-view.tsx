@@ -10,8 +10,12 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
+import type { NoticeDetail } from '@rent/contracts';
 import { useApp } from '@/components/app-context';
+import { ConfirmBox } from '@/components/confirm-box';
 import { EvidenceButton } from '@/components/evidence-button';
+import { MoveOutApprovalSummary } from '@/components/move-out-approval-summary';
+import { NoticeApprovalSummary } from '@/components/notice-approval-summary';
 import { Alert } from '@/components/ui/alert';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -26,6 +30,8 @@ import {
   approvalMoves,
   approvalWarning,
   closeReasonLabel,
+  FEE_TERMS_CHANGE,
+  MOVE_OUT_SETTLEMENT,
   payloadLeaseId,
   payloadReason,
   payloadSubject,
@@ -37,6 +43,8 @@ import { formatBusinessDate } from '@/lib/business-dates';
 import { cn } from '@/lib/cn';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
+import { settlementBlock, type SettlementVerdict } from '@/lib/move-out';
+import { approveQuitText, noticeApprovalOutcome } from '@/lib/notices';
 import { useRequestGate } from '@/lib/request-gate';
 
 type Which = 'open' | 'closed';
@@ -119,7 +127,17 @@ const RECORD_LINKS: Record<string, string> = {
   // M5: withholding and early terminations are shown on their lease's page.
   withholding: 'Open the lease',
   early_termination: 'Open the lease',
+  // M7: read the notice and its preview before approving it.
+  notice: 'Open the notice',
+  // M8: the move-out, with its inspection and deductions.
+  move_out: 'Open the move-out',
 };
+
+/** What the record link reads: M9's fee terms open the owner, not where their rent goes. */
+const recordLinkText = (row: ApprovalRow): string =>
+  row.actionType === FEE_TERMS_CHANGE
+    ? 'Open the owner'
+    : (RECORD_LINKS[row.subjectType] ?? 'Open the record');
 
 /** The approvals screen (AD-05; M3 decision 6), on M1's endpoints. */
 export function ApprovalsView({ names }: { readonly names: readonly [string, string][] }) {
@@ -282,6 +300,43 @@ function ApprovalItem({
   const who = personName(row.initiatedBy, { personId }, people);
   const closed = closeReasonLabel(row.closeReason);
   const label = approvalActionLabel(row.actionType);
+  // M7 review item 1: a notice is read in full before it is approved.
+  const noticeId = row.subjectType === 'notice' ? row.subjectId : null;
+  // M8: a move-out's settlement is approved with its statement and every deduction's photos.
+  const moveOutId =
+    row.actionType === MOVE_OUT_SETTLEMENT && row.subjectType === 'move_out' ? row.subjectId : null;
+  // Review WEB 4: a settlement is approved only once its statement has loaded and balances.
+  const [settlement, setSettlement] = useState<SettlementVerdict>('loading');
+  const blocked = moveOutId ? settlementBlock(settlement) : null;
+  const [notice, setNotice] = useState<NoticeDetail | null>(null);
+  const [noticeProblem, setNoticeProblem] = useState<string | null>(null);
+  useEffect(() => {
+    if (!noticeId) return undefined;
+    let current = true;
+    api()
+      .notices.get({ noticeId })
+      .then(
+        (found) => {
+          if (current) setNotice(found);
+        },
+        (failure: unknown) => {
+          if (current) setNoticeProblem(toProblem(failure).message);
+        },
+      );
+    return () => {
+      current = false;
+    };
+  }, [noticeId]);
+  /** What the decision did to the notice, read back from it (review item 2). */
+  const noticeResult = noticeId
+    ? async (fallback: string) => {
+        try {
+          return noticeApprovalOutcome(await api().notices.get({ noticeId }));
+        } catch {
+          return fallback;
+        }
+      }
+    : null;
 
   return (
     <Card data-testid="approval" data-approval-id={row.id}>
@@ -304,7 +359,7 @@ function ApprovalItem({
               <dd>
                 {href ? (
                   <Link href={href} className="font-medium underline underline-offset-2">
-                    {subject?.title ?? RECORD_LINKS[row.subjectType] ?? 'Open the record'}
+                    {subject?.title ?? recordLinkText(row)}
                   </Link>
                 ) : (
                   subject?.title
@@ -345,6 +400,22 @@ function ApprovalItem({
             {warning.text}
           </Alert>
         ) : null}
+        {noticeId ? (
+          notice ? (
+            <NoticeApprovalSummary notice={notice} />
+          ) : noticeProblem ? (
+            <Alert tone="warning" live={false}>
+              The notice could not be loaded: {noticeProblem} Open it before deciding.
+            </Alert>
+          ) : (
+            <p role="status" className="text-sm text-slate-600">
+              Loading the notice…
+            </p>
+          )
+        ) : null}
+        {moveOutId ? (
+          <MoveOutApprovalSummary moveOutId={moveOutId} onVerdict={setSettlement} />
+        ) : null}
         {evidence || otherRecord ? (
           <div className="flex flex-wrap items-center gap-3">
             {/* The approver checks the photo, proof or slip before deciding (BC-05, P07, P28). */}
@@ -353,7 +424,7 @@ function ApprovalItem({
             ) : null}
             {otherRecord ? (
               <Link href={otherRecord} className="text-sm font-medium underline underline-offset-2">
-                {RECORD_LINKS[row.subjectType] ?? 'Open the record'}
+                {recordLinkText(row)}
               </Link>
             ) : null}
           </div>
@@ -383,8 +454,27 @@ function ApprovalItem({
           </Alert>
         ) : null}
 
-        {moves.decide ? <Decide row={row} label={label} onChanged={onChanged} /> : null}
-        {moves.selfConfirm ? <SelfConfirm row={row} onChanged={onChanged} /> : null}
+        {moves.decide ? (
+          <Decide
+            row={row}
+            label={label}
+            onChanged={onChanged}
+            // A notice to quit is approved only after a confirmation that names it, and only
+            // once it has loaded, so the approver has seen its warnings.
+            confirm={
+              row.actionType === 'notice.issue_quit'
+                ? notice
+                  ? approveQuitText(notice)
+                  : null
+                : undefined
+            }
+            result={noticeResult}
+            blocked={blocked}
+          />
+        ) : null}
+        {moves.selfConfirm ? (
+          <SelfConfirm row={row} onChanged={onChanged} result={noticeResult} blocked={blocked} />
+        ) : null}
         {moves.withdraw ? <Withdraw row={row} onChanged={onChanged} /> : null}
       </CardBody>
     </Card>
@@ -395,14 +485,27 @@ function Decide({
   row,
   label,
   onChanged,
+  confirm,
+  result: readResult,
+  blocked = null,
 }: {
   readonly row: ApprovalRow;
   readonly label: string;
   readonly onChanged: (text: string) => Promise<void>;
+  /** M8 review: why Approve is off for now (a statement still loading or not balancing). */
+  readonly blocked?: string | null;
+  /**
+   * M7: the words of a confirmation Approve needs (a notice to quit names itself); null while
+   * the record it names is still loading, which keeps Approve off. Undefined: no confirmation.
+   */
+  readonly confirm?: string | null;
+  /** M7: what approving did, read back from the record (a notice may not have issued). */
+  readonly result?: ((fallback: string) => Promise<string>) | null;
 }) {
   const [reason, setReason] = useState('');
   const [pending, setPending] = useState<'approve' | 'reject' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   async function decide(decision: 'approve' | 'reject') {
     setPending(decision);
@@ -413,9 +516,12 @@ function Decide({
         decision,
         ...(reason.trim() ? { reason: reason.trim() } : {}),
       });
+      const approved = `Approved: ${label.toLowerCase()}. It has taken effect.`;
       await onChanged(
         result.status === 'approved'
-          ? `Approved: ${label.toLowerCase()}. It has taken effect.`
+          ? readResult
+            ? await readResult(approved)
+            : approved
           : result.status === 'rejected'
             ? 'Rejected the request. Nothing changed.'
             : result.status === 'cancelled'
@@ -444,11 +550,27 @@ function Decide({
         onChange={(event) => setReason(event.target.value)}
         className="[&_textarea]:font-sans"
       />
+      {confirming && confirm ? (
+        <ConfirmBox
+          label={`Confirm: ${label}`}
+          confirmText="Yes, approve it"
+          pending={pending === 'approve'}
+          onConfirm={() => void decide('approve')}
+          onCancel={() => setConfirming(false)}
+        >
+          <span data-testid="approve-confirm">{confirm}</span>
+        </ConfirmBox>
+      ) : null}
+      {blocked ? (
+        <p className="text-sm font-medium text-slate-800" data-testid="approve-blocked">
+          {blocked}
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <Button
-          pending={pending === 'approve'}
-          disabled={pending !== null}
-          onClick={() => void decide('approve')}
+          pending={pending === 'approve' && !confirming}
+          disabled={pending !== null || confirm === null || confirming || blocked !== null}
+          onClick={() => (confirm ? setConfirming(true) : void decide('approve'))}
         >
           Approve
         </Button>
@@ -468,9 +590,14 @@ function Decide({
 function SelfConfirm({
   row,
   onChanged,
+  result: readResult,
+  blocked = null,
 }: {
   readonly row: ApprovalRow;
   readonly onChanged: (text: string) => Promise<void>;
+  readonly blocked?: string | null;
+  /** M7: what confirming did, read back from the record. */
+  readonly result?: ((fallback: string) => Promise<string>) | null;
 }) {
   const [code, setCode] = useState('');
   const [pending, setPending] = useState(false);
@@ -486,7 +613,8 @@ function SelfConfirm({
     setPending(true);
     try {
       await api().approvals.decide({ id: row.id, decision: 'self_confirm', code });
-      await onChanged('Confirmed. It has taken effect.');
+      const confirmed = 'Confirmed. It has taken effect.';
+      await onChanged(readResult ? await readResult(confirmed) : confirmed);
     } catch (failure) {
       setError(toProblem(failure).message);
       setPending(false);
@@ -510,7 +638,12 @@ function SelfConfirm({
         onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
         className="max-w-xs"
       />
-      <Button type="submit" pending={pending}>
+      {blocked ? (
+        <p className="text-sm font-medium text-slate-800" data-testid="approve-blocked">
+          {blocked}
+        </p>
+      ) : null}
+      <Button type="submit" pending={pending} disabled={blocked !== null}>
         Confirm it myself
       </Button>
     </form>

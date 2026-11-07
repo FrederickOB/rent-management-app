@@ -34,7 +34,8 @@ export interface SubledgerResult {
  * - invariant 2: 1100 per invoice line equals what is outstanding once the line is charged;
  * - invariant 3: 2010 per lease equals advance allocations to lines not yet charged plus the
  *   credit of the payments whose credit sits on the lease;
- * - invariant 4: 2100 per lease equals deposits received less what left, plus carry-overs;
+ * - invariant 4: 2100 per lease equals deposits received less what left, plus carry-overs, less
+ *   what a move-out applied, retained or approved for refund (M8, P11 and P12);
  * - invariant 7: no payment is allocated beyond itself, and a reversed one allocates nothing;
  * - 1060 per collector and book equals approved cash less what was banked or reversed from hand;
  * - 2090 per payment equals the unmatched money still waiting (not matched, reversed or
@@ -136,10 +137,17 @@ export class SubledgerCheckService {
         sql`select coalesce(sum(case when lease_id = ${leaseId} then amount_minor else -amount_minor end), 0)::bigint as net
             from credit_carry_over where kind = 'deposit' and (lease_id = ${leaseId} or from_lease_id = ${leaseId})`,
       );
+      // M8: what a move-out applied, retained or approved for refund left the deposit (P11, P12),
+      // less what a chargeback's P21b gave back to it (M8 review).
+      const used = await tx.execute<{ total: number }>(
+        sql`select coalesce(sum(case when kind = 'unwound' then -amount_minor else amount_minor end), 0)::bigint as total
+            from deposit_application where lease_id = ${leaseId}`,
+      );
       add({
         check: 'deposit',
         subject: leaseId,
-        expectedMinor: depositsSettled + Number(carried.rows[0]?.net ?? 0),
+        expectedMinor:
+          depositsSettled + Number(carried.rows[0]?.net ?? 0) - Number(used.rows[0]?.total ?? 0),
         actualMinor: -(deposits.get(leaseId) ?? 0),
       });
     }

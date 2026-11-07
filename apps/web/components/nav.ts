@@ -17,6 +17,13 @@ export interface NavItem {
    * sees no inbox, broadcasts or tenant groups. The API refuses them again (403 `not_on_plan`).
    */
   readonly feature?: PlanFeature;
+  /**
+   * Hidden when the policy allows this action: a read-only entry to a section is left out for
+   * people who already have the full one (M8 decision 9).
+   */
+  readonly unless?: PolicyAction;
+  /** M9 review: only in an agency's company (a landlord keeps their own money). */
+  readonly agencyOnly?: boolean;
 }
 
 const ITEMS: readonly NavItem[] = [
@@ -157,12 +164,87 @@ const ITEMS: readonly NavItem[] = [
     description: 'The text of each WhatsApp template, and whether Meta has approved it.',
     needs: 'messaging.templates.read',
   },
+  // M8 (plan 4.11): the maintenance board replaces M6's list at the same address. Managers,
+  // admins, landlords and caretakers keep M6's entry; accountants, an agency's client owners and
+  // advisers get a read-only one (decision 9). The board is Growth only (decision 1).
   {
     href: '/repairs',
     label: 'Reported repairs',
-    description: 'Repairs tenants reported on WhatsApp, with their photos and ticket numbers.',
+    description:
+      'The maintenance board: every repair by status, with its priority, who has it, its photos and its cost.',
     needs: 'maintenance.view',
     feature: 'maintenance',
+  },
+  {
+    href: '/repairs',
+    label: 'Repairs',
+    description:
+      'Repairs on the properties you can see: each job, its photos, its cost and its history.',
+    needs: 'maintenance.read',
+    unless: 'maintenance.view',
+    feature: 'maintenance',
+  },
+  {
+    href: '/artisans',
+    label: 'Artisans',
+    description: 'The plumbers, electricians and others you send work to, and how to reach them.',
+    needs: 'artisan.manage',
+    feature: 'maintenance',
+  },
+  // Inspections and expenses are on every plan (decision 1): move-in and move-out need them.
+  {
+    href: '/inspections',
+    label: 'Inspections',
+    description: 'Move-in, move-out and routine inspections, room by room with photos.',
+    needs: 'inspection.read',
+  },
+  {
+    href: '/expenses',
+    label: 'Expenses',
+    description: 'Money spent on the properties, with receipts, linked to repairs.',
+    needs: 'expense.read',
+  },
+  // M7: legal notices and the tasks they create (plan 4.10). Growth only (decision 14).
+  {
+    href: '/notices',
+    label: 'Notices',
+    description:
+      'Legal notices to tenants: composing, issuing, tracking acknowledgement, reminders and physical service.',
+    needs: 'notices.read',
+    feature: 'notices',
+  },
+  {
+    href: '/tasks',
+    label: 'Tasks',
+    description:
+      'Reminders in person, posting and serving notices, repairs to attend and inspections to do.',
+    needs: 'tasks.read',
+    feature: 'notices',
+  },
+  // M9 (plan 4.7): owner statements and the money moved for owners are Growth only (decision 13);
+  // the compliance list is on every plan. Owners and advisers read their own, within scope.
+  {
+    href: '/statements',
+    label: 'Owner statements',
+    description:
+      'Each owner’s monthly statement: cash, earned and owed, occupancy, and the agency’s side. Issuing one locks its month.',
+    needs: 'statements.read',
+    feature: 'owner_reporting',
+  },
+  {
+    href: '/owner-money',
+    label: 'Remittances',
+    description: 'Money paid to owners, fees taken and money owners sent, each with its proof.',
+    needs: 'statements.read',
+    feature: 'owner_reporting',
+    agencyOnly: true,
+  },
+  {
+    href: '/compliance',
+    label: 'Compliance list',
+    description:
+      'Rent tax due, Rent Control registrations, withholding certificates, VAT returns and advances over the limit.',
+    needs: 'compliance.read',
   },
   {
     href: '/approvals',
@@ -182,6 +264,21 @@ const ITEMS: readonly NavItem[] = [
     label: 'Messaging settings',
     description: 'The response target, the conversation tags and your WhatsApp number.',
     needs: ['company.update', 'messaging.templates.read'],
+  },
+  {
+    href: '/settings/notices',
+    label: 'Notice settings',
+    description:
+      'Turning notices to quit on (the risk acknowledgement), the reminder ladder per notice type, quiet hours and link expiry.',
+    needs: ['company.update', 'notices.quit.acknowledge'],
+    feature: 'notices',
+  },
+  {
+    href: '/settings/maintenance',
+    label: 'Maintenance settings',
+    description:
+      'Target times for each priority, when a job closes without the tenant’s reply, and the inspection checklists.',
+    needs: 'company.update',
   },
   {
     href: '/settings/settlement',
@@ -209,6 +306,13 @@ const ITEMS: readonly NavItem[] = [
     description: 'The shared WhatsApp number and the numbers companies send from.',
     needs: 'whatsapp_account.manage',
   },
+  // M9: Gate 1 across companies, for platform admins (decision 13).
+  {
+    href: '/platform/gate1',
+    label: 'Gate 1 metrics',
+    description: 'The Gate 1 measures for each company and in total, month by month.',
+    needs: 'metrics.platform.read',
+  },
   {
     href: '/platform/company-plans',
     label: 'Company plans',
@@ -224,6 +328,9 @@ const ITEMS: readonly NavItem[] = [
   },
 ];
 
+const activeCompanyKind = (me: Me) =>
+  me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind ?? null;
+
 function permitted(me: Me, needs: NavItem['needs']): boolean {
   if (needs === null) return true;
   return (typeof needs === 'string' ? [needs] : needs).some((action) => allowed(me, action));
@@ -237,6 +344,9 @@ function permitted(me: Me, needs: NavItem['needs']): boolean {
 export function navFor(me: Me, features: readonly PlanFeature[] = []): NavItem[] {
   return ITEMS.filter(
     (item) =>
-      permitted(me, item.needs) && (item.feature === undefined || features.includes(item.feature)),
+      permitted(me, item.needs) &&
+      (item.unless === undefined || !allowed(me, item.unless)) &&
+      (!item.agencyOnly || activeCompanyKind(me) === 'agency') &&
+      (item.feature === undefined || features.includes(item.feature)),
   );
 }

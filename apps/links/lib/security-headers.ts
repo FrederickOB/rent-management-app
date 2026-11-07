@@ -1,6 +1,7 @@
 /**
- * Response headers for every apps/links response (CLAUDE.md section 9). The proxy applies them;
- * nothing else in this app sets security headers.
+ * Response headers for every apps/links response (CLAUDE.md section 9). The proxy applies them,
+ * except on the job sheet's two photo posts, which the proxy never sees (proxy.ts): those routes
+ * wrap their answers in secured().
  */
 
 /** A fresh 128-bit nonce for each request, base64 encoded as CSP expects. */
@@ -63,4 +64,16 @@ export function forwardedRequestHeaders(incoming: Headers, csp: string, nonce: s
   headers.set('content-security-policy', csp);
   headers.set('x-nonce', nonce);
   return headers;
+}
+
+/**
+ * The proxy's headers, for a response the proxy does not see (the job sheet's photo posts): a
+ * policy with a nonce of its own, the other security headers, and no caching.
+ */
+export function secured(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set('Content-Security-Policy', contentSecurityPolicy(createNonce()));
+  for (const [name, value] of SECURITY_HEADERS) headers.set(name, value);
+  headers.set('Cache-Control', 'no-store');
+  return new Response(response.body, { status: response.status, headers });
 }

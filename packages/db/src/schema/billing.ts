@@ -564,7 +564,8 @@ export const companyCounter = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.companyId, t.name] }),
-    check('company_counter_name_check', sql`${t.name} in ('receipt', 'invoice')`),
+    // M7 decision 15: notice numbers on the same counter, gap-free per company.
+    check('company_counter_name_check', sql`${t.name} in ('receipt', 'invoice', 'notice')`),
     check('company_counter_value_check', sql`${t.value} >= 1`),
   ],
 );
@@ -967,8 +968,9 @@ export const allocation = pgTable(
     ),
     check(
       'allocation_record_check',
-      // M5: withholding pinned to its lines (P19) and credit applied at an early end (P13).
-      sql`${t.recordType} in ('payment', 'match', 'accrual', 'reversal', 'credit_note', 'write_off', 'withholding', 'termination')`,
+      // M5: withholding pinned to its lines (P19) and credit applied at an early end (P13). M8:
+      // credit and the deposit applied at a move-out (P13, P11).
+      sql`${t.recordType} in ('payment', 'match', 'accrual', 'reversal', 'credit_note', 'write_off', 'withholding', 'termination', 'move_out')`,
     ),
     check('allocation_dates_check', sql`${t.accountingDate} >= ${t.valueDate}`),
   ],

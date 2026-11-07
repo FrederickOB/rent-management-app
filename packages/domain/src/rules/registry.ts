@@ -39,6 +39,9 @@ const REGISTRY: readonly Entry[] = [
   ),
   // M4a decision 4: VAT and levies on service charge as well as rent (unverified; OQ-20).
   entry(/^vat\.applies_to_service_charge$/, z.boolean()),
+  // M9 (P33): days after the end of the month the VAT was charged in that its return is due to
+  // GRA. No value until the tax adviser supplies one (OQ-61).
+  entry(/^vat\.return_due_days$/, days, true),
   entry(/^advance_rent\.max_months\.[a-z_]+$/, months),
   entry(/^rent_control\.registration_days$/, days),
   // M3 trackers (plan 4.11): stamping within months of signing (OQ-45), and the term above which
@@ -46,6 +49,9 @@ const REGISTRY: readonly Entry[] = [
   entry(/^stamp_duty\.deadline_months$/, months),
   entry(/^lease\.writing_exemption_max_years$/, years),
   entry(/^notice_to_quit\.statutory_min_days\.[a-z_]+$/, days, true),
+  // M7 decision 3: no notice to quit within this many months of a Rent Officer assessment
+  // (Act 220 s.23; the row is `unverified` until counsel confirms).
+  entry(/^notice_to_quit\.assessment_bar_months$/, months),
   entry(/^data_retention\.financial_and_notices$/, years, true),
   entry(/^data_retention\.other\.[a-z_]+$/, years, true),
 ];

@@ -14,6 +14,7 @@ import { conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, GRA_RECEIPT_UPLOAD } from '../documents/documents.service';
+import { assertAgentCash } from '../ledger/agent-cash';
 import { PostingService } from '../ledger/posting.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { lockOwnerTax, ruleStatuses, taxItems, uuids } from './tax-records';
@@ -167,6 +168,22 @@ export class GraService {
     return ownerBookId(tx, input.ownerId);
   }
 
+  /**
+   * F3 (founder, 2026-11-06): paid from the agency's account, never more than the agency holds for
+   * the owner (1070 in the owner's book, read whole whatever the caller's scope); 409
+   * INSUFFICIENT_AGENT_CASH otherwise. It takes the `owner-money:<owner>` lock, so in the write it
+   * comes before the owner's tax lock: lease locks, then owner money, then tax, for every writer
+   * that needs more than one, so none waits on another in a circle.
+   */
+  private async checkAgentCash(
+    tx: Tx,
+    input: Pick<GraPaymentInput, 'ownerId' | 'paidFrom' | 'amountMinor'>,
+    bookId: string,
+  ): Promise<void> {
+    if (input.paidFrom === 'agency_account')
+      await assertAgentCash(tx, { ownerId: input.ownerId, bookId, outMinor: input.amountMinor });
+  }
+
   /** Records rent tax paid to GRA (P18), settling items, with GRA's receipt attached. */
   async recordGraPayment(
     actor: Actor | null,
@@ -175,8 +192,9 @@ export class GraService {
   ): Promise<string> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'tax.manage');
-    await withCompany(this.database, staffContext(staff), (tx) =>
-      this.checkPayment(tx, staff, input),
+    // Every check before GRA's receipt is staged: staged files are kept write-once (M8 review).
+    await withCompany(this.database, staffContext(staff), async (tx) =>
+      this.checkAgentCash(tx, input, await this.checkPayment(tx, staff, input)),
     );
     const staged = await this.documents.stageEvidenceUpload(
       { companyId: staff.companyId, personId: staff.personId },
@@ -187,6 +205,7 @@ export class GraService {
     await withCompany(this.database, this.unscoped(staff), async (tx) => {
       await options.claim?.claim(tx);
       const bookId = await this.checkPayment(tx, staff, input);
+      await this.checkAgentCash(tx, input, bookId);
       await lockOwnerTax(tx, staff.companyId, input.ownerId);
       const open = (await taxItems(tx, sql`i.owner_id = ${input.ownerId}`)).filter(
         (i) => i.outstandingMinor > 0,
@@ -478,8 +497,9 @@ export class GraService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'tax.manage');
     const month = monthStart(input.periodMonth);
-    await withCompany(this.database, staffContext(staff), (tx) =>
-      this.checkPayment(tx, staff, input),
+    // Every check before GRA's receipt is staged: staged files are kept write-once (M8 review).
+    await withCompany(this.database, staffContext(staff), async (tx) =>
+      this.checkAgentCash(tx, input, await this.checkPayment(tx, staff, input)),
     );
     const staged = await this.documents.stageEvidenceUpload(
       { companyId: staff.companyId, personId: staff.personId },
@@ -490,6 +510,7 @@ export class GraService {
     await withCompany(this.database, this.unscoped(staff), async (tx) => {
       await options.claim?.claim(tx);
       const bookId = await this.checkPayment(tx, staff, input);
+      await this.checkAgentCash(tx, input, bookId);
       await lockOwnerTax(tx, staff.companyId, input.ownerId);
       const owed = await tx.execute<{ total: string }>(
         sql`select coalesce(-sum(amount_minor), 0)::bigint as total from journal_line

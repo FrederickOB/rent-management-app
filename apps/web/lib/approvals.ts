@@ -11,6 +11,7 @@ import {
 } from './billing-format';
 import { formatBusinessDate } from './business-dates';
 import { humanise } from './format';
+import { feeKindOf, graPayerOf, termsText } from './fee-terms';
 import { DESTINATION_LABELS, nameCheck } from './settlement';
 import { formatMinor } from './tenancy-format';
 
@@ -38,10 +39,22 @@ const ACTION_LABELS: Record<string, string> = {
   // termination's settlement and refund (P13).
   'withholding.write_off': 'Write off withholding tax whose certificate never came',
   'lease.refund': 'Settle an early termination and refund the tenant',
+  // M7 (decision 8): a notice to quit always needs a second person, and it issues itself on
+  // approval; another notice submitted by someone without notice authority needs one issuer.
+  'notice.issue_quit': 'Issue a notice to quit',
+  'notice.issue': 'Issue a notice',
+  // M8 (decision 12): a move-out's settlement, deposit and refund, in one approval.
+  'lease.move_out_settlement': 'Settle a move-out: the deposit, deductions and refund',
+  // M9 (decision 1): an agency-managed owner's fee terms and who pays GRA, from a date.
+  'management_fee_terms.change': 'Change an owner’s management fee',
 };
 
 const WITHHOLDING_WRITE_OFF = 'withholding.write_off';
 const LEASE_REFUND = 'lease.refund';
+/** M8: the move-out settlement (P01, P27, P13, P11, P12), shown with its statement and photos. */
+export const MOVE_OUT_SETTLEMENT = 'lease.move_out_settlement';
+/** M9: fee terms, shown as the terms now and the terms asked for. */
+export const FEE_TERMS_CHANGE = 'management_fee_terms.change';
 
 const REFUND_ACTION = 'payment.refund_unmatched';
 
@@ -64,6 +77,8 @@ export const MONEY_ACTIONS: readonly string[] = [
   ...SETTLEMENT_ACTIONS,
   WITHHOLDING_WRITE_OFF,
   LEASE_REFUND,
+  MOVE_OUT_SETTLEMENT,
+  FEE_TERMS_CHANGE,
 ];
 
 export function approvalActionLabel(actionType: string): string {
@@ -213,6 +228,50 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
     add('Refund to the tenant', minor('refundMinor'));
     add('Still owed after it', minor('arrearsMinor'));
   }
+  // A move-out's settlement (M8 plan 4.8): the headline figures; the card shows the statement in
+  // full with every deduction's photos.
+  if (actionType === MOVE_OUT_SETTLEMENT) {
+    const minor = (key: string): string | null => {
+      const value = data[key];
+      return Number.isSafeInteger(value) ? formatMinor(value as number) : null;
+    };
+    add(
+      'Kind',
+      data.kind === 'deposit_settlement'
+        ? 'Deposit settlement after the lease ended'
+        : data.kind === 'move_out'
+          ? data.early === true
+            ? 'Move-out, ending early'
+            : 'Move-out'
+          : null,
+    );
+    add('Last day of the tenancy', date('lastDay'));
+    add('Deposit held', minor('depositHeldMinor'));
+    add('Deductions', minor('deductionsMinor'));
+    if (Array.isArray(data.charges) && data.charges.length > 0)
+      add('Agreed charges', amountList(data.charges));
+    add('Refund to the tenant', minor('refundMinor'));
+    add('Still owed after it', minor('stillOwedMinor'));
+  }
+  // Fee terms (M9 decision 1): the terms now, and those asked for from a date.
+  if (actionType === FEE_TERMS_CHANGE) {
+    const terms = (t: Record<string, unknown> | null): string | null => {
+      if (!t) return null;
+      const kind = feeKindOf(typeof t.kind === 'string' ? t.kind : '');
+      const gra = graPayerOf(typeof t.graPaidBy === 'string' ? t.graPaidBy : '');
+      if (!kind || !gra) return null;
+      return termsText({
+        kind,
+        rateBps: Number.isSafeInteger(t.rateBps) ? (t.rateBps as number) : null,
+        fixedMinor: Number.isSafeInteger(t.fixedMinor) ? (t.fixedMinor as number) : null,
+        graPaidBy: gra,
+      });
+    };
+    add('Terms now', terms(asRecord(data.current)) ?? 'None set: no fee, and the owner pays GRA');
+    add('Terms asked for', terms(data));
+    add('From', date('effectiveFrom'));
+    return facts;
+  }
   // A settlement account (ADR-008): whose it is, and only ever its masked number.
   add('Whose account', data.holder === 'agency' ? 'The agency’s client account' : null);
   const bank = [str('bankName'), str('branch') ? `${str('branch')} branch` : null]
@@ -290,7 +349,7 @@ export function approvalWarning(actionType: string, payload: unknown): ApprovalW
           title: 'Rent stops settling into this account',
           text: 'Once approved, pay links for its leases work only if another account is in use for them.',
         };
-  if (actionType === LEASE_REFUND && data.open === false)
+  if ((actionType === LEASE_REFUND || actionType === MOVE_OUT_SETTLEMENT) && data.open === false)
     return {
       title: 'The figures no longer hold',
       text: 'The lease’s money has moved since this was asked for, or the request was replaced. Reject it, and ask again with the figures as they are now.',
@@ -390,8 +449,18 @@ export function subjectHref(
       return leaseId ? `/leases/${leaseId}` : null;
     }
     case 'owner':
-      // Where an owner's rent goes is kept with the settlement accounts.
-      return data && 'destination' in data ? '/settings/settlement' : '/owners';
+      // Where an owner's rent goes is kept with the settlement accounts; M9's fee terms are on
+      // the owner's own page.
+      if (data && 'destination' in data) return '/settings/settlement';
+      return data && 'graPaidBy' in data ? `/owners/${row.subjectId}` : '/owners';
+    // M7: the notice, with its preview, warnings and the checks run again at issue.
+    case 'notice':
+      return `/notices/${row.subjectId}`;
+    // M8: a move-out lives on its lease.
+    case 'move_out': {
+      const leaseId = id('leaseId');
+      return leaseId ? `/leases/${leaseId}/move-out` : null;
+    }
     default: {
       const invoiceId = id('invoiceId');
       if (invoiceId) return `/invoices/${invoiceId}`;

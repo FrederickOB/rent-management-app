@@ -1,5 +1,6 @@
 import { oc } from '@orpc/contract';
 import { SIGNER_ROLES } from '@rent/domain/esign';
+import { NOTICE_TYPES } from '@rent/domain/notices';
 import { z } from 'zod';
 
 /**
@@ -47,8 +48,43 @@ export const signingPageSchema = z.object({
    * declined or completed, or everyone who must sign has signed (`signed_by_all`).
    */
   reason: z
-    .enum(['superseded', 'cancelled', 'declined', 'completed', 'preparing', 'signed_by_all'])
+    .enum([
+      'superseded',
+      'cancelled',
+      'declined',
+      'completed',
+      'preparing',
+      'signed_by_all',
+      // M7 (plan 4.8): the notice was corrected by a later one, or closed. The link still opens
+      // the notice, read-only, with a banner naming the new one.
+      'notice_superseded',
+      'notice_closed',
+    ])
     .nullable(),
+  /**
+   * M7: what is being signed. A notice is acknowledged, never agreed to, and cannot be declined
+   * (CLAUDE.md section 9). Always sent; optional for pages written before M7.
+   */
+  subject: z.enum(['lease', 'notice']).optional(),
+  /** False for a notice: the page shows no decline button. Always sent; optional before M7. */
+  canDecline: z.boolean().optional(),
+  /** The notice, on a notice's link (M7 plan 4.5); null for a lease. */
+  notice: z
+    .object({
+      number: z.string(),
+      type: z.enum(NOTICE_TYPES),
+      typeLabel: z.string(),
+      issuedAt: iso,
+      effectiveDate: z.string().nullable(),
+      /** Shown above the signature box: signing acknowledges receipt, not agreement. */
+      statement: z.string(),
+      /** The notice that replaced this one, named on the banner (plan 4.8). */
+      supersededBy: z.object({ number: z.string() }).nullable(),
+      /** Whether this recipient's company has already acknowledged through another signatory. */
+      acknowledgedByAnother: z.boolean(),
+    })
+    .nullable()
+    .optional(),
   purpose: z.enum(['sign', 'signed_copy']),
   /** Who to contact: the landlord or agency, and the landlord's signatory on the request. */
   landlord: z.object({
@@ -160,7 +196,12 @@ export const linksContract = {
     )
     .output(z.object({ signedAt: iso, complete: z.boolean() })),
   decline: oc
-    .route({ method: 'POST', path: '/links/decline', summary: 'Decline to sign, with a reason' })
+    .route({
+      method: 'POST',
+      path: '/links/decline',
+      summary:
+        'Decline to sign, with a reason. A notice cannot be declined: 409 NOTICE_NOT_DECLINABLE (M7)',
+    })
     .input(z.object({ token, client, reason: z.string().max(1000) }).strict())
     .output(z.object({ declinedAt: iso })),
 };

@@ -33,7 +33,7 @@ import { PostingService } from '../ledger/posting.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { ownerNameThroughProperty } from '../portfolio/ownership';
 import { billingLeaseOf, leaseLabels } from '../tenancy/billing-facts';
-import { BillingEngine, lineLabel, type LeaseState } from './engine';
+import { BillingEngine, depositSettled, lineLabel, type LeaseState } from './engine';
 import {
   bankableMinor,
   cashKey,
@@ -636,6 +636,8 @@ export class MoneyService {
           'payment_refunded',
           'This money is being or has been refunded to its payer, so it cannot also be reversed',
         );
+      // A deposit a move-out has settled stays settled (M8 review); the engine refuses it again.
+      if ((await this.engine.depositUsed(tx, paymentId)) > 0) throw depositSettled();
       const options_ = payment.leaseId
         ? await this.engine.reversalOptions(tx, payment, staff.companyKind)
         : [payment.row.cashAccount === '1070' ? 'agency_account' : 'owner_account'];

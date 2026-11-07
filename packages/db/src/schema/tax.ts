@@ -156,7 +156,8 @@ export const rentTaxItem = pgTable(
     index('rent_tax_item_due_idx').on(t.companyId, t.dueDate),
     check(
       'rent_tax_item_kind_check',
-      sql`${t.kind} in ('receipt', 'carry_over', 'withholding', 'reversal', 'withholding_offset')`,
+      // M8: `deposit_applied`, rent a move-out settled from the deposit (P11), received then.
+      sql`${t.kind} in ('receipt', 'carry_over', 'deposit_applied', 'withholding', 'reversal', 'withholding_offset')`,
     ),
     check('rent_tax_item_use_check', sql`${t.leaseUse} in ('residential', 'commercial')`),
     check('rent_tax_item_currency_check', sql`${t.currency} = 'GHS'`),
@@ -172,7 +173,7 @@ export const rentTaxItem = pgTable(
       // A receipt item names a withholding only when it taxes cash that withholding returned to
       // credit (M5 review 2); a reversal or a carry-over never does.
       sql`(${t.kind} not in ('withholding', 'withholding_offset') or ${t.withholdingId} is not null)
-          and (${t.kind} not in ('reversal', 'carry_over') or ${t.withholdingId} is null)
+          and (${t.kind} not in ('reversal', 'carry_over', 'deposit_applied') or ${t.withholdingId} is null)
           and (${t.kind} not in ('receipt', 'reversal') or ${t.paymentId} is not null)`,
     ),
     check('rent_tax_item_entry_check', sql`(${t.taxMinor} <> 0) = (${t.entryId} is not null)`),

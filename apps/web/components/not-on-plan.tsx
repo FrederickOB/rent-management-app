@@ -21,7 +21,7 @@ export function NotOnPlan({
           On the Starter plan the WhatsApp assistant still answers balance, receipt and pay requests
           and sends reminders. Anything else a tenant writes is recorded on their timeline and
           forwarded to you by SMS or email. A platform administrator can move your company to the
-          Growth plan, which adds the inbox, broadcasts, tenant groups and repairs.
+          Growth plan, which adds the inbox, broadcasts, tenant groups, repairs and legal notices.
         </p>
       </CardBody>
     </Card>

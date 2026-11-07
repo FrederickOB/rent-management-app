@@ -17,6 +17,9 @@ const PROBLEMS: Readonly<Record<string, string>> = {
   SIGNING_LOCKED: 'Too many wrong codes. Signing is locked for 30 minutes.',
   RATE_LIMITED: 'Too many requests. Wait a few minutes and try again.',
   LINK_NOT_USABLE: 'This link can no longer be used to sign.',
+  // M7 (plan 4.5): a notice is acknowledged, never declined.
+  NOTICE_NOT_DECLINABLE:
+    'A notice cannot be declined. Signing only acknowledges that you received it.',
 };
 
 /** The problem to show, with the tries left when the API said how many. */

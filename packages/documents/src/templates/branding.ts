@@ -16,6 +16,17 @@ export const brandingSchema = z.strictObject({
     .max(2_000_000)
     .regex(LOGO_DATA_URI, 'Expected a PNG, JPEG or WebP data URI')
     .optional(),
+  /**
+   * M8 (decision 11): photo thumbnails a template shows, by document id. The renderer reads them
+   * from storage by the ids in the data, so the frozen data holds ids and fingerprints, never
+   * images. Data URIs only, as the logo.
+   */
+  images: z
+    .record(
+      z.string().uuid(),
+      z.string().max(2_000_000).regex(LOGO_DATA_URI, 'Expected a PNG, JPEG or WebP data URI'),
+    )
+    .optional(),
 });
 
 export type Branding = z.infer<typeof brandingSchema>;

@@ -69,6 +69,14 @@ describe('TX-08 rules engine (value schemas)', () => {
     ).toBeTruthy();
   });
 
+  it('takes the VAT return due days as days, or no value until the tax adviser supplies one (OQ-61)', () => {
+    expect(isKnownRuleKey('vat.return_due_days')).toBe(true);
+    expect(parseRuleValue('vat.return_due_days', null)).toBeNull();
+    expect(parseRuleValue('vat.return_due_days', { days: 0 })).toEqual({ days: 0 });
+    expect(() => parseRuleValue('vat.return_due_days', { days: -1 })).toThrow();
+    expect(() => parseRuleValue('vat.return_due_days', 15)).toThrow();
+  });
+
   it('rejects keys with no registered schema', () => {
     expect(isKnownRuleKey('made_up.key')).toBe(false);
     expect(() => parseRuleValue('made_up.key', 1)).toThrow();

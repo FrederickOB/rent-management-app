@@ -396,6 +396,7 @@ export class ProviderPaymentsService {
       .reduce((sum, r) => sum + r.amountMinor, 0);
     if (taken <= 0) return 'ignored';
     const companyId = ref.company_id;
+    const unwound: string[] = [];
     const done = await withCompany(
       this.database,
       { companyId, actorKind: 'system' },
@@ -434,7 +435,7 @@ export class ProviderPaymentsService {
         const states: LeaseState[] = [];
         for (const leaseId of leases) states.push(await this.engine.load(tx, companyId, leaseId));
         const company = await companyRecord(tx, companyId);
-        await this.engine.reverse(tx, states, payment, {
+        const reversed = await this.engine.reverse(tx, states, payment, {
           reason: 'chargeback',
           note: 'Charged back or refunded at the payment provider',
           moneyNowIn: 'provider',
@@ -456,10 +457,36 @@ export class ProviderPaymentsService {
             propertyId: payment.row.propertyId,
             related: { type: 'payment', id: payment.id },
           });
+        // M8 review: a move-out had already settled this deposit. P21b took the share back (the
+        // lines it paid are owed again; the deductions and refund it covered are taken back), and
+        // the refund cannot be recorded as paid: the people who settle move-outs must sort it out.
+        for (const u of reversed.depositUnwound) {
+          for (const personId of await membersWhoCan(tx, this.policy, company!, 'moveout.settle', {
+            propertyId: u.propertyId,
+            ownerId: u.ownerId,
+          }))
+            await queueMessage(tx, companyId, {
+              recipient: { type: 'staff', personId },
+              purpose: 'staff_notice',
+              subject: 'A settled deposit was charged back',
+              body: `A deposit payment of ${format(money(payment.amountMinor))} was charged back after a move-out settled it. ${format(money(u.amountMinor))} of it was taken back from the settlement: the rent it paid is owed again, and the deductions and refund it covered no longer stand. The refund cannot be recorded as paid until you have checked the lease's money and agreed what happens with the tenant.`,
+              channels: ['email'],
+              propertyId: u.propertyId,
+              related: { type: 'move_out', id: u.moveOutId },
+            });
+          unwound.push(u.moveOutId);
+        }
         return 'reversed' as const;
       },
     );
     if (done !== 'reversed') return done;
+    for (const moveOutId of unwound)
+      await this.alerts.raise({
+        severity: 'critical',
+        code: 'payments.chargeback_settled_deposit',
+        message: 'A deposit payment was charged back after a move-out settled it',
+        context: { companyId, paymentId: ref.payment_id, provider, moveOutId },
+      });
     await this.alerts.raise({
       severity: 'warning',
       code: 'payments.chargeback',

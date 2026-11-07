@@ -1,4 +1,8 @@
-import type { TenancyDetailView } from '@rent/contracts';
+import type {
+  TenancyDetailView,
+  TenantNoticeView,
+  TenantTenancyDocumentView,
+} from '@rent/contracts';
 import { Redirect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
@@ -6,12 +10,14 @@ import { api } from '../../src/api';
 import {
   formatDate,
   formatMoney,
+  formatTime,
   leaseStatusLabel,
   leaseStatusTone,
   noticeLabel,
   optionalMoney,
   rentLabel,
   termLabel,
+  zoneOf,
 } from '../../src/format';
 import { openFetchedUrl } from '../../src/open-url';
 import { toProblem } from '../../src/problems';
@@ -22,6 +28,7 @@ import {
   Body,
   Button,
   Card,
+  colours,
   ErrorText,
   Fact,
   Heading,
@@ -30,9 +37,15 @@ import {
   Screen,
   Small,
 } from '../../src/ui';
+import { useCachedLoad } from '../../src/use-cached-load';
 import { useLoad, useReloadOnReturn } from '../../src/use-load';
 
-/** Tenancy (TL-01): the lease's terms and status, and the signed copy to download. */
+const loadNotices = async () => api.tenantApp.notices();
+
+/**
+ * Tenancy (TL-01): the lease's terms and status, the signed copy to download, and the notices
+ * the landlord served under this lease (M7 plan 4.10).
+ */
 export default function TenancyScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ leaseId?: string | string[] }>();
@@ -79,12 +92,27 @@ export default function TenancyScreen() {
           We could not update this just now, so it may be out of date.
         </Notice>
       ) : null}
-      <Details tenancy={state.data} onToSign={() => router.push('/to-sign')} />
+      <Details
+        tenancy={state.data}
+        onToSign={() => router.push('/to-sign')}
+        onReport={() => router.push(`/repairs/new?leaseId=${state.data.leaseId}`)}
+      />
     </Screen>
   );
 }
 
-function Details({ tenancy, onToSign }: { tenancy: TenancyDetailView; onToSign: () => void }) {
+/** Leases a repair can be reported under: in force, or about to start. */
+const REPORTABLE = new Set(['signed', 'active', 'ending', 'holding_over']);
+
+function Details({
+  tenancy,
+  onToSign,
+  onReport,
+}: {
+  tenancy: TenancyDetailView;
+  onToSign: () => void;
+  onReport: () => void;
+}) {
   return (
     <View style={styles.stack} testID="tenancy-detail">
       <Badge
@@ -130,6 +158,16 @@ function Details({ tenancy, onToSign }: { tenancy: TenancyDetailView; onToSign: 
       </Card>
 
       <Signing tenancy={tenancy} onToSign={onToSign} />
+      <Documents tenancy={tenancy} />
+      <Notices tenancy={tenancy} />
+      {REPORTABLE.has(tenancy.status) ? (
+        <Button
+          label="Report a repair"
+          variant="quiet"
+          testID="report-repair-here"
+          onPress={onReport}
+        />
+      ) : null}
     </View>
   );
 }
@@ -194,6 +232,221 @@ function Signing({ tenancy, onToSign }: { tenancy: TenancyDetailView; onToSign: 
   );
 }
 
+const DOCUMENT_KINDS: Readonly<Record<TenantTenancyDocumentView['kind'], string>> = {
+  lease: 'The lease',
+  move_in_report: 'The move-in report',
+  final_statement: 'The final statement',
+};
+
+/**
+ * The tenancy's documents (M8 plan 4.11): the signed lease, the move-in report signed by every
+ * party (TL-08), and the final statement at move-out (TL-11). Each opens through a short-lived
+ * link fetched at the tap.
+ */
+function Documents({ tenancy }: { tenancy: TenancyDetailView }) {
+  const { me, expire } = useSession();
+  const load = useCallback(
+    async () => api.tenantApp.documents({ leaseId: tenancy.leaseId }),
+    [tenancy.leaseId],
+  );
+  const documents = useLoad(load, Boolean(me));
+  const [busy, setBusy] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const opening = useRef(false);
+  const state = documents.state;
+  if (state.status === 'loading') return null;
+  if (state.status === 'error')
+    return state.problem.status === 401 ? null : (
+      <Small testID="documents-error">We could not load this tenancy’s documents just now.</Small>
+    );
+  if (state.data.length === 0) return null;
+
+  function open(document: TenantTenancyDocumentView) {
+    if (opening.current) return;
+    opening.current = true;
+    setBusy(document.documentId);
+    setProblem(null);
+    // Straight from the tap: on the web the tab has to open before anything is awaited.
+    void openFetchedUrl(
+      () => api.tenantApp.documentDownload({ documentId: document.documentId }),
+      'Opening the document…',
+    )
+      .catch((error: unknown) => {
+        const found = toProblem(error);
+        if (found.status === 401) return expire();
+        setProblem(`We could not open the document. ${found.message}`);
+      })
+      .finally(() => {
+        opening.current = false;
+        setBusy(null);
+      });
+  }
+
+  return (
+    <Card label="Documents" testID="tenancy-documents">
+      <Heading>Documents</Heading>
+      {state.data.map((document) => (
+        <View key={document.documentId} style={styles.notice} testID="tenancy-document">
+          <Body>{document.title}</Body>
+          <Small>
+            {DOCUMENT_KINDS[document.kind]}
+            {document.kind === 'final_statement'
+              ? ''
+              : document.signed
+                ? ', signed by everyone'
+                : ', not signed by everyone yet'}
+          </Small>
+          <Button
+            label="Download"
+            variant="quiet"
+            testID="download-document"
+            busy={busy === document.documentId}
+            onPress={() => open(document)}
+          />
+        </View>
+      ))}
+      {problem ? <ErrorText testID="document-error">{problem}</ErrorText> : null}
+    </Card>
+  );
+}
+
+/**
+ * The notices served under this lease (M7 plan 4.10), from this lease's landlord only: one
+ * landlord's notices never show under another's (TL-12), the offline copy included. Each opens
+ * as a PDF (the signed acknowledgement once acknowledged), and one still waiting for the tenant
+ * opens its signing page. Offline, the list last fetched on this device shows.
+ */
+function Notices({ tenancy }: { tenancy: TenancyDetailView }) {
+  const { me } = useSession();
+  const notices = useCachedLoad('notices', loadNotices, Boolean(me));
+  useReloadOnReturn(notices.reload);
+  const view = notices.view;
+  if (view.status === 'loading') return null;
+  if (view.status === 'error') {
+    return view.problem.status === 401 ? null : (
+      <Small testID="notices-error">We could not load the notices for this tenancy just now.</Small>
+    );
+  }
+  const mine = view.data
+    .filter((group) => group.landlord.companyId === tenancy.landlord.companyId)
+    .flatMap((group) => group.notices)
+    .filter((notice) => notice.leaseId === tenancy.leaseId);
+  if (mine.length === 0) return null;
+  return (
+    <Card label="Notices" testID="tenancy-notices">
+      <Heading>Notices</Heading>
+      {view.offline ? (
+        <Small testID="notices-offline">
+          You are offline. These are the notices we last fetched, at {formatTime(view.fetchedAt)}.
+        </Small>
+      ) : null}
+      {mine.map((notice) => (
+        <NoticeRow
+          key={notice.noticeId}
+          notice={notice}
+          offline={view.offline}
+          timeZone={zoneOf(tenancy.landlord)}
+        />
+      ))}
+    </Card>
+  );
+}
+
+function noticeState(notice: TenantNoticeView): { label: string; tone: 'ok' | 'waiting' | 'past' } {
+  if (notice.superseded) return { label: 'Replaced by a later notice', tone: 'past' };
+  if (notice.acknowledged) return { label: 'Acknowledged', tone: 'ok' };
+  if (notice.closed) return { label: 'Closed', tone: 'past' };
+  return { label: 'Waiting for you to acknowledge it', tone: 'waiting' };
+}
+
+function NoticeRow({
+  notice,
+  offline,
+  timeZone,
+}: {
+  notice: TenantNoticeView;
+  offline: boolean;
+  /** The landlord's zone, for the notice's times. */
+  timeZone: string;
+}) {
+  const { expire } = useSession();
+  const [busy, setBusy] = useState<'document' | 'sign' | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const opening = useRef(false);
+  const state = noticeState(notice);
+  const signerId = notice.signerId;
+  const canAcknowledge =
+    signerId !== null && !notice.acknowledged && !notice.superseded && !notice.closed;
+
+  function open(which: 'document' | 'sign') {
+    if (opening.current) return;
+    opening.current = true;
+    setBusy(which);
+    setProblem(null);
+    // Straight from the tap: on the web the tab has to open before anything is awaited. The
+    // link lasts minutes and is never kept.
+    void openFetchedUrl(
+      () =>
+        which === 'document' || !signerId
+          ? api.tenantApp.noticeDocument({ noticeId: notice.noticeId })
+          : api.tenantApp.signingLink({ signerId }),
+      which === 'document' ? 'Opening the notice…' : 'Opening the signing page…',
+    )
+      .catch((error: unknown) => {
+        const found = toProblem(error);
+        if (found.status === 401) return expire();
+        setProblem(
+          which === 'document'
+            ? `We could not open the notice. ${found.message}`
+            : found.status === 404
+              ? 'This notice is no longer waiting for you to acknowledge it.'
+              : `We could not open the signing page. ${found.message}`,
+        );
+      })
+      .finally(() => {
+        opening.current = false;
+        setBusy(null);
+      });
+  }
+
+  return (
+    <View style={styles.notice} testID="notice-row">
+      <Body>
+        Notice {notice.number} · {notice.typeLabel}
+      </Body>
+      <Badge label={state.label} tone={state.tone} testID="notice-state" />
+      <Small>Issued {formatTime(notice.issuedAt, timeZone)}</Small>
+      {notice.effectiveDate ? (
+        <Small>Effective date {formatDate(notice.effectiveDate)}</Small>
+      ) : null}
+      {notice.acknowledged && notice.acknowledgedAt ? (
+        <Small>Acknowledged {formatTime(notice.acknowledgedAt, timeZone)}</Small>
+      ) : null}
+      {offline ? null : (
+        <>
+          <Button
+            label={notice.acknowledged ? 'Download the acknowledgement' : 'Download the notice'}
+            variant="quiet"
+            testID="download-notice"
+            busy={busy === 'document'}
+            onPress={() => open('document')}
+          />
+          {canAcknowledge ? (
+            <Button
+              label="Read and acknowledge"
+              testID="acknowledge-notice"
+              busy={busy === 'sign'}
+              onPress={() => open('sign')}
+            />
+          ) : null}
+        </>
+      )}
+      {problem ? <ErrorText testID="notice-error">{problem}</ErrorText> : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   stack: { gap: 16 },
+  notice: { gap: 4, borderTopWidth: 1, borderTopColor: colours.line, paddingTop: 10 },
 });

@@ -30,7 +30,12 @@ import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
 import { LedgerModule } from '@rent/server/ledger';
-import { MaintenanceModule } from '@rent/server/maintenance';
+// M9 (F3): the nightly agent cash check.
+import { AgentCashCheckService } from '@rent/server/ledger';
+import { MaintenanceModule, MaintenanceService } from '@rent/server/maintenance';
+import { MoveInReportService, MoveOutModule, MoveOutService } from '@rent/server/moveout';
+import { NoticesModule, NoticeTrackingService } from '@rent/server/notices';
+import { TasksModule } from '@rent/server/tasks';
 import {
   BotService,
   BroadcastsService,
@@ -56,6 +61,15 @@ import {
   PropertyFilesService,
   RegisterImportService,
 } from '@rent/server/portfolio';
+import {
+  DashboardService,
+  OwnerStatementsService,
+  ManagementFeesService,
+  ReportingDashboardModule,
+  ReportingMoneyModule,
+  ReportingRollupService,
+  ReportingStatementsModule,
+} from '@rent/server/reporting';
 import { TaxAlertsService, TaxAssessmentService, TaxModule } from '@rent/server/tax';
 import {
   IdChecksService,
@@ -63,13 +77,27 @@ import {
   TenancyModule,
   TenancyRemindersService,
 } from '@rent/server/tenancy';
+import { agentCashJobs } from './agent-cash.jobs';
 import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
 import { MESSAGING_EVENT_TYPES, messagingJobs } from './messaging.jobs';
+import { MAINTENANCE_EVENT_TYPES, maintenanceJobs, moveOutOnRendered } from './maintenance.jobs';
+import { NOTICES_EVENT_TYPES, noticesJobs, noticesOnRendered } from './notices.jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
+import {
+  dashboardOnRendered,
+  REPORTING_DASHBOARD_EVENT_TYPES,
+  reportingDashboardJobs,
+} from './reporting-dashboard.jobs';
+import { reportingMoneyJobs } from './reporting-money.jobs';
+import {
+  REPORTING_STATEMENTS_EVENT_TYPES,
+  reportingStatementsJobs,
+  statementsOnRendered,
+} from './reporting-statements.jobs';
 import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
@@ -92,6 +120,17 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     PaymentsModule,
     // M5: rent tax is assessed in every receipt's posting transaction once this module starts.
     TaxModule,
+    // M7: legal notices and staff tasks.
+    TasksModule,
+    NoticesModule,
+    MoveOutModule,
+    // M9: the daily rollup, dashboard exports and Gate 1.
+    ReportingDashboardModule,
+    // M9: owner statements, drafted monthly, and their PDFs once rendered.
+    ReportingStatementsModule,
+    // M9: management fees are charged in every receipt's posting transaction once this module
+    // starts; fixed fees monthly and the nightly fee check.
+    ReportingMoneyModule,
   ],
 })
 class WorkerModule {}
@@ -142,6 +181,14 @@ const definitions = [
     onRendered: [
       (companyId: string, renderRequestId: string) =>
         app.get(BotService).onDocumentRendered(companyId, renderRequestId),
+      // M7 (plan 4.12, notices.issue-delivery): the frozen notice recorded and its links sent.
+      noticesOnRendered(app.get(NoticeTrackingService)),
+      // M8 (plan 4.13): the final statement recorded and sent to the tenant.
+      moveOutOnRendered(app.get(MoveOutService)),
+      // M9 (DA-06): the dashboard's PDF export marked ready.
+      dashboardOnRendered(app.get(DashboardService)),
+      // M9 (AC-04): an issued statement's PDF recorded with its hash, and emailed to the owner.
+      statementsOnRendered(app.get(OwnerStatementsService)),
     ],
   }),
   ...messagingJobs({
@@ -167,12 +214,24 @@ const definitions = [
     accounts: app.get(SettlementAccountsService),
     queue: app.get(QueueService),
   }),
+  ...noticesJobs({ ...deps, tracking: app.get(NoticeTrackingService) }),
+  ...maintenanceJobs({
+    ...deps,
+    maintenance: app.get(MaintenanceService),
+    reports: app.get(MoveInReportService),
+    moveOuts: app.get(MoveOutService),
+  }),
   ...taxJobs({
     ...deps,
     taxAlerts: app.get(TaxAlertsService),
     taxAssessment: app.get(TaxAssessmentService),
     advance: app.get(AdvanceService),
   }),
+  ...reportingDashboardJobs({ ...deps, rollup: app.get(ReportingRollupService) }),
+  ...reportingStatementsJobs({ ...deps, statements: app.get(OwnerStatementsService) }),
+  ...reportingMoneyJobs({ ...deps, fees: app.get(ManagementFeesService) }),
+  // M9 (F3): an owner's 1070 below zero alerts (a chargeback cannot be refused).
+  ...agentCashJobs({ ...deps, agentCash: app.get(AgentCashCheckService) }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -190,6 +249,10 @@ const relay = new OutboxRelay(
     ...BILLING_EVENT_TYPES,
     ...PAYMENTS_EVENT_TYPES,
     ...MESSAGING_EVENT_TYPES,
+    ...NOTICES_EVENT_TYPES,
+    ...MAINTENANCE_EVENT_TYPES,
+    ...REPORTING_DASHBOARD_EVENT_TYPES,
+    ...REPORTING_STATEMENTS_EVENT_TYPES,
   ]),
 );
 await relay.start();

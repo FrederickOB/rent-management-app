@@ -54,9 +54,12 @@ const PAGE = 50;
 export function ThreadView({
   conversationId,
   since,
+  canLogRepair = false,
 }: {
   readonly conversationId: string;
   readonly since: string | null;
+  /** M8 (decision 14): a repair reported by SMS or email is logged from its conversation. */
+  readonly canLogRepair?: boolean;
 }) {
   const { timeZone } = useApp();
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
@@ -315,6 +318,21 @@ export function ThreadView({
             </Card>
           ) : null}
           <ConversationActions detail={detail} onChanged={changed} />
+          {canLogRepair && detail.state !== 'triage' && detail.units.length > 0 ? (
+            <Card>
+              <CardBody>
+                <p className="text-sm text-slate-700">
+                  A repair reported by SMS or email does not open a job by itself. Log it here.
+                </p>
+                <Link
+                  href={`/repairs/new?conversationId=${detail.id}&propertyId=${detail.units[0]!.propertyId}&unitId=${detail.units[0]!.unitId}`}
+                  className="inline-flex min-h-11 items-center text-sm font-medium underline underline-offset-2"
+                >
+                  Log a repair from this conversation
+                </Link>
+              </CardBody>
+            </Card>
+          ) : null}
         </aside>
       </div>
     </>

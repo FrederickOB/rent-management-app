@@ -61,7 +61,7 @@ export function attachmentNote(message: TenantMessage): string | null {
 export const unreadLabel = (count: number): string => `${count} new`;
 
 /** A secure link, with or without its host: the cache keeps none (src/cache.ts). */
-const LINKS = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\/[lpru]\/[A-Za-z0-9_-]{16,}/gi;
+const LINKS = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\/[lpruj]\/[A-Za-z0-9_-]{16,}/gi;
 
 /** Text as the offline cache keeps it: every link replaced by `[link]`. */
 export const withoutLinks = (text: string): string => text.replace(LINKS, '[link]');

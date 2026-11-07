@@ -30,6 +30,7 @@ export const RENT_TAX_REPORT_TEMPLATE = { key: 'tax.rent-tax-report', version: 2
 const KIND_LABELS: Record<TaxItemKind, string> = {
   receipt: 'Receipt',
   carry_over: 'Credit carried to a renewal',
+  deposit_applied: 'Deposit applied to rent at move-out',
   withholding: 'Withheld by the tenant',
   reversal: 'Payment reversed',
   withholding_offset: 'Replaced by withholding',

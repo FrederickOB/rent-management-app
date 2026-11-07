@@ -1,9 +1,15 @@
+import {
+  CURRENT_CONSENT,
+  CURRENT_MOVE_IN_REPORT_CONSENT,
+  CURRENT_NOTICE_CONSENT,
+} from '@rent/domain/esign';
 import { asc, desc, eq, schema, sql, type Tx } from '@rent/db';
 import {
   maskEmail,
-  signingComplete,
+  signingCompleteBy,
   type SignerLinkPurpose,
   type SignerStatus,
+  type SigningCompletionRule,
 } from '@rent/domain/esign';
 import { maskPhone } from '@rent/domain/phone';
 import { parseCompanySettings, type CompanySettings } from '@rent/domain/settings';
@@ -107,8 +113,35 @@ export async function codesSince(
  * no further sign, decline or code action from anyone, an optional signer included, until it is
  * finalised. Read under the request row lock, so it serialises with the last signature.
  */
-export const signedByAll = (signers: readonly SignerRow[]): boolean =>
-  signingComplete(signers.map((s) => ({ required: s.required, status: s.status as SignerStatus })));
+export const signedByAll = (
+  signers: readonly SignerRow[],
+  rule: SigningCompletionRule = 'all_required',
+): boolean =>
+  signingCompleteBy(
+    rule,
+    signers.map((s) => ({ required: s.required, status: s.status as SignerStatus })),
+  );
+
+/** M7: the request's completion rule (`any_one` for a company's signatories on a notice). */
+export const completionOf = (request: Pick<RequestRow, 'completionRule'>): SigningCompletionRule =>
+  request.completionRule === 'any_one' ? 'any_one' : 'all_required';
+
+/** M7: a notice request (plan 4.5): no decline, no superseded links, its own link expiry. */
+const NOTICE_SUBJECT: ReadonlySet<string> = new Set(['notice']);
+export const isNoticeRequest = (request: Pick<RequestRow, 'subjectType'>): boolean =>
+  NOTICE_SUBJECT.has(request.subjectType);
+
+/** M8 (plan 4.7): a move-in report, signed by every party under its own consent text. */
+export const isMoveInReportRequest = (request: Pick<RequestRow, 'subjectType'>): boolean =>
+  request.subjectType === 'move_in_report';
+
+/** The consent text a request is signed under: M3's, a notice's (M7) or a move-in report's (M8). */
+export const consentVersionFor = (request: Pick<RequestRow, 'subjectType'>): string =>
+  isNoticeRequest(request)
+    ? CURRENT_NOTICE_CONSENT
+    : isMoveInReportRequest(request)
+      ? CURRENT_MOVE_IN_REPORT_CONSENT
+      : CURRENT_CONSENT;
 
 export interface CompanyFacts {
   readonly id: string;
@@ -189,9 +222,13 @@ export function screenFor(
   // while the link is live.
   if (signer.status === 'signed') return show('signed', closed(), live);
   if (signer.status === 'declined') return show('declined');
-  if (request.status !== 'pending') return show('closed', closed());
-  // Everyone who must sign has: nobody else signs, declines or asks for a code (finding 9).
-  if (signedByAll(signers)) return show('closed', 'signed_by_all');
+  // M7 (plan 4.8): a notice's link still opens the notice, read-only, once it has closed.
+  if (request.status !== 'pending')
+    return show('closed', closed(), isNoticeRequest(request) && live && !!request.documentId);
+  // Everyone who must sign has: nobody else signs, declines or asks for a code (finding 9). For a
+  // company's signatories on a notice, the first signature acknowledges for everyone (LN-07).
+  if (signedByAll(signers, completionOf(request)))
+    return show('closed', 'signed_by_all', isNoticeRequest(request) && live);
   if (link.revokedAt) return show('revoked', revoked());
   if (link.usedAt) return show('signed');
   if (!live) return show('expired');

@@ -3,10 +3,16 @@ import { Redirect, useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
-import { formatTime, SIGNER_STATUS_LABELS } from '../src/format';
+import { formatTime, SIGNER_STATUS_LABELS, zoneOf } from '../src/format';
 import { openFetchedUrl } from '../src/open-url';
 import { toProblem, type Problem } from '../src/problems';
 import { useSession } from '../src/session';
+import {
+  isMoveInReportItem,
+  isNoticeItem,
+  noticeDates,
+  noticeStatement,
+} from '../src/signing-items';
 import {
   BackLink,
   Badge,
@@ -29,8 +35,13 @@ type Signer = Item['signers'][number];
 const loadSigning = () => api.tenantApp.signing();
 
 /** Why the signing page could not be opened, in words for the tenant. */
-function linkMessage(problem: Problem): string {
-  if (problem.status === 404) return 'This lease is no longer waiting for your signature.';
+function linkMessage(problem: Problem, item: Item): string {
+  if (problem.status === 404)
+    return isNoticeItem(item)
+      ? 'This notice is no longer waiting for you to acknowledge it.'
+      : isMoveInReportItem(item)
+        ? 'This move-in report is no longer waiting for your signature.'
+        : 'This lease is no longer waiting for your signature.';
   if (problem.status === 409) return problem.message;
   return `We could not open the signing page. ${problem.message}`;
 }
@@ -47,9 +58,11 @@ function othersOf(item: Item): Signer[] {
 }
 
 /**
- * To sign (TL-07): each lease out for the tenant's own signature. "Review and sign" asks the API
- * for a fresh single-use link (it replaces the one sent by SMS) and opens the signing page in the
- * app's browser. The list reloads when the browser closes or the app is back in front.
+ * To sign (TL-07; M7 plan 4.10): each lease out for the tenant's own signature, and each notice
+ * waiting for them to acknowledge receipt. "Review and sign" (or "Read and acknowledge") asks the
+ * API for a fresh link and opens the signing page in the app's browser. For a lease the link
+ * replaces the one sent by message; for a notice earlier links keep working (M7 decision 6). The
+ * list reloads when the browser closes or the app is back in front.
  */
 export default function ToSign() {
   const router = useRouter();
@@ -76,7 +89,7 @@ export default function ToSign() {
       .catch((error: unknown) => {
         const found = toProblem(error);
         if (found.status === 401) return expire();
-        setProblem(linkMessage(found));
+        setProblem(linkMessage(found, item));
         // Signed or closed meanwhile: show the list as it is now.
         if (found.status === 404 || found.status === 409) signing.reload();
       })
@@ -109,23 +122,33 @@ export default function ToSign() {
           ) : null}
           {state.data.length === 0 ? (
             <Body testID="nothing-to-sign">
-              Nothing is waiting for your signature. When your landlord sends you a lease to sign,
-              it will appear here.
+              Nothing is waiting for your signature. When your landlord sends you a lease or a
+              move-in report to sign, or a notice to acknowledge, it will appear here.
             </Body>
           ) : (
             <>
               <Body>
-                Read the lease before you sign. To confirm it is you, the signing page sends a
-                6-digit code to your phone.
+                Read each document before you sign. To confirm it is you, the signing page sends a
+                6-digit code to your phone. Signing a notice acknowledges that you received it; it
+                does not mean that you agree with it.
               </Body>
-              {state.data.map((item) => (
-                <SigningItem
-                  key={item.signingRequestId}
-                  item={item}
-                  busy={opening === item.signer.id}
-                  onReview={() => review(item)}
-                />
-              ))}
+              {state.data.map((item) =>
+                isNoticeItem(item) ? (
+                  <NoticeItem
+                    key={item.signingRequestId}
+                    item={item}
+                    busy={opening === item.signer.id}
+                    onReview={() => review(item)}
+                  />
+                ) : (
+                  <SigningItem
+                    key={item.signingRequestId}
+                    item={item}
+                    busy={opening === item.signer.id}
+                    onReview={() => review(item)}
+                  />
+                ),
+              )}
             </>
           )}
           <Button label="Refresh" variant="quiet" testID="refresh" onPress={signing.reload} />
@@ -146,8 +169,13 @@ function SigningItem({
 }) {
   const canSign = item.status === 'pending' && item.signer.status === 'pending';
   const others = othersOf(item);
+  const report = isMoveInReportItem(item);
   return (
-    <Card testID="signing-item" label={item.title} highlight={canSign}>
+    <Card
+      testID={report ? 'move-in-report-item' : 'signing-item'}
+      label={item.title}
+      highlight={canSign}
+    >
       <View>
         <Heading>{item.title}</Heading>
         <Small>From {item.landlord.name}</Small>
@@ -156,15 +184,23 @@ function SigningItem({
             {item.tenancy.unitCode}, {item.tenancy.propertyName}
           </Small>
         ) : null}
-        {item.sentAt ? <Small>Sent {formatTime(item.sentAt)}</Small> : null}
+        {item.sentAt ? <Small>Sent {formatTime(item.sentAt, zoneOf(item.landlord))}</Small> : null}
       </View>
+      {report ? (
+        <Body testID="move-in-report-about">
+          It records the condition of your home when you moved in, room by room, with photos. Check
+          it before you sign: it is compared with the home when you move out.
+        </Body>
+      ) : null}
 
       <View style={styles.own} testID="own-status">
         <Text style={styles.ownLabel}>Your signature</Text>
         {item.signer.status === 'signed' ? (
           <>
             <Badge label="You have signed" tone="ok" />
-            {item.signer.signedAt ? <Small>Signed {formatTime(item.signer.signedAt)}</Small> : null}
+            {item.signer.signedAt ? (
+              <Small>Signed {formatTime(item.signer.signedAt, zoneOf(item.landlord))}</Small>
+            ) : null}
             <Small>When everyone has signed, your copy will be with your tenancy.</Small>
           </>
         ) : item.signer.status === 'declined' ? (
@@ -172,7 +208,10 @@ function SigningItem({
         ) : item.status === 'pending' ? (
           <Badge label="Waiting for your signature" tone="waiting" />
         ) : (
-          <Small>Your landlord is still preparing this lease. Try again in a few minutes.</Small>
+          <Small>
+            Your landlord is still preparing this {report ? 'report' : 'lease'}. Try again in a few
+            minutes.
+          </Small>
         )}
       </View>
 
@@ -192,7 +231,66 @@ function SigningItem({
       ) : null}
 
       {canSign ? (
-        <Button label="Review and sign" testID="review-and-sign" busy={busy} onPress={onReview} />
+        <Button
+          label="Review and sign"
+          testID={report ? 'review-move-in-report' : 'review-and-sign'}
+          busy={busy}
+          onPress={onReview}
+        />
+      ) : null}
+    </Card>
+  );
+}
+
+/**
+ * A notice to acknowledge (M7 plan 4.5): what it is and when, the statement that signing
+ * acknowledges receipt, not agreement, and no way to decline. It is the tenant's own; other
+ * recipients are not listed.
+ */
+function NoticeItem({ item, busy, onReview }: { item: Item; busy: boolean; onReview: () => void }) {
+  const notice = item.notice ?? null;
+  const canSign = item.status === 'pending' && item.signer.status === 'pending';
+  return (
+    <Card testID="notice-item" label={item.title} highlight={canSign}>
+      <View>
+        <Heading>{notice ? `Notice ${notice.number}: ${notice.typeLabel}` : item.title}</Heading>
+        <Small>From {item.landlord.name}</Small>
+        {item.tenancy ? (
+          <Small>
+            {item.tenancy.unitCode}, {item.tenancy.propertyName}
+          </Small>
+        ) : null}
+        {notice
+          ? noticeDates(notice, zoneOf(item.landlord)).map((line) => (
+              <Small key={line}>{line}</Small>
+            ))
+          : null}
+      </View>
+      {notice ? <Body testID="notice-statement">{noticeStatement(notice)}</Body> : null}
+
+      <View style={styles.own} testID="own-status">
+        <Text style={styles.ownLabel}>Your acknowledgement</Text>
+        {item.signer.status === 'signed' ? (
+          <>
+            <Badge label="You have acknowledged it" tone="ok" />
+            {item.signer.signedAt ? (
+              <Small>Acknowledged {formatTime(item.signer.signedAt, zoneOf(item.landlord))}</Small>
+            ) : null}
+          </>
+        ) : item.status === 'pending' ? (
+          <Badge label="Waiting for you to acknowledge it" tone="waiting" />
+        ) : (
+          <Small>Your landlord is still preparing this notice. Try again in a few minutes.</Small>
+        )}
+      </View>
+
+      {canSign ? (
+        <Button
+          label="Read and acknowledge"
+          testID="acknowledge-notice"
+          busy={busy}
+          onPress={onReview}
+        />
       ) : null}
     </Card>
   );

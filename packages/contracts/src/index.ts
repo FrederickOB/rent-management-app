@@ -9,7 +9,23 @@ import {
 } from './billing';
 import { companyContract } from './company';
 import { linksContract } from './links';
-import { maintenanceContract } from './maintenance';
+import {
+  artisansContract,
+  expensesContract,
+  inspectionsContract,
+  jobSheetContract,
+  maintenanceContract,
+  tenantRepairsContract,
+} from './maintenance';
+import { moveOutsContract } from './moveout';
+import {
+  complianceContract,
+  dashboardContract,
+  feeTermsContract,
+  ownerMoneyContract,
+  ownerStatementsContract,
+  platformMetricsContract,
+} from './reporting';
 import {
   broadcastsContract,
   inboxContract,
@@ -22,6 +38,12 @@ import {
   unsubscribeLinksContract,
 } from './messaging';
 import { meContract } from './me';
+import {
+  noticesContract,
+  quitAcknowledgementContract,
+  rentAssessmentsContract,
+  tasksContract,
+} from './notices';
 import {
   payLinksContract,
   paymentsQueueContract,
@@ -52,11 +74,14 @@ export * from './billing';
 export * from './company';
 export * from './links';
 export * from './maintenance';
+export * from './moveout';
 export * from './messaging';
 export * from './me';
+export * from './notices';
 export * from './payments';
 export * from './memberships';
 export * from './register';
+export * from './reporting';
 export * from './rules';
 export * from './tax';
 export * from './tenancy';
@@ -106,6 +131,26 @@ export const contract = {
   tenantMessaging: tenantMessagingContract,
   unsubscribeLinks: unsubscribeLinksContract,
   maintenance: maintenanceContract,
+  // M7: legal notices, the OQ-16 acknowledgement, Rent Officer assessments and staff tasks.
+  notices: noticesContract,
+  quitAcknowledgement: quitAcknowledgementContract,
+  rentAssessments: rentAssessmentsContract,
+  tasks: tasksContract,
+  // M8: the maintenance board, artisans and their job sheets, inspections and the move-in report,
+  // expenses, the tenant app's repairs, and move-out with its settlement.
+  artisans: artisansContract,
+  jobSheets: jobSheetContract,
+  inspections: inspectionsContract,
+  expenses: expensesContract,
+  tenantRepairs: tenantRepairsContract,
+  moveOuts: moveOutsContract,
+  // M9: fee terms, owner statements, remittances, the dashboard, Gate 1 and the compliance list.
+  feeTerms: feeTermsContract,
+  ownerStatements: ownerStatementsContract,
+  ownerMoney: ownerMoneyContract,
+  dashboard: dashboardContract,
+  platformMetrics: platformMetricsContract,
+  compliance: complianceContract,
 };
 
 export type Contract = typeof contract;

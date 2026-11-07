@@ -20,6 +20,7 @@ import { conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, REFUND_PROOF_UPLOAD } from '../documents/documents.service';
+import { assertAgentCash } from '../ledger/agent-cash';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { billingLeaseOf } from '../tenancy/billing-facts';
 import { BillingEngine, creditNoteWithheld, lineLabel, type LeaseState } from './engine';
@@ -27,6 +28,7 @@ import { MONEY_APPROVERS } from './money.service';
 import {
   formatInvoiceNumber,
   isoNow,
+  leaseBookOf,
   leaseGroup,
   lockCounters,
   lockLeases,
@@ -332,6 +334,13 @@ export class TerminationService {
     };
   }
 
+  /** M8 review: the moveout module (above billing) says whether a lease has a move-out. */
+  private readonly moveOutGuards: ((tx: Tx, leaseId: string) => Promise<boolean>)[] = [];
+
+  useMoveOutGuard(exists: (tx: Tx, leaseId: string) => Promise<boolean>): void {
+    this.moveOutGuards.push(exists);
+  }
+
   /** Asks for the settlement and its refund (`lease.refund`); a second person approves. */
   async request(
     actor: Actor | null,
@@ -346,6 +355,14 @@ export class TerminationService {
     return withCompany(this.database, this.unscoped(staff), async (tx) => {
       await options.claim?.claim(tx);
       await lockLeases(tx, staff.companyId, await leaseGroup(tx, leaseId));
+      // M8 review: once a lease has a move-out, its money is settled there; an early-termination
+      // refund here would credit the same unused days a second time.
+      for (const exists of this.moveOutGuards)
+        if (await exists(tx, leaseId))
+          throw conflict(
+            'move_out_exists',
+            'This lease has a move-out. Settle its money on the move-out instead.',
+          );
       await lockCounters(tx, staff.companyId);
       await this.closeStale(tx, leaseId);
       const figures = await this.simulate(tx, staff.companyId, leaseId, input);
@@ -463,6 +480,21 @@ export class TerminationService {
       if (!t) throw notFound('Early termination');
       return t;
     });
+    // F3 before the proof is staged (staged files are kept write-once): paid from the agency's
+    // account, never more than it holds for the owner. Checked again in the write, under the lock.
+    if (input.paidFrom === 'agency_account' && found.status === 'settled' && found.refundMinor > 0)
+      await withCompany(this.database, this.unscoped(staff), async (tx) => {
+        const company = await companyRecord(tx, staff.companyId);
+        const lease = await billingLeaseOf(tx, found.leaseId);
+        const book = requireBook(
+          await leaseBookOf(tx, lease, isoNow(this.clock, company!.timeZone)),
+        );
+        await assertAgentCash(tx, {
+          ownerId: book.ownerId,
+          bookId: book.bookId,
+          outMinor: found.refundMinor,
+        });
+      });
     const staged = await this.documents.stageEvidenceUpload(
       { companyId: staff.companyId, personId: staff.personId },
       input.proofUploadId,
@@ -483,6 +515,15 @@ export class TerminationService {
       if (t.settledOn && input.paidOn < t.settledOn)
         throw invalid('paid_before_approval', 'A refund is paid after it is approved');
       const state = await this.engine.load(tx, staff.companyId, t.leaseId);
+      // F3: the owner's lock (after the lease locks), then the agent's cash, before anything posts.
+      if (input.paidFrom === 'agency_account') {
+        const book = requireBook(state.book);
+        await assertAgentCash(tx, {
+          ownerId: book.ownerId,
+          bookId: book.bookId,
+          outMinor: t.refundMinor,
+        });
+      }
       const posted = await this.engine.payRefund(tx, state, {
         terminationId,
         amountMinor: t.refundMinor,

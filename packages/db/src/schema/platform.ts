@@ -335,6 +335,8 @@ export const uploadIntent = pgTable(
     storageKey: text().notNull(),
     contentType: text().notNull(),
     maxBytes: integer().notNull(),
+    /** M8 (decision 2): a video or voice note's length as the uploader declared it, in seconds. */
+    durationSeconds: integer(),
     status: text().notNull().default('pending'),
     documentId: uuid(),
     rejectReason: text(),

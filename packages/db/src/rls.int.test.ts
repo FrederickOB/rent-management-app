@@ -242,7 +242,391 @@ async function seedCompany(companyId: string) {
       tenantId,
       leaseId: leases[0]!.id,
     });
+    await seedNotices(companyId, {
+      initiator,
+      initiatorMembership,
+      documentId: docs[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
+    await seedMaintenance(companyId, {
+      initiator,
+      initiatorMembership,
+      documentId: docs[0]!.id,
+      ownerId: owners[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
+    await seedReporting(companyId, {
+      initiator,
+      documentId: docs[0]!.id,
+      ownerId: owners[0]!.id,
+      propertyId,
+      unitId: units[0]!.id,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * Owner reporting (M9): one row in each of its company tables, around the fixture owner and lease.
+ * The remittance and funding entries are fixture entries, written as ledger_writer.
+ */
+async function seedReporting(
+  companyId: string,
+  ids: {
+    initiator: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    leaseId: string;
+  },
+) {
+  const { rows: books } = await app.query<{ id: string }>(
+    'select id from book where owner_id = $1',
+    [ids.ownerId],
+  );
+  const bookId = books[0]!.id;
+  const entry = randomUUID();
+  await app.query('set local role ledger_writer');
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_entry (id, company_id, rule, idempotency_key, value_date, accounting_date, record_type, record_id)
+     values ($1, $2, 'P30', $3, current_date, current_date, 'fixture', $1)`,
+    [entry, companyId, `P30:${entry}`],
+  );
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_line (id, company_id, entry_id, line_no, book_id, account_code, amount_minor)
+     values (gen_random_uuid(), $1, $2, 1, $3, '1070', 1000), (gen_random_uuid(), $1, $2, 2, $3, '1010', -1000)`,
+    [companyId, entry, bookId],
+  );
+  await app.query('set local role none');
+  await app.query(
+    `insert into management_fee_terms (company_id, owner_id, kind, rate_bps, gra_paid_by, effective_from, created_by)
+     values ($1, $2, 'percentage', 800, 'agency', current_date, $3)`,
+    [companyId, ids.ownerId, ids.initiator],
+  );
+  const { rows: statements } = await app.query<{ id: string }>(
+    `insert into owner_statement (company_id, owner_id, book_id, month, first_day, last_day, status, template_key,
+       template_version, generated_at, issued_at, issued_by)
+     values ($1, $2, $3, '2026-01', '2026-01-01', '2026-01-31', 'issued', 'reporting.owner_statement', 1, now(), now(), $4)
+     returning id`,
+    [companyId, ids.ownerId, bookId, ids.initiator],
+  );
+  await app.query(
+    `insert into owner_statement_figure (company_id, statement_id, owner_id, key, value_minor, position)
+     values ($1, $2, $3, 'summary.cash.collections', 1000, 0)`,
+    [companyId, statements[0]!.id, ids.ownerId],
+  );
+  await app.query(
+    `insert into remittance (company_id, owner_id, book_id, kind, paid_on, method, reference, proof_document_id,
+       net_minor, fees_retained_minor, entry_id, accounting_date, created_by)
+     values ($1, $2, $3, 'remittance', current_date, 'bank', 'REF', $4, 1000, 0, $5, current_date, $6)`,
+    [companyId, ids.ownerId, bookId, ids.documentId, entry, ids.initiator],
+  );
+  await app.query(
+    `insert into owner_funding (company_id, owner_id, book_id, received_on, method, reference, proof_document_id,
+       amount_minor, entry_id, accounting_date, created_by)
+     values ($1, $2, $3, current_date, 'bank', 'REF', $4, 1000, $5, current_date, $6)`,
+    [companyId, ids.ownerId, bookId, ids.documentId, entry, ids.initiator],
+  );
+  await app.query(
+    `insert into lease_snapshot (company_id, snapshot_date, lease_id, property_id, unit_id, owner_id, lease_status,
+       occupying, end_date, computed_at)
+     values ($1, current_date, $2, $3, $4, $5, 'active', true, current_date + 300, now())`,
+    [companyId, ids.leaseId, ids.propertyId, ids.unitId, ids.ownerId],
+  );
+  await app.query(
+    `insert into metric_daily (company_id, metric_date, month, figures, computed_at)
+     values ($1, current_date, to_char(current_date, 'YYYY-MM'), '{}', now())`,
+    [companyId],
+  );
+  await app.query(
+    `insert into management_fee (company_id, owner_id, book_id, property_id, lease_id, key, source, rate_bps,
+       base_minor, fee_minor, value_date, entry_id)
+     values ($1, $2, $3, $4, $5, $6, 'payment', 800, 1000, 80, current_date, $7)`,
+    [companyId, ids.ownerId, bookId, ids.propertyId, ids.leaseId, `P14:${entry}`, entry],
+  );
+  await app.query(
+    `insert into dashboard_export (company_id, format, filters, status, requested_by)
+     values ($1, 'xlsx', '{}', 'rendering', $2)`,
+    [companyId, ids.initiator],
+  );
+  // The M9 review's tables: an allocation's fee, and a reversal of the remittance above.
+  const { rows: allocations } = await app.query<{ id: string; invoice_line_id: string }>(
+    'select id, invoice_line_id from allocation where lease_id = $1 limit 1',
+    [ids.leaseId],
+  );
+  await app.query(
+    `insert into allocation_fee (company_id, owner_id, property_id, allocation_id, lease_id, invoice_line_id,
+       rate_bps, base_minor, fee_minor)
+     values ($1, $2, $3, $4, $5, $6, 800, 1000, 80)`,
+    [
+      companyId,
+      ids.ownerId,
+      ids.propertyId,
+      allocations[0]!.id,
+      ids.leaseId,
+      allocations[0]!.invoice_line_id,
+    ],
+  );
+  const { rows: remitted } = await app.query<{ id: string }>(
+    'select id from remittance where owner_id = $1 limit 1',
+    [ids.ownerId],
+  );
+  await app.query(
+    `insert into owner_money_reversal (company_id, owner_id, book_id, record_kind, record_id, reason, reversed_on,
+       entry_id, accounting_date, created_by)
+     values ($1, $2, $3, 'remittance', $4, 'Fixture', current_date, $5, current_date, $6)`,
+    [companyId, ids.ownerId, bookId, remitted[0]!.id, entry, ids.initiator],
+  );
+}
+
+/**
+ * Maintenance, inspections, expenses and move-out (M8): one row in each of their company tables,
+ * around one job and one move-out under the fixture lease. The deposit the deduction comes from is
+ * a fixture entry crediting 2100, written as ledger_writer.
+ */
+async function seedMaintenance(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    documentId: string;
+    ownerId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const lease = [companyId, ids.propertyId, ids.tenantId, ids.leaseId];
+  const { rows: books } = await app.query<{ id: string }>(
+    'select id from book where owner_id = $1',
+    [ids.ownerId],
+  );
+  const bookId = books[0]!.id;
+  const depositEntry = randomUUID();
+  await app.query('set local role ledger_writer');
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_entry (id, company_id, rule, idempotency_key, value_date, accounting_date, record_type, record_id)
+     values ($1, $2, 'P10', $3, current_date, current_date, 'fixture', $1)`,
+    [depositEntry, companyId, `P10:${depositEntry}`],
+  );
+  await app.query(
+    // eslint-disable-next-line rent/ledger-writes -- a fixture row, written as the posting service writes them
+    `insert into journal_line (id, company_id, entry_id, line_no, book_id, account_code, amount_minor, property_id, unit_id,
+       lease_id, tenant_id)
+     values (gen_random_uuid(), $1, $2, 1, $3, '1010', 5000, $4, $5, $6, $7),
+            (gen_random_uuid(), $1, $2, 2, $3, '2100', -5000, $4, $5, $6, $7)`,
+    [companyId, depositEntry, bookId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId],
+  );
+  await app.query('set local role none');
+  const { rows: artisans } = await app.query<{ id: string }>(
+    "insert into artisan (company_id, name, phone, trades, created_by) values ($1, 'Kofi Plumber', '+233200000077', '{plumbing}', $2) returning id",
+    [companyId, ids.initiator],
+  );
+  const artisanId = artisans[0]!.id;
+  await app.query(
+    `insert into contact_consent_event (company_id, subject_type, membership_id, channel, action, text_version, text_sha256,
+       source, recorded_by) values ($1, 'staff', $2, 'whatsapp', 'grant', 'staff_alerts.v1', $3, 'staff', $4)`,
+    [companyId, ids.initiatorMembership, '0'.repeat(64), ids.initiator],
+  );
+  const { rows: jobs } = await app.query<{ id: string }>(
+    `insert into maintenance_job (company_id, property_id, unit_id, lease_id, tenant_id, source, description, reported_by)
+     values ($1, $2, $3, $4, $5, 'staff', 'The roof leaks', $6) returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId, ids.initiator],
+  );
+  const jobId = jobs[0]!.id;
+  await app.query(
+    `insert into maintenance_job_event (company_id, property_id, job_id, kind, actor_kind, actor_person_id, data)
+     values ($1, $2, $3, 'reported', 'staff', $4, '{"source":"staff"}')`,
+    [companyId, ids.propertyId, jobId, ids.initiator],
+  );
+  const { rows: links } = await app.query<{ id: string }>(
+    `insert into secure_link (company_id, property_id, purpose, token_hash, job_id, artisan_id, expires_at)
+     values ($1, $2, 'job_sheet', $3, $4, $5, now() + interval '30 days') returning id`,
+    [companyId, ids.propertyId, randomBytes(32).toString('hex'), jobId, artisanId],
+  );
+  await app.query(
+    `insert into job_sheet_code (company_id, property_id, job_id, artisan_id, secure_link_id, channel, destination_masked,
+       destination_hash, code_hash, expires_at)
+     values ($1, $2, $3, $4, $5, 'sms', '+233 ** *** 0077', 'h', 'c', now() + interval '10 minutes')`,
+    [companyId, ids.propertyId, jobId, artisanId, links[0]!.id],
+  );
+  await app.query(
+    `insert into inspection_template (company_id, unit_type, rooms, updated_by)
+     values ($1, 'single_room', '[{"key":"room","label":"Room","items":[{"key":"walls","label":"Walls"}]}]', $2)`,
+    [companyId, ids.initiator],
+  );
+  const { rows: inspections } = await app.query<{ id: string }>(
+    `insert into inspection (company_id, property_id, unit_id, lease_id, tenant_id, kind, unit_type, performed_by)
+     values ($1, $2, $3, $4, $5, 'move_out', 'single_room', $6) returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId, ids.initiator],
+  );
+  const inspectionId = inspections[0]!.id;
+  const { rows: items } = await app.query<{ id: string }>(
+    `insert into inspection_item (company_id, property_id, inspection_id, position, room_key, room_label, item_key,
+       item_label, condition) values ($1, $2, $3, 1, 'room', 'Room', 'walls', 'Walls', 'damaged') returning id`,
+    [companyId, ids.propertyId, inspectionId],
+  );
+  const { rows: photos } = await app.query<{ id: string }>(
+    `insert into inspection_photo (company_id, property_id, inspection_id, item_id, document_id, added_by)
+     values ($1, $2, $3, $4, $5, $6) returning id`,
+    [companyId, ids.propertyId, inspectionId, items[0]!.id, ids.documentId, ids.initiator],
+  );
+  const { rows: entries } = await app.query<{ id: string }>(
+    'select id from journal_entry order by posted_at limit 1',
+  );
+  const entryId = entries[0]!.id;
+  const { rows: expenses } = await app.query<{ id: string }>(
+    `insert into expense (company_id, property_id, unit_id, owner_id, book_id, category, supplier_name, amount_minor,
+       expense_date, paid_by, receipt_document_id, job_id, entry_id, accounting_date, created_by)
+     values ($1, $2, $3, $4, $5, 'repairs', 'Kofi Plumber', 12000, current_date, 'unpaid', $6, $7, $8, current_date, $9)
+     returning id`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.unitId,
+      ids.ownerId,
+      bookId,
+      ids.documentId,
+      jobId,
+      entryId,
+      ids.initiator,
+    ],
+  );
+  await app.query(
+    `insert into expense_payment (company_id, property_id, expense_id, paid_on, paid_from, entry_id, accounting_date)
+     values ($1, $2, $3, current_date, 'owner_account', $4, current_date)`,
+    [companyId, ids.propertyId, expenses[0]!.id, entryId],
+  );
+  await app.query(
+    `insert into expense_reversal (company_id, property_id, expense_id, reason, entry_id, value_date, accounting_date)
+     values ($1, $2, $3, 'A fixture', $4, current_date, current_date)`,
+    [companyId, ids.propertyId, expenses[0]!.id, entryId],
+  );
+  const { rows: moves } = await app.query<{ id: string }>(
+    `insert into move_out (company_id, property_id, tenant_id, lease_id, unit_id, owner_id, book_id, reason, planned_date,
+       inspection_id, created_by)
+     values ($1, $2, $3, $4, $5, $6, $7, 'end_of_term', current_date, $8, $9) returning id`,
+    [...lease, ids.unitId, ids.ownerId, bookId, inspectionId, ids.initiator],
+  );
+  const moveOutId = moves[0]!.id;
+  const { rows: deductions } = await app.query<{ id: string }>(
+    `insert into deposit_deduction (company_id, property_id, tenant_id, lease_id, move_out_id, kind, amount_minor, reason,
+       inspection_item_ids, photo_ids, created_by)
+     values ($1, $2, $3, $4, $5, 'damage', 1000, 'A hole in the wall', array[$6::uuid], array[$7::uuid], $8) returning id`,
+    [...lease, moveOutId, items[0]!.id, photos[0]!.id, ids.initiator],
+  );
+  await app.query(
+    `insert into deposit_deduction_withdrawal (company_id, property_id, move_out_id, deduction_id, created_by)
+     values ($1, $2, $3, $4, $5)`,
+    [companyId, ids.propertyId, moveOutId, deductions[0]!.id, ids.initiator],
+  );
+  const { rows: payments } = await app.query<{ id: string }>(
+    'select id from payment where lease_id = $1 limit 1',
+    [ids.leaseId],
+  );
+  await app.query(
+    `insert into deposit_application (company_id, property_id, tenant_id, lease_id, move_out_id, kind, payment_id,
+       amount_minor, entry_id, value_date, accounting_date)
+     values ($1, $2, $3, $4, $5, 'refund', $6, 1000, $7, current_date, current_date)`,
+    [...lease, moveOutId, payments[0]!.id, depositEntry],
+  );
+  await app.query(
+    `insert into move_out_refund_part (company_id, move_out_id, property_id, tenant_id, lease_id, payment_id, amount_minor)
+     values ($1, $5, $2, $3, $4, $6, 1000)`,
+    [...lease, moveOutId, payments[0]!.id],
+  );
+}
+
+/**
+ * Legal notices and tasks (M7): one row in each of their company tables, around one notice of
+ * entry issued under the fixture lease.
+ */
+async function seedNotices(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    documentId: string;
+    propertyId: string;
+    unitId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const zero = '0'.repeat(64);
+  const { rows: notices } = await app.query<{ id: string }>(
+    `insert into notice (company_id, number, type, subtype, status, property_id, unit_id, lease_id, tenant_id, fields,
+       template_key, template_version, issue_date, issued_at, created_by)
+     values ($1, 1, 'entry', 'inspection', 'sent', $2, $3, $4, $5, '{}', 'notices.notice', 1, current_date, now(), $6)
+     returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.leaseId, ids.tenantId, ids.initiator],
+  );
+  const noticeId = notices[0]!.id;
+  const { rows: recipients } = await app.query<{ id: string }>(
+    `insert into notice_recipient (company_id, property_id, notice_id, tenant_id, lease_id, unit_id, kind, name, phone,
+       channels, physical_service_planned, position)
+     values ($1, $2, $3, $4, $5, $6, 'tenant', 'Tenant', '+233200000099', '[]', false, 1) returning id`,
+    [companyId, ids.propertyId, noticeId, ids.tenantId, ids.leaseId, ids.unitId],
+  );
+  await app.query(
+    `insert into notice_event (company_id, property_id, notice_id, recipient_id, tenant_id, kind, dedupe_key)
+     values ($1, $2, $3, $4, $5, 'sent', $6)`,
+    [companyId, ids.propertyId, noticeId, recipients[0]!.id, ids.tenantId, `sent:${noticeId}`],
+  );
+  await app.query(
+    `insert into service_record (company_id, property_id, notice_id, recipient_id, method, served_at, served_by_name,
+       recorded_by)
+     values ($1, $2, $3, $4, 'handed_to_tenant', now(), 'Caretaker', $5)`,
+    [companyId, ids.propertyId, noticeId, recipients[0]!.id, ids.initiator],
+  );
+  await app.query(
+    `insert into rent_assessment (company_id, property_id, unit_id, assessed_on, reference, document_id, recorded_by)
+     values ($1, $2, $3, current_date - 30, 'RO/2026/001', $4, $5)`,
+    [companyId, ids.propertyId, ids.unitId, ids.documentId, ids.initiator],
+  );
+  // M7 review C4: an assessment recorded in error, voided.
+  const { rows: mistaken } = await app.query<{ id: string }>(
+    `insert into rent_assessment (company_id, property_id, unit_id, assessed_on, reference, recorded_by)
+     values ($1, $2, $3, current_date - 40, 'RO/2026/000', $4) returning id`,
+    [companyId, ids.propertyId, ids.unitId, ids.initiator],
+  );
+  await app.query(
+    `insert into rent_assessment_void (company_id, property_id, unit_id, assessment_id, reason, voided_by)
+     values ($1, $2, $3, $4, 'Recorded on the wrong unit', $5)`,
+    [companyId, ids.propertyId, ids.unitId, mistaken[0]!.id, ids.initiator],
+  );
+  await app.query(
+    `insert into notice_quit_acknowledgement (company_id, action, person_id, membership_id, typed_name,
+       statement_version, statement_sha256)
+     values ($1, 'grant', $2, $3, 'Initiator', 'quit_ack.v1', $4)`,
+    [companyId, ids.initiator, ids.initiatorMembership, zero],
+  );
+  await app.query(
+    `insert into task (company_id, property_id, unit_id, tenant_id, kind, title, related_type, notice_id, recipient_id,
+       due_at, dedupe_key)
+     values ($1, $2, $3, $4, 'notice_in_person_reminder', 'Remind the tenant', 'notice', $5, $6, now() + interval '1 day',
+       $7)`,
+    [
+      companyId,
+      ids.propertyId,
+      ids.unitId,
+      ids.tenantId,
+      noticeId,
+      recipients[0]!.id,
+      `task:${noticeId}`,
+    ],
+  );
 }
 
 /**

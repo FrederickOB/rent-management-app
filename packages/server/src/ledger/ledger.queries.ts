@@ -16,6 +16,8 @@ const GROUPS = {
   invoiceLineId: 'l.invoice_line_id',
   paymentId: 'l.payment_id',
   collectorId: 'l.collector_id',
+  /** The entry's posting rule (M9: statements split some accounts by the rule that moved them). */
+  rule: 'e.rule',
 } as const;
 export type BalanceGroup = keyof typeof GROUPS;
 
@@ -29,6 +31,10 @@ export interface BalanceFilter {
   readonly propertyIds?: readonly string[];
   /** Entries reported on or before this accounting date. */
   readonly accountingDateTo?: string;
+  /** Entries reported on or after this accounting date (M9: a statement's month). */
+  readonly accountingDateFrom?: string;
+  /** Entries posted under these rules only (P18, P20, P22: M9 statements). */
+  readonly rules?: readonly string[];
 }
 
 export type BalanceRow = { readonly balanceMinor: number } & Partial<
@@ -55,6 +61,9 @@ export async function sumLines(
   if (filter.propertyIds) where.push(sql`l.property_id = any(${uuids(filter.propertyIds)})`);
   if (filter.accountingDateTo)
     where.push(sql`e.accounting_date <= ${filter.accountingDateTo}::date`);
+  if (filter.accountingDateFrom)
+    where.push(sql`e.accounting_date >= ${filter.accountingDateFrom}::date`);
+  if (filter.rules) where.push(sql`e.rule = any(${`{${filter.rules.join(',')}}`}::text[])`);
   const columns = groupBy.map((g) => sql.raw(`${GROUPS[g]} as "${g}"`));
   const select = columns.length > 0 ? sql`${sql.join(columns, sql`, `)},` : sql``;
   const group =

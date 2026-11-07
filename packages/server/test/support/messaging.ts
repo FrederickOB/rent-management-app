@@ -5,6 +5,7 @@ import { CallbackAlert, InMemoryPush, InMemoryWhatsApp, type Alert } from '@rent
 import { EntitlementsService } from '../../src/companies/entitlements.service';
 import { DEV_WEBHOOK_SECRET, DEV_WHATSAPP_APP_SECRET } from '../../src/core/config';
 import { MESSAGE_SEND_JOB, messageRequestSchema } from '../../src/core/messages';
+import { TasksService } from '../../src/tasks/tasks.service';
 import { MaintenanceService } from '../../src/maintenance/maintenance.service';
 import { BotService } from '../../src/messaging/bot.service';
 import { BROADCAST_FANOUT_JOB, BroadcastsService } from '../../src/messaging/broadcasts.service';
@@ -45,7 +46,14 @@ export function messagingServices(ctx: ServerTestContext, s: TenancyServices, b:
     alerts.push(alert);
   });
   const entitlements = new EntitlementsService(ctx.database, s.policy);
-  const maintenance = new MaintenanceService(ctx.database, s.policy, entitlements, s.documents);
+  const maintenance = new MaintenanceService(
+    ctx.database,
+    s.policy,
+    entitlements,
+    s.documents,
+    new TasksService(ctx.database, s.policy, ctx.clock),
+    ctx.clock,
+  );
   const messaging = new MessagingService(
     ctx.database,
     s.sms,

@@ -934,7 +934,12 @@ const tenancyCardSchema = z.object({
   documentId: uuid.nullable(),
 });
 
-const landlordSchema = z.object({ companyId: uuid, name: z.string() });
+const landlordSchema = z.object({
+  companyId: uuid,
+  name: z.string(),
+  /** The landlord company's time zone (IANA), for showing its times; always sent. */
+  timeZone: z.string().optional(),
+});
 
 export const tenancyGroupSchema = z.object({
   landlord: landlordSchema,
@@ -970,8 +975,61 @@ export const tenantSigningSchema = z.object({
   signers: z.array(
     z.object({ roleLabel: z.string(), name: z.string(), status: z.enum(SIGNER_STATUSES) }),
   ),
+  /**
+   * M7 (plan 4.5): a lease to sign, or a notice to acknowledge; M8 (plan 4.7) adds the move-in
+   * report to sign. Always sent; optional before M7.
+   */
+  subject: z.enum(['lease', 'notice', 'move_in_report']).optional(),
+  /** The notice, for a notice to acknowledge; null for a lease. */
+  notice: z
+    .object({
+      noticeId: uuid,
+      number: z.string(),
+      typeLabel: z.string(),
+      issuedAt: iso,
+      effectiveDate: isoDate.nullable(),
+      /** Signing acknowledges receipt, not agreement. */
+      statement: z.string(),
+    })
+    .nullable()
+    .optional(),
 });
 export type TenantSigningView = z.infer<typeof tenantSigningSchema>;
+
+/** A notice the tenant received from a landlord, for the tenancy's documents (M7 plan 4.10). */
+export const tenantNoticeSchema = z.object({
+  noticeId: uuid,
+  number: z.string(),
+  typeLabel: z.string(),
+  issuedAt: iso,
+  effectiveDate: isoDate.nullable(),
+  leaseId: uuid.nullable(),
+  unitCode: z.string().nullable(),
+  /** Whether this tenant (or, for a company, one of its signatories) acknowledged it. */
+  acknowledged: z.boolean(),
+  acknowledgedAt: iso.nullable(),
+  /** The notice was corrected by a later one, or closed. */
+  superseded: z.boolean(),
+  closed: z.boolean(),
+  /** The tenant's own signer, while it can still be acknowledged in the app. */
+  signerId: uuid.nullable(),
+});
+export type TenantNoticeView = z.infer<typeof tenantNoticeSchema>;
+
+/**
+ * A document of a tenancy in the app (M8 plan 4.11): the signed lease, the move-in report (signed
+ * by every party, TL-08) and the final statement at move-out (TL-11). Download each through
+ * GET /me/documents/{documentId}/download.
+ */
+export const tenantTenancyDocumentSchema = z.object({
+  kind: z.enum(['lease', 'move_in_report', 'final_statement']),
+  title: z.string(),
+  documentId: uuid,
+  /** Signed by everyone (the lease, the move-in report); a statement is never signed. */
+  signed: z.boolean(),
+  createdAt: iso,
+});
+export type TenantTenancyDocumentView = z.infer<typeof tenantTenancyDocumentSchema>;
 
 export const tenantAppContract = {
   tenancies: oc
@@ -985,11 +1043,21 @@ export const tenantAppContract = {
     .route({ method: 'GET', path: '/me/tenancies/{leaseId}' })
     .input(z.object({ leaseId: uuid }))
     .output(tenancyDetailSchema),
+  documents: oc
+    .route({
+      method: 'GET',
+      path: '/me/tenancies/{leaseId}/documents',
+      summary:
+        'The tenancy’s documents: the signed lease, the move-in report and the final statement (M8)',
+    })
+    .input(z.object({ leaseId: uuid }))
+    .output(z.array(tenantTenancyDocumentSchema)),
   documentDownload: oc
     .route({
       method: 'GET',
       path: '/me/documents/{documentId}/download',
-      summary: 'A short-lived link to the tenant’s signed lease',
+      summary:
+        'A short-lived link to one of the tenant’s documents: the signed lease, the move-in report or the final statement',
     })
     .input(z.object({ documentId: uuid }))
     .output(z.object({ url: z.string() })),
@@ -1000,12 +1068,27 @@ export const tenantAppContract = {
       summary: 'Leases out for the signed-in tenant’s own signature, by landlord (TL-07)',
     })
     .output(z.array(tenantSigningSchema)),
+  notices: oc
+    .route({
+      method: 'GET',
+      path: '/me/notices',
+      summary: 'Notices the signed-in tenant received, by landlord (M7 plan 4.10)',
+    })
+    .output(z.array(z.object({ landlord: landlordSchema, notices: z.array(tenantNoticeSchema) }))),
+  noticeDocument: oc
+    .route({
+      method: 'GET',
+      path: '/me/notices/{noticeId}/document',
+      summary: 'A short-lived link to the notice, or to the signed acknowledgement once signed',
+    })
+    .input(z.object({ noticeId: uuid }))
+    .output(z.object({ url: z.string() })),
   signingLink: oc
     .route({
       method: 'POST',
       path: '/me/signing/{signerId}/link',
       summary:
-        'A fresh signing link for the tenant’s own signer, to open in the app’s browser; it replaces the link sent by message',
+        'A fresh signing link for the tenant’s own signer, to open in the app’s browser. For a lease it replaces the link sent by message; for a notice, earlier links keep working (M7 decision 6)',
     })
     .input(z.object({ signerId: uuid }))
     .output(issuedLinkSchema),

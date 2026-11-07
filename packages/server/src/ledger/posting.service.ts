@@ -1,9 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, schema, sql, type Tx } from '@rent/db';
-import { monthOf } from '@rent/domain/ledger';
 import {
   accountingDateFor,
   checkEntry,
+  lockDateOf,
+  monthOf,
   reversalLines,
   type AccountCode,
   type BookKind,
@@ -12,6 +13,7 @@ import {
 } from '@rent/domain/ledger';
 import { v7 as uuidv7 } from 'uuid';
 import { AuditService } from '../audit/audit.service';
+import { conflict } from '../core/errors';
 
 /** One business event to post (CLAUDE.md section 4): its rule, its key and its lines. */
 export interface PostingRequest {
@@ -62,21 +64,48 @@ export class PostingService {
   }
 
   /**
-   * The accounting date for a value date (AC-04): the value date itself, unless its month is
-   * locked in one of the books, then the first day of the first open month after it.
+   * The accounting date for a value date (AC-04). F1 (founder, 2026-11-06): a value date on or
+   * before a book's lock date, the last day of the latest month an issued owner statement locked,
+   * moves to the day after it; a month locked by hand moves to the next month's first day. Over
+   * every book the entry touches.
+   *
+   * First it takes each book's period lock in its shared form (M9 review, the race): an owner
+   * statement being issued holds the exclusive form from before it works its figures out until it
+   * commits, so the locks read here are the ones that will stand. It does not wait: the caller's
+   * transaction usually holds the company's audit chain already, which the issue needs too, so
+   * waiting could deadlock. A posting that meets an issue in progress is refused with a 409
+   * STATEMENT_ISSUING, and nothing of its transaction stays; a retry a moment later posts in the
+   * open month.
    */
   async accountingDate(tx: Tx, bookIds: readonly string[], valueDate: string): Promise<string> {
     if (bookIds.length === 0) return accountingDateFor(valueDate, new Set());
-    const locks = await tx
-      .select({ month: schema.periodLock.month })
-      .from(schema.periodLock)
-      .where(
-        and(
-          inArray(schema.periodLock.bookId, [...new Set(bookIds)]),
-          sql`${schema.periodLock.month} >= date_trunc('month', ${valueDate}::date)::date`,
-        ),
+    const books = sql`${`{${[...new Set(bookIds)].sort().join(',')}}`}::uuid[]`;
+    const [held] = (
+      await tx.execute<{ ok: boolean }>(
+        sql`select bool_and(pg_try_advisory_xact_lock_shared(app.period_lock_key(b))) as ok
+            from unnest(${books}) as b`,
+      )
+    ).rows;
+    if (!held?.ok)
+      throw conflict(
+        'statement_issuing',
+        'An owner statement is being issued for this owner just now. Try again in a moment.',
       );
-    return accountingDateFor(valueDate, new Set(locks.map((l) => monthOf(l.month))));
+    const [locks] = (
+      await tx.execute<{ statement_month: string | null; manual: string[] | null }>(
+        sql`select
+              (select max(p.month)::text from period_lock p
+               where p.book_id = any(${books}) and p.source = 'owner_statement') as statement_month,
+              (select array_agg(p.month::text) from period_lock p
+               where p.book_id = any(${books}) and p.source <> 'owner_statement'
+                 and p.month >= date_trunc('month', ${valueDate}::date)::date) as manual`,
+      )
+    ).rows;
+    return accountingDateFor(
+      valueDate,
+      new Set((locks?.manual ?? []).map((m) => monthOf(m))),
+      locks?.statement_month ? lockDateOf([locks.statement_month]) : null,
+    );
   }
 
   /** The entry already posted under a key, if any. */
@@ -236,8 +265,18 @@ export class PostingService {
   }
 
   /**
-   * Locks a month of a book (AC-04). Owner statements issue locks in M9; M4a builds the rule and
-   * its tests. Idempotent.
+   * M9 review (the race): an owner statement about to be issued takes its book's period lock in
+   * the exclusive form, waiting for postings in flight to commit; postings take the shared form
+   * (`accountingDate`). Call it first in the issuing transaction, before anything audited, so it
+   * waits holding nothing a posting needs. Released when the transaction ends.
+   */
+  async lockBookForIssue(tx: Tx, bookId: string): Promise<void> {
+    await tx.execute(sql`select pg_advisory_xact_lock(app.period_lock_key(${bookId}::uuid))`);
+  }
+
+  /**
+   * Locks a month of a book (AC-04). An owner statement's lock (M9) also locks every earlier month
+   * of the book (F1); a manual one (M4a) locks its month alone. Idempotent.
    */
   async lockMonth(
     tx: Tx,

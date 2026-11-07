@@ -49,6 +49,13 @@ const OPTION_WORDS: Record<BotOption, readonly string[]> = {
 
 const MENU_WORDS = new Set(['MENU', 'HI', 'HELLO', 'HELP', '0', 'START OVER']);
 
+/** M8 (decision 14): words for "my repairs", the status of the tenant's open repairs. */
+const MY_REPAIRS_WORDS = new Set(['MY REPAIRS', 'REPAIRS', 'REPAIR STATUS', 'MY REPAIR']);
+
+/** The reply buttons on "work done, please confirm" (decision 7), by job. */
+export const repairConfirmChoice = (jobId: string) => `repair_confirm:${jobId}`;
+export const repairDisputeChoice = (jobId: string) => `repair_dispute:${jobId}`;
+
 /** Contact kinds that see account figures for a company tenant (plan 4.5). */
 const MONEY_CONTACT_KINDS = new Set(['signatory', 'finance']);
 
@@ -87,7 +94,22 @@ export interface BotContext {
   readonly leases: readonly BotLease[];
   /** The last three receipts per lease, newest first. */
   readonly receipts: Readonly<Record<string, readonly BotReceipt[]>>;
+  /**
+   * M8 (decision 14): the tenant's open repairs on Growth, newest first, for "my repairs" and the
+   * replies to "work done". Absent where the service does not load them.
+   */
+  readonly openRepairs?: readonly BotRepair[];
   readonly now: Instant;
+}
+
+/** An open repair as the bot shows it (M8): its ticket and status, and whether it waits on them. */
+export interface BotRepair {
+  readonly jobId: string;
+  /** `MT-0042`. */
+  readonly ticket: string;
+  readonly statusLabel: string;
+  /** Work done and waiting for the tenant to confirm or say what is wrong. */
+  readonly awaitingResponse: boolean;
 }
 
 export type BotState =
@@ -102,7 +124,9 @@ export type BotState =
       readonly text: readonly string[];
       readonly messageIds: readonly string[];
     }
-  | { readonly name: 'handed_over' };
+  | { readonly name: 'handed_over' }
+  /** M8: the tenant said a repair is not fixed; the next message says what is still wrong. */
+  | { readonly name: 'repair_dispute'; readonly jobId: string; readonly ticket: string };
 
 /** What `bot_session` stores, as JSON. */
 export interface BotSession {
@@ -146,7 +170,14 @@ export type BotAction =
     }
   | { readonly type: 'handover'; readonly reason: HandoverReason }
   /** Starter (decision 9): logged on the tenant's timeline and sent to the landlord. */
-  | { readonly type: 'forward_to_landlord'; readonly messageIds: readonly string[] };
+  | { readonly type: 'forward_to_landlord'; readonly messageIds: readonly string[] }
+  /** M8 (decision 7): the tenant confirmed a repair, or said what is still wrong. */
+  | {
+      readonly type: 'repair_response';
+      readonly jobId: string;
+      readonly response: 'confirmed' | 'disputed';
+      readonly reason: string | null;
+    };
 
 export interface BotStep {
   readonly session: BotSession;
@@ -426,8 +457,35 @@ export function botStep(session: BotSession, context: BotContext, input: BotInpu
       }
       return done(state, [leaseList(context)]);
     }
+    case 'repair_dispute': {
+      if (isMenuWord(input) || isWord(input, 'CANCEL'))
+        return done(menuState(), [menuReply(context)]);
+      const reason =
+        input.kind === 'text'
+          ? input.text.trim()
+          : input.kind === 'media'
+            ? (input.caption ?? '').trim()
+            : '';
+      if (reason.length < 3)
+        return done(state, [
+          reply(`Tell us in a few words what is still wrong with ${state.ticket}, or CANCEL.`),
+        ]);
+      return done(menuState(), [
+        { type: 'repair_response', jobId: state.jobId, response: 'disputed', reason },
+        reply(
+          `Thank you. We have reopened ${state.ticket} and told the team. Reply MENU for the menu.`,
+        ),
+      ]);
+    }
     case 'menu': {
       if (isMenuWord(input)) return done(menuState(), [menuReply(context)]);
+      const repairs = planHas(context.plan, 'bot_full_menu') ? context.openRepairs : undefined;
+      if (repairs) {
+        const answered = repairAnswer(input, repairs);
+        if (answered) return done(answered.state ?? menuState(), answered.actions);
+        if (input.kind === 'text' && MY_REPAIRS_WORDS.has(upper(input.text)))
+          return done(menuState(), [myRepairsReply(repairs)]);
+      }
       const option = optionOf(input, context.plan);
       if (option === 'person') {
         const next = toPerson(
@@ -473,6 +531,76 @@ export function botStep(session: BotSession, context: BotContext, input: BotInpu
       ]);
     }
   }
+}
+
+/**
+ * M8 (decision 7): a tenant's answer to "work done": the buttons, or `FIXED MT-0042` and
+ * `NOT FIXED MT-0042 <what is wrong>` typed. Null when the input is not one.
+ */
+function repairAnswer(
+  input: BotInput,
+  repairs: readonly BotRepair[],
+): { state?: BotState; actions: BotAction[] } | null {
+  const waiting = repairs.filter((r) => r.awaitingResponse);
+  let jobId: string | null = null;
+  let response: 'confirmed' | 'disputed' | null = null;
+  let reason = '';
+  if (input.kind === 'choice') {
+    for (const r of waiting) {
+      if (input.id === repairConfirmChoice(r.jobId)) [jobId, response] = [r.jobId, 'confirmed'];
+      if (input.id === repairDisputeChoice(r.jobId)) [jobId, response] = [r.jobId, 'disputed'];
+    }
+  } else if (input.kind === 'text') {
+    const match = /^(NOT FIXED|FIXED|CONFIRM|DISPUTE)\s+MT\s?-?\s?0*(\d{1,9})\b\s*(.*)$/s.exec(
+      upper(input.text),
+    );
+    if (match) {
+      const repair = waiting.find((r) => Number(r.ticket.replace(/\D/g, '')) === Number(match[2]));
+      if (!repair) return null;
+      jobId = repair.jobId;
+      response = match[1] === 'FIXED' || match[1] === 'CONFIRM' ? 'confirmed' : 'disputed';
+      // The reason as typed, not upper-cased.
+      reason = input.text
+        .trim()
+        .split(/\s+/)
+        .slice(match[1]!.split(' ').length + 1)
+        .join(' ');
+    }
+  }
+  if (!jobId || !response) return null;
+  const repair = waiting.find((r) => r.jobId === jobId)!;
+  if (response === 'confirmed')
+    return {
+      actions: [
+        { type: 'repair_response', jobId, response, reason: null },
+        reply(`Thank you for confirming. ${repair.ticket} is closed. Reply MENU for the menu.`),
+      ],
+    };
+  if (reason.trim().length >= 3)
+    return {
+      actions: [
+        { type: 'repair_response', jobId, response, reason: reason.trim() },
+        reply(
+          `Thank you. We have reopened ${repair.ticket} and told the team. Reply MENU for the menu.`,
+        ),
+      ],
+    };
+  return {
+    state: { name: 'repair_dispute', jobId, ticket: repair.ticket },
+    actions: [reply(`Sorry it is not fixed. Tell us in a few words what is still wrong.`)],
+  };
+}
+
+/** "My repairs": the status of each open repair, newest first (decision 14). */
+function myRepairsReply(repairs: readonly BotRepair[]): BotAction {
+  if (repairs.length === 0) return reply('You have no open repairs. Reply MENU for the menu.');
+  const lines = repairs
+    .slice(0, 10)
+    .map(
+      (r) =>
+        `${r.ticket}: ${r.statusLabel}${r.awaitingResponse ? ` (reply FIXED ${r.ticket} or NOT FIXED ${r.ticket})` : ''}`,
+    );
+  return reply(`Your open repairs:\n${lines.join('\n')}\nReply MENU for the menu.`);
 }
 
 /**

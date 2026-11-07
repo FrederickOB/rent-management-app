@@ -19,6 +19,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
+import { RentAssessments } from './rent-assessments';
 import { UnitConversations } from './unit-conversations';
 import { UnitLeases } from './unit-leases';
 import { useApp } from '@/components/app-context';
@@ -59,6 +60,9 @@ export interface UnitPermissions {
   readonly draftLease?: boolean;
   /** M6 (CM-05): every conversation with the unit's tenants since each lease began. */
   readonly conversations?: boolean;
+  /** M7 (decision 3): Rent Officer assessments, read and recorded. */
+  readonly assessments?: boolean;
+  readonly recordAssessment?: boolean;
 }
 
 /**
@@ -191,6 +195,9 @@ export function UnitDetail({
 
       {can.seeLeases ? <UnitLeases unit={unit} canDraft={Boolean(can.draftLease) && live} /> : null}
       {can.conversations ? <UnitConversations unitId={unit.id} /> : null}
+      {can.assessments ? (
+        <RentAssessments unitId={unit.id} canRecord={Boolean(can.recordAssessment) && live} />
+      ) : null}
 
       <AvailabilityCard unit={unit} canChange={can.manage && live} onSaved={saved} />
       <BandCard unit={unit} canOverride={can.overrideBand && live} onSaved={saved} />

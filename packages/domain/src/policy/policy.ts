@@ -100,6 +100,45 @@ export const POLICY_ACTIONS = [
   'company.plan.manage',
   // M6 (decision 12): the reported repairs the bot creates; M8 adds the rest of maintenance.
   'maintenance.view',
+  // M7: legal notices and staff tasks (plan 4.11). Growth only (decision 14), which
+  // EntitlementsService checks, not this matrix.
+  'notices.read',
+  'notices.draft',
+  'notices.issue',
+  'notices.approve_quit',
+  'notices.ladder.control',
+  'notices.service.record',
+  'notices.close',
+  'notices.quit.acknowledge',
+  'rent_assessment.record',
+  'tasks.read',
+  'tasks.complete',
+  'tasks.manage',
+  // M8 (plan 4.12; decision 9). `maintenance.view` stays M6's (the inbox's repair links); the
+  // board's read-only access for accountants, an agency's client owners and advisers is
+  // `maintenance.read`. Growth-only parts are checked by EntitlementsService (decision 1).
+  'maintenance.read',
+  'maintenance.report',
+  'maintenance.manage',
+  'maintenance.attend',
+  // Decision 5: who an emergency alert goes to (the property's managers and caretakers).
+  'maintenance.alert',
+  'artisan.manage',
+  'inspection.read',
+  'inspection.perform',
+  'moveout.manage',
+  'moveout.settle',
+  'expense.read',
+  'expense.record',
+  // M9 (docs/plans/M9.md section 4.8): owner statements, remittances, fee terms, the dashboard,
+  // the compliance list, and Gate 1 across companies.
+  'statements.read',
+  'statements.issue',
+  'remittance.record',
+  'fees.manage',
+  'dashboard.read',
+  'compliance.read',
+  'metrics.platform.read',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -130,7 +169,13 @@ export interface CertificateResource {
   readonly ownerHasUser: boolean;
 }
 
-export type PolicyResource = ApprovalResource | CertificateResource;
+/** A staff task (CF-06; M7 plan 4.11): a caretaker completes only the tasks assigned to them. */
+export interface TaskResource {
+  readonly kind: 'task';
+  readonly assigneePersonId: string | null;
+}
+
+export type PolicyResource = ApprovalResource | CertificateResource | TaskResource;
 
 export interface Decision {
   readonly allowed: boolean;
@@ -365,6 +410,107 @@ const STAFF_MATRIX: Record<
   'messaging.own': [],
   // Caretakers see the repairs on their assigned properties (scope applies).
   'maintenance.view': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  // M7 (plan 4.11). Scope applies to every row: a caretaker reads notices and records service on
+  // assigned properties only. Accountants and advisers read only. An agency's client owners stay
+  // out, as with the inbox: the agency serves its tenants. Notice authority (decision 8) is
+  // agency admins, managers and the self-managing landlord; anyone else who drafts submits.
+  'notices.read': [
+    'owner:own_company',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'notices.draft': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'notices.issue': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // The roles a notice to quit's approval handler names; approval.decide still applies (AD-05).
+  'notices.approve_quit': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'notices.ladder.control': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'notices.service.record': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'notices.close': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // OQ-16 (decision 9): agency admins and landlords accept the risk for their company.
+  'notices.quit.acknowledge': ['owner:own_company', 'agency_admin'],
+  'rent_assessment.record': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // CF-06: caretakers see the tasks on their properties and complete their own (the task
+  // resource below); managers and admins complete any in their scope.
+  'tasks.read': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'tasks.complete': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  // Cancelling a task: managers and admins, never the caretaker it is assigned to.
+  'tasks.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  // M8 (plan 4.12; decision 9). Scope applies to every row: owner scope for an agency's client
+  // owners and advisers, property scope for caretakers. Read-only access: accountants, client
+  // owners and advisers see jobs, photos, cost and history. Managers, admins and landlords manage;
+  // caretakers report, attend, inspect and record work on their own properties.
+  'maintenance.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'maintenance.report': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'maintenance.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'maintenance.attend': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  'maintenance.alert': ['property_manager', 'caretaker'],
+  'artisan.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'inspection.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'caretaker',
+    'adviser',
+  ],
+  'inspection.perform': ['owner:own_company', 'agency_admin', 'property_manager', 'caretaker'],
+  // Move-out: managers, admins and landlords plan it and draft the settlement; the settlement is
+  // approved through approvals by a money approver who did not ask for it (AD-05).
+  'moveout.manage': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'moveout.settle': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'expense.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'expense.record': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  // M9 (plan 4.8): owners and advisers read within owner scope; a caretaker sees no owner's
+  // figures (PRD section 15). A manager, an agency admin or an accountant issues a statement
+  // (decision 7); a landlord issues their own. Remittances are an agency's. Fee terms are asked
+  // for by admins and managers, and approved by a second person.
+  'statements.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'statements.issue': ['owner:own_company', 'agency_admin', 'property_manager', 'accountant'],
+  'remittance.record': ['agency_admin', 'property_manager', 'accountant'],
+  'fees.manage': ['agency_admin', 'property_manager'],
+  'dashboard.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'compliance.read': [
+    'owner:own_company',
+    'owner:agency_client',
+    'agency_admin',
+    'property_manager',
+    'accountant',
+    'adviser',
+  ],
+  'metrics.platform.read': [],
 };
 
 /** Platform-level actions: platform admins only, never staff of a company (M6 decisions 3 and 9). */
@@ -374,6 +520,8 @@ const PLATFORM_ACTIONS: readonly PolicyAction[] = [
   'session.manage_own',
   'whatsapp_account.manage',
   'company.plan.manage',
+  // M9 decision 13: Gate 1 across companies, through a system path.
+  'metrics.platform.read',
 ];
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
@@ -447,7 +595,7 @@ export function can(actor: Actor, action: PolicyAction, resource?: PolicyResourc
         action === 'approval.self_confirm' ||
         action === 'approval.cancel'
       ) {
-        if (!resource || resource.kind === 'certificate')
+        if (!resource || resource.kind === 'certificate' || resource.kind === 'task')
           return deny('approval decisions need the request');
         const isInitiator = resource.initiatorPersonId === actor.personId;
         if (action === 'approval.decide') {
@@ -484,6 +632,16 @@ export function can(actor: Actor, action: PolicyAction, resource?: PolicyResourc
         return deny('the audit log needs access to the whole company', AUDIT_NEEDS_WHOLE_COMPANY);
       if (action === 'withholding.confirm' && resource?.kind === 'certificate')
         return certificateDecision(actor, resource);
+      if (
+        action === 'tasks.complete' &&
+        actor.role === 'caretaker' &&
+        resource?.kind === 'task' &&
+        resource.assigneePersonId !== actor.personId
+      )
+        return deny(
+          'a caretaker completes only their own tasks (CF-06)',
+          'This task is assigned to someone else',
+        );
       return allow(`${actor.role} may ${action}`);
     }
   }
@@ -554,6 +712,50 @@ export function scopeOf(actor: Actor): ScopeIds | null {
   const propertyIds = rule.properties === 'unused' ? [] : (actor.scope.properties ?? []);
   const always = rule.owners === 'required' || rule.properties === 'required';
   return always || ownerIds.length > 0 || propertyIds.length > 0 ? { ownerIds, propertyIds } : null;
+}
+
+/**
+ * Who a property's task goes to (CF-06; M7 plan 3): its caretaker, else its manager, else an agency
+ * admin or the landlord. A lower number comes first; null means the role is never assigned one.
+ * Routing work, not authorization: whoever receives it still acts through can().
+ */
+export function taskAssigneeOrder(role: StaffRole, companyKind: CompanyKind): number | null {
+  switch (staffKey(role, companyKind)) {
+    case 'caretaker':
+      return 0;
+    case 'property_manager':
+      return 1;
+    case 'agency_admin':
+      return 2;
+    case 'owner:own_company':
+      return 3;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Who an emergency alert reaches (decision 5, widened by the M8 review), by role: the property's
+ * managers and caretakers; a self-managing landlord, who is their own property's manager; and an
+ * agency's admins, who are alerted only when no manager covers the property (the caller decides).
+ */
+export type EmergencyAlertRole = 'manages' | 'attends' | 'fallback';
+
+export function emergencyAlertRole(
+  role: StaffRole,
+  companyKind: CompanyKind,
+): EmergencyAlertRole | null {
+  switch (staffKey(role, companyKind)) {
+    case 'property_manager':
+    case 'owner:own_company':
+      return 'manages';
+    case 'caretaker':
+      return 'attends';
+    case 'agency_admin':
+      return 'fallback';
+    default:
+      return null;
+  }
 }
 
 /** The role an actor acts with, for display (never for decisions; use can()). */

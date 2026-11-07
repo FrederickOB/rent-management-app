@@ -1,4 +1,5 @@
 import { Controller, Inject } from '@nestjs/common';
+import { ArtisansService } from '@rent/server/maintenance';
 import { Implement, implement } from '@orpc/nest';
 import { contract, type Me } from '@rent/contracts';
 import { companyOf, roleOf } from '@rent/domain/policy';
@@ -35,7 +36,25 @@ function toMe(session: ResolvedSession): Me {
 
 @Controller()
 export class MeController {
-  constructor(@Inject(IdentityService) private readonly identity: IdentityService) {}
+  constructor(
+    @Inject(IdentityService) private readonly identity: IdentityService,
+    @Inject(ArtisansService) private readonly staffAlerts: ArtisansService,
+  ) {}
+
+  /** M8 (decision 5): the signed-in staff member's own WhatsApp opt-in for emergency alerts. */
+  @Implement(contract.me.whatsappConsent)
+  whatsappConsent(@Ctx() ctx: RequestContext) {
+    return implement(contract.me.whatsappConsent).handler(() =>
+      this.staffAlerts.ownWhatsApp(ctx.actor),
+    );
+  }
+
+  @Implement(contract.me.setWhatsappConsent)
+  setWhatsappConsent(@Ctx() ctx: RequestContext) {
+    return implement(contract.me.setWhatsappConsent).handler(({ input }) =>
+      this.staffAlerts.ownWhatsApp(ctx.actor, input.granted),
+    );
+  }
 
   @AllowStates('enrolment_required', 'company_required', 'ready')
   @Implement(contract.me.get)

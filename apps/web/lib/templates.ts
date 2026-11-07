@@ -16,6 +16,15 @@ export const TEMPLATE_KEY_LABELS: Record<TemplateKey, string> = {
   paid_until_prompt: 'Paid-until reminder',
   building_notice: 'Building notice (broadcasts)',
   conversation_reopen: 'Reopen a conversation',
+  // M7: legal notices (plan 4.6 and 4.7).
+  notice_link: 'Legal notice: the link to acknowledge it',
+  notice_reminder: 'Legal notice: reminder',
+  notice_in_force: 'Legal notice: reminder that it remains in force',
+  // M8: repairs and move-out (plan 4.1 and 4.4).
+  maintenance_alert: 'Emergency repair alert to staff',
+  job_sheet_link: 'Job sheet link to an artisan',
+  repair_update: 'Repair update to the tenant',
+  final_statement_ready: 'Final statement at move-out',
 };
 
 export const TEMPLATE_CATEGORY_LABELS: Record<TemplateCategory, string> = {

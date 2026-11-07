@@ -61,7 +61,8 @@ type TenantRow = typeof schema.tenant.$inferSelect;
 export type TimelineSource = (
   tx: Tx,
   tenantId: string,
-  options: { readonly detailed: boolean },
+  /** M7: the reader too, so a source can show its data only to those allowed to read it. */
+  options: { readonly detailed: boolean; readonly actor?: Actor },
 ) => Promise<TimelineEvent[]>;
 type ContactRow = typeof schema.tenantContact.$inferSelect;
 
@@ -671,7 +672,7 @@ export class TenantsService {
       }));
       if (this.timelineSources.length === 0) return timeline;
       for (const source of this.timelineSources)
-        timeline.push(...(await source(tx, tenantId, { detailed })));
+        timeline.push(...(await source(tx, tenantId, { detailed, actor: staff })));
       // Review note: each source keeps its own cap, so messages never crowd out the record's
       // own history (the audit events above, at most 200).
       return timeline.sort((a, b) => b.at.getTime() - a.at.getTime());

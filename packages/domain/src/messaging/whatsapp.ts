@@ -60,6 +60,15 @@ export const TEMPLATE_KEYS = [
   'paid_until_prompt',
   'building_notice',
   'conversation_reopen',
+  // M7: legal notices (plan 4.6 and 4.7).
+  'notice_link',
+  'notice_reminder',
+  'notice_in_force',
+  // M8: maintenance and move-out (plan 4.4, 4.5 and 4.8).
+  'maintenance_alert',
+  'job_sheet_link',
+  'repair_update',
+  'final_statement_ready',
 ] as const;
 export type TemplateKey = (typeof TEMPLATE_KEYS)[number];
 
@@ -79,6 +88,13 @@ export const TEMPLATE_FOR_PURPOSE: Readonly<Partial<Record<MessagePurpose, Templ
   paid_until_prompt: 'paid_until_prompt',
   broadcast: 'building_notice',
   conversation_reply: 'conversation_reopen',
+  notice_link: 'notice_link',
+  notice_reminder: 'notice_reminder',
+  notice_in_force: 'notice_in_force',
+  maintenance_alert: 'maintenance_alert',
+  job_sheet_link: 'job_sheet_link',
+  repair_update: 'repair_update',
+  final_statement: 'final_statement_ready',
 };
 
 export const templateForPurpose = (purpose: MessagePurpose): TemplateKey | null =>
@@ -204,6 +220,43 @@ export const TEMPLATE_DEFINITIONS: readonly TemplateDefinition[] = [
   template(
     'conversation_reopen',
     'Hello {{2}}, {{1}} has replied to your message. Reply here to read it and carry on.',
+    ['tenant'],
+  ),
+  // M7: the words say what to do and what signing confirms; the legal wording is in the notice.
+  template(
+    'notice_link',
+    'Hello {{2}}, {{1}} has sent you a notice. Read it at {{3}} and confirm you received it with a code sent to your phone.',
+    ['tenant', 'link'],
+  ),
+  template(
+    'notice_reminder',
+    'Hello {{2}}, a reminder from {{1}}: a notice is waiting for you at {{3}}. Please open it and confirm you received it.',
+    ['tenant', 'link'],
+  ),
+  template(
+    'notice_in_force',
+    'Hello {{2}}, a reminder from {{1}}: the notice sent to you remains in force whether or not you sign it. Read it at {{3}} when you are ready.',
+    ['tenant', 'link'],
+  ),
+  // M8: what to do and where, with no tenant details in the staff alert or the job sheet link.
+  template(
+    'maintenance_alert',
+    'An emergency repair was reported to {{1}}: {{2}} at {{3}}. Please open the maintenance board now.',
+    ['ticket', 'place'],
+  ),
+  template(
+    'job_sheet_link',
+    'Hello {{2}}, {{1}} has a repair job for you: {{3}}. See the details and reply at {{4}} please.',
+    ['artisan', 'job', 'link'],
+  ),
+  template(
+    'repair_update',
+    'Hello {{2}}, an update from {{1}} on your repair {{3}}: {{4}}. Reply here if you have a question.',
+    ['tenant', 'ticket', 'update'],
+  ),
+  template(
+    'final_statement_ready',
+    'Hello {{2}}, {{1}} has settled your tenancy. Your final statement is in the tenant app, or reply here and we will send it.',
     ['tenant'],
   ),
 ];

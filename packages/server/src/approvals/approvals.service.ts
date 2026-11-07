@@ -447,6 +447,90 @@ export class ApprovalsService {
     return new Map(rows.map((r) => [r.id, r]));
   }
 
+  /**
+   * Who approved a request (an approve or a single-user confirmation), in the caller's
+   * transaction: for the record an action leaves (M7 review: the approver on a notice's event).
+   */
+  async approverIn(tx: Tx, requestId: string): Promise<string | null> {
+    const [row] = await tx
+      .select({ decidedBy: schema.approvalDecision.decidedBy })
+      .from(schema.approvalDecision)
+      .where(
+        and(
+          eq(schema.approvalDecision.requestId, requestId),
+          inArray(schema.approvalDecision.kind, ['approve', 'self_confirm']),
+        ),
+      )
+      .orderBy(desc(schema.approvalDecision.decidedAt))
+      .limit(1);
+    return row?.decidedBy ?? null;
+  }
+
+  /**
+   * The latest request of these actions about one subject, open or closed, with its outcome
+   * (M7 review C1: a notice keeps its last approval after it returns to draft). `decidedAt` is
+   * when it closed (its expiry, for an expired one); `decidedBy` who approved or rejected it.
+   */
+  async latestForSubject(
+    tx: Tx,
+    subjectType: string,
+    subjectId: string,
+    actionTypes: readonly string[],
+  ): Promise<{
+    readonly id: string;
+    readonly actionType: string;
+    readonly status: ApprovalStatus;
+    readonly decidedAt: Date | null;
+    readonly decidedBy: string | null;
+  } | null> {
+    const [request] = await tx
+      .select()
+      .from(schema.approvalRequest)
+      .where(
+        and(
+          eq(schema.approvalRequest.subjectType, subjectType),
+          eq(schema.approvalRequest.subjectId, subjectId),
+          inArray(schema.approvalRequest.actionType, [...actionTypes]),
+        ),
+      )
+      .orderBy(desc(schema.approvalRequest.createdAt), desc(schema.approvalRequest.id))
+      .limit(1);
+    if (!request) return null;
+    const status = request.status as ApprovalStatus;
+    const [decision] =
+      status === 'approved' || status === 'rejected'
+        ? await tx
+            .select({
+              decidedBy: schema.approvalDecision.decidedBy,
+              decidedAt: schema.approvalDecision.decidedAt,
+            })
+            .from(schema.approvalDecision)
+            .where(
+              and(
+                eq(schema.approvalDecision.requestId, request.id),
+                inArray(
+                  schema.approvalDecision.kind,
+                  status === 'approved' ? ['approve', 'self_confirm'] : ['reject'],
+                ),
+              ),
+            )
+            .orderBy(desc(schema.approvalDecision.decidedAt))
+            .limit(1)
+        : [];
+    const open = status === 'pending' || status === 'cooling_off';
+    return {
+      id: request.id,
+      actionType: request.actionType,
+      status,
+      decidedAt: open
+        ? null
+        : (request.closedAt ??
+          decision?.decidedAt ??
+          (status === 'expired' ? request.expiresAt : null)),
+      decidedBy: decision?.decidedBy ?? null,
+    };
+  }
+
   /** Requests still waiting for a decision about these subjects, by subject id. */
   async openFor(
     tx: Tx,

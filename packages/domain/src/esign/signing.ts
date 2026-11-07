@@ -107,6 +107,23 @@ export function signingComplete(
   return required.length > 0 && required.every((s) => s.status === 'signed');
 }
 
+/**
+ * How a request completes (M7 plan 4.5). `all_required` is M3's rule for leases
+ * (signingComplete). `any_one` serves notices to a company tenant (LN-07): the first required
+ * signer to sign acknowledges for everyone. A notice cannot be declined, so a decline under
+ * `any_one` blocks nobody else.
+ */
+export const SIGNING_COMPLETION_RULES = ['all_required', 'any_one'] as const;
+export type SigningCompletionRule = (typeof SIGNING_COMPLETION_RULES)[number];
+
+export function signingCompleteBy(
+  rule: SigningCompletionRule,
+  signers: readonly { readonly required: boolean; readonly status: SignerStatus }[],
+): boolean {
+  if (rule === 'all_required') return signingComplete(signers);
+  return signers.some((s) => s.required && s.status === 'signed');
+}
+
 export const SIGNATURE_METHODS = ['typed', 'drawn'] as const;
 export type SignatureMethod = (typeof SIGNATURE_METHODS)[number];
 
@@ -136,5 +153,27 @@ export const SIGNING_CONSENT: Readonly<Record<string, string>> = {
     'I have read this document and I agree to sign it electronically. I understand that my ' +
     'signature, the time, the phone number or email that received my code, and my device ' +
     'details are recorded with the document’s fingerprint.',
+  // M7 plan 4.5: the notice acknowledgement. It says what signing records and that it confirms
+  // receipt only; the legal effect of electronic service is counsel's (OQ-10).
+  'notice_ack.v1':
+    'I have opened this notice and I am signing to acknowledge that I received it. My signature ' +
+    'confirms receipt only: it does not mean that I agree with the notice. I understand that my ' +
+    'signature, the time, the phone number or email that received my code, and my device ' +
+    'details are recorded with the notice’s fingerprint.',
+  // M8 plan 4.7: the move-in report. Signing agrees that the report records the condition of the
+  // home at move-in; what that means at move-out is the lease's and the law's (OQ-59).
+  'move_in_report.v1':
+    'I have read this move-in report and its photos, and I agree to sign it electronically as a ' +
+    'record of the condition of the home when the tenancy started. I understand that my signature, ' +
+    'the time, the phone number or email that received my code, and my device details are ' +
+    'recorded with the report’s fingerprint.',
 };
 export const CURRENT_CONSENT = 'consent.v1';
+/** The consent a notice's signer accepts (M7 plan 4.5); leases keep CURRENT_CONSENT. */
+export const CURRENT_NOTICE_CONSENT = 'notice_ack.v1';
+/** The consent each party to a move-in report accepts (M8 plan 4.7). */
+export const CURRENT_MOVE_IN_REPORT_CONSENT = 'move_in_report.v1';
+
+/** Shown above the signature box on a notice's signing page (M7 plan 4.5; CLAUDE.md section 9). */
+export const NOTICE_SIGNING_STATEMENT =
+  'Signing acknowledges that you received this notice. It does not mean that you agree with it.';

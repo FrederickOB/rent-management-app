@@ -26,7 +26,9 @@ export default defineConfig({
           name: 'integration',
           include: ['src/**/*.int.test.ts', 'test/**/*.int.test.ts'],
           globalSetup: ['./test/support/global-setup.ts'],
-          testTimeout: 30_000,
+          // 60 s, founder-approved 2026-11-06 (M9 §9): TL-07's reminder and recall tests and BC-06
+          // are slow under the full run's load (the reminder test: 1.8 s alone, up to 30 s there).
+          testTimeout: 60_000,
           hookTimeout: 60_000,
         },
       },

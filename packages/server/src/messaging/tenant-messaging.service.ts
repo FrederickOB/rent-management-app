@@ -150,7 +150,13 @@ export class TenantMessagingService {
               unreadCount: 0,
               tenantId: null as string | null,
             };
-          const latest = await this.inbox.thread(tx, row, { limit: 1 }, { forTenant: true });
+          // The preview is the last real message, never an automatic prompt (M8 review).
+          const latest = await this.inbox.thread(
+            tx,
+            row,
+            { limit: 1 },
+            { forTenant: true, withoutSystemPrompts: true },
+          );
           return {
             companyId,
             landlordName,

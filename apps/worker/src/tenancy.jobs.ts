@@ -63,6 +63,10 @@ export function tenancyJobs(
       schema: z.object({ companyId: z.string().uuid() }).passthrough(),
       // Five sends per channel, then the next consented channel (plan 4.17).
       retry: { limit: 12, delaySeconds: 30, backoff: true, maxDelaySeconds: 1_800 },
+      // A building-wide notice, a broadcast or the daily reminders queue many sends at once: drain
+      // the backlog without the polling pause after each one. Sends still run one at a time, in
+      // queue order, and each is idempotent by its message id (M8 §9).
+      drain: true,
       async handle(payload) {
         const body = { ...(payload as Record<string, unknown>) };
         for (const key of ENVELOPE) delete body[key];

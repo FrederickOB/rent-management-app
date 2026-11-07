@@ -27,6 +27,7 @@ export function InviteForm({ onInvited, onCancel }: InviteFormProps) {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [nominatedApprover, setNominatedApprover] = useState(false);
+  const [whatsappConsent, setWhatsappConsent] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +43,7 @@ export function InviteForm({ onInvited, onCancel }: InviteFormProps) {
         name: name.trim(),
         role,
         nominatedApprover,
+        whatsappConsent,
         ...(byEmail ? { email: email.trim() } : { phone: phone.trim() }),
       });
       onInvited(
@@ -105,6 +107,12 @@ export function InviteForm({ onInvited, onCancel }: InviteFormProps) {
         hint="Can approve requests that need a second person, for example for a landlord who works alone."
         checked={nominatedApprover}
         onChange={(event) => setNominatedApprover(event.target.checked)}
+      />
+      <CheckboxField
+        label="They agreed to emergency repair alerts on WhatsApp"
+        hint="Tick only if they said yes. Emergency alerts also go by SMS to staff phones. They can change this from their own profile."
+        checked={whatsappConsent}
+        onChange={(event) => setWhatsappConsent(event.target.checked)}
       />
       <div className="flex flex-wrap gap-2">
         <Button type="submit" pending={pending}>

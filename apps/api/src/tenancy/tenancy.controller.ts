@@ -1,8 +1,10 @@
 import { Controller, Inject } from '@nestjs/common';
 import { Implement, implement } from '@orpc/nest';
 import { contract } from '@rent/contracts';
+import { TenantNoticesService } from '@rent/server/notices';
 import { PLACEHOLDERS } from '@rent/domain/tenancy';
-import { forbidden } from '@rent/server/core';
+import { forbidden, notFound } from '@rent/server/core';
+import { MoveInReportService } from '@rent/server/moveout';
 import {
   IdChecksService,
   LeaseDocumentsService,
@@ -224,7 +226,11 @@ export class SigningRequestsController {
 /** The tenant app's endpoints (TL-01, TL-07): the signed-in tenant's own tenancies, documents and signing. */
 @Controller()
 export class TenantAppController {
-  constructor(@Inject(TenantAppService) private readonly app: TenantAppService) {}
+  constructor(
+    @Inject(TenantAppService) private readonly app: TenantAppService,
+    @Inject(TenantNoticesService) private readonly notices: TenantNoticesService,
+    @Inject(MoveInReportService) private readonly reports: MoveInReportService,
+  ) {}
 
   @Implement(contract.tenantApp)
   tenantAppRouter(@Ctx() ctx: RequestContext) {
@@ -235,14 +241,35 @@ export class TenantAppController {
       tenancy: implement(contract.tenantApp.tenancy).handler(async ({ input }) =>
         serialize(await this.app.tenancy(ctx.actor, input.leaseId)),
       ),
+      // M8 (plan 4.11): the signed lease, the move-in report and the final statement.
+      documents: implement(contract.tenantApp.documents).handler(async ({ input }) => {
+        const found = await this.app.forEachTenancy(ctx.actor, (_companyId, tx) =>
+          this.reports.tenantTenancyDocuments(tx, input.leaseId),
+        );
+        if (!found) throw notFound('Tenancy');
+        return serialize(found);
+      }),
       documentDownload: implement(contract.tenantApp.documentDownload).handler(
         async ({ input }) => ({
           url: await this.app.documentUrl(ctx.actor, input.documentId),
         }),
       ),
-      signing: implement(contract.tenantApp.signing).handler(async () =>
-        serialize(await this.app.signing(ctx.actor)),
+      // M7 (plan 4.5): leases to sign and notices to acknowledge, in one To sign list.
+      signing: implement(contract.tenantApp.signing).handler(async () => {
+        const cards = await this.app.signing(ctx.actor);
+        const notices = cards.some((c) => c.subject === 'notice')
+          ? await this.notices.signingNotices(ctx.actor)
+          : new Map();
+        return serialize(
+          cards.map((c) => ({ ...c, notice: notices.get(c.signingRequestId) ?? null })),
+        );
+      }),
+      notices: implement(contract.tenantApp.notices).handler(async () =>
+        serialize(await this.notices.notices(ctx.actor)),
       ),
+      noticeDocument: implement(contract.tenantApp.noticeDocument).handler(async ({ input }) => ({
+        url: await this.notices.documentUrl(ctx.actor, input.noticeId),
+      })),
       signingLink: implement(contract.tenantApp.signingLink).handler(async ({ input }) =>
         serialize(await this.app.signingLink(ctx.actor, input.signerId)),
       ),

@@ -6,6 +6,7 @@ import {
   INBOX_VIEWS,
   isOverdue,
   planReply,
+  SYSTEM_PROMPT_PURPOSES,
   whatsAppWindowClosesAt,
   type Channel,
   type ConsentSource,
@@ -257,10 +258,12 @@ export class InboxService {
           .from(schema.person)
           .where(inArray(schema.person.id, assignees))
       : [];
+    // The preview is the last real message: never an automatic prompt (M8 review).
     const latest = await tx.execute<{ conversation_id: string; body: string; direction: string }>(
       sql`select distinct on (coalesce(c.merged_into_id, c.id)) coalesce(c.merged_into_id, c.id) as conversation_id, m.body, m.direction
           from message m join conversation c on c.company_id = m.company_id and c.id = m.conversation_id
           where coalesce(c.merged_into_id, c.id) = any(${`{${ids.join(',')}}`}::uuid[])
+            and m.purpose <> all(${`{${SYSTEM_PROMPT_PURPOSES.join(',')}}`}::text[])
           order by coalesce(c.merged_into_id, c.id), m.created_at desc, m.id desc`,
     );
     const unanswered = await tx.execute<{ conversation_id: string; n: number }>(
@@ -546,7 +549,7 @@ export class InboxService {
     tx: Tx,
     row: ConversationRow,
     filter: { since?: string; cursor?: string; limit: number },
-    options: { forTenant: boolean },
+    options: { forTenant: boolean; withoutSystemPrompts?: boolean },
   ): Promise<{ items: ThreadMessageView[]; nextCursor: string | null }> {
     const ids = await threadConversationIds(tx, row.id);
     const m = schema.message;
@@ -575,6 +578,10 @@ export class InboxService {
             : undefined,
           cursorAt && cursorId
             ? sql`(${m.createdAt}, ${m.id}) < (${new Date(cursorAt)}::timestamptz, ${cursorId}::uuid)`
+            : undefined,
+          // For a preview only: the thread itself always shows the prompts (M8 review).
+          options.withoutSystemPrompts
+            ? sql`${m.purpose} <> all(${`{${SYSTEM_PROMPT_PURPOSES.join(',')}}`}::text[])`
             : undefined,
         ),
       )
@@ -1195,7 +1202,9 @@ export class InboxService {
       const out = [];
       for (const l of leases.rows) {
         const counts = await tx.execute<{ n: number; last: Date | null }>(
-          sql`select count(*)::int as n, max(m.created_at) as last from message m
+          sql`select count(*)::int as n,
+                max(m.created_at) filter (where m.purpose <> all(${`{${SYSTEM_PROMPT_PURPOSES.join(',')}}`}::text[])) as last
+              from message m
               where m.created_at >= (${l.start_date}::date::timestamp at time zone (select c.time_zone from company c where c.id = m.company_id)) and (
                 m.conversation_id in (select c.id from conversation c where c.tenant_id = ${l.tenant_id}::uuid)
                 or (m.conversation_id is null and m.tenant_id = ${l.tenant_id}::uuid and m.direction = 'outbound'

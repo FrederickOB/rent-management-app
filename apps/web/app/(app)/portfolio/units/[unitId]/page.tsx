@@ -40,6 +40,8 @@ export default async function UnitPage({ params }: { readonly params: Params }) 
         seeLeases: allowed(me, 'lease.view'),
         draftLease: allowed(me, 'lease.manage'),
         conversations: allowed(me, 'messaging.inbox.read') && hasFeature(company, 'inbox'),
+        assessments: allowed(me, 'notices.read') && hasFeature(company, 'notices'),
+        recordAssessment: allowed(me, 'rent_assessment.record') && hasFeature(company, 'notices'),
       }}
     />
   );

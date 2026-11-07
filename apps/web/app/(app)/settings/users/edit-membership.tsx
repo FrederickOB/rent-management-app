@@ -60,6 +60,8 @@ export function EditMembership({
 }: EditMembershipProps) {
   const [role, setRole] = useState<Role>(row.role);
   const [nominatedApprover, setNominatedApprover] = useState(row.nominatedApprover);
+  // M8 (decision 5): recorded as a consent of its own, not with the role.
+  const [whatsappConsent, setWhatsappConsent] = useState(row.whatsappConsent ?? false);
   const [owners, setOwners] = useState<string[]>([...(row.scope.owners ?? [])]);
   const [properties, setProperties] = useState<string[]>([...(row.scope.properties ?? [])]);
   const [tried, setTried] = useState(false);
@@ -98,13 +100,20 @@ export function EditMembership({
       },
       { role, nominatedApprover, scope: scopeToSave(pickers, owners, properties) },
     );
-    if (Object.keys(patch).length === 0) {
+    const consentChanged = whatsappConsent !== (row.whatsappConsent ?? false);
+    if (Object.keys(patch).length === 0 && !consentChanged) {
       onCancel();
       return;
     }
     setPending(true);
     try {
-      await api().memberships.update({ membershipId: row.membershipId, ...patch });
+      if (Object.keys(patch).length > 0)
+        await api().memberships.update({ membershipId: row.membershipId, ...patch });
+      if (consentChanged)
+        await api().memberships.whatsappConsent({
+          membershipId: row.membershipId,
+          granted: whatsappConsent,
+        });
       onSaved(`Saved the changes for ${row.name}.`);
     } catch (failure) {
       // The API checks the scope against the role the person will have; place its answer where
@@ -146,6 +155,12 @@ export function EditMembership({
         hint="Can approve requests that need a second person."
         checked={nominatedApprover}
         onChange={(event) => setNominatedApprover(event.target.checked)}
+      />
+      <CheckboxField
+        label="Agreed to emergency repair alerts on WhatsApp"
+        hint="Only with their say-so; each change is kept as a consent record. SMS alerts go to staff phones anyway."
+        checked={whatsappConsent}
+        onChange={(event) => setWhatsappConsent(event.target.checked)}
       />
       <fieldset className="space-y-3">
         <legend className="text-sm font-medium text-slate-800">Access</legend>
