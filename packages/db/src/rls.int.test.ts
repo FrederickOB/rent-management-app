@@ -358,6 +358,34 @@ async function seedReporting(
      values ($1, 'xlsx', '{}', 'rendering', $2)`,
     [companyId, ids.initiator],
   );
+  // The M9 review's tables: an allocation's fee, and a reversal of the remittance above.
+  const { rows: allocations } = await app.query<{ id: string; invoice_line_id: string }>(
+    'select id, invoice_line_id from allocation where lease_id = $1 limit 1',
+    [ids.leaseId],
+  );
+  await app.query(
+    `insert into allocation_fee (company_id, owner_id, property_id, allocation_id, lease_id, invoice_line_id,
+       rate_bps, base_minor, fee_minor)
+     values ($1, $2, $3, $4, $5, $6, 800, 1000, 80)`,
+    [
+      companyId,
+      ids.ownerId,
+      ids.propertyId,
+      allocations[0]!.id,
+      ids.leaseId,
+      allocations[0]!.invoice_line_id,
+    ],
+  );
+  const { rows: remitted } = await app.query<{ id: string }>(
+    'select id from remittance where owner_id = $1 limit 1',
+    [ids.ownerId],
+  );
+  await app.query(
+    `insert into owner_money_reversal (company_id, owner_id, book_id, record_kind, record_id, reason, reversed_on,
+       entry_id, accounting_date, created_by)
+     values ($1, $2, $3, 'remittance', $4, 'Fixture', current_date, $5, current_date, $6)`,
+    [companyId, ids.ownerId, bookId, remitted[0]!.id, entry, ids.initiator],
+  );
 }
 
 /**

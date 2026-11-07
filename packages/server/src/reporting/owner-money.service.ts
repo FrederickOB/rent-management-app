@@ -13,6 +13,7 @@ import {
   type FeeKind,
   type FeeTerms,
   type GraPayer,
+  type JournalLineDraft,
   type RemittanceMethod,
 } from '@rent/domain/ledger';
 import type { Actor } from '@rent/domain/policy';
@@ -28,9 +29,10 @@ import { conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, TRANSFER_PROOF_UPLOAD } from '../documents/documents.service';
+import { agentCashHeld, insufficientAgentCash, lockOwnerMoney } from '../ledger/agent-cash';
 import { balance, ownerBook } from '../ledger/ledger.queries';
 import { PostingService } from '../ledger/posting.service';
-import { PolicyService } from '../policy/policy.service';
+import { PolicyService, staffContext } from '../policy/policy.service';
 import { ownersVisibleTo } from './visibility';
 
 export const FEE_TERMS_ACTION = 'management_fee_terms.change';
@@ -97,7 +99,31 @@ export interface OwnerMoneyView {
   readonly hasProof: boolean;
   readonly recordedAt: Date;
   readonly recordedByName: string | null;
+  readonly reversed: {
+    readonly at: Date;
+    readonly on: string;
+    readonly reason: string;
+    readonly byName: string | null;
+  } | null;
 }
+
+type RawOwnerMoney = {
+  readonly id: string;
+  readonly kind: OwnerMoneyView['kind'];
+  readonly owner_id: string;
+  readonly day: string;
+  readonly amount: string;
+  readonly fees: string;
+  readonly method: RemittanceMethod | null;
+  readonly reference: string | null;
+  readonly proof: string | null;
+  readonly created_at: Date | string;
+  readonly created_by: string | null;
+  readonly reversed_at: Date | string | null;
+  readonly reversed_on: string | null;
+  readonly reversal_reason: string | null;
+  readonly reversed_by: string | null;
+};
 
 const PROBLEM_CODES = {
   over_agent_cash: ['over_agent_cash', 'The agent does not hold this much of the owner’s money'],
@@ -175,6 +201,30 @@ export class OwnerMoneyService implements OnModuleInit {
       if (!owner) throw notFound('Owner');
       return this.feeTermsView(tx, ownerId, owner.name, await this.today(tx, staff.companyId));
     });
+  }
+
+  /**
+   * Properties the owner shares with another owner: a fixed fee posts only on a property one owner
+   * holds alone, so these carry none (M9 review: fixed-fee gaps). Shown beside the fee terms.
+   */
+  async coOwnedProperties(
+    actor: Actor | null,
+    ownerId: string,
+  ): Promise<{ id: string; name: string }[]> {
+    const staff = await this.reader(actor);
+    await this.assertVisible(staff, ownerId);
+    return withCompany(this.database, this.whole(staff), async (tx) =>
+      (
+        await tx.execute<{ id: string; name: string }>(
+          sql`select p.id, coalesce(p.name, p.code) as name from property p
+              where p.id in (select co.property_id from property_current_ownership co
+                             where co.owner_id = ${ownerId}::uuid)
+                and (select count(*) from property_current_ownership o
+                     where o.company_id = p.company_id and o.property_id = p.id) > 1
+              order by p.code`,
+        )
+      ).rows.map((p) => ({ id: p.id, name: p.name })),
+    );
   }
 
   private async feeTermsView(tx: Tx, ownerId: string, name: string, today: string) {
@@ -279,17 +329,28 @@ export class OwnerMoneyService implements OnModuleInit {
 
   // Balances and the suggestion -------------------------------------------------------------------
 
+  /**
+   * The owner's balances with the agent, read over the whole book (the caller's visibility was
+   * checked first): the agent's cash (1070, F3), fees due (2300; above zero is over-taken and is
+   * flagged, never clamped), and the rent tax payable (2200) less tax a tenant withheld that waits
+   * for its certificate (1150), which the agency never pays GRA (review #9, worked example B).
+   */
   private async balances(tx: Tx, ownerId: string, date: string) {
     const bookId = await ownerBook(tx, ownerId);
     if (!bookId) throw notFound('Owner');
     const terms = await this.currentIn(tx, ownerId, date);
+    const fees = await balance(tx, { accounts: ['2300'], bookIds: [bookId] });
+    const payable = -(await balance(tx, { accounts: ['2200'], bookIds: [bookId] }));
+    const withheld = Math.max(0, await balance(tx, { accounts: ['1150'], bookIds: [bookId] }));
     return {
       bookId,
-      agentHeldMinor: await balance(tx, { accounts: ['1070'], bookIds: [bookId] }),
-      feesDueMinor: -(await balance(tx, { accounts: ['2300'], bookIds: [bookId] })),
+      agentHeldMinor: await agentCashHeld(tx, bookId),
+      feesDueMinor: Math.max(0, -fees),
+      feesOverTakenMinor: Math.max(0, fees),
+      rentTaxWithheldMinor: withheld,
       rentTax: {
         graPaidBy: (terms?.graPaidBy ?? 'owner') as GraPayer,
-        payableMinor: -(await balance(tx, { accounts: ['2200'], bookIds: [bookId] })),
+        payableMinor: Math.max(0, payable - withheld),
       },
     };
   }
@@ -317,6 +378,16 @@ export class OwnerMoneyService implements OnModuleInit {
         totalMinor: s.totalMinor,
         feesRetainedMinor: s.feesRetainedMinor,
         netMinor: s.netMinor,
+        // A remittance pays the owner something; when the fees due take all there is, the agent
+        // takes them on their own; otherwise there is nothing to remit.
+        proposal:
+          s.netMinor > 0
+            ? ('remit' as const)
+            : s.feesRetainedMinor > 0
+              ? ('take_fees' as const)
+              : ('nothing' as const),
+        rentTaxWithheldMinor: b.rentTaxWithheldMinor,
+        feesOverTakenMinor: b.feesOverTakenMinor,
       };
     });
   }
@@ -516,44 +587,113 @@ export class OwnerMoneyService implements OnModuleInit {
     return { id };
   }
 
+  /**
+   * P21(a): a remittance, fees taken or owner funding recorded in error, reversed (M9 review #8):
+   * each line of its entry, sign flipped, dated today, with a reason. The record stays and shows
+   * as reversed; one reversal each (409 OWNER_MONEY_REVERSED). Reversing owner funding takes the
+   * money back out of the agent's cash, so F3 applies (409 INSUFFICIENT_AGENT_CASH).
+   */
+  async reverse(
+    actor: Actor | null,
+    input: { readonly id: string; readonly reason: string },
+    claim: IdempotencyClaim | null = null,
+  ): Promise<{ readonly id: string }> {
+    const staff = await this.writer(actor);
+    // Found under the caller's own scope (RLS), or not at all.
+    const [record] = await withCompany(this.database, staffContext(staff), (tx) =>
+      this.rows(tx, { id: input.id }),
+    );
+    if (!record) throw notFound('Record');
+    const reason = input.reason.trim().slice(0, 500);
+    await this.write(staff, record.owner_id, async (tx) => {
+      await claim?.claim(tx);
+      const [done] = await tx
+        .select({ id: schema.ownerMoneyReversal.id })
+        .from(schema.ownerMoneyReversal)
+        .where(eq(schema.ownerMoneyReversal.recordId, record.id));
+      if (done) throw conflict('owner_money_reversed', 'This was reversed already');
+      const table = record.kind === 'owner_funding' ? schema.ownerFunding : schema.remittance;
+      const [original] = await tx
+        .select({ entryId: table.entryId, bookId: table.bookId })
+        .from(table)
+        .where(eq(table.id, record.id));
+      const lines = await tx
+        .select()
+        .from(schema.journalLine)
+        .where(eq(schema.journalLine.entryId, original!.entryId));
+      if (record.kind === 'owner_funding') {
+        const out = lines
+          .filter((l) => l.accountCode === '1070')
+          .reduce((sum, l) => sum + Number(l.amountMinor), 0);
+        const held = await agentCashHeld(tx, original!.bookId);
+        if (out > held) throw insufficientAgentCash(held);
+      }
+      const today = await this.today(tx, staff.companyId);
+      const posted = await this.posting.post(tx, {
+        companyId: staff.companyId,
+        rule: 'P21',
+        key: `P21:${record.id}`,
+        valueDate: today,
+        lines: lines.map((l) => ({
+          bookId: l.bookId,
+          accountCode: l.accountCode as JournalLineDraft['accountCode'],
+          amountMinor: -Number(l.amountMinor),
+          propertyId: l.propertyId,
+          unitId: l.unitId,
+          leaseId: l.leaseId,
+          tenantId: l.tenantId,
+          invoiceLineId: l.invoiceLineId,
+          paymentId: l.paymentId,
+          collectorId: l.collectorId,
+          provider: l.provider,
+          settlementAccountId: l.settlementAccountId,
+          settlementId: l.settlementId,
+        })),
+        record: { type: 'owner_money_reversal', id: record.id },
+        causedBy: staff.personId,
+      });
+      await tx.insert(schema.ownerMoneyReversal).values({
+        companyId: staff.companyId,
+        ownerId: record.owner_id,
+        bookId: original!.bookId,
+        recordKind: record.kind === 'owner_funding' ? 'owner_funding' : 'remittance',
+        recordId: record.id,
+        reason,
+        reversedOn: today,
+        entryId: posted!.entryId,
+        accountingDate: posted!.accountingDate,
+        createdBy: staff.personId,
+      });
+      await claim?.done(tx, { id: record.id });
+    });
+    return { id: record.id };
+  }
+
   // Reading ------------------------------------------------------------------------------------
 
+  /**
+   * The records under the caller's own scope (RLS: `app.owner_book_visible`, review must-fix 2),
+   * named in a transaction over the company: people limited to properties see no owner records.
+   */
   async list(
     actor: Actor | null,
     filter: { readonly ownerId?: string; readonly kind?: OwnerMoneyView['kind'] },
   ): Promise<OwnerMoneyView[]> {
     const staff = await this.reader(actor);
-    const scope = this.policy.scopeFor(staff);
-    let owners: string[] | null = null;
-    if (scope !== null) {
-      const held = await withCompany(this.database, this.whole(staff), (tx) =>
-        tx.execute<{ owner_id: string }>(
-          sql`select owner_id from remittance union select owner_id from owner_funding`,
-        ),
-      );
-      owners = [
-        ...(await ownersVisibleTo(
-          this.database,
-          this.policy,
-          staff,
-          held.rows.map((r) => r.owner_id),
-        )),
-      ];
-      if (owners.length === 0) return [];
-    }
-    return withCompany(this.database, this.whole(staff), (tx) =>
-      this.rows(tx, { ...filter, owners }),
+    const raw = await withCompany(this.database, staffContext(staff), (tx) =>
+      this.rows(tx, filter),
     );
+    return this.present(staff, raw);
   }
 
   /** One remittance, fees taken or owner funding, as the list shows it. */
   async get(actor: Actor | null, id: string): Promise<OwnerMoneyView> {
     const staff = await this.reader(actor);
-    const [row] = await withCompany(this.database, this.whole(staff), (tx) =>
-      this.rows(tx, { id, owners: null }),
+    const raw = await withCompany(this.database, staffContext(staff), (tx) =>
+      this.rows(tx, { id }),
     );
-    if (!row || !(await ownersVisibleTo(this.database, this.policy, staff, [row.owner.id])).size)
-      throw notFound('Record');
+    const [row] = await this.present(staff, raw);
+    if (!row) throw notFound('Record');
     return row;
   }
 
@@ -563,24 +703,12 @@ export class OwnerMoneyService implements OnModuleInit {
       readonly ownerId?: string;
       readonly kind?: OwnerMoneyView['kind'];
       readonly id?: string;
-      /** The owners the reader may see; null for all. */
-      readonly owners: readonly string[] | null;
     },
-  ): Promise<OwnerMoneyView[]> {
-    const result = await tx.execute<{
-      id: string;
-      kind: OwnerMoneyView['kind'];
-      owner_id: string;
-      day: string;
-      amount: string;
-      fees: string;
-      method: RemittanceMethod | null;
-      reference: string | null;
-      proof: string | null;
-      created_at: Date | string;
-      created_by: string | null;
-    }>(sql`
-      select x.* from (
+  ): Promise<RawOwnerMoney[]> {
+    const result = await tx.execute<RawOwnerMoney>(sql`
+      select x.*, v.created_at as reversed_at, v.reversed_on::text as reversed_on,
+             v.reason as reversal_reason, v.created_by as reversed_by
+      from (
         select r.id, r.kind, r.owner_id, r.paid_on::text as day, r.net_minor::text as amount,
                r.fees_retained_minor::text as fees, r.method, r.reference,
                r.proof_document_id::text as proof, r.created_at, r.created_by
@@ -590,19 +718,36 @@ export class OwnerMoneyService implements OnModuleInit {
                f.method, f.reference, f.proof_document_id::text, f.created_at, f.created_by
         from owner_funding f
       ) x
+      left join owner_money_reversal v on v.record_id = x.id
       where (${filter.ownerId ?? null}::uuid is null or x.owner_id = ${filter.ownerId ?? null}::uuid)
         and (${filter.kind ?? null}::text is null or x.kind = ${filter.kind ?? null}::text)
         and (${filter.id ?? null}::uuid is null or x.id = ${filter.id ?? null}::uuid)
-        and (${filter.owners === null}::boolean
-             or x.owner_id = any(${`{${(filter.owners ?? []).join(',')}}`}::uuid[]))
       order by x.day desc, x.created_at desc, x.id desc
       limit 500`);
-    const owners = await ownerFacts(tx, [...new Set(result.rows.map((r) => r.owner_id))]);
-    const people = await personNames(
-      tx,
-      result.rows.flatMap((r) => (r.created_by ? [r.created_by] : [])),
-    );
-    return result.rows.map((r) => ({
+    return result.rows;
+  }
+
+  private async present(staff: StaffActor, raw: readonly RawOwnerMoney[]) {
+    if (raw.length === 0) return [];
+    return withCompany(this.database, this.whole(staff), async (tx) => {
+      const owners = await ownerFacts(tx, [...new Set(raw.map((r) => r.owner_id))]);
+      const people = await personNames(
+        tx,
+        raw.flatMap((r) => [
+          ...(r.created_by ? [r.created_by] : []),
+          ...(r.reversed_by ? [r.reversed_by] : []),
+        ]),
+      );
+      return raw.map((r) => this.view(r, owners, people));
+    });
+  }
+
+  private view(
+    r: RawOwnerMoney,
+    owners: Map<string, { name: string }>,
+    people: Map<string, string>,
+  ): OwnerMoneyView {
+    return {
       id: r.id,
       kind: r.kind,
       owner: { id: r.owner_id, name: owners.get(r.owner_id)?.name ?? '' },
@@ -614,12 +759,21 @@ export class OwnerMoneyService implements OnModuleInit {
       hasProof: r.proof !== null,
       recordedAt: new Date(r.created_at),
       recordedByName: r.created_by ? (people.get(r.created_by) ?? null) : null,
-    }));
+      reversed: r.reversed_at
+        ? {
+            at: new Date(r.reversed_at),
+            on: r.reversed_on!,
+            reason: r.reversal_reason ?? '',
+            byName: r.reversed_by ? (people.get(r.reversed_by) ?? null) : null,
+          }
+        : null,
+    };
   }
 
   async proofUrl(actor: Actor | null, id: string) {
     const staff = await this.reader(actor);
-    const found = await withCompany(this.database, this.whole(staff), async (tx) => {
+    // Read under the caller's own scope (RLS): another owner's record is not found.
+    const found = await withCompany(this.database, staffContext(staff), async (tx) => {
       const [r] = await tx
         .select({ doc: schema.remittance.proofDocumentId, ownerId: schema.remittance.ownerId })
         .from(schema.remittance)
@@ -631,8 +785,7 @@ export class OwnerMoneyService implements OnModuleInit {
         .where(eq(schema.ownerFunding.id, id));
       return f ?? null;
     });
-    if (!found || !(await ownersVisibleTo(this.database, this.policy, staff, [found.ownerId])).size)
-      throw notFound('Proof');
+    if (!found) throw notFound('Proof');
     const url = found.doc ? await this.documents.downloadUrl(staff.companyId, found.doc) : null;
     if (!url) throw notFound('Proof');
     return { url, expiresAt: new Date(this.clock.now().getTime() + 300_000) };
@@ -719,9 +872,7 @@ export class OwnerMoneyService implements OnModuleInit {
     fn: (tx: Tx) => Promise<T>,
   ): Promise<T> {
     return withCompany(this.database, this.whole(staff), async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`owner-money:${ownerId}`}, 0))`,
-      );
+      await lockOwnerMoney(tx, ownerId);
       return fn(tx);
     });
   }

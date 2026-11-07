@@ -6,6 +6,7 @@ import { useApp } from '@/components/app-context';
 import { ShareBar, StackBar } from '@/components/bars';
 import { LoadFailed, Loading } from '@/components/load-state';
 import { Alert } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField } from '@/components/ui/field';
@@ -19,15 +20,19 @@ import {
   anyFilter,
   bucketsOf,
   dashboardQuery,
+  dashboardTimesText,
   expiryRows,
   EXPORT_POLL_MS,
   EXPORT_POLL_TRIES,
   exportNext,
   gate1Rows,
+  gate1StatusText,
   monthsText,
   NO_FILTERS,
   ratioCounts,
   ratioText,
+  refreshProblemText,
+  unearnedDetailText,
   unitTypeText,
   type Dashboard,
   type DashboardFilters,
@@ -43,7 +48,7 @@ const BUCKET_COLOURS = ['bg-amber-300', 'bg-amber-500', 'bg-red-500', 'bg-red-70
  * snapshot, with its date and time, filters, a refresh and exports. Owners and advisers see their
  * own, within scope; the API applies it.
  */
-export function DashboardView() {
+export function DashboardView({ canRefresh = false }: { readonly canRefresh?: boolean }) {
   const { timeZone } = useApp();
   const [filters, setFilters] = useState<DashboardFilters>(NO_FILTERS);
   const [data, setData] = useState<Dashboard | null>(null);
@@ -82,7 +87,9 @@ export function DashboardView() {
           : 'A refresh is already on its way.',
       );
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      // M9 review: a refusal or a refresh too soon is said plainly.
+      const problem = toProblem(failure);
+      setProblem(refreshProblemText(problem.status, problem.message));
     } finally {
       setRefreshing(false);
     }
@@ -103,16 +110,25 @@ export function DashboardView() {
           <h2 id="dashboard-title" className="text-lg font-semibold text-slate-900">
             Portfolio
           </h2>
+          {/* M9 review: which figures are live and which come from the nightly snapshot. */}
           <p className="text-sm text-slate-600" data-testid="dashboard-as-of">
-            {data.asOf
-              ? `Figures as of ${formatTime(data.asOf, timeZone)}`
-              : 'The figures have not been worked out yet; they are each night, or on Refresh.'}
+            {dashboardTimesText(data, (iso) => formatTime(iso, timeZone)).snapshot}
+          </p>
+          <p className="text-sm text-slate-600" data-testid="dashboard-live-at">
+            {dashboardTimesText(data, (iso) => formatTime(iso, timeZone)).live}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" pending={refreshing} onClick={() => void refresh()}>
-            Refresh
-          </Button>
+          {canRefresh ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              pending={refreshing}
+              onClick={() => void refresh()}
+            >
+              Refresh
+            </Button>
+          ) : null}
           <ExportButton format="xlsx" filters={dashboardQuery(filters, fo)} />
           <ExportButton format="pdf" filters={dashboardQuery(filters, fo)} />
         </div>
@@ -187,7 +203,7 @@ export function DashboardView() {
           testId="figure-arrears"
           title="Arrears"
           value={formatMinor(data.arrears.totalMinor)}
-          detail={`On ${data.arrears.leases} ${data.arrears.leases === 1 ? 'lease' : 'leases'}`}
+          detail={`Earned, unpaid and past due, on ${data.arrears.leases} ${data.arrears.leases === 1 ? 'lease' : 'leases'}`}
         >
           <StackBar
             label="Arrears by age"
@@ -224,10 +240,18 @@ export function DashboardView() {
         />
         <Figure
           testId="figure-unearned"
-          title="Paid ahead, not yet earned"
+          title="Rent paid ahead, not yet earned"
           value={formatMinor(data.unearnedRentMinor)}
-          detail="Rent tenants have paid for months still to come."
+          detail={unearnedDetailText(data)}
         />
+        {data.arrears.dueNotStartedMinor > 0 ? (
+          <Figure
+            testId="figure-billed-not-started"
+            title="Billed, not yet due"
+            value={formatMinor(data.arrears.dueNotStartedMinor)}
+            detail="Billed and past its invoice date, for months not yet started (an annual invoice’s later months). Not arrears."
+          />
+        ) : null}
         <Figure
           testId="figure-deposits"
           title="Deposits held"
@@ -332,7 +356,14 @@ export function Gate1Card({ gate1, title }: { readonly gate1: Gate1; readonly ti
     <Card data-testid="gate1">
       <CardHeader
         title={title ?? `Gate 1 measures, ${monthLabel(gate1.month)}`}
-        description={`Worked out ${formatTime(gate1.computedAt, timeZone)}.`}
+        description={gate1StatusText(gate1, (iso) => formatTime(iso, timeZone))}
+        actions={
+          <span data-testid="gate1-status">
+            <Badge tone={gate1.status === 'final' ? 'green' : 'amber'}>
+              {gate1.status === 'final' ? 'Final' : 'Provisional'}
+            </Badge>
+          </span>
+        }
       />
       <CardBody>
         <ul className="grid gap-4 md:grid-cols-2">
@@ -367,6 +398,14 @@ function ExportButton({
 }) {
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // Review WEB 8: polling stops when the dashboard closes.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   async function run() {
     setPending(true);
@@ -379,8 +418,10 @@ function ExportButton({
         tries += 1
       ) {
         await new Promise((resolve) => window.setTimeout(resolve, EXPORT_POLL_MS));
+        if (!mounted.current) return;
         exported = await api().dashboard.exportGet({ exportId: exported.id });
       }
+      if (!mounted.current) return;
       const next = exportNext(exported);
       if (next !== 'open' || !exported.url)
         throw new ExportFailed(
@@ -391,6 +432,7 @@ function ExportButton({
       // The signed link is served as an attachment: it downloads, and the dashboard stays.
       startDownload(exported.url);
     } catch (failure) {
+      if (!mounted.current) return;
       setProblem(
         failure instanceof ExportFailed
           ? failure.message
@@ -399,7 +441,7 @@ function ExportButton({
             : toProblem(failure).message,
       );
     } finally {
-      setPending(false);
+      if (mounted.current) setPending(false);
     }
   }
 

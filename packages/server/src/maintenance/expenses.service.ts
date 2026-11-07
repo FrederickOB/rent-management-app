@@ -16,7 +16,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { companyRecord, staffActor } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
 import { maintenanceCheckConflict } from '../core/db-errors';
-import { AppError, conflict, invalid, notFound } from '../core/errors';
+import { AppError, conflict, forbidden, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { CLOCK, DATABASE } from '../core/tokens';
 import {
@@ -24,6 +24,7 @@ import {
   EXPENSE_RECEIPT_UPLOAD,
   type StagedMedia,
 } from '../documents/documents.service';
+import { assertAgentCash } from '../ledger/agent-cash';
 import { ownerBook } from '../ledger/ledger.queries';
 import { PostingService } from '../ledger/posting.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
@@ -125,6 +126,20 @@ export class ExpensesService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'expense.record');
     // Every check before the receipt is staged: staged files are kept write-once (M8 review).
+    // Under the caller's scope: a property-limited manager records only on their own properties;
+    // another property of the company is refused (403), one that doesn't exist is not found.
+    const visible = await this.write(
+      staff,
+      async (tx) =>
+        (
+          await tx
+            .select({ id: schema.property.id })
+            .from(schema.property)
+            .where(eq(schema.property.id, input.propertyId))
+        ).length > 0,
+    );
+    if (!visible && (await this.propertyInCompany(staff.companyId, input.propertyId)))
+      throw forbidden('This property is not one you manage');
     await this.write(staff, (tx) => this.validate(tx, staff, input));
     const receipt: StagedMedia | null = input.receiptUploadId
       ? await this.documents.stageMediaUpload(
@@ -134,7 +149,9 @@ export class ExpensesService {
           EXPENSE_RECEIPT_UPLOAD,
         )
       : null;
-    const id = await this.write(staff, async (tx) => {
+    // The caller's scope was checked above (the property must be theirs); the journal rows are
+    // written unscoped, as the ledger's RLS requires (refunds and GRA payments do the same).
+    const id = await this.ledgerWrite(staff, async (tx) => {
       await claim?.claim(tx);
       const { ownerId, bookId } = await this.validate(tx, staff, input);
       const expenseId = uuidv7();
@@ -259,6 +276,10 @@ export class ExpensesService {
     const ownerId = owners[0]!.ownerId;
     const bookId = await ownerBook(tx, ownerId);
     if (!bookId) throw conflict('no_owner', 'The owner has no book');
+    // F3: the agent pays out of what it holds for the owner (1070, read whole whatever the
+    // caller's scope), never more; under the owner's lock, which the write keeps until it posts.
+    if (input.paidBy === 'agent')
+      await assertAgentCash(tx, { ownerId, bookId, outMinor: input.amountMinor });
     return { ownerId, bookId };
   }
 
@@ -275,7 +296,9 @@ export class ExpensesService {
   ): Promise<{ readonly expenseId: string }> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'expense.record');
-    await this.write(staff, async (tx) => {
+    // The expense must be one the caller sees (scoped), before the unscoped ledger write.
+    await this.write(staff, (tx) => this.row(tx, expenseId));
+    await this.ledgerWrite(staff, async (tx) => {
       await claim?.claim(tx);
       const row = await this.row(tx, expenseId, true);
       if (row.status !== 'unpaid')
@@ -291,6 +314,13 @@ export class ExpensesService {
           'agency_account_not_available',
           'Only an agency pays from its own account; record it as paid from the owner’s account',
         );
+      // F3: never more than the agency holds for the owner, under the owner's lock.
+      if (input.paidFrom === 'agency_account')
+        await assertAgentCash(tx, {
+          ownerId: row.owner.id,
+          bookId: row.bookId,
+          outMinor: row.amountMinor,
+        });
       const posted = await this.posting.post(tx, {
         companyId: staff.companyId,
         rule: 'P15',
@@ -334,7 +364,8 @@ export class ExpensesService {
   ): Promise<{ readonly expenseId: string }> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'expense.record');
-    await this.write(staff, async (tx) => {
+    await this.write(staff, (tx) => this.row(tx, expenseId));
+    await this.ledgerWrite(staff, async (tx) => {
       await claim?.claim(tx);
       const row = await this.row(tx, expenseId, true);
       if (row.status === 'reversed') throw conflict('expense_closed', 'This expense was reversed');
@@ -396,6 +427,35 @@ export class ExpensesService {
   private async write<T>(staff: StaffActor, fn: (tx: Tx) => Promise<T>): Promise<T> {
     try {
       return await withCompany(this.database, staffContext(staff), fn);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      return domainInvalid(error);
+    }
+  }
+
+  private async propertyInCompany(companyId: string, propertyId: string): Promise<boolean> {
+    const rows = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+      tx
+        .select({ id: schema.property.id })
+        .from(schema.property)
+        .where(eq(schema.property.id, propertyId)),
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * A write that posts to the ledger, after a scoped check has confirmed the caller may act on
+   * the property or expense: unscoped, because journal rows are written only by unscoped sessions
+   * (0013 `unscoped_writes`). A property-limited manager could not record any expense before
+   * (M9 review: a raw 500). The person is kept for the audit trail.
+   */
+  private async ledgerWrite<T>(staff: StaffActor, fn: (tx: Tx) => Promise<T>): Promise<T> {
+    try {
+      return await withCompany(
+        this.database,
+        { companyId: staff.companyId, personId: staff.personId, actorKind: 'staff' },
+        fn,
+      );
     } catch (error) {
       if (error instanceof AppError) throw error;
       return domainInvalid(error);

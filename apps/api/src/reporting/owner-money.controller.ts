@@ -24,9 +24,13 @@ export class OwnerMoneyController {
   feeTermsRouter(@Ctx() ctx: RequestContext) {
     const m = this.money;
     const a = ctx.actor;
+    const withCoOwned = async <T extends object>(ownerId: string, view: T) => ({
+      ...view,
+      coOwnedProperties: await m.coOwnedProperties(a, ownerId),
+    });
     return {
       get: implement(contract.feeTerms.get).handler(async ({ input }) =>
-        serialize(await m.feeTerms(a, input.ownerId)),
+        serialize(await withCoOwned(input.ownerId, await m.feeTerms(a, input.ownerId))),
       ),
       request: implement(contract.feeTerms.request).handler(({ input }) =>
         idempotent(
@@ -38,7 +42,8 @@ export class OwnerMoneyController {
             await m.requestFeeTerms(a, input, claim);
             return { ownerId: input.ownerId };
           },
-          async ({ ownerId }) => serialize(await m.feeTerms(a, ownerId)),
+          async ({ ownerId }) =>
+            serialize(await withCoOwned(ownerId, await m.feeTerms(a, ownerId))),
           { required: false },
         ),
       ),
@@ -92,6 +97,16 @@ export class OwnerMoneyController {
       ),
       proof: implement(contract.ownerMoney.proof).handler(async ({ input }) =>
         serialize(await m.proofUrl(a, input.id)),
+      ),
+      reverse: implement(contract.ownerMoney.reverse).handler(({ input }) =>
+        idempotent(
+          this.idempotency,
+          ctx,
+          'reporting.owner_money_reversal',
+          input,
+          (claim) => m.reverse(a, input, claim),
+          render,
+        ),
       ),
     };
   }

@@ -266,7 +266,7 @@ export const moveOutsContract = {
       method: 'POST',
       path: '/move-outs/{moveOutId}/refund-paid',
       summary:
-        'Record the approved refund (P12 and P13) as paid outside the platform, with its reference and proof (upload from POST /refund-uploads). Requires an Idempotency-Key',
+        'Record the approved refund (P12 and P13) as paid outside the platform, with its reference and proof (upload from POST /refund-uploads). 409 INSUFFICIENT_AGENT_CASH when paid from the agency’s account beyond what it holds for the owner (record the owner’s funding first). Requires an Idempotency-Key',
     })
     .input(
       z.object({

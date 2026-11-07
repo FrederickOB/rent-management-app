@@ -18,9 +18,11 @@ import {
 } from 'drizzle-orm/pg-core';
 import { company } from './company';
 import { person } from './identity';
+import { allocation, invoiceLine, payment } from './billing';
 import { book, journalEntry } from './ledger';
 import { approvalRequest, document, documentRenderRequest } from './platform';
-import { owner } from './register';
+import { owner, property, unit } from './register';
+import { lease } from './tenancy';
 
 /**
  * Owner reporting (M9 plan 4.6): fee terms, owner statements and their frozen figures,
@@ -108,7 +110,13 @@ export const ownerStatement = pgTable(
     renderRequestId: uuid(),
     documentId: uuid(),
     sha256: text(),
+    /** When the provider reported the statement email delivered (M9 review). */
     deliveredAt: ts(),
+    /** When the statement email was queued (`owner_statement` purpose), and its message. */
+    sentAt: ts(),
+    emailMessageId: uuid(),
+    /** Why no email went: `no_email`, `no_consent` or `opted_out` (CM-09). */
+    emailNotSentReason: text(),
     createdBy: uuid().references(() => person.id),
     createdAt: tsNow(),
     updatedAt: tsNow(),
@@ -288,6 +296,11 @@ export const leaseSnapshot = pgTable(
     arrears61To90Minor: minor().notNull().default(0),
     arrears90PlusMinor: minor().notNull().default(0),
     unearnedRentMinor: minor().notNull().default(0),
+    /** The rest of 2010 split as the statement splits it (`prepaymentSplit`; M9 review, 0056). */
+    unearnedServiceChargeMinor: minor().notNull().default(0),
+    creditMinor: minor().notNull().default(0),
+    /** Billed and past due but not charged yet (an annual invoice's months not started). */
+    dueNotStartedMinor: minor().notNull().default(0),
     depositHeldMinor: minor().notNull().default(0),
     rentMinor: minor().notNull().default(0),
     serviceChargeMinor: minor().notNull().default(0),
@@ -308,6 +321,8 @@ export const metricDaily = pgTable(
     month: text().notNull(),
     figures: jsonb().notNull(),
     computedAt: ts().notNull(),
+    /** Set when the month's figures were worked out after its end and marked final (M9 review). */
+    finalisedAt: ts(),
   },
   (t) => [primaryKey({ name: 'metric_daily_pkey', columns: [t.companyId, t.metricDate] })],
 );
@@ -379,6 +394,32 @@ export const managementFee = pgTable(
       columns: [t.companyId, t.reversesFeeId],
       foreignColumns: [t.companyId, t.id],
     }),
+    // Company-composite (CLAUDE.md section 5; M9 review #10).
+    foreignKey({
+      name: 'management_fee_book_fk',
+      columns: [t.companyId, t.bookId],
+      foreignColumns: [book.companyId, book.id],
+    }),
+    foreignKey({
+      name: 'management_fee_property_fk',
+      columns: [t.companyId, t.propertyId],
+      foreignColumns: [property.companyId, property.id],
+    }),
+    foreignKey({
+      name: 'management_fee_unit_fk',
+      columns: [t.companyId, t.unitId],
+      foreignColumns: [unit.companyId, unit.id],
+    }),
+    foreignKey({
+      name: 'management_fee_lease_fk',
+      columns: [t.companyId, t.leaseId],
+      foreignColumns: [lease.companyId, lease.id],
+    }),
+    foreignKey({
+      name: 'management_fee_payment_fk',
+      columns: [t.companyId, t.paymentId],
+      foreignColumns: [payment.companyId, payment.id],
+    }),
     index('management_fee_lease_idx').on(t.companyId, t.leaseId),
     index('management_fee_payment_idx').on(t.companyId, t.paymentId),
     check(
@@ -388,6 +429,126 @@ export const managementFee = pgTable(
     check(
       'management_fee_sign_check',
       sql`(${t.source} in ('reversal', 'refund', 'unwind')) = (${t.feeMinor} < 0) and (${t.reversesFeeId} is not null) = (${t.source} in ('reversal', 'refund', 'unwind'))`,
+    ),
+  ],
+);
+
+/**
+ * Each allocation's management fee (M9 review, must-fix 1): a rent or service-charge allocation
+ * made under percentage terms carries its share of its event's fee, and a negative allocation
+ * that undoes it takes that share back in proportion, mirrored exactly. `management_fee` holds
+ * the posted totals per event and payment; these rows say which allocation each pesewa is on.
+ * Append-only.
+ */
+export const allocationFee = pgTable(
+  'allocation_fee',
+  {
+    id: id(),
+    companyId: companyId(),
+    managementFeeId: uuid(),
+    ownerId: uuid().notNull(),
+    propertyId: uuid().notNull(),
+    /** The allocation that caused this row: charged (positive) or undoing one (negative). */
+    allocationId: uuid().notNull(),
+    /** For a take-back: the charged allocation whose fee it takes back. */
+    chargedAllocationId: uuid(),
+    leaseId: uuid().notNull(),
+    invoiceLineId: uuid().notNull(),
+    paymentId: uuid(),
+    rateBps: integer().notNull(),
+    baseMinor: minor().notNull(),
+    feeMinor: minor().notNull(),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('allocation_fee_company_id_id_key').on(t.companyId, t.id),
+    unique('allocation_fee_key')
+      .on(t.companyId, t.allocationId, t.chargedAllocationId)
+      .nullsNotDistinct(),
+    foreignKey({
+      name: 'allocation_fee_management_fee_fk',
+      columns: [t.companyId, t.managementFeeId],
+      foreignColumns: [managementFee.companyId, managementFee.id],
+    }),
+    ownerFk(t as never, 'allocation_fee_owner_fk'),
+    foreignKey({
+      name: 'allocation_fee_property_fk',
+      columns: [t.companyId, t.propertyId],
+      foreignColumns: [property.companyId, property.id],
+    }),
+    foreignKey({
+      name: 'allocation_fee_allocation_fk',
+      columns: [t.companyId, t.allocationId],
+      foreignColumns: [allocation.companyId, allocation.id],
+    }),
+    foreignKey({
+      name: 'allocation_fee_charged_fk',
+      columns: [t.companyId, t.chargedAllocationId],
+      foreignColumns: [allocation.companyId, allocation.id],
+    }),
+    foreignKey({
+      name: 'allocation_fee_lease_fk',
+      columns: [t.companyId, t.leaseId],
+      foreignColumns: [lease.companyId, lease.id],
+    }),
+    foreignKey({
+      name: 'allocation_fee_line_fk',
+      columns: [t.companyId, t.invoiceLineId],
+      foreignColumns: [invoiceLine.companyId, invoiceLine.id],
+    }),
+    foreignKey({
+      name: 'allocation_fee_payment_fk',
+      columns: [t.companyId, t.paymentId],
+      foreignColumns: [payment.companyId, payment.id],
+    }),
+    index('allocation_fee_lease_idx').on(t.companyId, t.leaseId),
+    index('allocation_fee_charged_idx').on(t.companyId, t.chargedAllocationId),
+    check(
+      'allocation_fee_sign_check',
+      sql`(${t.chargedAllocationId} is null and ${t.baseMinor} > 0 and ${t.feeMinor} >= 0)
+          or (${t.chargedAllocationId} is not null and ${t.baseMinor} < 0 and ${t.feeMinor} <= 0)`,
+    ),
+  ],
+);
+
+/**
+ * A remittance, fees taken or owner funding recorded in error, reversed (P21a; M9 review #8):
+ * each line of its entry, sign flipped. The record stays; one reversal each. Append-only.
+ */
+export const ownerMoneyReversal = pgTable(
+  'owner_money_reversal',
+  {
+    id: id(),
+    companyId: companyId(),
+    ownerId: uuid().notNull(),
+    bookId: uuid().notNull(),
+    /** `remittance` (a remittance or fees taken) or `owner_funding`. */
+    recordKind: text().notNull(),
+    recordId: uuid().notNull(),
+    reason: text().notNull(),
+    reversedOn: day().notNull(),
+    entryId: uuid().notNull(),
+    accountingDate: day().notNull(),
+    createdBy: uuid().references(() => person.id),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('owner_money_reversal_company_id_id_key').on(t.companyId, t.id),
+    unique('owner_money_reversal_record_key').on(t.companyId, t.recordId),
+    ownerFk(t as never, 'owner_money_reversal_owner_fk'),
+    foreignKey({
+      name: 'owner_money_reversal_book_fk',
+      columns: [t.companyId, t.bookId],
+      foreignColumns: [book.companyId, book.id],
+    }),
+    foreignKey({
+      name: 'owner_money_reversal_entry_fk',
+      columns: [t.companyId, t.entryId],
+      foreignColumns: [journalEntry.companyId, journalEntry.id],
+    }),
+    check(
+      'owner_money_reversal_kind_check',
+      sql`${t.recordKind} in ('remittance', 'owner_funding')`,
     ),
   ],
 );

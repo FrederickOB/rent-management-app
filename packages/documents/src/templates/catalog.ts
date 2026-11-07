@@ -2,7 +2,7 @@ import { invoiceV1, receiptV1 } from './billing';
 import { leaseV1 } from './lease';
 import { finalStatementV1, moveInReportV1 } from './moveout';
 import { noticeV1, servicePackV1 } from './notice';
-import { dashboardV1 } from './reporting-dashboard';
+import { dashboardV1, dashboardV2 } from './reporting-dashboard';
 import { ownerStatementV1 } from './reporting-statement';
 import { signingCertificateV1, signingCertificateV2 } from './signing-certificate';
 import { TemplateRegistry } from './registry';
@@ -30,6 +30,8 @@ export const templates = new TemplateRegistry([
   finalStatementV1,
   // M9: the portfolio dashboard's PDF export (DA-06).
   dashboardV1,
+  // M9 review: the dashboard export names its snapshot and live figures apart.
+  dashboardV2,
   // M9: the monthly owner statement (AC-04).
   ownerStatementV1,
 ]);

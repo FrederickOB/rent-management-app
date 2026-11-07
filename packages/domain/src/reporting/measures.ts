@@ -10,7 +10,8 @@ import { money, multiplyRatio } from '../money/money';
 /**
  * A share: what was counted and out of what. `bps` is the share in basis points (95% = 9,500),
  * rounded half up once through packages/domain/money; null when there was nothing to measure, so
- * an empty month is never shown as 0% or 100%.
+ * an empty month is never shown as 0% or 100%. A share short of the whole is never shown as 100%
+ * (M9 review): where half up would reach 10,000, it is held at 9,999 (19,999 of 20,000 is 99.99%).
  */
 export interface Ratio {
   readonly numerator: number;
@@ -28,13 +29,12 @@ export function ratioOf(numerator: number, denominator: number): Ratio {
     denominator < 0
   )
     throw new DomainError('report.bad_ratio', 'A share counts whole amounts of zero or more');
+  const bps =
+    denominator === 0 ? null : multiplyRatio(money(BPS_WHOLE), numerator, denominator).amountMinor;
   return {
     numerator,
     denominator,
-    bps:
-      denominator === 0
-        ? null
-        : multiplyRatio(money(BPS_WHOLE), numerator, denominator).amountMinor,
+    bps: bps !== null && bps >= BPS_WHOLE && numerator < denominator ? BPS_WHOLE - 1 : bps,
   };
 }
 

@@ -2,6 +2,7 @@
 
 import { MEDIA_RULES } from '@rent/domain/maintenance';
 import { REMITTANCE_METHODS } from '@rent/domain/ledger';
+import { money, toDecimal } from '@rent/domain/money';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
 import { FileField } from '@/components/file-field';
@@ -10,7 +11,7 @@ import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
-import { SelectField, TextField } from '@/components/ui/field';
+import { SelectField, TextAreaField, TextField } from '@/components/ui/field';
 import { api, keyedApi } from '@/lib/api';
 import { openFetchedLink } from '@/lib/browser-files';
 import { formatBusinessDate, todayIn } from '@/lib/business-dates';
@@ -20,13 +21,17 @@ import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib
 import { useHoldWhileSending } from '@/lib/in-flight';
 import { declaredMediaType } from '@/lib/maintenance';
 import {
+  feesOverTakenText,
   methodOf,
+  nothingToRemitText,
   OWNER_MONEY_KIND_LABELS,
   ownerMoneyMessage,
   remittanceDraftOf,
   remittanceInput,
   remittanceWarning,
+  reversalReasonProblem,
   simpleTransferInput,
+  suggestionProposal,
   type OwnerMoneyRow,
   type RemittanceDraft,
   type RemittanceSuggestion,
@@ -61,6 +66,7 @@ export function OwnerMoneyView({
   const [open, setOpen] = useState<'remit' | 'fees' | 'fund' | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
+  const [feesPrefill, setFeesPrefill] = useState<number | null>(null);
 
   useEffect(() => {
     let current = true;
@@ -118,7 +124,13 @@ export function OwnerMoneyView({
             {open === null ? (
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setOpen('remit')}>Record a remittance</Button>
-                <Button variant="secondary" onClick={() => setOpen('fees')}>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setFeesPrefill(null);
+                    setOpen('fees');
+                  }}
+                >
                   Record fees taken
                 </Button>
                 <Button variant="secondary" onClick={() => setOpen('fund')}>
@@ -132,10 +144,19 @@ export function OwnerMoneyView({
                 ownerId={ownerId}
                 onDone={done}
                 onCancel={() => setOpen(null)}
+                onTakeFees={(amountMinor) => {
+                  setFeesPrefill(amountMinor);
+                  setOpen('fees');
+                }}
               />
             ) : null}
             {open === 'fees' ? (
-              <FeesTakenForm ownerId={ownerId} onDone={done} onCancel={() => setOpen(null)} />
+              <FeesTakenForm
+                ownerId={ownerId}
+                initialAmountMinor={feesPrefill}
+                onDone={done}
+                onCancel={() => setOpen(null)}
+              />
             ) : null}
             {open === 'fund' ? (
               <FundingForm ownerId={ownerId} onDone={done} onCancel={() => setOpen(null)} />
@@ -143,14 +164,25 @@ export function OwnerMoneyView({
           </CardBody>
         </Card>
       ) : null}
-      <MoneyList ownerId={ownerId} version={version} />
+      <MoneyList ownerId={ownerId} version={version} canRecord={canRecord} onReversed={done} />
     </>
   );
 }
 
-function MoneyList({ ownerId, version }: { readonly ownerId: string; readonly version: number }) {
+function MoneyList({
+  ownerId,
+  version,
+  canRecord,
+  onReversed,
+}: {
+  readonly ownerId: string;
+  readonly version: number;
+  readonly canRecord: boolean;
+  readonly onReversed: (text: string) => void;
+}) {
   const { timeZone } = useApp();
   const [problem, setProblem] = useState<string | null>(null);
+  const [reversing, setReversing] = useState<string | null>(null);
   const load = useCallback(
     // `version` reloads the list after a record.
     () => (version >= 0 ? api().ownerMoney.list(ownerId ? { ownerId } : {}) : Promise.resolve([])),
@@ -204,7 +236,14 @@ function MoneyList({ ownerId, version }: { readonly ownerId: string; readonly ve
                   </span>
                 </span>
                 <span className="flex flex-col items-end gap-1">
-                  <span className="font-semibold tabular-nums" data-testid="owner-money-amount">
+                  <span
+                    className={
+                      row.reversed
+                        ? 'font-semibold tabular-nums text-slate-500 line-through'
+                        : 'font-semibold tabular-nums'
+                    }
+                    data-testid="owner-money-amount"
+                  >
                     {formatMinor(row.amountMinor)}
                   </span>
                   {row.feesRetainedMinor > 0 ? (
@@ -225,13 +264,119 @@ function MoneyList({ ownerId, version }: { readonly ownerId: string; readonly ve
                       Open the proof
                     </Button>
                   ) : null}
+                  {canRecord && !row.reversed && reversing !== row.id ? (
+                    <Button size="sm" variant="ghost" onClick={() => setReversing(row.id)}>
+                      Reverse
+                    </Button>
+                  ) : null}
                 </span>
+                {/* M9 review: a record is never edited; a mistake is reversed (P21a) and stays. */}
+                {row.reversed ? (
+                  <p
+                    className="basis-full text-sm text-slate-700"
+                    data-testid="owner-money-reversed"
+                  >
+                    <Badge tone="dark">Reversed</Badge> on {formatBusinessDate(row.reversed.on)}
+                    {row.reversed.byName ? ` by ${row.reversed.byName}` : ''},{' '}
+                    {formatTime(row.reversed.at, timeZone)}: {row.reversed.reason}
+                  </p>
+                ) : null}
+                {reversing === row.id ? (
+                  <ReverseForm
+                    row={row}
+                    onDone={(text) => {
+                      setReversing(null);
+                      onReversed(text);
+                    }}
+                    onCancel={() => setReversing(null)}
+                  />
+                ) : null}
               </li>
             ))}
           </ul>
         ) : null}
       </CardBody>
     </Card>
+  );
+}
+
+/** Reverse a record made in error (P21a), with the reason; the record stays, marked reversed. */
+function ReverseForm({
+  row,
+  onDone,
+  onCancel,
+}: {
+  readonly row: OwnerMoneyRow;
+  readonly onDone: (text: string) => void;
+  readonly onCancel: () => void;
+}) {
+  const keeper = useIdempotencyKeeper();
+  const keyedFor = useRef<string | null>(null);
+  const [reason, setReason] = useState('');
+  const [tried, setTried] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const problem = reversalReasonProblem(reason);
+  useHoldWhileSending(pending);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setTried(true);
+    setError(null);
+    if (problem) return;
+    const text = reason.trim();
+    if (keyedFor.current !== text) {
+      keeper.reset();
+      keyedFor.current = text;
+    }
+    setPending(true);
+    try {
+      await sendOnce(keeper, (key) =>
+        keyedApi(key).ownerMoney.reverse({ id: row.id, reason: text }),
+      );
+      onDone(
+        `Reversed: ${OWNER_MONEY_KIND_LABELS[row.kind].toLowerCase()} of ${formatMinor(row.amountMinor)} on ${formatBusinessDate(row.on)}.`,
+      );
+    } catch (failure) {
+      setError(ownerMoneyMessage(failure) ?? moneyProblem(failure));
+      if (isKeyReused(failure)) {
+        keeper.reset();
+        keyedFor.current = null;
+      }
+      setPending(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      noValidate
+      aria-label={`Reverse ${OWNER_MONEY_KIND_LABELS[row.kind].toLowerCase()} of ${formatMinor(row.amountMinor)}`}
+      className="basis-full space-y-3 rounded-md border border-red-200 bg-red-50 p-4"
+    >
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      <p className="text-sm text-red-900">
+        A reversal posts the record again with each line’s sign flipped; the record stays, marked
+        reversed. Record the right one afterwards if it was wrong.
+      </p>
+      <TextAreaField
+        label="Reason"
+        rows={2}
+        maxLength={500}
+        value={reason}
+        error={tried ? problem : undefined}
+        onChange={(event) => setReason(event.target.value)}
+        className="[&_textarea]:font-sans"
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" variant="danger" pending={pending}>
+          Reverse it
+        </Button>
+        <Button variant="ghost" onClick={onCancel} disabled={pending}>
+          Cancel
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -266,10 +411,13 @@ function RemittanceForm({
   ownerId,
   onDone,
   onCancel,
+  onTakeFees,
 }: {
   readonly ownerId: string;
   readonly onDone: (text: string) => void;
   readonly onCancel: () => void;
+  /** The suggestion proposes fees taken instead (`take_fees`), for this amount. */
+  readonly onTakeFees: (amountMinor: number) => void;
 }) {
   const { timeZone } = useApp();
   const today = todayIn(timeZone);
@@ -278,8 +426,86 @@ function RemittanceForm({
   if (state.status === 'loading') return <Loading what="the suggestion" />;
   if (state.status === 'error')
     return <LoadFailed message={state.problem.message} onRetry={reload} />;
+  const proposal = suggestionProposal(state.data);
+  if (proposal !== 'remit')
+    return (
+      <div
+        className="space-y-4 rounded-md border border-slate-200 bg-slate-50 p-4"
+        data-testid="remittance-proposal"
+        data-proposal={proposal}
+      >
+        <SuggestionFacts suggestion={state.data} />
+        <Alert tone="info" live={false}>
+          <span data-testid="nothing-to-remit">
+            {proposal === 'take_fees'
+              ? `Nothing to remit: the fees due take everything that could be paid out. Record the ${formatMinor(state.data.feesRetainedMinor || state.data.feesDueMinor)} of fees taken instead.`
+              : (nothingToRemitText(state.data) ?? 'Nothing to remit.')}
+          </span>
+        </Alert>
+        <div className="flex flex-wrap gap-2">
+          {proposal === 'take_fees' ? (
+            <Button
+              onClick={() => onTakeFees(state.data.feesRetainedMinor || state.data.feesDueMinor)}
+            >
+              Record fees taken
+            </Button>
+          ) : null}
+          <Button variant="ghost" onClick={onCancel}>
+            Close
+          </Button>
+        </div>
+      </div>
+    );
   return (
     <RemittanceFields suggestion={state.data} today={today} onDone={onDone} onCancel={onCancel} />
+  );
+}
+
+/** The suggestion as the API worked it out from the ledger (M9 review: with its notes). */
+function SuggestionFacts({ suggestion: s }: { readonly suggestion: RemittanceSuggestion }) {
+  return (
+    <>
+      <dl className="grid gap-2 text-sm sm:grid-cols-2" data-testid="remittance-suggestion">
+        <div className="flex justify-between gap-2">
+          <dt className="text-slate-600">Held for {s.owner.name}</dt>
+          <dd className="tabular-nums">{formatMinor(s.agentCashMinor)}</dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-slate-600">Fees due to the agency</dt>
+          <dd className="tabular-nums">{formatMinor(s.feesDueMinor)}</dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-slate-600">
+            Rent tax held back{' '}
+            {s.graPaidBy === 'agency' ? '(the agency pays GRA)' : '(the owner pays GRA)'}
+          </dt>
+          <dd className="tabular-nums" data-testid="suggestion-tax-held">
+            {formatMinor(s.rentTaxHeldBackMinor)}
+          </dd>
+        </div>
+        {s.rentTaxWithheldMinor > 0 ? (
+          <div className="flex justify-between gap-2" data-testid="suggestion-tax-withheld">
+            <dt className="text-slate-600">
+              Rent tax tenants withheld, awaiting certificates (not held back: the agency does not
+              pay it)
+            </dt>
+            <dd className="tabular-nums">{formatMinor(s.rentTaxWithheldMinor)}</dd>
+          </div>
+        ) : null}
+        <div className="flex justify-between gap-2 font-semibold">
+          <dt>Suggested: to the owner</dt>
+          <dd className="tabular-nums" data-testid="suggestion-net">
+            {formatMinor(s.netMinor)}
+          </dd>
+        </div>
+      </dl>
+      <p className="text-xs text-slate-600">As of {formatBusinessDate(s.asOf)}, from the ledger.</p>
+      {feesOverTakenText(s) ? (
+        <Alert tone="warning" live={false}>
+          <span data-testid="fees-over-taken">{feesOverTakenText(s)}</span>
+        </Alert>
+      ) : null}
+    </>
   );
 }
 
@@ -356,32 +582,7 @@ function RemittanceFields({
       className="space-y-4 rounded-md border border-slate-200 bg-slate-50 p-4"
     >
       {error ? <Alert tone="error">{error}</Alert> : null}
-      <dl className="grid gap-2 text-sm sm:grid-cols-2" data-testid="remittance-suggestion">
-        <div className="flex justify-between gap-2">
-          <dt className="text-slate-600">Held for {s.owner.name}</dt>
-          <dd className="tabular-nums">{formatMinor(s.agentCashMinor)}</dd>
-        </div>
-        <div className="flex justify-between gap-2">
-          <dt className="text-slate-600">Fees due to the agency</dt>
-          <dd className="tabular-nums">{formatMinor(s.feesDueMinor)}</dd>
-        </div>
-        <div className="flex justify-between gap-2">
-          <dt className="text-slate-600">
-            Rent tax held back{' '}
-            {s.graPaidBy === 'agency' ? '(the agency pays GRA)' : '(the owner pays GRA)'}
-          </dt>
-          <dd className="tabular-nums" data-testid="suggestion-tax-held">
-            {formatMinor(s.rentTaxHeldBackMinor)}
-          </dd>
-        </div>
-        <div className="flex justify-between gap-2 font-semibold">
-          <dt>Suggested: to the owner</dt>
-          <dd className="tabular-nums" data-testid="suggestion-net">
-            {formatMinor(s.netMinor)}
-          </dd>
-        </div>
-      </dl>
-      <p className="text-xs text-slate-600">As of {formatBusinessDate(s.asOf)}, from the ledger.</p>
+      <SuggestionFacts suggestion={s} />
       <div className="grid gap-4 sm:grid-cols-2">
         <TextField
           label="Paid to the owner (GH₵)"
@@ -458,10 +659,13 @@ function RemittanceFields({
 
 function FeesTakenForm({
   ownerId,
+  initialAmountMinor,
   onDone,
   onCancel,
 }: {
   readonly ownerId: string;
+  /** From the suggestion's `take_fees` proposal, or none. */
+  readonly initialAmountMinor: number | null;
   readonly onDone: (text: string) => void;
   readonly onCancel: () => void;
 }) {
@@ -469,7 +673,11 @@ function FeesTakenForm({
   const today = todayIn(timeZone);
   const keeper = useIdempotencyKeeper();
   const keyedFor = useRef<string | null>(null);
-  const [draft, setDraft] = useState({ amount: '', on: today, reference: '' });
+  const [draft, setDraft] = useState(() => ({
+    amount: initialAmountMinor ? toDecimal(money(initialAmountMinor)) : '',
+    on: today,
+    reference: '',
+  }));
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);

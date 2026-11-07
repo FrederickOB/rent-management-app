@@ -42,12 +42,15 @@ export function OwnersManager({
   initialRows,
   canManage,
   linkedUsers,
+  showReporting = true,
 }: {
   readonly initialRows: readonly OwnerRow[];
   /** From the policy (owner.manage); the API refuses anything else regardless. */
   readonly canManage: boolean;
   /** People linked to each owner, by owner id; null when this session may not list people. */
   readonly linkedUsers: Readonly<Record<string, readonly LinkedUser[]>> | null;
+  /** M9: the plan includes fees, statements and remittances (decision 13). */
+  readonly showReporting?: boolean;
 }) {
   const [rows, setRows] = useState<readonly OwnerRow[]>(initialRows);
   const [showArchived, setShowArchived] = useState(false);
@@ -126,6 +129,7 @@ export function OwnersManager({
                   owner={owner}
                   canManage={canManage}
                   linkedUsers={linkedUsers ? (linkedUsers[owner.id] ?? []) : null}
+                  showReporting={showReporting}
                   onChanged={refresh}
                 />
               ))}
@@ -141,11 +145,13 @@ function OwnerItem({
   owner,
   canManage,
   linkedUsers,
+  showReporting,
   onChanged,
 }: {
   readonly owner: OwnerRow;
   readonly canManage: boolean;
   readonly linkedUsers: readonly LinkedUser[] | null;
+  readonly showReporting: boolean;
   readonly onChanged: (text: string) => Promise<void>;
 }) {
   const [mode, setMode] = useState<'view' | 'edit' | 'archive' | 'reveal'>('view');
@@ -195,15 +201,17 @@ function OwnerItem({
             <Badge>{OWNER_KIND_LABELS[owner.kind]}</Badge>
             {owner.archived ? <Badge tone="dark">Archived</Badge> : null}
           </p>
-          {/* M9: the owner's fee terms, statements and remittances. */}
-          <p>
-            <Link
-              href={`/owners/${owner.id}`}
-              className="inline-flex min-h-9 items-center font-medium underline underline-offset-2"
-            >
-              Fees, statements and remittances
-            </Link>
-          </p>
+          {/* M9: the owner's fee terms, statements and remittances (Growth only). */}
+          {showReporting ? (
+            <p>
+              <Link
+                href={`/owners/${owner.id}`}
+                className="inline-flex min-h-9 items-center font-medium underline underline-offset-2"
+              >
+                Fees, statements and remittances
+              </Link>
+            </p>
+          ) : null}
           {owner.legalName && owner.legalName !== owner.displayName ? (
             <p className="text-slate-700">Legal name: {owner.legalName}</p>
           ) : null}

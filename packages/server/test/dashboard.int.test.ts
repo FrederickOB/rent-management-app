@@ -206,11 +206,15 @@ describe('DA-01 the dashboard reconciles to the ledger', () => {
 
     // Unearned rent (AR-03): the rent share of 2010, here all of it (no service charge, no
     // credit beyond a lease's end), and the money cards' figure.
-    expect(view.unearnedRentMinor).toBe(cards.reduce((sum, c) => sum + c.unearnedRentMinor, 0));
-    expect(view.unearnedRentMinor).toBe(
+    expect(view.unearnedRentMinor + view.unearnedServiceChargeMinor + view.creditMinor).toBe(
+      cards.reduce((sum, c) => sum + c.unearnedRentMinor, 0),
+    );
+    expect(view.unearnedRentMinor + view.unearnedServiceChargeMinor + view.creditMinor).toBe(
       -(await journalSum(ctx, recon.companyId, `l.account_code = '2010'`)),
     );
-    expect(view.unearnedRentMinor).toBeGreaterThan(0);
+    expect(
+      view.unearnedRentMinor + view.unearnedServiceChargeMinor + view.creditMinor,
+    ).toBeGreaterThan(0);
 
     // Paid-until per lease is the money card's.
     const snapshot = await snapshotOf(ctx, recon.companyId, view.date);
@@ -281,7 +285,9 @@ describe('DA-01 owner isolation (decision 15)', () => {
       // The positive case: exactly owner A's leases.
       expect(view.arrears.totalMinor).toBe(100_000 + 550_000);
       expect(view.depositsHeldMinor).toBe(300_000);
-      expect(view.unearnedRentMinor).toBe(cards.reduce((sum, c) => sum + c.unearnedRentMinor, 0));
+      expect(view.unearnedRentMinor + view.unearnedServiceChargeMinor + view.creditMinor).toBe(
+        cards.reduce((sum, c) => sum + c.unearnedRentMinor, 0),
+      );
       expect(view.rentRoll.rentMinor).toBe(300_000);
       expect(view.occupancy).toMatchObject({ units: 4, occupied: 3 });
       expect(view.filterOptions.owners.map((o) => o.id)).toEqual([recon.ownerA]);

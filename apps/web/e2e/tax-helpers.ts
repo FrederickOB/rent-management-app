@@ -1,5 +1,9 @@
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import { format, money, parseAmount } from '@rent/domain/money';
+import { fixture } from './register-helpers';
+import { today } from './tenancy-helpers';
 
 /**
  * Helpers for the M5 specs (rent tax, withholding, early termination, VAT, advance rent). They
@@ -43,3 +47,64 @@ export async function myPersonId(page: Page): Promise<string> {
 
 /** `2026-11` for a date such as `2026-11-03`. */
 export const monthOf = (date: string): string => date.slice(0, 7);
+
+/**
+ * The owner whose book a lease's money is in, as the API resolves it: the owner on the lease's
+ * first invoice, or else the property's one current owner.
+ */
+export async function leaseOwnerId(page: Page, leaseId: string): Promise<string> {
+  const invoices = await apiGet<{ number: string; ownerId: string }[]>(
+    page.request,
+    `/invoices?leaseId=${leaseId}&limit=500`,
+  );
+  const first = [...invoices].sort((a, b) => (a.number < b.number ? -1 : 1))[0];
+  if (first) return first.ownerId;
+  const lease = await apiGet<{ unit: { propertyId: string } }>(page.request, `/leases/${leaseId}`);
+  const property = await apiGet<{ ownership: { ownerId: string; current: boolean }[] }>(
+    page.request,
+    `/properties/${lease.unit.propertyId}`,
+  );
+  const owners = property.ownership.filter((o) => o.current);
+  expect(owners, 'the lease’s property has one current owner').toHaveLength(1);
+  return owners[0]!.ownerId;
+}
+
+/**
+ * F3 setup (founder-approved class, 2026-11-07): money the owner sent the agency (P30), recorded
+ * through the API with its proof, so the agency holds at least `amountMinor` for the lease's owner
+ * before a refund is paid from the agency's account.
+ */
+export async function fundLeaseOwner(
+  page: Page,
+  leaseId: string,
+  amountMinor: number,
+): Promise<void> {
+  const ownerId = await leaseOwnerId(page, leaseId);
+  const proof = readFileSync(fixture('title-deed.pdf'));
+  const slotResponse = await page.request.post('/api/v1/owner-money-uploads', {
+    data: { contentType: 'application/pdf', sizeBytes: proof.length },
+  });
+  expect(slotResponse.status(), `ask for a proof upload: ${await slotResponse.text()}`).toBe(200);
+  const slot = (await slotResponse.json()) as {
+    uploadId: string;
+    url: string;
+    fields: Record<string, string>;
+  };
+  const form = new FormData();
+  for (const [key, value] of Object.entries(slot.fields)) form.append(key, value);
+  form.append('file', new Blob([proof], { type: 'application/pdf' }), 'funding.pdf');
+  const stored = await fetch(slot.url, { method: 'POST', body: form });
+  expect(stored.ok, `upload the proof: ${stored.status}`).toBe(true);
+  const funded = await page.request.post('/api/v1/owner-funding', {
+    headers: { 'Idempotency-Key': randomUUID() },
+    data: {
+      ownerId,
+      on: today(),
+      method: 'bank',
+      reference: `FUND-E2E-${randomUUID().slice(0, 8)}`,
+      amountMinor,
+      proofUploadId: slot.uploadId,
+    },
+  });
+  expect(funded.status(), `record the owner’s funding: ${await funded.text()}`).toBe(200);
+}

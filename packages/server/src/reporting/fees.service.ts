@@ -1,5 +1,16 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { asc, eq, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNull,
+  schema,
+  sql,
+  withCompany,
+  type Database,
+  type Tx,
+} from '@rent/db';
 import {
   addDays,
   addMonths,
@@ -9,34 +20,33 @@ import {
   toIsoDate,
 } from '@rent/domain/dates';
 import {
-  creditDrawFee,
-  creditDrawFeeLines,
+  chargeAllocations,
+  feeBearing,
   feeOnBaseMinor,
   feeTermsOn,
-  FEE_BEARING_KINDS,
   fixedFeesForMonth,
-  managementFeeKeys,
   managementFeeLines,
   managementFeeReversalLines,
-  percentageFee,
-  refundedFeeBaseMinor,
-  refundFeeReversalMinor,
-  type FeeBasePart,
+  takeBacks,
+  undoings,
+  type ChargedAllocation,
+  type FeeAllocation,
   type FeeDimensions,
+  type FeeTakeBack,
   type FeeTerms,
   type FeeTermsVersion,
   type JournalLineDraft,
-  type PaymentAmount,
+  type PaymentCharge,
 } from '@rent/domain/ledger';
-import type { LineKind } from '@rent/domain/billing';
+import type { AllocationSource, LineKind } from '@rent/domain/billing';
 import type { AlertPort } from '@rent/integrations';
 import {
   BillingEngine,
+  type AllocationWrite,
   type FeeHooks,
   type LeaseState,
-  type SettledEvent,
 } from '../billing/engine';
-import { dimsOf, type PaymentRecord } from '../billing/records';
+import { dimsOf } from '../billing/records';
 import { companyRecord } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
 import { ALERT_PORT, CLOCK, DATABASE } from '../core/tokens';
@@ -68,374 +78,404 @@ export async function feeTermsVersions(tx: Tx, ownerId: string): Promise<FeeTerm
   return rows.map((r) => ({ effectiveFrom: r.effectiveFrom, terms: termsOfRow(r) }));
 }
 
-/** The lease, the leases it renews and the leases that renew it, all the way along. */
-async function renewalChain(tx: Tx, leaseId: string): Promise<string[]> {
-  const rows = await tx.execute<{ id: string }>(
-    sql`with recursive up(id) as (
-          select ${leaseId}::uuid
-          union select l.renews_lease_id from lease l join up on l.id = up.id
-                where l.renews_lease_id is not null),
-        down(id) as (
-          select ${leaseId}::uuid
-          union select l.id from lease l join down on l.renews_lease_id = down.id)
-        select id from up union select id from down`,
-  );
-  return rows.rows.map((r) => r.id).sort();
+type AllocationRow = typeof schema.allocation.$inferSelect;
+
+export interface FeeMismatch {
+  readonly key: string;
+  readonly expectedMinor: number;
+  readonly actualMinor: number;
+  readonly problems: string[];
 }
 
-/** Rent and service charge settled by money (payments, deposits, withholding) on the chain's other leases. */
-async function settledElsewhere(
-  tx: Tx,
-  chain: readonly string[],
-  leaseId: string,
-): Promise<number> {
-  const others = chain.filter((id) => id !== leaseId);
-  if (others.length === 0) return 0;
-  const [row] = (
-    await tx.execute<{ total: number }>(
-      sql`select coalesce(sum(a.amount_minor), 0)::bigint as total from allocation a
-          join invoice_line il on il.company_id = a.company_id and il.id = a.invoice_line_id
-          where a.lease_id = any(${`{${others.join(',')}}`}::uuid[])
-            and a.source in ('payment', 'deposit', 'withholding')
-            and il.kind = any(${`{${FEE_BEARING_KINDS.join(',')}}`}::text[])`,
-    )
-  ).rows;
-  return Math.max(0, Number(row?.total ?? 0));
+const feeAllocationOf = (
+  r: Pick<AllocationRow, 'id' | 'invoiceLineId' | 'source' | 'paymentId' | 'amountMinor'>,
+  kinds: ReadonlyMap<string, LineKind>,
+): FeeAllocation => ({
+  id: r.id,
+  lineId: r.invoiceLineId,
+  lineKind: kinds.get(r.invoiceLineId) ?? ('one_off' as LineKind),
+  source: r.source as AllocationSource,
+  paymentId: r.paymentId,
+  amountMinor: Number(r.amountMinor),
+});
+
+/** A charged allocation as stored, with its event row and what was taken back so far. */
+interface StoredCharge extends ChargedAllocation {
+  readonly managementFeeId: string | null;
+  readonly rateBps: number;
+  readonly source: string;
+  readonly paymentId: string | null;
+  readonly propertyId: string;
+  readonly unitId: string | null;
+  readonly leaseId: string | null;
+}
+
+async function storedCharges(tx: Tx, allocationIds: readonly string[]): Promise<StoredCharge[]> {
+  const rows = await tx.execute<{
+    allocation_id: string;
+    management_fee_id: string | null;
+    rate_bps: number;
+    base: string;
+    fee: string;
+    taken_base: string;
+    taken_fee: string;
+    source: string | null;
+    payment_id: string | null;
+    property_id: string;
+    unit_id: string | null;
+    lease_id: string;
+  }>(
+    sql`select c.allocation_id, c.management_fee_id, c.rate_bps, c.base_minor::text as base,
+          c.fee_minor::text as fee,
+          coalesce((select -sum(t.base_minor) from allocation_fee t
+                    where t.company_id = c.company_id and t.charged_allocation_id = c.allocation_id), 0)::text as taken_base,
+          coalesce((select -sum(t.fee_minor) from allocation_fee t
+                    where t.company_id = c.company_id and t.charged_allocation_id = c.allocation_id), 0)::text as taken_fee,
+          f.source, c.payment_id, c.property_id, f.unit_id, c.lease_id
+        from allocation_fee c
+        left join management_fee f on f.company_id = c.company_id and f.id = c.management_fee_id
+        where c.charged_allocation_id is null
+          and c.allocation_id = any(${`{${allocationIds.join(',')}}`}::uuid[])`,
+  );
+  return rows.rows.map((r) => ({
+    allocationId: r.allocation_id,
+    managementFeeId: r.management_fee_id,
+    rateBps: Number(r.rate_bps),
+    baseMinor: Number(r.base),
+    feeMinor: Number(r.fee),
+    takenBaseMinor: Number(r.taken_base),
+    takenFeeMinor: Number(r.taken_fee),
+    source: r.source ?? 'payment',
+    paymentId: r.payment_id,
+    propertyId: r.property_id,
+    unitId: r.unit_id,
+    leaseId: r.lease_id,
+  }));
+}
+
+async function entryKeyOf(tx: Tx, entryId: string): Promise<string | null> {
+  const [row] = await tx
+    .select({ key: schema.journalEntry.idempotencyKey })
+    .from(schema.journalEntry)
+    .where(eq(schema.journalEntry.id, entryId));
+  return row?.key ?? null;
+}
+
+/** What a charge is called: money received, credit drawn onto a month, a deposit, withholding. */
+function chargeSource(a: FeeAllocation, write: AllocationWrite): string {
+  if (a.source === 'deposit') return 'deposit';
+  if (a.source === 'withholding') return 'withholding';
+  return write.recordType === 'payment' || write.recordType === 'match' ? 'payment' : 'credit_draw';
+}
+
+/**
+ * A charge's key: `P14:<payment>` for money received or matched, `P14:<record>` for a deposit
+ * applied or tax withheld, and `P14:<draw entry key>` for credit drawn (`P14:P02:<line>`, a redraw's
+ * `P14:P02:<line>:redraw:<n>`, P13's `P14:P13:…`).
+ */
+function chargeKey(write: AllocationWrite, entryKey: string | null, paymentId: string | null) {
+  if ((write.recordType === 'payment' || write.recordType === 'match') && paymentId)
+    return `P14:${paymentId}`;
+  if (write.recordType === 'withholding' || write.recordType === 'move_out')
+    return entryKey && !entryKey.startsWith('P11') && write.recordType === 'move_out'
+      ? `P14:${entryKey}`
+      : `P14:${write.recordId}`;
+  return entryKey ? `P14:${entryKey}` : `P14:${write.recordType}:${write.recordId}`;
+}
+
+/** A take-back's key: the P21 mirror `P21:<payment>:fee`, a deposit unwind, or a release. */
+function takeBackKey(source: string, write: AllocationWrite, paymentId: string | null) {
+  if (source === 'reversal' && paymentId) return `P21:${paymentId}:fee`;
+  if (source === 'unwind') return `P14:unwind:${write.recordId}`;
+  return `P14:release:${write.recordType}:${write.recordId}`;
+}
+
+/** Keys are unique per company and payment: a second fee under the same key gets `:2`, `:3`… */
+async function uniqueFeeKey(tx: Tx, key: string, paymentId: string | null): Promise<string> {
+  const taken = await tx
+    .select({ key: schema.managementFee.key })
+    .from(schema.managementFee)
+    .where(
+      and(
+        sql`${schema.managementFee.key} like ${`${key}%`}`,
+        paymentId
+          ? eq(schema.managementFee.paymentId, paymentId)
+          : isNull(schema.managementFee.paymentId),
+      ),
+    );
+  const used = new Set(taken.map((t) => t.key));
+  if (!used.has(key)) return key;
+  for (let n = 2; ; n += 1) if (!used.has(`${key}:${n}`)) return `${key}:${n}`;
 }
 
 export const FIXED_FEES_JOB = 'reporting.fixed-fees';
 export const FEE_CHECK_JOB = 'reporting.fee-check';
 
 /**
- * Management fees (P14; AC-02; M9 plan 4.2, decisions 1 to 3 and the founder's decision on drawn
- * surplus). Percentage fees post in the event's own transaction, through billing's fee hooks: on
- * the rent and service charge a receipt settles (advances included), credit drawn onto a month,
- * rent settled from a deposit, and tax withheld; never on deposits paid in, VAT, one-off charges or
- * surplus not yet drawn. A reversal mirrors them (P21b), a refund takes them back in proportion,
- * and a chargeback's deposit unwind takes back the deposit fee. Fixed fees post monthly. Each fee
- * is recorded in `management_fee` with its base, which the guard and the nightly check read. Only
- * an agency's owners pay fees; fees carry no VAT (OQ-60).
+ * Management fees (P14; AC-02; M9 plan 4.2, decisions 1 to 3, and the M9 review's must-fix 1).
+ * Percentage fees follow the allocations: every rent or service-charge allocation of money (a
+ * payment, its credit drawn onto a month, a deposit applied, tax withheld) carries its fee at the
+ * rate in force on its value date, in the transaction that writes it, and a negative allocation (a
+ * reversal, a release, a chargeback's deposit unwind) takes back the fee of what it undoes, in
+ * proportion and mirrored exactly (`@rent/domain/ledger` allocation-fees). Each allocation's share
+ * is in `allocation_fee`; `management_fee` holds the posted totals per event and payment, which
+ * statements, the nightly check and the screens read. Fixed fees post monthly. Only an agency's
+ * owners pay fees; fees carry no VAT (OQ-60).
  */
 @Injectable()
 export class ManagementFeesService implements FeeHooks {
   constructor(
     @Inject(DATABASE) private readonly database: Database,
-    @Inject(BillingEngine) engine: BillingEngine,
+    @Inject(BillingEngine) private readonly engine: BillingEngine,
     @Inject(PostingService) private readonly posting: PostingService,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
   ) {
-    // As rent tax does: once constructed, every settlement in this engine is charged its fee.
+    // As rent tax does: once constructed, every allocation in this engine carries its fee.
     engine.useFeeHooks(this);
   }
 
-  // Percentage fees on money settled ---------------------------------------------------------------
+  // Percentage fees on allocations -------------------------------------------------------------
 
-  async afterSettled(tx: Tx, state: LeaseState, event: SettledEvent): Promise<void> {
-    if (state.company.kind !== 'agency' || state.book.kind !== 'book') return;
-    const parts = event.parts.filter((p) => p.amountMinor > 0);
-    if (parts.length === 0) return;
-    const terms = feeTermsOn(await feeTermsVersions(tx, state.book.ownerId), event.valueDate);
-    if (terms?.terms.kind !== 'percentage') return;
-    const kinds = new Map(state.lines.map((l) => [l.id, l.kind as LineKind]));
-    const bearing = parts.filter((p) => FEE_BEARING_KINDS.includes(kinds.get(p.lineId)!));
-    // Across the renewal chain: credit a renewal carried over may have been charged on the old
-    // lease (a credit note's release, say), so the guard counts both leases' money and fees.
-    const chain = await renewalChain(tx, state.lease.id);
-    const guard = {
-      settledMinor: this.settled(state) + (await settledElsewhere(tx, chain, state.lease.id)),
-      chargedBaseMinor: await this.chargedBase(tx, chain),
-    };
-    const dims: FeeDimensions = { ...dimsOf(state.lease), propertyId: state.lease.propertyId };
-    const bookId = state.book.bookId;
-    let lines: JournalLineDraft[];
-    let rows: { paymentId: string | null; baseMinor: number; feeMinor: number }[];
-    if (event.source === 'credit_draw') {
-      const byPayment = new Map<string, number>();
-      for (const p of bearing)
-        if (p.paymentId)
-          byPayment.set(p.paymentId, (byPayment.get(p.paymentId) ?? 0) + p.amountMinor);
-      const draws: PaymentAmount[] = [...byPayment].map(([paymentId, amountMinor]) => ({
-        paymentId,
-        amountMinor,
-      }));
-      // Rent and service charge bear the same rate, so the draw is charged as one base.
-      const fee = creditDrawFee({ terms: terms.terms, kind: 'rent', draws, guard });
-      if (!fee || fee.feeMinor === 0) return;
-      lines = creditDrawFeeLines({ bookId, dims, fee });
-      rows = fee.shares.map((s) => ({
-        paymentId: s.paymentId,
-        baseMinor: s.baseMinor,
-        feeMinor: s.feeMinor,
-      }));
-    } else {
-      const feeParts: FeeBasePart[] = bearing.map((p) => ({
-        kind: kinds.get(p.lineId)!,
-        source: event.source as Exclude<SettledEvent['source'], 'credit_draw'>,
-        amountMinor: p.amountMinor,
-      }));
-      const fee = percentageFee({ terms: terms.terms, parts: feeParts, guard });
-      if (!fee || fee.feeMinor === 0) return;
-      const paymentId = event.source === 'payment' ? (parts[0]!.paymentId ?? null) : null;
-      lines = managementFeeLines({
-        bookId,
-        dims: { ...dims, paymentId },
-        amountMinor: fee.feeMinor,
-      });
-      rows = [{ paymentId, baseMinor: fee.baseMinor, feeMinor: fee.feeMinor }];
-    }
-    const posted = await this.posting.post(tx, {
-      companyId: state.company.id,
-      rule: 'P14',
-      key: event.key,
-      valueDate: event.valueDate,
-      lines,
-      record: { type: event.recordType, id: event.recordId },
-      causedBy: event.causedBy,
-    });
-    if (!posted || posted.replayed) return;
-    await tx.insert(schema.managementFee).values(
-      rows.map((r) => ({
-        companyId: state.company.id,
-        ownerId: state.book.kind === 'book' ? state.book.ownerId : '',
-        bookId,
-        propertyId: state.lease.propertyId,
-        unitId: state.lease.unitId,
-        leaseId: state.lease.id,
-        paymentId: r.paymentId,
-        key: event.key,
-        source: event.source,
-        rateBps: terms.terms.kind === 'percentage' ? terms.terms.rateBps : null,
-        baseMinor: r.baseMinor,
-        feeMinor: r.feeMinor,
-        valueDate: event.valueDate,
-        entryId: posted.entryId,
-      })),
-    );
-  }
-
-  /** Rent and service charge settled on the lease by payments, deposits and withholding, net. */
-  private settled(state: LeaseState): number {
-    const kinds = new Map(state.lines.map((l) => [l.id, l.kind as LineKind]));
-    let total = 0;
-    for (const a of state.allocations)
-      if (
-        FEE_BEARING_KINDS.includes(kinds.get(a.lineId)!) &&
-        (a.source === 'payment' || a.source === 'deposit' || a.source === 'withholding')
-      )
-        total += a.amountMinor;
-    return Math.max(0, total);
-  }
-
-  /** The base the chain's fees already cover, net of take-backs (the guard). */
-  private async chargedBase(tx: Tx, chain: readonly string[]): Promise<number> {
-    const [row] = (
-      await tx.execute<{ total: number }>(
-        sql`select coalesce(sum(base_minor), 0)::bigint as total from management_fee
-            where lease_id = any(${`{${chain.join(',')}}`}::uuid[]) and source <> 'fixed'`,
-      )
-    ).rows;
-    return Math.max(0, Number(row?.total ?? 0));
-  }
-
-  // Take-backs -----------------------------------------------------------------------------------
-
-  /** What is left of each fee: the original row, its base and fee net of every take-back. */
-  private async remaining(tx: Tx, where: ReturnType<typeof sql>) {
-    const originals = (
-      await tx.execute<FeeRow & { left_base: number; left_fee: number; taken_base: number }>(
-        sql`select f.*, f.base_minor + coalesce(t.base, 0) as left_base, f.fee_minor + coalesce(t.fee, 0) as left_fee,
-              -coalesce(t.base, 0) as taken_base
-            from management_fee f
-            left join (select reverses_fee_id, sum(base_minor)::bigint as base, sum(fee_minor)::bigint as fee
-                       from management_fee where reverses_fee_id is not null group by 1) t on t.reverses_fee_id = f.id
-            where f.reverses_fee_id is null and ${where}`,
-      )
-    ).rows;
-    return originals.map((r) => ({
-      id: String((r as unknown as { id: string }).id),
-      ownerId: String((r as unknown as { owner_id: string }).owner_id),
-      bookId: String((r as unknown as { book_id: string }).book_id),
-      propertyId: String((r as unknown as { property_id: string }).property_id),
-      unitId: (r as unknown as { unit_id: string | null }).unit_id,
-      leaseId: (r as unknown as { lease_id: string | null }).lease_id,
-      paymentId: (r as unknown as { payment_id: string | null }).payment_id,
-      source: String((r as unknown as { source: string }).source),
-      rateBps: (r as unknown as { rate_bps: number | null }).rate_bps,
-      baseMinor: Number((r as unknown as { base_minor: number }).base_minor),
-      feeMinor: Number((r as unknown as { fee_minor: number }).fee_minor),
-      leftBase: Number(r.left_base),
-      leftFee: Number(r.left_fee),
-      takenBase: Number(r.taken_base),
-    }));
-  }
-
-  private async takeBack(
-    tx: Tx,
-    companyId: string,
-    input: {
-      key: string;
-      source: 'reversal' | 'refund' | 'unwind';
-      valueDate: string;
-      record: { type: string; id: string };
-      causedBy: string | null;
-      parts: {
-        fee: Awaited<ReturnType<ManagementFeesService['remaining']>>[number];
-        baseMinor: number;
-        feeMinor: number;
-      }[];
-    },
-  ): Promise<void> {
-    const parts = input.parts.filter((p) => p.feeMinor > 0);
-    if (parts.length === 0) return;
-    const lines = parts.flatMap((p) =>
-      managementFeeReversalLines({
-        bookId: p.fee.bookId,
-        dims: {
-          propertyId: p.fee.propertyId,
-          unitId: p.fee.unitId ?? undefined,
-          leaseId: p.fee.leaseId ?? undefined,
-          paymentId: p.fee.paymentId ?? undefined,
-        } as FeeDimensions,
-        amountMinor: p.feeMinor,
-      }),
-    );
-    const posted = await this.posting.post(tx, {
-      companyId,
-      rule: input.source === 'reversal' ? 'P21' : 'P14',
-      key: input.key,
-      valueDate: input.valueDate,
-      lines,
-      record: input.record,
-      causedBy: input.causedBy,
-    });
-    if (!posted || posted.replayed) return;
-    await tx.insert(schema.managementFee).values(
-      parts.map((p) => ({
-        companyId,
-        ownerId: p.fee.ownerId,
-        bookId: p.fee.bookId,
-        propertyId: p.fee.propertyId,
-        unitId: p.fee.unitId,
-        leaseId: p.fee.leaseId,
-        paymentId: p.fee.paymentId,
-        key: `${input.key}#${p.fee.id}`,
-        source: input.source,
-        reversesFeeId: p.fee.id,
-        rateBps: p.fee.rateBps,
-        baseMinor: -p.baseMinor,
-        feeMinor: -p.feeMinor,
-        valueDate: input.valueDate,
-        entryId: posted.entryId,
-      })),
-    );
-  }
-
-  /** P21b mirrors what is left of the payment's fees: on its receipt and on its credit drawn. */
-  async afterReversal(
-    tx: Tx,
-    states: readonly LeaseState[],
-    payment: PaymentRecord,
-    reversal: {
-      readonly reversalId: string;
-      readonly valueDate: string;
-      readonly causedBy: string | null;
-    },
-  ): Promise<void> {
-    const fees = await this.remaining(tx, sql`f.payment_id = ${payment.id}::uuid`);
-    await this.takeBack(tx, payment.row.companyId, {
-      key: managementFeeKeys.paymentReversal(payment.id),
-      source: 'reversal',
-      valueDate: reversal.valueDate,
-      record: { type: 'payment_reversal', id: reversal.reversalId },
-      causedBy: reversal.causedBy,
-      parts: fees.map((fee) => ({ fee, baseMinor: fee.leftBase, feeMinor: fee.leftFee })),
-    });
-    void states;
-  }
-
-  /** A refund of a receipt's credit takes back the fee on the base it returns (decision 3). */
-  async afterRefund(
+  async afterAllocations(
     tx: Tx,
     state: LeaseState,
-    refund: {
-      readonly refundId: string;
-      readonly valueDate: string;
-      readonly causedBy: string | null;
-      readonly credits: readonly PaymentAmount[];
-    },
+    rows: readonly AllocationRow[],
+    write: AllocationWrite,
   ): Promise<void> {
-    const kinds = new Map(state.lines.map((l) => [l.id, l.kind as LineKind]));
-    for (const credit of refund.credits) {
-      const [fee] = await this.remaining(
-        tx,
-        sql`f.payment_id = ${credit.paymentId}::uuid and f.lease_id = ${state.lease.id}::uuid and f.source = 'payment'`,
-      );
-      if (!fee || fee.leftFee <= 0) continue;
-      let kept = 0;
-      for (const a of state.allocations)
-        if (
-          a.paymentId === credit.paymentId &&
-          a.source === 'payment' &&
-          FEE_BEARING_KINDS.includes(kinds.get(a.lineId)!)
-        )
-          kept += a.amountMinor;
-      const base = refundedFeeBaseMinor({
-        baseMinor: fee.baseMinor,
-        keptBaseMinor: Math.max(0, kept),
-        refundedBaseBeforeMinor: fee.takenBase,
-        refundMinor: credit.amountMinor,
-      });
-      const amount = refundFeeReversalMinor({
-        feeMinor: fee.feeMinor,
-        baseMinor: fee.baseMinor,
-        refundedBaseBeforeMinor: fee.takenBase,
-        refundedBaseMinor: base,
-      });
-      await this.takeBack(tx, state.company.id, {
-        key: managementFeeKeys.refund(refund.refundId, credit.paymentId),
-        source: 'refund',
-        valueDate: refund.valueDate,
-        record: { type: 'refund', id: refund.refundId },
-        causedBy: refund.causedBy,
-        parts: [{ fee, baseMinor: base, feeMinor: amount }],
-      });
-    }
-  }
-
-  /** A chargeback took back a deposit share: the fee on the rent it had settled follows it. */
-  async afterDepositUnwound(
-    tx: Tx,
-    state: LeaseState,
-    unwound: {
-      readonly moveOutId: string;
-      readonly paymentId: string;
-      readonly appliedMinor: number;
-      readonly reversalId: string;
-      readonly valueDate: string;
-      readonly causedBy: string | null;
-    },
-  ): Promise<void> {
-    const [fee] = await this.remaining(
+    if (state.company.kind !== 'agency' || rows.length === 0) return;
+    const kinds = await this.lineKinds(
       tx,
-      sql`f.key = ${managementFeeKeys.event(unwound.moveOutId)} and f.source = 'deposit'`,
+      state,
+      rows.map((r) => r.invoiceLineId),
     );
-    if (!fee || fee.leftFee <= 0) return;
-    const base = Math.min(unwound.appliedMinor, fee.baseMinor - fee.takenBase);
-    const amount = refundFeeReversalMinor({
-      feeMinor: fee.feeMinor,
-      baseMinor: fee.baseMinor,
-      refundedBaseBeforeMinor: fee.takenBase,
-      refundedBaseMinor: base,
+    const fee = rows
+      .map((r) => ({ row: r, alloc: feeAllocationOf(r, kinds) }))
+      .filter((x) => feeBearing(x.alloc));
+    if (fee.length === 0) return;
+    const byLease = new Map<string, typeof fee>();
+    for (const f of fee) byLease.set(f.row.leaseId, [...(byLease.get(f.row.leaseId) ?? []), f]);
+    for (const [leaseId, leaseRows] of byLease) {
+      const leaseState =
+        leaseId === state.lease.id ? state : await this.engine.load(tx, state.company.id, leaseId);
+      if (leaseState.book.kind !== 'book') continue;
+      await this.feesFor(tx, leaseState, leaseRows, kinds, write);
+    }
+  }
+
+  private async lineKinds(
+    tx: Tx,
+    state: LeaseState,
+    lineIds: readonly string[],
+  ): Promise<Map<string, LineKind>> {
+    const kinds = new Map(state.lines.map((l) => [l.id, l.kind as LineKind]));
+    const missing = [...new Set(lineIds)].filter((id) => !kinds.has(id));
+    if (missing.length > 0) {
+      const found = await tx
+        .select({ id: schema.invoiceLine.id, kind: schema.invoiceLine.kind })
+        .from(schema.invoiceLine)
+        .where(inArray(schema.invoiceLine.id, missing));
+      for (const f of found) kinds.set(f.id, f.kind as LineKind);
+    }
+    return kinds;
+  }
+
+  private async feesFor(
+    tx: Tx,
+    state: LeaseState,
+    rows: readonly { row: AllocationRow; alloc: FeeAllocation }[],
+    kinds: Map<string, LineKind>,
+    write: AllocationWrite,
+  ): Promise<void> {
+    if (state.book.kind !== 'book') return;
+    const { ownerId, bookId } = state.book;
+    const companyId = state.company.id;
+    const positives = rows.filter((r) => r.alloc.amountMinor > 0).map((r) => r.alloc);
+    const negatives = rows.filter((r) => r.alloc.amountMinor < 0).map((r) => r.alloc);
+
+    // Charges: the rate in force on the allocations' value date (none before the terms began).
+    let charges: PaymentCharge[] = [];
+    if (positives.length > 0) {
+      const terms = feeTermsOn(await feeTermsVersions(tx, ownerId), write.valueDate);
+      if (terms?.terms.kind === 'percentage')
+        charges = chargeAllocations(positives, terms.terms.rateBps);
+    }
+
+    // Take-backs: what each negative allocation undoes, latest first, and the fee it carried.
+    let backs: FeeTakeBack[] = [];
+    const charged = new Map<string, StoredCharge>();
+    if (negatives.length > 0) {
+      const lineIds = [...new Set(negatives.map((n) => n.lineId))];
+      const history = (
+        await tx
+          .select()
+          .from(schema.allocation)
+          .where(inArray(schema.allocation.invoiceLineId, lineIds))
+          .orderBy(asc(schema.allocation.createdAt), asc(schema.allocation.id))
+      ).map((r) => feeAllocationOf(r, kinds));
+      const undone = undoings(history, new Set(negatives.map((n) => n.id)));
+      const ids = [...new Set(undone.map((u) => u.undoesId))];
+      if (ids.length > 0) {
+        for (const c of await storedCharges(tx, ids)) charged.set(c.allocationId, c);
+        backs = takeBacks(undone, charged);
+      }
+    }
+    if (charges.length === 0 && backs.length === 0) return;
+
+    // One entry for the write: Dr 5100, Cr 2300 per charge; the reverse per fee taken back.
+    const leaseDims = dimsOf(state.lease);
+    const dims = (paymentId: string | null): FeeDimensions => ({
+      ...leaseDims,
+      propertyId: state.lease.propertyId,
+      ...(paymentId ? { paymentId } : {}),
     });
-    await this.takeBack(tx, state.company.id, {
-      key: `P14:${unwound.moveOutId}:${unwound.paymentId}:unwind`,
-      source: 'unwind',
-      valueDate: unwound.valueDate,
-      record: { type: 'payment_reversal', id: unwound.reversalId },
-      causedBy: unwound.causedBy,
-      parts: [{ fee, baseMinor: base, feeMinor: amount }],
-    });
+    const groups = new Map<string, { charge: StoredCharge; base: number; fee: number }[]>();
+    for (const b of backs) {
+      const c = charged.get(b.chargedAllocationId)!;
+      const key = c.managementFeeId ?? '';
+      groups.set(key, [
+        ...(groups.get(key) ?? []),
+        { charge: c, base: b.baseMinor, fee: b.feeMinor },
+      ]);
+    }
+    const lines: JournalLineDraft[] = [
+      ...charges.flatMap((c) =>
+        managementFeeLines({ bookId, dims: dims(c.paymentId), amountMinor: c.feeMinor }),
+      ),
+      ...[...groups.values()].flatMap((g) =>
+        managementFeeReversalLines({
+          bookId,
+          dims: dims(g[0]!.charge.paymentId),
+          amountMinor: g.reduce((s, x) => s + x.fee, 0),
+        }),
+      ),
+    ];
+    const posted =
+      lines.length === 0
+        ? null
+        : await this.posting.post(tx, {
+            companyId,
+            rule: write.recordType === 'reversal' && charges.length === 0 ? 'P21' : 'P14',
+            key: `P14:alloc:${rows[0]!.alloc.id}`,
+            valueDate: write.valueDate,
+            lines,
+            record: { type: write.recordType, id: write.recordId },
+            causedBy: write.causedBy,
+          });
+    if (posted?.replayed) return;
+    const entryKey = write.entryId ? await entryKeyOf(tx, write.entryId) : null;
+
+    // The posted totals, per event and payment, and each allocation's share.
+    for (const c of charges) {
+      const source = chargeSource(
+        rows.find((r) => r.alloc.id === c.parts[0]!.allocationId)!.alloc,
+        write,
+      );
+      const managementFeeId = posted
+        ? await this.insertFee(tx, {
+            companyId,
+            ownerId,
+            bookId,
+            propertyId: state.lease.propertyId,
+            unitId: state.lease.unitId,
+            leaseId: state.lease.id,
+            paymentId: c.paymentId,
+            key: await uniqueFeeKey(tx, chargeKey(write, entryKey, c.paymentId), c.paymentId),
+            source,
+            rateBps: c.rateBps,
+            baseMinor: c.baseMinor,
+            feeMinor: c.feeMinor,
+            valueDate: write.valueDate,
+            entryId: posted.entryId,
+          })
+        : null;
+      await tx.insert(schema.allocationFee).values(
+        c.parts.map((p) => {
+          const row = rows.find((r) => r.alloc.id === p.allocationId)!.row;
+          return {
+            companyId,
+            managementFeeId,
+            ownerId,
+            propertyId: row.propertyId,
+            allocationId: p.allocationId,
+            leaseId: row.leaseId,
+            invoiceLineId: row.invoiceLineId,
+            paymentId: row.paymentId,
+            rateBps: c.rateBps,
+            baseMinor: p.baseMinor,
+            feeMinor: p.feeMinor,
+          };
+        }),
+      );
+    }
+    for (const [feeId, g] of groups) {
+      const fee = g.reduce((s, x) => s + x.fee, 0);
+      const base = g.reduce((s, x) => s + x.base, 0);
+      const first = g[0]!.charge;
+      const source =
+        write.recordType === 'reversal'
+          ? first.source === 'deposit'
+            ? 'unwind'
+            : 'reversal'
+          : 'refund';
+      const managementFeeId =
+        posted && feeId && fee > 0
+          ? await this.insertFee(tx, {
+              companyId,
+              ownerId,
+              bookId,
+              propertyId: first.propertyId,
+              unitId: first.unitId,
+              leaseId: first.leaseId,
+              paymentId: first.paymentId,
+              key: await uniqueFeeKey(
+                tx,
+                `${takeBackKey(source, write, first.paymentId)}#${feeId}`,
+                first.paymentId,
+              ),
+              source,
+              reversesFeeId: feeId,
+              rateBps: first.rateBps,
+              baseMinor: -base,
+              feeMinor: -fee,
+              valueDate: write.valueDate,
+              entryId: posted.entryId,
+            })
+          : null;
+      await tx.insert(schema.allocationFee).values(
+        backs
+          .filter((b) => (charged.get(b.chargedAllocationId)!.managementFeeId ?? '') === feeId)
+          .map((b) => {
+            const neg = rows.find((r) => r.alloc.id === b.allocationId)!.row;
+            const c = charged.get(b.chargedAllocationId)!;
+            return {
+              companyId,
+              managementFeeId,
+              ownerId,
+              propertyId: neg.propertyId,
+              allocationId: b.allocationId,
+              chargedAllocationId: b.chargedAllocationId,
+              leaseId: neg.leaseId,
+              invoiceLineId: neg.invoiceLineId,
+              paymentId: neg.paymentId,
+              rateBps: c.rateBps,
+              baseMinor: -b.baseMinor,
+              feeMinor: -b.feeMinor,
+            };
+          }),
+      );
+    }
+  }
+
+  private async insertFee(
+    tx: Tx,
+    values: typeof schema.managementFee.$inferInsert,
+  ): Promise<string> {
+    const [row] = await tx
+      .insert(schema.managementFee)
+      .values(values)
+      .returning({ id: schema.managementFee.id });
+    return row!.id;
   }
 
   // Fixed fees, monthly (`reporting.fixed-fees`) ------------------------------------------------
@@ -443,6 +483,9 @@ export class ManagementFeesService implements FeeHooks {
   /**
    * P14 fixed fees for a month, for every agency-managed owner whose terms on its last day are a
    * fixed fee per unit: once per unit billable that month (D8). Idempotent by key.
+   * - A property the owner shares carries none (it shows on the fee terms as co-owned).
+   * - A property sold during the month: the owner on its last day is charged; the seller is not.
+   * - A month that began under percentage terms carries no fixed fee.
    */
   async runFixedFees(companyId: string, month: string): Promise<number> {
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
@@ -457,6 +500,14 @@ export class ManagementFeesService implements FeeHooks {
       for (const { ownerId } of owners) {
         const versions = await feeTermsVersions(tx, ownerId);
         if (feeTermsOn(versions, last)?.terms.kind !== 'fixed_per_unit') continue;
+        // A month that began under percentage terms was charged per allocation until the switch:
+        // the fixed fee starts the month after, never both in one month (M9 review).
+        const firstDay = toIsoDate(first);
+        const days = [
+          firstDay,
+          ...versions.map((v) => v.effectiveFrom).filter((d) => d > firstDay && d <= last),
+        ];
+        if (days.some((d) => feeTermsOn(versions, d)?.terms.kind === 'percentage')) continue;
         const bookId = await ownerBook(tx, ownerId);
         if (!bookId) continue;
         // The owner's units on the month's last day (sole ownership, as fees post on one book).
@@ -527,42 +578,95 @@ export class ManagementFeesService implements FeeHooks {
     });
   }
 
-  // The nightly check (plan risk 1) ------------------------------------------------------------
+  // The nightly check (plan risk 1; M9 review must-fix 1) --------------------------------------
 
   /**
-   * Fees equal rate × base per receipt: each percentage fee's rows (a credit draw's shares added
-   * together) equal the rate on their base, rounded once, and 5100 for the fee's entry equals the
-   * rows. Mismatches raise an alert.
+   * `reporting.fee-check`, for a company. Any difference raises one critical alert:
+   * - each percentage fee posted equals its rate on its base, rounded once;
+   * - each posted fee equals its allocations' shares (`allocation_fee`);
+   * - no charged allocation has more taken back than it carried;
+   * - each owner book's 5100 equals its fee records (take-backs and fixed fees included);
+   * - per lease, the base charged and still live equals the rent and service charge settled by
+   *   money since the terms began, net of what was undone (replayed from the allocations).
    */
   async check(companyId: string, options: { alert?: boolean } = {}) {
     const mismatches = await withCompany(
       this.database,
       { companyId, actorKind: 'system' },
       async (tx) => {
+        const out = new Map<string, FeeMismatch>();
+        const add = (key: string, expected: number, actual: number, problem: string) => {
+          const m = out.get(key);
+          if (m) m.problems.push(problem);
+          else
+            out.set(key, {
+              key,
+              expectedMinor: expected,
+              actualMinor: actual,
+              problems: [problem],
+            });
+        };
+        // 1. Each posted percentage fee is its rate on its base.
         const groups = (
-          await tx.execute<{
-            key: string;
-            rate_bps: number;
-            base: number;
-            fee: number;
-            ledger: number;
-          }>(
-            sql`select f.key, max(f.rate_bps) as rate_bps, sum(f.base_minor)::bigint as base, sum(f.fee_minor)::bigint as fee,
-                  (select coalesce(sum(l.amount_minor), 0)::bigint from journal_line l
-                   where l.company_id = f.company_id and l.account_code = '5100'
-                     and l.entry_id = any(array_agg(f.entry_id))) as ledger
+          await tx.execute<{ key: string; rate_bps: number; base: string; fee: string }>(
+            sql`select f.key, max(f.rate_bps) as rate_bps, sum(f.base_minor)::text as base, sum(f.fee_minor)::text as fee
                 from management_fee f where f.reverses_fee_id is null and f.source <> 'fixed'
                 group by f.company_id, f.key`,
           )
         ).rows;
-        const out: { key: string; expectedMinor: number; actualMinor: number }[] = [];
         for (const g of groups) {
           const expected = feeOnBaseMinor(Number(g.base), Number(g.rate_bps));
-          if (expected !== Number(g.fee) || Number(g.ledger) !== Number(g.fee))
-            out.push({ key: g.key, expectedMinor: expected, actualMinor: Number(g.fee) });
+          if (expected !== Number(g.fee)) add(g.key, expected, Number(g.fee), 'rate_on_base');
         }
-        return out;
+        // 2. Each posted fee equals its allocations' shares.
+        for (const r of (
+          await tx.execute<{
+            key: string;
+            fee: string;
+            base: string;
+            parts_fee: string;
+            parts_base: string;
+          }>(
+            sql`select f.key, f.fee_minor::text as fee, f.base_minor::text as base,
+                  sum(a.fee_minor)::text as parts_fee, sum(a.base_minor)::text as parts_base
+                from management_fee f join allocation_fee a
+                  on a.company_id = f.company_id and a.management_fee_id = f.id
+                group by f.id, f.key, f.fee_minor, f.base_minor
+                having sum(a.fee_minor) <> f.fee_minor or sum(a.base_minor) <> f.base_minor`,
+          )
+        ).rows)
+          add(r.key, Number(r.parts_fee), Number(r.fee), 'allocations');
+        // 3. No allocation has more taken back than it carried.
+        for (const r of (
+          await tx.execute<{ allocation_id: string; fee: string; taken: string }>(
+            sql`select c.allocation_id, c.fee_minor::text as fee, (-sum(t.fee_minor))::text as taken
+                from allocation_fee c join allocation_fee t
+                  on t.company_id = c.company_id and t.charged_allocation_id = c.allocation_id
+                where c.charged_allocation_id is null
+                group by c.allocation_id, c.fee_minor, c.base_minor
+                having -sum(t.fee_minor) > c.fee_minor or -sum(t.base_minor) > c.base_minor`,
+          )
+        ).rows)
+          add(`allocation:${r.allocation_id}`, Number(r.fee), Number(r.taken), 'over_taken');
+        // 4. Each owner book's 5100 equals its fee records.
+        for (const r of (
+          await tx.execute<{ book_id: string; ledger: string; fees: string }>(
+            sql`select b.id as book_id,
+                  (select coalesce(sum(l.amount_minor), 0) from journal_line l
+                   where l.company_id = b.company_id and l.book_id = b.id and l.account_code = '5100')::text as ledger,
+                  (select coalesce(sum(f.fee_minor), 0) from management_fee f
+                   where f.company_id = b.company_id and f.book_id = b.id)::text as fees
+                from book b where b.owner_id is not null`,
+          )
+        ).rows)
+          if (Number(r.ledger) !== Number(r.fees))
+            add(`book:${r.book_id}`, Number(r.fees), Number(r.ledger), 'ledger');
+        // 5. Per lease, the live base charged equals the money settled since the terms began.
+        for (const m of await this.liveBaseMismatches(tx))
+          add(m.key, m.expected, m.actual, 'live_base');
+        return [...out.values()];
       },
+      { isolationLevel: 'repeatable read', accessMode: 'read only' },
     );
     if (mismatches.length > 0 && options.alert !== false)
       await this.alerts
@@ -580,6 +684,81 @@ export class ManagementFeesService implements FeeHooks {
         })
         .catch(() => undefined);
     return { mismatches };
+  }
+
+  /**
+   * Replays every lease of an owner who has had percentage terms: each fee-bearing allocation of
+   * money made while percentage terms were in force should carry a fee, and what negative
+   * allocations undid of it should have come back. Compares the live base so found with the
+   * live base of `allocation_fee`.
+   */
+  private async liveBaseMismatches(
+    tx: Tx,
+  ): Promise<{ key: string; expected: number; actual: number }[]> {
+    const owners = (
+      await tx.execute<{ owner_id: string }>(
+        sql`select distinct owner_id from management_fee_terms where kind = 'percentage'`,
+      )
+    ).rows.map((r) => r.owner_id);
+    const out: { key: string; expected: number; actual: number }[] = [];
+    for (const ownerId of owners) {
+      const versions = await feeTermsVersions(tx, ownerId);
+      const rows = (
+        await tx.execute<{
+          id: string;
+          lease_id: string;
+          invoice_line_id: string;
+          kind: string;
+          source: string;
+          payment_id: string | null;
+          amount_minor: string;
+          value_date: string;
+        }>(
+          sql`select a.id, a.lease_id, a.invoice_line_id, il.kind, a.source, a.payment_id,
+                a.amount_minor::text as amount_minor, a.value_date::text as value_date
+              from allocation a
+              join invoice_line il on il.company_id = a.company_id and il.id = a.invoice_line_id
+              where a.property_id in (
+                select co.property_id from property_current_ownership co
+                where co.company_id = a.company_id and co.owner_id = ${ownerId}::uuid)
+                and (select c.kind from company c where c.id = a.company_id) = 'agency'
+              order by a.created_at, a.id`,
+        )
+      ).rows;
+      const byLease = new Map<string, typeof rows>();
+      for (const r of rows) byLease.set(r.lease_id, [...(byLease.get(r.lease_id) ?? []), r]);
+      for (const [leaseId, leaseRows] of byLease) {
+        const allocs = leaseRows.map((r) => ({
+          id: r.id,
+          lineId: r.invoice_line_id,
+          lineKind: r.kind as LineKind,
+          source: r.source as AllocationSource,
+          paymentId: r.payment_id,
+          amountMinor: Number(r.amount_minor),
+        }));
+        const termed = new Set(
+          leaseRows
+            .filter(
+              (r) =>
+                Number(r.amount_minor) > 0 &&
+                feeTermsOn(versions, r.value_date)?.terms.kind === 'percentage',
+            )
+            .map((r) => r.id),
+        );
+        let expected = 0;
+        for (const a of allocs) if (termed.has(a.id) && feeBearing(a)) expected += a.amountMinor;
+        for (const u of undoings(allocs)) if (termed.has(u.undoesId)) expected -= u.amountMinor;
+        const [stored] = (
+          await tx.execute<{ base: string }>(
+            sql`select coalesce(sum(base_minor), 0)::text as base from allocation_fee
+                where lease_id = ${leaseId}::uuid`,
+          )
+        ).rows;
+        const actual = Number(stored?.base ?? 0);
+        if (actual !== expected) out.push({ key: `lease:${leaseId}`, expected, actual });
+      }
+    }
+    return out;
   }
 
   /** The month whose fixed fees run today: today's month on its last day, else none. */

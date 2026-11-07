@@ -61,3 +61,29 @@ export function dueText(item: Pick<ComplianceItem, 'kind' | 'dueDate'>): string 
     ? `Overdue since ${formatBusinessDate(item.dueDate)}`
     : `Due ${formatBusinessDate(item.dueDate)}`;
 }
+
+/**
+ * A key per item, stable while the list is shown (review WEB 5): what the item is about, and a
+ * count for any that are otherwise the same.
+ */
+export function complianceKeys(
+  items: readonly Pick<
+    ComplianceItem,
+    'kind' | 'owner' | 'property' | 'lease' | 'dueDate' | 'description'
+  >[],
+): string[] {
+  const seen = new Map<string, number>();
+  return items.map((item) => {
+    const base = [
+      item.kind,
+      item.owner?.id ?? '-',
+      item.property?.id ?? '-',
+      item.lease?.id ?? '-',
+      item.dueDate ?? '-',
+      item.description,
+    ].join('|');
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}#${n}`;
+  });
+}

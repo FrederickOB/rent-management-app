@@ -37,6 +37,12 @@ export type ComplianceScreen =
 
 /** One thing to do, as the contract's `complianceItemSchema` carries it. */
 export interface ComplianceItem {
+  /**
+   * Stable and unique within the list (a React key; M9 review): the kind plus the record it is
+   * about (a lease, a withholding, a flagged advance), or the group it adds up (rent tax by owner,
+   * property and due date; VAT by owner and month).
+   */
+  readonly id: string;
   readonly kind: ComplianceKind;
   readonly owner: { readonly id: string; readonly name: string } | null;
   readonly property: { readonly id: string; readonly name: string } | null;
@@ -139,7 +145,8 @@ export class ComplianceService {
             (a.dueDate ?? '9999-12-31').localeCompare(b.dueDate ?? '9999-12-31') ||
             a.kind.localeCompare(b.kind) ||
             (a.property?.name ?? '').localeCompare(b.property?.name ?? '') ||
-            (a.lease?.unitCode ?? '').localeCompare(b.lease?.unitCode ?? ''),
+            (a.lease?.unitCode ?? '').localeCompare(b.lease?.unitCode ?? '') ||
+            a.id.localeCompare(b.id),
         );
       },
       { accessMode: 'read only' },
@@ -202,8 +209,10 @@ export class ComplianceService {
     return [...groups.values()].map((g) => {
       const overdue = g.dueDate !== null && g.dueDate < today;
       const receipts = g.n === 1 ? 'one receipt' : `${g.n} receipts`;
+      const kind = overdue ? ('rent_tax_overdue' as const) : ('rent_tax_due' as const);
       return {
-        kind: overdue ? ('rent_tax_overdue' as const) : ('rent_tax_due' as const),
+        id: `${kind}:${g.ownerId}:${g.propertyId}:${g.dueDate ?? 'undated'}`,
+        kind,
         owner: names.owner(g.ownerId),
         property: names.property(g.propertyId),
         lease: null,
@@ -248,6 +257,7 @@ export class ComplianceService {
     return rows.rows
       .filter((r) => !filter.ownerId || r.owner_id === filter.ownerId)
       .map((r) => ({
+        id: `rent_control_registration:${r.id}`,
         kind: 'rent_control_registration' as const,
         owner: names.owner(r.owner_id),
         property: names.property(r.property_id),
@@ -279,6 +289,7 @@ export class ComplianceService {
     if (filter.ownerId) where.push(sql`w.owner_id = ${filter.ownerId}::uuid`);
     if (filter.propertyId) where.push(sql`w.property_id = ${filter.propertyId}::uuid`);
     const rows = await tx.execute<{
+      id: string;
       lease_id: string;
       owner_id: string;
       property_id: string;
@@ -287,7 +298,7 @@ export class ComplianceService {
       amount_minor: number;
       uploaded: boolean;
     }>(
-      sql`select w.lease_id, w.owner_id, w.property_id, u.code as unit_code, w.value_date::text as value_date,
+      sql`select w.id, w.lease_id, w.owner_id, w.property_id, u.code as unit_code, w.value_date::text as value_date,
             w.amount_minor,
             exists (select 1 from withholding_certificate c where c.company_id = w.company_id
                     and c.withholding_id = w.id and c.status = 'awaiting_confirmation') as uploaded
@@ -297,6 +308,7 @@ export class ComplianceService {
           where ${sql.join(where, sql` and `)}`,
     );
     return rows.rows.map((r) => ({
+      id: `withholding_certificate:${r.id}`,
       kind: 'withholding_certificate' as const,
       owner: names.owner(r.owner_id),
       property: names.property(r.property_id),
@@ -363,6 +375,7 @@ export class ComplianceService {
       const dueDate = days === null ? null : toIsoDate(addDays(monthEnd, days));
       const verified = rule?.verificationStatus === 'verified' && dueDate !== null;
       items.push({
+        id: `vat_return:${ownerId}:${month}`,
         kind: 'vat_return' as const,
         owner: names.owner(ownerId),
         property: null,
@@ -395,6 +408,7 @@ export class ComplianceService {
     if (filter.ownerId) where.push(sql`p.owner_id = ${filter.ownerId}::uuid`);
     if (filter.propertyId) where.push(sql`a.property_id = ${filter.propertyId}::uuid`);
     const rows = await tx.execute<{
+      id: string;
       lease_id: string;
       property_id: string;
       owner_id: string | null;
@@ -405,7 +419,7 @@ export class ComplianceService {
       amount_minor: number;
       status: string | null;
     }>(
-      sql`select a.lease_id, a.property_id, p.owner_id, u.code as unit_code, a.value_date::text as value_date,
+      sql`select a.id, a.lease_id, a.property_id, p.owner_id, u.code as unit_code, a.value_date::text as value_date,
             a.months_ahead, a.limit_months, p.amount_minor, r.verification_status as status
           from payment_advance a
           join payment p on p.company_id = a.company_id and p.id = a.payment_id
@@ -415,6 +429,7 @@ export class ComplianceService {
           where ${sql.join(where, sql` and `)}`,
     );
     return rows.rows.map((r) => ({
+      id: `advance_over_cap:${r.id}`,
       kind: 'advance_over_cap' as const,
       owner: names.owner(r.owner_id),
       property: names.property(r.property_id),

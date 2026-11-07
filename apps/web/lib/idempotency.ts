@@ -105,7 +105,15 @@ export async function sendOnce<T>(
  * What to tell someone after a failed money write, so they know whether sending it again is
  * safe. The API's words for a reused or busy key are about keys; these are about the money.
  */
+/**
+ * M9 F3: money leaving the agency's account for an owner (refunds, GRA payments, expenses the
+ * agency paid, remittances and fees taken) never takes more than the agency holds for them.
+ */
+export const INSUFFICIENT_AGENT_CASH_TEXT =
+  'Nothing was recorded: the agency doesn’t hold enough of this owner’s cash. Record the owner’s funding first (Remittances, “Record money from the owner”), then try again.';
+
 export function moneyProblem(error: unknown): string {
+  if (errorCode(error) === 'INSUFFICIENT_AGENT_CASH') return INSUFFICIENT_AGENT_CASH_TEXT;
   // The key may belong to an attempt still running, or to one that failed: nothing is certain.
   if (isKeyReused(error))
     return 'An earlier attempt from this form may already have been recorded, so this one was not. Check the list before recording it again.';

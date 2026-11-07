@@ -62,6 +62,7 @@ const pageSchema = z.strictObject({
     earnedMinor: minor,
     unearnedRentMinor: minor,
     unearnedServiceChargeMinor: minor,
+    creditMinor: minor,
     unearnedMinor: minor,
     depositsHeldMinor: minor,
     arrearsByBucket: byKeys(AGE_BUCKETS),
@@ -297,10 +298,15 @@ function Sections({ page }: { page: Page }) {
           <Row label="Service charge earned" amount={accrual.serviceChargeEarnedMinor} />
           <Row label="Earned" amount={accrual.earnedMinor} strong />
           <Row
-            label="Unearned rent (paid ahead, and credit not yet applied)"
+            label="Unearned rent (paid for months not started)"
             amount={accrual.unearnedRentMinor}
           />
-          <Row label="Unearned service charge" amount={accrual.unearnedServiceChargeMinor} />
+          <Row
+            label="Unearned service charge (paid for months not started)"
+            amount={accrual.unearnedServiceChargeMinor}
+          />
+          <Row label="Paid ahead, not yet applied to a month" amount={accrual.creditMinor} />
+          <Row label="Held for tenants" amount={accrual.unearnedMinor} strong />
           <Row label="Deposits held" amount={accrual.depositsHeldMinor} />
           {AGE_BUCKETS.map((b) => (
             <Row

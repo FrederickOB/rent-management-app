@@ -30,6 +30,8 @@ import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
 import { LedgerModule } from '@rent/server/ledger';
+// M9 (F3): the nightly agent cash check.
+import { AgentCashCheckService } from '@rent/server/ledger';
 import { MaintenanceModule, MaintenanceService } from '@rent/server/maintenance';
 import { MoveInReportService, MoveOutModule, MoveOutService } from '@rent/server/moveout';
 import { NoticesModule, NoticeTrackingService } from '@rent/server/notices';
@@ -75,6 +77,7 @@ import {
   TenancyModule,
   TenancyRemindersService,
 } from '@rent/server/tenancy';
+import { agentCashJobs } from './agent-cash.jobs';
 import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
@@ -227,6 +230,8 @@ const definitions = [
   ...reportingDashboardJobs({ ...deps, rollup: app.get(ReportingRollupService) }),
   ...reportingStatementsJobs({ ...deps, statements: app.get(OwnerStatementsService) }),
   ...reportingMoneyJobs({ ...deps, fees: app.get(ManagementFeesService) }),
+  // M9 (F3): an owner's 1070 below zero alerts (a chargeback cannot be refused).
+  ...agentCashJobs({ ...deps, agentCash: app.get(AgentCashCheckService) }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();

@@ -16,7 +16,7 @@ import { todayIn } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import { monthLabel } from '@/lib/rent-tax';
-import { draftableMonths, statementMessage } from '@/lib/statements';
+import { draftableMonths, ISSUE_LOCKS_NOTE, statementMessage } from '@/lib/statements';
 import { useLoad } from '@/lib/use-load';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -171,6 +171,9 @@ function DraftForm({ owners }: { readonly owners: readonly { id: string; name: s
       <CardBody>
         <form onSubmit={submit} noValidate aria-label="Draft a statement" className="space-y-3">
           {error ? <Alert tone="error">{error}</Alert> : null}
+          <p className="text-sm text-slate-700" data-testid="issue-locks-note">
+            {ISSUE_LOCKS_NOTE}
+          </p>
           <div className="grid gap-4 sm:grid-cols-2">
             <SelectField
               label="Owner"

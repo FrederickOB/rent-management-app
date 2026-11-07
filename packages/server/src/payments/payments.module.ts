@@ -8,6 +8,7 @@ import { DocumentsModule } from '../documents/documents.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { MessagingService } from '../messaging/messaging.service';
+import { ownerEmailConsent } from '../core/owner-consent';
 import { RulesModule } from '../rules/rules.module';
 import { PolicyModule } from '../policy/policy.module';
 import { TenancyModule } from '../tenancy/tenancy.module';
@@ -107,8 +108,10 @@ export function registerPayments(
       return {
         name: owner.legalName ?? owner.displayName,
         addresses,
-        // Settlement alerts need no tenancy consent (packages/domain/src/messaging).
+        // Settlement alerts need no tenancy consent (packages/domain/src/messaging). M9: the
+        // address on record is the consent for the owner's statement too; an opt-out withdraws it.
         consented: new Set(Object.keys(addresses) as MessageChannel[]),
+        consent: await ownerEmailConsent(tx, owner.id),
         isTestContact: owner.isTestContact,
         tenantId: null,
         propertyId: null,

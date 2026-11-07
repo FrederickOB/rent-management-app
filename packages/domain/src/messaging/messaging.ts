@@ -54,6 +54,10 @@ export const MESSAGE_PURPOSES = [
   'job_sheet_link',
   'repair_update',
   'final_statement',
+  // M9 (decision 7; M9 review): the owner's monthly statement by email. Business-initiated, so it
+  // needs consent on the channel and honours an opt-out; the owner's address on record is the
+  // consent, as for M4b's owner messages (owners have no consent register).
+  'owner_statement',
 ] as const;
 export type MessagePurpose = (typeof MESSAGE_PURPOSES)[number];
 

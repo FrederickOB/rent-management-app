@@ -606,9 +606,10 @@ describe('AC-04 the issued PDF and its delivery', () => {
     expect(afterA.row!.document_id).toBe(rendered!.documentId);
     expect(afterA.row!.sha256).toBe(rendered!.sha256);
     expect(afterA.row!.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(afterA.row!.delivered_at).not.toBeNull();
+    expect(afterA.row!.sent_at).not.toBeNull();
+    expect(afterA.row!.delivered_at).toBeNull();
     expect(afterB.row!.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(afterB.row!.delivered_at).toBeNull();
+    expect(afterB.row!.sent_at).toBeNull();
     const sends = (await outboxOf(ctx, agency.companyId, 'messaging.send')).map(
       (e) =>
         e.payload as {
@@ -628,7 +629,7 @@ describe('AC-04 the issued PDF and its delivery', () => {
     });
     const viewA = await r.statements.get(agency.manager, issuedA.id);
     expect(viewA.sha256).toBe(rendered!.sha256);
-    expect(viewA.deliveredAt).toBeInstanceOf(Date);
+    expect(viewA.sentAt).toBeInstanceOf(Date);
     const link = await r.statements.document(agency.manager, issuedA.id);
     expect(link.url).toMatch(/^(memory|https?):\/\//);
   });

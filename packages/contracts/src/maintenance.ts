@@ -927,7 +927,7 @@ export const expensesContract = {
       method: 'POST',
       path: '/expenses',
       summary:
-        'Record an expense on a property or unit, optionally for a job, with its receipt if there is one (F3: optional; without one it is flagged `noReceipt`). Posts P15: Dr 5000 or 5400; Cr 2500 if unpaid, 1070 if the agent paid, 1010 if the owner paid. Only an agency pays as the agent (400 EXPENSE_PAID_BY). Requires an Idempotency-Key',
+        'Record an expense on a property or unit, optionally for a job, with its receipt if there is one (F3: optional; without one it is flagged `noReceipt`). Posts P15: Dr 5000 or 5400; Cr 2500 if unpaid, 1070 if the agent paid, 1010 if the owner paid. Only an agency pays as the agent (400 EXPENSE_PAID_BY). 409 INSUFFICIENT_AGENT_CASH when the agent pays beyond what it holds for the owner (record the owner’s funding first). Requires an Idempotency-Key',
     })
     .input(
       z.object({
@@ -949,7 +949,7 @@ export const expensesContract = {
       method: 'POST',
       path: '/expenses/{expenseId}/payment',
       summary:
-        'Record an unpaid expense as paid (P15: Dr 2500, Cr 1010 or 1070). A self-managing landlord has no agency account (400 AGENCY_ACCOUNT_NOT_AVAILABLE). Requires an Idempotency-Key',
+        'Record an unpaid expense as paid (P15: Dr 2500, Cr 1010 or 1070). A self-managing landlord has no agency account (400 AGENCY_ACCOUNT_NOT_AVAILABLE). 409 INSUFFICIENT_AGENT_CASH when paid from the agency’s account beyond what it holds for the owner (record the owner’s funding first). Requires an Idempotency-Key',
     })
     .input(
       z.object({

@@ -64,6 +64,8 @@ export const ownerFeeTermsSchema = z.object({
   upcoming: z.array(feeTermsSchema),
   /** Waiting for a second person (`management_fee_terms.change`). */
   pending: z.object({ approvalId: uuid, terms: feeTermsSchema }).nullable(),
+  /** Properties the owner shares with another owner: no fixed fee is charged on them. */
+  coOwnedProperties: z.array(named),
 });
 
 const feeTermsInput = z.object({
@@ -110,8 +112,16 @@ const accrualSection = z.object({
   rentEarnedMinor: minor,
   serviceChargeEarnedMinor: minor,
   earnedMinor: minor,
+  /**
+   * Unearned rent, split by invoice (founder decision, 2026-11-07): money allocated to rent lines
+   * whose charge period has not started, as of the month's end.
+   */
   unearnedRentMinor: minor,
+  /** The same for service-charge lines. */
   unearnedServiceChargeMinor: minor,
+  /** "Paid ahead, not yet applied to a month": the rest of 2010. */
+  creditMinor: minor,
+  /** All of 2010: unearned rent + unearned service charge + credit. */
   unearnedMinor: minor,
   depositsHeldMinor: minor,
   arrearsByBucket: byKeys(AGE_BUCKETS),
@@ -206,8 +216,12 @@ export const ownerStatementSchema = z.object({
   ownerTimeZone: z.string(),
   /** The company's: the month is a calendar month there. */
   companyTimeZone: z.string(),
-  /** Sent to the owner's contacts with email consent, once issued. */
+  /** When the email with the PDF was queued (`owner_statement` purpose); null until then. */
+  sentAt: iso.nullable(),
+  /** When the email provider reported it delivered; null until it does. */
   deliveredAt: iso.nullable(),
+  /** Why no email went: no address on record, no email consent, or an opt-out (CM-09). */
+  emailNotSentReason: z.enum(['no_email', 'no_consent', 'opted_out']).nullable(),
 });
 export type OwnerStatementView = z.infer<typeof ownerStatementSchema>;
 
@@ -304,6 +318,10 @@ export const ownerMoneySchema = z.object({
   hasProof: z.boolean(),
   recordedAt: iso,
   recordedByName: z.string().nullable(),
+  /** Set once reversed (P21a): the record stays, with its reversal. */
+  reversed: z
+    .object({ at: iso, on: isoDate, reason: z.string(), byName: z.string().nullable() })
+    .nullable(),
 });
 export type OwnerMoneyView = z.infer<typeof ownerMoneySchema>;
 
@@ -321,6 +339,18 @@ export const remittanceSuggestionSchema = z.object({
   totalMinor: minor,
   feesRetainedMinor: minor,
   netMinor: minor,
+  /**
+   * What to record: a remittance (`remit`), fees taken on their own when the fees due use up
+   * everything remittable (`take_fees`), or nothing at all (`nothing`: "Nothing to remit").
+   */
+  proposal: z.enum(['remit', 'take_fees', 'nothing']),
+  /**
+   * Rent tax in 2200 the tenant withheld, waiting for its certificate (1150): not paid to GRA by
+   * the agency, so not held back (architecture worked example B).
+   */
+  rentTaxWithheldMinor: minor,
+  /** More fees taken than were charged (2300 above zero): flagged, never clamped silently. */
+  feesOverTakenMinor: minor,
 });
 
 const transfer = z.object({
@@ -363,7 +393,7 @@ export const ownerMoneyContract = {
       method: 'POST',
       path: '/remittances',
       summary:
-        'Record a remittance already made, with proof (P16: Dr 1010 net, Dr 2300 fees retained, Cr 1070). 409 OVER_AGENT_CASH, FEES_OVER_DUE, INTO_RENT_TAX. Requires an Idempotency-Key',
+        'Record a remittance already made, with proof (P16: Dr 1010 net, Dr 2300 fees retained, Cr 1070). 409 OVER_AGENT_CASH (more than the agent holds for the owner: record the owner’s funding first), FEES_OVER_DUE, INTO_RENT_TAX. Requires an Idempotency-Key',
     })
     .input(transfer.extend({ netMinor: positiveMinor, feesRetainedMinor: minor.min(0) }))
     .output(ownerMoneySchema),
@@ -372,7 +402,7 @@ export const ownerMoneyContract = {
       method: 'POST',
       path: '/fees-taken',
       summary:
-        'Record fees taken without a remittance (Dr 2300, Cr 1070). 409 FEES_OVER_DUE, OVER_AGENT_CASH. Requires an Idempotency-Key',
+        'Record fees taken without a remittance (Dr 2300, Cr 1070). 409 FEES_OVER_DUE, OVER_AGENT_CASH (more than the agent holds for the owner). Requires an Idempotency-Key',
     })
     .input(
       z.object({
@@ -396,6 +426,15 @@ export const ownerMoneyContract = {
     .route({ method: 'GET', path: '/owner-money/{id}/proof' })
     .input(z.object({ id: uuid }))
     .output(download),
+  reverse: oc
+    .route({
+      method: 'POST',
+      path: '/owner-money/{id}/reversal',
+      summary:
+        'Reverse a remittance, fees taken or owner funding recorded in error (P21a: each line, sign flipped), with a reason. 409 OWNER_MONEY_REVERSED once reversed; INSUFFICIENT_AGENT_CASH when reversing owner funding would take more out of 1070 than the agent holds for the owner. Requires an Idempotency-Key',
+    })
+    .input(z.object({ id: uuid, reason: z.string().trim().min(3).max(500) }))
+    .output(ownerMoneySchema),
 };
 
 // Dashboards (DA-01, DA-02, DA-06; decisions 11 and 12) and Gate 1 -------------------------------
@@ -409,6 +448,17 @@ const dashboardFilters = z.object({
 
 export const gate1Schema = z.object({
   month,
+  /**
+   * `final` once the month is over and its figures were worked out after its end (on the 1st);
+   * `provisional` while the month runs or until then. Notices and repairs stay pending only while
+   * their windows are open.
+   */
+  status: z.enum(['final', 'provisional']),
+  finalisedAt: iso.nullable(),
+  /**
+   * F2: rent and service charge whose charge period starts in the month, whatever the billing
+   * cycle; collected is the part of those lines settled by the month's end.
+   */
   collectionRate: z.object({ dueMinor: minor, collectedMinor: minor, rate: ratioSchema }),
   digitalShare: z.object({
     byMethod: byKeys(COLLECTION_METHODS),
@@ -430,20 +480,41 @@ export const gate1Schema = z.object({
   }),
   noticeAcknowledgement: z.object({ met: minor, missed: minor, pending: minor, rate: ratioSchema }),
   repairResponse: z.object({ met: minor, missed: minor, pending: minor, rate: ratioSchema }),
-  /** When these were worked out (the rollup at 04:00, or a refresh). */
+  /** When these were worked out (the rollup at 04:00, or a refresh); for a total, the oldest. */
   computedAt: iso,
 });
 export type Gate1View = z.infer<typeof gate1Schema>;
 
 export const dashboardSchema = z.object({
-  /** The snapshot these figures come from; null before the first rollup. */
+  /** The snapshot the money figures come from; null before the first rollup. */
   asOf: iso.nullable(),
+  /** When the live figures (`occupancy` and `collectionRate`) were read: now. */
+  liveAt: iso,
   date: isoDate,
+  /** Live. */
   occupancy: occupancySummary,
+  /** Live; F2's basis (rent and service charge whose period starts in the month). */
   collectionRate: z.object({ month, dueMinor: minor, collectedMinor: minor, rate: ratioSchema }),
-  arrears: z.object({ totalMinor: minor, byBucket: byKeys(AGE_BUCKETS), leases: minor }),
+  /**
+   * Earned and unpaid (1100) past its due date, as the statement counts it. Months billed and
+   * past due but not yet started (an annual invoice's) are not arrears: `dueNotStartedMinor`.
+   */
+  arrears: z.object({
+    totalMinor: minor,
+    byBucket: byKeys(AGE_BUCKETS),
+    leases: minor,
+    dueNotStartedMinor: minor,
+  }),
   rentRoll: z.object({ rentMinor: minor, serviceChargeMinor: minor, totalMinor: minor }),
+  /**
+   * Unearned rent, split by invoice (founder decision, 2026-11-07): money allocated to rent lines
+   * whose charge period has not started. The same split as the statement's.
+   */
   unearnedRentMinor: minor,
+  /** The same for service-charge lines. */
+  unearnedServiceChargeMinor: minor,
+  /** "Paid ahead, not yet applied to a month": the rest of 2010. */
+  creditMinor: minor,
   depositsHeldMinor: minor,
   paidUntilCoverage: z.object({
     occupied: minor,
@@ -496,7 +567,8 @@ export const dashboardContract = {
     .route({
       method: 'POST',
       path: '/dashboard/refresh',
-      summary: 'Queue a fresh rollup for the company; the dashboard shows when it was computed',
+      summary:
+        'Queue a fresh rollup for the company (agency admins, managers and landlords; once a minute at most); the dashboard shows when it was computed. 403 for anyone else',
     })
     .input(z.object({}))
     .output(z.object({ queued: z.boolean() })),
@@ -552,6 +624,8 @@ export const COMPLIANCE_KINDS = [
 ] as const;
 
 export const complianceItemSchema = z.object({
+  /** Stable and unique within the list (a React key): kind plus the record it is about. */
+  id: z.string(),
   kind: z.enum(COMPLIANCE_KINDS),
   owner: named.nullable(),
   property: named.nullable(),

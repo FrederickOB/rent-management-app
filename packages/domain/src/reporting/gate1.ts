@@ -65,22 +65,23 @@ const onOrBefore = (date: string, limit: string): boolean =>
 const SETTLING_SOURCES: readonly AllocationSource[] = ['payment', 'deposit', 'withholding'];
 
 /**
- * Decision 9. Due: the rent and service-charge lines falling due in the month, after credit
- * notes dated by its end. Collected: what of each was settled by the month's end, by allocations
- * with a value date on or before it, so money paid in advance and tax withheld both count.
- * Deposits, VAT and levies, and one-off charges are left out; a write-off is not collected.
+ * Due and collected over lines already chosen for the month: each line's amount after credit
+ * notes dated by the month's end, and what of it was settled by then, never more than it was due.
  */
-export function collectionRate(input: {
-  readonly month: string;
-  readonly lines: readonly CollectionLine[];
-}): CollectionRate {
-  const month = reportMonth(input.month);
+function rateOver(
+  month: ReturnType<typeof reportMonth>,
+  lines: readonly {
+    readonly amountMinor: number;
+    readonly allocations: readonly {
+      readonly source: AllocationSource;
+      readonly amountMinor: number;
+      readonly valueDate: string;
+    }[];
+  }[],
+): CollectionRate {
   let due = 0;
   let collected = 0;
-  let count = 0;
-  for (const line of input.lines) {
-    if (line.kind !== 'rent' && line.kind !== 'service_charge') continue;
-    if (!inReportMonth(line.dueDate, month)) continue;
+  for (const line of lines) {
     let credited = 0;
     let settled = 0;
     for (const a of line.allocations) {
@@ -90,17 +91,97 @@ export function collectionRate(input: {
       else if (SETTLING_SOURCES.includes(a.source)) settled += a.amountMinor;
     }
     const net = Math.max(0, amountOf(line.amountMinor, 'A line') - credited);
-    count += 1;
     due += net;
     collected += Math.min(net, Math.max(0, settled));
   }
   return {
     month: month.month,
-    lines: count,
+    lines: lines.length,
     dueMinor: due,
     collectedMinor: collected,
     rate: ratioOf(collected, due),
   };
+}
+
+const isRent = (kind: LineKind) => kind === 'rent' || kind === 'service_charge';
+
+/**
+ * Decision 9, on its first basis: the rent and service-charge lines falling due in the month.
+ * F2 (founder decision, 2026-11-06) replaced this basis with the month each line covers, so the
+ * dashboard and the rollup use `collectionRateByPeriod`; this is kept for its first tests.
+ * Due: after credit notes dated by the month's end. Collected: what of each was settled by the
+ * month's end, by allocations with a value date on or before it, so money paid in advance and tax
+ * withheld both count. Deposits, VAT and levies, and one-off charges are left out; a write-off is
+ * not collected.
+ */
+export function collectionRate(input: {
+  readonly month: string;
+  readonly lines: readonly CollectionLine[];
+}): CollectionRate {
+  const month = reportMonth(input.month);
+  return rateOver(
+    month,
+    input.lines.filter((line) => isRent(line.kind) && inReportMonth(line.dueDate, month)),
+  );
+}
+
+/** A rent or service-charge line as F2 reads it: by the charge period it covers. */
+export interface PeriodCollectionLine {
+  readonly lineId: string;
+  readonly kind: LineKind;
+  /** The first day of the monthly charge period the line covers; null for a line with none. */
+  readonly periodStart: string | null;
+  readonly amountMinor: number;
+  /** When the line was recorded; needed with `asOf`. */
+  readonly recordedAt?: InstantLike;
+  readonly allocations: readonly {
+    readonly source: AllocationSource;
+    /** Signed: reversals and releases are negative rows. */
+    readonly amountMinor: number;
+    readonly valueDate: string;
+    /** When the allocation was recorded; needed with `asOf`. */
+    readonly recordedAt?: InstantLike;
+  }[];
+}
+
+/**
+ * F2 (founder decision, 2026-11-06; replaces decision 9's "falling due in the month"): rent due
+ * in a month is the rent and service-charge lines whose charge period starts in the month,
+ * whatever the billing cycle, so an annual invoice's months count one in each month they cover.
+ * Collected is the part of those lines settled by the month's end: allocations with a value date
+ * on or before it, so money paid in advance and tax withheld count, and never more than a line
+ * was due. A credit note dated by the month's end reduces what is due; a write-off is not
+ * collected. Deposits, VAT and levies, and one-off charges are left out.
+ *
+ * With `asOf`, only lines and allocations recorded by then count (M9 review), so the figures for
+ * a past moment never change when something is recorded later with an earlier value date.
+ */
+export function collectionRateByPeriod(input: {
+  readonly month: string;
+  readonly lines: readonly PeriodCollectionLine[];
+  readonly asOf?: InstantLike;
+}): CollectionRate {
+  const month = reportMonth(input.month);
+  const asOf = input.asOf === undefined ? null : epochMillisOf(input.asOf);
+  const recordedBy = (at: InstantLike | undefined, what: string): boolean => {
+    if (asOf === null) return true;
+    if (at === undefined)
+      throw new DomainError('report.no_recorded_at', `${what} needs the time it was recorded`);
+    return epochMillisOf(at) <= asOf;
+  };
+  const lines = input.lines
+    .filter(
+      (line) =>
+        isRent(line.kind) &&
+        line.periodStart !== null &&
+        inReportMonth(line.periodStart, month) &&
+        recordedBy(line.recordedAt, 'A line'),
+    )
+    .map((line) => ({
+      amountMinor: line.amountMinor,
+      allocations: line.allocations.filter((a) => recordedBy(a.recordedAt, 'An allocation')),
+    }));
+  return rateOver(month, lines);
 }
 
 // Digital payment share (decision 10).

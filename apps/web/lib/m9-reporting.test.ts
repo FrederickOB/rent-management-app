@@ -146,6 +146,8 @@ const GATE1: Gate1 = {
   noticeAcknowledgement: { met: 3, missed: 1, pending: 2, rate: ratio(3, 4, 7500) },
   repairResponse: { met: 0, missed: 0, pending: 0, rate: ratio(0, 0, null) },
   computedAt: '2026-11-05T04:00:00.000Z',
+  status: 'final',
+  finalisedAt: null,
 };
 
 describe('Gate 1 (PRD section 19) shows each share with what is behind it', () => {
@@ -337,6 +339,9 @@ const SUGGESTION: RemittanceSuggestion = {
   totalMinor: 202_000,
   feesRetainedMinor: 28_000,
   netMinor: 174_000,
+  proposal: 'remit',
+  rentTaxWithheldMinor: 0,
+  feesOverTakenMinor: 0,
 };
 
 describe('AC-05 the remittance starts from the suggestion and needs its proof', () => {

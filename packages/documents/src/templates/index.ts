@@ -39,4 +39,10 @@ export {
   type MoveInReportDocumentData,
 } from './moveout';
 export { dashboardV1, type DashboardDocumentData } from './reporting-dashboard';
+export {
+  dashboardV2,
+  DASHBOARD_LIVE_FIGURES,
+  DASHBOARD_SNAPSHOT_FIGURES,
+  type DashboardDocumentDataV2,
+} from './reporting-dashboard';
 export { ownerStatementV1, type OwnerStatementDocumentData } from './reporting-statement';

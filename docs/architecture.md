@@ -1087,6 +1087,7 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `reporting.metrics-rollup` | daily 04:00 | company + date | 3 | M9 |
 | `reporting.fixed-fees` | 23:00 from the 28th to the 1st; posts on the company's last day of a month, and on the 1st for last month | owner + unit + month (`P14:<owner>:<unit>:<month>`) | 5 | M9 |
 | `reporting.fee-check` | daily 03:15 | company + date; read-only, alerts `reporting.fee_mismatch` | 3 | M9 |
+| `ledger.agent-cash-check` | daily 03:30; fans out per company | company + date; read-only, alerts `ledger.agent_cash_negative` (critical) when an owner book's 1070 is below zero (F3: payments out of it are refused beyond what is held, but a chargeback cannot be) | 3 | M9 |
 | `subscription.snapshot` | monthly, 1st at 00:30 | company + month | 5 | M10 |
 | `subscription.invoice` | monthly, 1st at 01:00 | company + month | 5 | M10 |
 | `subscription.dunning` | daily 09:00 | invoice id + step | 3 | M10 |

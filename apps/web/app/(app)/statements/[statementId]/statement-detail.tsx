@@ -21,18 +21,26 @@ import {
   agentRows,
   cashRows,
   checkScopeText,
+  earlierMonthsLockText,
+  expenseCategoryText,
   failedChecks,
   isRendering,
   issueConfirmText,
   occupancyRows,
   STATEMENT_CHECK_LABELS,
   statementMessage,
+  statementEmailText,
   statementPages,
   type StatementRow,
 } from '@/lib/statements';
 import { formatMinor } from '@/lib/tenancy-format';
+import { startDownload } from '@/lib/browser-files';
+import { useRequestGate } from '@/lib/request-gate';
 
 const DOCUMENT_POLL_MS = 2_000;
+
+/** The PDF did not finish rendering within the polls. */
+class StillRendering extends Error {}
 const DOCUMENT_POLL_TRIES = 15;
 
 export function StatementDetailView({ statementId }: { readonly statementId: string }) {
@@ -43,14 +51,19 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState<'issue' | 'regenerate' | 'document' | null>(null);
 
+  // Review WEB 8: only the newest load is shown, so a slow answer never replaces a newer one.
+  const gate = useRequestGate();
   const load = useCallback(async () => {
+    const current = gate.begin();
     try {
-      setDetail(await api().ownerStatements.get({ statementId }));
+      const next = await api().ownerStatements.get({ statementId });
+      if (!current()) return;
+      setDetail(next);
       setProblem(null);
     } catch (failure) {
-      setProblem(toProblem(failure));
+      if (current()) setProblem(toProblem(failure));
     }
-  }, [statementId]);
+  }, [gate, statementId]);
 
   useEffect(() => {
     void load();
@@ -125,12 +138,14 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
   }
 
   /** The PDF: a 5-minute link; while it renders (409), ask again a few times. */
+  /**
+   * The PDF (review WEB 2): its 5-minute link is served as an attachment, so it downloads from
+   * the page itself and no empty tab is left. While it renders (409), ask again a few times.
+   */
   async function openDocument() {
     if (!detail) return;
     setPending('document');
     setActionError(null);
-    const tab = window.open('', '_blank');
-    if (tab) tab.opener = null;
     try {
       let url: string | null = null;
       for (let tries = 0; url === null && tries < DOCUMENT_POLL_TRIES; tries += 1) {
@@ -141,15 +156,15 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
           await new Promise((resolve) => window.setTimeout(resolve, DOCUMENT_POLL_MS));
         }
       }
-      if (!url || !/^https?:\/\//i.test(url)) throw new Error('rendering');
-      if (tab) tab.location.replace(url);
-      else window.location.assign(url);
+      if (!url) throw new StillRendering();
+      startDownload(url);
     } catch (failure) {
-      tab?.close();
       setActionError(
-        failure instanceof Error && failure.message === 'rendering'
+        failure instanceof StillRendering
           ? 'The PDF is still being made. Try again in a minute.'
-          : (statementMessage(failure) ?? toProblem(failure).message),
+          : failure instanceof Error && failure.message === 'unexpected link'
+            ? 'The PDF link could not be opened. Try again.'
+            : (statementMessage(failure) ?? toProblem(failure).message),
       );
     } finally {
       setPending(null);
@@ -178,8 +193,13 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
           {detail.issuedAt
             ? `; issued ${formatTime(detail.issuedAt, zone)}${detail.issuedBy ? ` by ${detail.issuedBy.name}` : ''}`
             : ''}
-          {detail.deliveredAt ? `; emailed ${formatTime(detail.deliveredAt, zone)}` : ''}.
+          .
         </p>
+        {detail.status === 'issued' ? (
+          <p className="text-sm text-slate-700" data-testid="statement-email">
+            {statementEmailText(detail, zone)}
+          </p>
+        ) : null}
       </div>
       {notice ? <Alert tone="success">{notice}</Alert> : null}
       {actionError ? <Alert tone="error">{actionError}</Alert> : null}
@@ -233,7 +253,10 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
               <Button
                 variant="secondary"
                 pending={pending === 'regenerate'}
-                onClick={() => void regenerate()}
+                onClick={() => {
+                  setConfirming(false);
+                  void regenerate();
+                }}
               >
                 Work it out again
               </Button>
@@ -248,7 +271,9 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
               </Button>
             ) : null}
           </div>
-          {confirming ? (
+          {/* Review WEB 8: the confirmation closes while the figures are worked out again or a
+              check fails, so nobody confirms figures they have not seen. */}
+          {confirming && failing.length === 0 && pending !== 'regenerate' ? (
             <ConfirmBox
               label={`Confirm issuing ${monthLabel(detail.month)} for ${detail.owner.name}`}
               confirmText="Issue and lock the month"
@@ -256,7 +281,8 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
               onConfirm={() => void issue()}
               onCancel={() => setConfirming(false)}
             >
-              <span data-testid="issue-confirm">{issueConfirmText(detail)}</span>
+              <span data-testid="issue-confirm">{issueConfirmText(detail)}</span>{' '}
+              <span data-testid="issue-confirm-earlier">{earlierMonthsLockText(detail)}</span>
             </ConfirmBox>
           ) : null}
           {detail.sha256 ? (
@@ -305,6 +331,15 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
                 ? `The agency pays this owner’s rent tax to GRA, so ${formatMinor(detail.figures.agent.rentTaxHeldBackMinor)} of rent tax payable is held back before anything is paid to the owner.`
                 : 'The owner pays their own rent tax to GRA, so none is held back.'}
             </p>
+          </CardBody>
+        </Card>
+      ) : null}
+      {/* Review WEB 3: rent tax payable and processing fees show for every owner, a landlord who
+          manages their own property included, not only with the agency's side. */}
+      {detail.figures.rentTaxPayable || detail.figures.processingFeesMinor !== 0 ? (
+        <Card data-testid="statement-tax">
+          <CardHeader title="Rent tax payable and processing fees" />
+          <CardBody>
             {detail.figures.rentTaxPayable ? (
               <Rows
                 title="Rent tax payable to GRA"
@@ -399,7 +434,8 @@ function Expenses({
             data-testid="statement-expense"
           >
             <span>
-              {formatBusinessDate(e.expenseDate)} · {e.supplierName} · {e.category}
+              {formatBusinessDate(e.expenseDate)} · {e.supplierName} ·{' '}
+              {expenseCategoryText(e.category)}
             </span>
             <span className="flex items-center gap-2">
               <span className="tabular-nums">{formatMinor(e.amountMinor)}</span>

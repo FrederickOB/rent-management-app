@@ -22,6 +22,8 @@ export interface NavItem {
    * people who already have the full one (M8 decision 9).
    */
   readonly unless?: PolicyAction;
+  /** M9 review: only in an agency's company (a landlord keeps their own money). */
+  readonly agencyOnly?: boolean;
 }
 
 const ITEMS: readonly NavItem[] = [
@@ -235,6 +237,7 @@ const ITEMS: readonly NavItem[] = [
     description: 'Money paid to owners, fees taken and money owners sent, each with its proof.',
     needs: 'statements.read',
     feature: 'owner_reporting',
+    agencyOnly: true,
   },
   {
     href: '/compliance',
@@ -325,6 +328,9 @@ const ITEMS: readonly NavItem[] = [
   },
 ];
 
+const activeCompanyKind = (me: Me) =>
+  me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind ?? null;
+
 function permitted(me: Me, needs: NavItem['needs']): boolean {
   if (needs === null) return true;
   return (typeof needs === 'string' ? [needs] : needs).some((action) => allowed(me, action));
@@ -340,6 +346,7 @@ export function navFor(me: Me, features: readonly PlanFeature[] = []): NavItem[]
     (item) =>
       permitted(me, item.needs) &&
       (item.unless === undefined || !allowed(me, item.unless)) &&
+      (!item.agencyOnly || activeCompanyKind(me) === 'agency') &&
       (item.feature === undefined || features.includes(item.feature)),
   );
 }

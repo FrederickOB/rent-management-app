@@ -11,11 +11,10 @@ import {
 import type { AccountCode, GraPayer } from '@rent/domain/ledger';
 import type { DisplayStatus } from '@rent/domain/portfolio';
 import {
+  agentCashMovements,
   isCollectionMethod,
   ownerStatementFigures,
   reportMonth,
-  type AgentCashIn,
-  type AgentCashOut,
   type CollectionMethod,
   type OccupancyCounts,
   type OwnerStatementFigures,
@@ -24,6 +23,7 @@ import {
   type StatementPropertyInput,
 } from '@rent/domain/reporting';
 import { sumLines, type BalanceFilter, type BalanceRow } from '../ledger/ledger.queries';
+import { prepaymentSplitAt, prepaymentSplitByProperty } from './prepayment-split';
 
 /**
  * The owner statement's queries (AC-04; M9 plan 4.3, decisions 5 to 7). Every figure is read from
@@ -79,28 +79,6 @@ export interface StatementComputation {
   readonly payments: readonly StatementPaymentRow[];
   readonly expenses: readonly StatementExpenseRow[];
 }
-
-/** Rules whose money into the agent's account (1070) is collections or the owner's funding. */
-const CASH_IN: Readonly<Record<string, AgentCashIn>> = {
-  P03: 'collections',
-  P06: 'collections',
-  P07: 'collections',
-  P22: 'collections',
-  P23: 'collections',
-  P28: 'collections',
-  P30: 'owner_funding',
-};
-
-/** Rules whose money out of the agent's account is each kind of payment (P16 is split apart). */
-const CASH_OUT: Readonly<Record<string, AgentCashOut>> = {
-  P15: 'expenses_paid',
-  P18: 'rent_tax_paid',
-  P33: 'vat_paid',
-  P12: 'refunds_paid',
-  P13: 'refunds_paid',
-  P31: 'refunds_paid',
-  P21: 'reversals',
-};
 
 const num = (value: unknown): number => Number(value ?? 0);
 
@@ -163,14 +141,17 @@ export async function computeOwnerStatement(
     await sumLines(tx, { ...inMonth, accounts: ['2200'], rules: ['P18'] }, ['propertyId']),
     null,
   );
-  // Prepayments and deposits at the month's end, by property (2010, 2100).
+  // Deposits at the month's end, by property (2100).
   const held = keyed(
-    await sumLines(tx, { ...atEnd, accounts: ['2010', '2100'] }, ['propertyId', 'accountCode']),
+    await sumLines(tx, { ...atEnd, accounts: ['2100'] }, ['propertyId', 'accountCode']),
     'accountCode',
+  );
+  // Prepayments (2010) at the month's end, split as the dashboard splits them (M9 review).
+  const prepaid = prepaymentSplitByProperty(
+    (await prepaymentSplitAt(tx, { bookIds: [book], asOf: d.lastDay })).values(),
   );
 
   const arrears = await arrearsAtEnd(tx, book, d.lastDay);
-  const serviceAdvance = await serviceChargeAdvance(tx, book, d.lastDay);
   const taxItems = await rentTaxItems(tx, book, d.firstDay, d.lastDay);
   const payments = await collectedPayments(tx, book, d.firstDay, d.lastDay);
   const expenseTotals = await expensesByCategory(tx, book, d.firstDay, d.lastDay);
@@ -183,7 +164,11 @@ export async function computeOwnerStatement(
     ),
     ...taxPaid.keys(),
     ...arrears.keys(),
-    ...serviceAdvance.keys(),
+    ...[...prepaid].flatMap(([k, v]) =>
+      v.prepaymentsMinor === 0 && v.unearnedRentMinor === 0 && v.unearnedServiceChargeMinor === 0
+        ? []
+        : [k],
+    ),
     ...taxItems.keys(),
     ...payments.map((p) => p.propertyId),
     ...expenseTotals.keys(),
@@ -193,8 +178,7 @@ export async function computeOwnerStatement(
 
   const flow = (propertyId: string, account: string) => flows.get(`${propertyId}|${account}`) ?? 0;
   const properties: StatementPropertyInput[] = ids.map((propertyId) => {
-    const prepaid = 0 - (held.get(`${propertyId}|2010`) ?? 0);
-    const service = serviceAdvance.get(propertyId) ?? 0;
+    const split = prepaid.get(propertyId);
     const byMethod = new Map<CollectionMethod, number>();
     for (const p of payments)
       if (p.propertyId === propertyId)
@@ -211,11 +195,11 @@ export async function computeOwnerStatement(
       },
       rentEarnedMinor: 0 - flow(propertyId, '4000'),
       serviceChargeEarnedMinor: 0 - flow(propertyId, '4100'),
-      // AR-03: what tenants have paid ahead. Advance held on service-charge months not started is
-      // the service-charge share; everything else in 2010 (rent months and credit not yet applied
-      // to a month) is shown as unearned rent.
-      unearnedRentMinor: prepaid - service,
-      unearnedServiceChargeMinor: service,
+      // AR-03, with the dashboard's definitions: money allocated to rent and to service-charge
+      // lines not started by the month's end, and the rest of 2010 as credit.
+      unearnedRentMinor: split?.unearnedRentMinor ?? 0,
+      unearnedServiceChargeMinor: split?.unearnedServiceChargeMinor ?? 0,
+      creditMinor: split?.creditMinor ?? 0,
       depositsHeldMinor: 0 - (held.get(`${propertyId}|2100`) ?? 0),
       arrears: arrears.get(propertyId) ?? [],
       occupancy: occupancy.get(propertyId) ?? {},
@@ -286,30 +270,6 @@ async function arrearsAtEnd(
     if (bucket) push(out, r.property_id, { bucket, amountMinor: num(r.amount) });
   }
   return out;
-}
-
-/**
- * Money held at the month's end on service-charge months not started by then: the allocations
- * reported by then to service-charge lines not yet accrued (in the ledger: still in 2010).
- */
-async function serviceChargeAdvance(
-  tx: Tx,
-  book: string,
-  lastDay: string,
-): Promise<Map<string, number>> {
-  const rows = await tx.execute<{ property_id: string; amount: string }>(
-    sql`select il.property_id, sum(a.amount_minor)::bigint as amount
-        from allocation a
-        join invoice_line il on il.company_id = a.company_id and il.id = a.invoice_line_id
-        join invoice i on i.company_id = il.company_id and i.id = il.invoice_id
-        left join invoice_line_accrual ac on ac.company_id = il.company_id and ac.invoice_line_id = il.id
-        where i.book_id = ${book}::uuid and il.kind = 'service_charge' and il.base_line_id is null
-          and a.source not in ('credit_note', 'write_off')
-          and a.accounting_date <= ${lastDay}::date
-          and (ac.id is null or ac.accounting_date > ${lastDay}::date)
-        group by il.property_id`,
-  );
-  return new Map(rows.rows.map((r) => [r.property_id, num(r.amount)]));
 }
 
 /** Each rent tax item reported in the month, net of its reversals (TX-01; invariant 6). */
@@ -596,34 +556,16 @@ async function agentSide(
           and e.accounting_date between ${firstDay}::date and ${lastDay}::date
         group by l.entry_id, e.rule, o.rule`,
   );
-  const cashIn = new Map<AgentCashIn, number>();
-  const cashOut = new Map<AgentCashOut, number>();
-  const add = <K>(map: Map<K, number>, key: K, amount: number) =>
-    map.set(key, (map.get(key) ?? 0) + amount);
-  let feesTaken = 0;
-  let remitted = 0;
-  let settledAtSource = 0;
-  for (const e of entries.rows) {
-    const cash = num(e.cash);
-    const fees = num(e.fees);
-    // P22 split at source: the provider paid the agent its share (Dr 2300).
-    if (e.rule === 'P22' && fees > 0) settledAtSource += fees;
-    if (cash === 0) continue;
-    // P16, and a correction of one: the agent paid the owner (1010) and kept its fees (2300).
-    if (e.rule === 'P16' || (e.rule === 'P21' && e.reversed_rule === 'P16')) {
-      feesTaken += fees;
-      remitted += -cash - fees;
-      continue;
-    }
-    if (cash > 0) add(cashIn, CASH_IN[e.rule] ?? 'other_in', cash);
-    else add(cashOut, CASH_OUT[e.rule] ?? 'other_out', -cash);
-  }
-  // A month whose corrections outweigh its remittances shows the difference as money back in.
-  if (feesTaken >= 0) add(cashOut, 'fees_taken', feesTaken);
-  else add(cashIn, 'other_in', -feesTaken);
-  if (remitted >= 0) add(cashOut, 'remittances', remitted);
-  else add(cashIn, 'other_in', -remitted);
-
+  // In and out by kind, entry by entry, from the 1070 lines the categories name; the balances
+  // above are the 1070 lines themselves, so the identity fails on anything unnamed (M9 review).
+  const movements = agentCashMovements(
+    entries.rows.map((e) => ({
+      rule: e.rule,
+      reversedRule: e.reversed_rule,
+      cashMinor: num(e.cash),
+      feesMinor: num(e.fees),
+    })),
+  );
   const [terms] = (
     await tx.execute<{ gra_paid_by: GraPayer }>(
       sql`select gra_paid_by from management_fee_terms
@@ -635,15 +577,17 @@ async function agentSide(
     cash: {
       openingMinor: await total('1070', input.dayBefore),
       closingMinor: await total('1070', lastDay),
-      in: [...cashIn].map(([kind, amountMinor]) => ({ kind, amountMinor })),
-      out: [...cashOut].map(([kind, amountMinor]) => ({ kind, amountMinor })),
+      in: movements.in,
+      out: movements.out,
     },
     feesDue: {
       openingMinor: 0 - (await total('2300', input.dayBefore)),
       closingMinor: 0 - (await total('2300', lastDay)),
-      settledAtSourceMinor: settledAtSource,
+      settledAtSourceMinor: movements.settledAtSourceMinor,
     },
     reserveMinor: 0,
     graPaidBy: terms?.gra_paid_by ?? 'owner',
+    // Tax a tenant withheld, waiting for its certificate: in 2200, never paid to GRA by the agency.
+    withholdingPendingMinor: await total('1150', lastDay),
   };
 }

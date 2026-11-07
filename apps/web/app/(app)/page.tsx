@@ -56,7 +56,8 @@ export default async function HomePage() {
           You are not a member of any company yet. Ask an administrator to invite you.
         </Alert>
       )}
-      {dashboard ? <DashboardView /> : null}
+      {/* Refresh is for agency admins, managers and landlords (M9 review), who manage leases. */}
+      {dashboard ? <DashboardView canRefresh={allowed(me, 'lease.manage')} /> : null}
       {register ? (
         <Card data-testid="register-summary">
           <CardHeader

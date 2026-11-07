@@ -799,7 +799,7 @@ export const earlyTerminationContract = {
       method: 'POST',
       path: '/early-terminations/{terminationId}/refund-paid',
       summary:
-        'Record the approved refund as paid outside the platform, with a reference and proof (P13)',
+        'Record the approved refund as paid outside the platform, with a reference and proof (P13). 409 INSUFFICIENT_AGENT_CASH when paid from the agency’s account beyond what it holds for the owner (record the owner’s funding first)',
     })
     .input(
       z.object({

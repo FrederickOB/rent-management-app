@@ -7,8 +7,20 @@ import {
   type AgentCashOut,
   type StatementCheckName,
 } from '@rent/domain/reporting';
+import { addMonths, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
+import {
+  EXPENSE_CATEGORIES,
+  EXPENSE_CATEGORY_LABELS,
+  type ExpenseCategory,
+} from '@rent/domain/maintenance';
 import { errorCode } from './errors';
-import { bucketsOf, COLLECTION_METHOD_LABELS, ratioText } from './reporting';
+import { formatTime } from './format';
+import {
+  bucketsOf,
+  COLLECTION_METHOD_LABELS,
+  CREDIT_NOT_APPLIED_LABEL,
+  ratioText,
+} from './reporting';
 import { monthLabel } from './rent-tax';
 
 // Owner statements (AC-04; M9 decisions 5 to 7 and 15): the month in the company's time zone, a
@@ -65,7 +77,7 @@ export function cashRows(page: StatementPage): StatementRow[] {
     { key: 'expenses', label: 'Expenses', amountMinor: c.expensesMinor, strong: true },
     ...c.expensesByCategory.map((e) => ({
       key: `expense-${e.category}`,
-      label: e.category,
+      label: expenseCategoryText(e.category),
       amountMinor: e.amountMinor,
       part: true,
     })),
@@ -93,15 +105,27 @@ export function accrualRows(page: StatementPage): StatementRow[] {
     },
     {
       key: 'unearned',
-      label: 'Paid ahead, not yet earned',
+      label: 'Held for tenants: paid ahead',
       amountMinor: a.unearnedMinor,
       strong: true,
     },
-    { key: 'rent-unearned', label: 'Rent', amountMinor: a.unearnedRentMinor, part: true },
+    {
+      key: 'rent-unearned',
+      label: 'Rent paid ahead',
+      amountMinor: a.unearnedRentMinor,
+      part: true,
+    },
     {
       key: 'service-unearned',
-      label: 'Service charge',
+      label: 'Service charge paid ahead',
       amountMinor: a.unearnedServiceChargeMinor,
+      part: true,
+    },
+    // M9 review: a tenant's surplus not yet applied to any invoice line (the rest of 2010).
+    {
+      key: 'credit-unearned',
+      label: CREDIT_NOT_APPLIED_LABEL,
+      amountMinor: a.creditMinor,
       part: true,
     },
     { key: 'deposits', label: 'Deposits held', amountMinor: a.depositsHeldMinor, strong: true },
@@ -204,6 +228,26 @@ export function statementPages(
   ];
 }
 
+/** An expense category for people (M8's labels); a key the domain does not know, as sent. */
+export const expenseCategoryText = (category: string): string =>
+  (EXPENSE_CATEGORIES as readonly string[]).includes(category)
+    ? EXPENSE_CATEGORY_LABELS[category as ExpenseCategory]
+    : category;
+
+/**
+ * F1 (founder, 2026-11-06): issuing a month locks it and every earlier month of the owner's book,
+ * drafts included, so anything recorded later for them lands in the open month.
+ */
+export function earlierMonthsLockText(
+  statement: Pick<OwnerStatementDetail, 'month' | 'owner'>,
+): string {
+  return `It also locks every month before ${monthLabel(statement.month)} for ${statement.owner.name}, issued or not: anything recorded later for those months lands in the first open month.`;
+}
+
+/** The draft form's note on locks (F1): what issuing a month will lock. */
+export const ISSUE_LOCKS_NOTE =
+  'Issuing a statement locks its month and every earlier month for that owner, including months not yet issued. Drafting months out of order is fine; issue the earliest first if you want each month’s own statement.';
+
 /** "Issuing locks October 2026 for Ama Owner-London…": the confirmation before issuing. */
 export function issueConfirmText(statement: Pick<OwnerStatementDetail, 'month' | 'owner'>): string {
   return `Issuing locks ${monthLabel(statement.month)} for ${statement.owner.name}. The figures are frozen, the PDF is fingerprinted and emailed to the owner’s contacts who agreed to email. Anything recorded later for that month lands in the open month instead, so this statement never changes.`;
@@ -227,19 +271,9 @@ export const isRendering = (error: unknown): boolean => errorCode(error) === 'ST
 
 /** The months a statement can be drafted for: the last `count` months before this one. */
 export function draftableMonths(today: string, count = 12): string[] {
-  const [y, m] = today.slice(0, 7).split('-').map(Number) as [number, number];
-  const months: string[] = [];
-  let year = y;
-  let month = m;
-  for (let i = 0; i < count; i += 1) {
-    month -= 1;
-    if (month === 0) {
-      month = 12;
-      year -= 1;
-    }
-    months.push(`${year}-${String(month).padStart(2, '0')}`);
-  }
-  return months;
+  // Business date arithmetic goes through packages/domain/dates (CLAUDE.md section 11).
+  const first = parseBusinessDate(`${today.slice(0, 7)}-01`);
+  return Array.from({ length: count }, (_, i) => toIsoDate(addMonths(first, -(i + 1))).slice(0, 7));
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -251,4 +285,29 @@ export function checkScopeText(
 ): string | null {
   if (!UUID.test(check.scope)) return null;
   return properties.find((p) => p.id === check.scope)?.name ?? 'a property';
+}
+
+/** Why a statement was not emailed (CM-09: email consent and unsubscribes are honoured). */
+export const EMAIL_NOT_SENT_TEXT: Record<
+  NonNullable<OwnerStatementDetail['emailNotSentReason']>,
+  string
+> = {
+  no_email: 'Not emailed: there is no email address on record for the owner.',
+  no_consent: 'Not emailed: the owner has not agreed to email.',
+  opted_out: 'Not emailed: the owner unsubscribed from email.',
+};
+
+/**
+ * The email of an issued statement, in words (M9 review): queued ("sent") and confirmed by the
+ * provider ("delivered") are told apart, and a statement not emailed says why.
+ */
+export function statementEmailText(
+  statement: Pick<OwnerStatementDetail, 'sentAt' | 'deliveredAt' | 'emailNotSentReason'>,
+  timeZone: string,
+): string {
+  if (statement.emailNotSentReason) return EMAIL_NOT_SENT_TEXT[statement.emailNotSentReason];
+  if (!statement.sentAt) return 'Not emailed yet.';
+  return statement.deliveredAt
+    ? `Emailed: sent ${formatTime(statement.sentAt, timeZone)}, delivered ${formatTime(statement.deliveredAt, timeZone)}.`
+    : `Emailed: sent ${formatTime(statement.sentAt, timeZone)}; delivery not yet confirmed.`;
 }

@@ -1,6 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { schema, sql, withCompany, type Database, type SQL, type Tx } from '@rent/db';
-import { templates, type DashboardDocumentData } from '@rent/documents';
+import {
+  DASHBOARD_LIVE_FIGURES,
+  DASHBOARD_SNAPSHOT_FIGURES,
+  templates,
+  type DashboardDocumentDataV2,
+} from '@rent/documents';
 import {
   AGE_BUCKETS,
   AGE_BUCKET_LABELS,
@@ -13,14 +18,14 @@ import type { Actor } from '@rent/domain/policy';
 import { XLSX_CONTENT_TYPE, type DisplayStatus } from '@rent/domain/portfolio';
 import { money, toDecimal } from '@rent/domain/money';
 import {
-  collectionRate,
+  collectionRateByPeriod,
   COLLECTION_METHODS,
   occupancyOf,
   paidUntilCoverage,
-  type CollectionLine,
   type CoverageUnit,
   type OccupancySummary,
   type PaidUntilCoverage,
+  type PeriodCollectionLine,
   type Ratio,
 } from '@rent/domain/reporting';
 import { v7 as uuidv7 } from 'uuid';
@@ -48,28 +53,40 @@ export interface DashboardFilters {
 }
 
 export interface DashboardView {
-  /** When the snapshot was worked out; null before the first rollup. */
+  /** When the snapshot the money figures come from was worked out; null before the first rollup. */
   readonly asOf: Date | null;
+  /** When the live figures (`occupancy`, `collectionRate`) were read: now. */
+  readonly liveAt: Date;
   /** The snapshot's day (the company's calendar), or today before the first rollup. */
   readonly date: string;
+  /** Live. */
   readonly occupancy: OccupancySummary;
+  /** Live, on F2's basis: rent and service charge whose charge period starts this month. */
   readonly collectionRate: {
     readonly month: string;
     readonly dueMinor: number;
     readonly collectedMinor: number;
     readonly rate: Ratio;
   };
+  /**
+   * Earned and unpaid (1100) past its due date, as the statement counts it; months billed and past
+   * due but not charged yet (an annual invoice's months not started) are `dueNotStartedMinor`.
+   */
   readonly arrears: {
     readonly totalMinor: number;
     readonly byBucket: Readonly<Record<AgeBucket, number>>;
     readonly leases: number;
+    readonly dueNotStartedMinor: number;
   };
   readonly rentRoll: {
     readonly rentMinor: number;
     readonly serviceChargeMinor: number;
     readonly totalMinor: number;
   };
+  /** 2010 split by `prepaymentSplit`, as the statement splits it; the three add up to 2010. */
   readonly unearnedRentMinor: number;
+  readonly unearnedServiceChargeMinor: number;
+  readonly creditMinor: number;
   readonly depositsHeldMinor: number;
   readonly paidUntilCoverage: PaidUntilCoverage;
   readonly expiries: readonly {
@@ -105,7 +122,8 @@ export interface DashboardRow {
   readonly bps: number | null;
 }
 
-export const DASHBOARD_TEMPLATE = { key: 'reporting.dashboard', version: 1 } as const;
+/** Version 2 names the snapshot's figures and the live ones apart (M9 review). */
+export const DASHBOARD_TEMPLATE = { key: 'reporting.dashboard', version: 2 } as const;
 const DOWNLOAD_MS = 300_000;
 const EXPIRY_MONTHS = [3, 6, 12] as const;
 /** The renewal lease is being prepared or signed (DA-02). */
@@ -123,6 +141,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type SnapshotSqlRow = {
   lease_id: string;
   unit_id: string;
+  lease_status: string;
   occupying: boolean;
   end_date: string;
   renewal_status: string | null;
@@ -133,6 +152,9 @@ type SnapshotSqlRow = {
   arrears_61_to_90_minor: number;
   arrears_90_plus_minor: number;
   unearned_rent_minor: number;
+  unearned_service_charge_minor: number;
+  credit_minor: number;
+  due_not_started_minor: number;
   deposit_held_minor: number;
   rent_minor: number;
   service_charge_minor: number;
@@ -177,10 +199,13 @@ export function dashboardRows(view: DashboardView): DashboardRow[] {
     amount('Arrears', AGE_BUCKET_LABELS[bucket], view.arrears.byBucket[bucket]);
   amount('Arrears', 'Total arrears', view.arrears.totalMinor);
   count('Arrears', 'Leases in arrears', view.arrears.leases);
+  amount('Arrears', 'Billed and past due, months not started', view.arrears.dueNotStartedMinor);
   amount('Rent roll', 'Rent', view.rentRoll.rentMinor);
   amount('Rent roll', 'Service charge', view.rentRoll.serviceChargeMinor);
   amount('Rent roll', 'Total', view.rentRoll.totalMinor);
   amount('Held for tenants', 'Unearned rent', view.unearnedRentMinor);
+  amount('Held for tenants', 'Unearned service charge', view.unearnedServiceChargeMinor);
+  amount('Held for tenants', 'Credit not applied to any month', view.creditMinor);
   amount('Held for tenants', 'Deposits held', view.depositsHeldMinor);
   const pc = 'Paid-until coverage';
   count(pc, 'Occupied units', view.paidUntilCoverage.occupied);
@@ -195,7 +220,7 @@ export function dashboardRows(view: DashboardView): DashboardRow[] {
   }
   const g = view.gate1;
   if (g) {
-    const s = `Gate 1, ${g.month}`;
+    const s = `Gate 1, ${g.month} (${g.status})`;
     amount(s, 'Rent due', g.collectionRate.dueMinor);
     amount(s, 'Rent collected', g.collectionRate.collectedMinor);
     share(s, 'Collection rate', g.collectionRate.rate);
@@ -272,6 +297,8 @@ export class DashboardService {
   private async viewIn(tx: Tx, staff: StaffActor, filters: DashboardFilters) {
     const company = await companyRecord(tx, staff.companyId);
     if (!company) throw notFound('Company');
+    // The live figures are read now; the money figures come from the latest snapshot.
+    const liveAt = this.clock.now();
     const today = isoNow(this.clock, company.timeZone);
     const month = today.slice(0, 7);
     // The latest rollup is the company's (metric_daily), whatever part of it the reader sees.
@@ -292,8 +319,10 @@ export class DashboardService {
     ) as Record<AgeBucket, number>;
     const arrearsOf = (r: SnapshotSqlRow) =>
       AGE_BUCKETS.reduce((s, b) => s + Number(r[BUCKET_COLUMN[b] as keyof SnapshotSqlRow]), 0);
-    const rent = snapshot.reduce((s, r) => s + Number(r.rent_minor), 0);
-    const service = snapshot.reduce((s, r) => s + Number(r.service_charge_minor), 0);
+    const total = (column: keyof SnapshotSqlRow) =>
+      snapshot.reduce((s, r) => s + Number(r[column]), 0);
+    const rent = total('rent_minor');
+    const service = total('service_charge_minor');
 
     // One lease per occupied unit: should two ever hold one unit, the later-ending one counts.
     const occupied = new Map<string, SnapshotSqlRow>();
@@ -307,11 +336,11 @@ export class DashboardService {
       monthsPaidAhead: Number(r.months_paid_ahead),
     }));
     const day = parseBusinessDate(date);
+    // DA-02: leases holding their unit that end within the window, holding over included (they
+    // ended already and still hold the unit, so they head every window).
     const expiries = EXPIRY_MONTHS.map((withinMonths) => {
       const until = toIsoDate(addMonths(day, withinMonths));
-      const ending = snapshot.filter(
-        (r) => r.occupying && r.end_date >= date && r.end_date <= until,
-      );
+      const ending = snapshot.filter((r) => r.occupying && r.end_date <= until);
       return {
         withinMonths,
         leases: ending.length,
@@ -323,6 +352,7 @@ export class DashboardService {
     const collection = await this.collectionIn(tx, month, filters);
     return {
       asOf: latest ? asDate(latest.computed_at) : null,
+      liveAt,
       date,
       occupancy: await this.occupancyIn(tx, filters),
       collectionRate: {
@@ -335,10 +365,13 @@ export class DashboardService {
         totalMinor: AGE_BUCKETS.reduce((s, b) => s + byBucket[b], 0),
         byBucket,
         leases: snapshot.filter((r) => arrearsOf(r) > 0).length,
+        dueNotStartedMinor: total('due_not_started_minor'),
       },
       rentRoll: { rentMinor: rent, serviceChargeMinor: service, totalMinor: rent + service },
-      unearnedRentMinor: snapshot.reduce((s, r) => s + Number(r.unearned_rent_minor), 0),
-      depositsHeldMinor: snapshot.reduce((s, r) => s + Number(r.deposit_held_minor), 0),
+      unearnedRentMinor: total('unearned_rent_minor'),
+      unearnedServiceChargeMinor: total('unearned_service_charge_minor'),
+      creditMinor: total('credit_minor'),
+      depositsHeldMinor: total('deposit_held_minor'),
       paidUntilCoverage: paidUntilCoverage({ units, today: date }),
       expiries,
       // Company-wide figures: only for people who see the whole company (decision 15).
@@ -358,11 +391,13 @@ export class DashboardService {
     if (filters.region) where.push(sql`p.region = ${filters.region}`);
     if (filters.unitType) where.push(sql`u.unit_type = ${filters.unitType}`);
     const rows = await tx.execute<SnapshotSqlRow>(
-      sql`select s.lease_id, s.unit_id, s.occupying, s.end_date::text as end_date, s.renewal_status,
+      sql`select s.lease_id, s.unit_id, s.lease_status, s.occupying, s.end_date::text as end_date,
+            s.renewal_status,
             s.paid_until::text as paid_until, s.months_paid_ahead,
             s.arrears0_to30_minor as arrears_0_to_30_minor, s.arrears31_to60_minor as arrears_31_to_60_minor,
             s.arrears61_to90_minor as arrears_61_to_90_minor, s.arrears90_plus_minor as arrears_90_plus_minor,
-            s.unearned_rent_minor, s.deposit_held_minor, s.rent_minor, s.service_charge_minor
+            s.unearned_rent_minor, s.unearned_service_charge_minor, s.credit_minor,
+            s.due_not_started_minor, s.deposit_held_minor, s.rent_minor, s.service_charge_minor
           from lease_snapshot s
           join property p on p.company_id = s.company_id and p.id = s.property_id
           join unit u on u.company_id = s.company_id and u.id = s.unit_id
@@ -394,17 +429,18 @@ export class DashboardService {
   }
 
   /**
-   * Decision 9's collection rate for this month, live and filtered: the rent and service-charge
-   * lines due in the month that the reader sees, by their invoice's owner, as the snapshot's owner
-   * scope reads them.
+   * This month's collection rate on F2's basis (founder decision, 2026-11-06), live and filtered:
+   * the rent and service-charge lines whose charge period starts this month that the reader sees,
+   * by their invoice's owner, as the snapshot's owner scope reads them (`app.owner_row_visible`:
+   * an empty owner scope sees nothing unless limited to properties, which RLS then applies).
    */
   private async collectionIn(tx: Tx, month: string, filters: DashboardFilters) {
     const first = `${month}-01`;
     const until = toIsoDate(addMonths(parseBusinessDate(first), 1));
     const where: SQL[] = [
       sql`l.kind in ('rent', 'service_charge')`,
-      sql`l.due_date >= ${first}::date and l.due_date < ${until}::date`,
-      sql`(app.owner_scope() is null or cardinality(app.owner_scope()) = 0 or i.owner_id = any(app.owner_scope()))`,
+      sql`l.period_start >= ${first}::date and l.period_start < ${until}::date`,
+      sql`app.owner_row_visible(i.owner_id)`,
     ];
     if (filters.ownerId) where.push(sql`i.owner_id = ${filters.ownerId}::uuid`);
     if (filters.propertyId) where.push(sql`l.property_id = ${filters.propertyId}::uuid`);
@@ -413,10 +449,10 @@ export class DashboardService {
     const lines = await tx.execute<{
       id: string;
       kind: LineKind;
-      due_date: string;
+      period_start: string;
       amount_minor: number;
     }>(
-      sql`select l.id, l.kind, l.due_date::text as due_date, l.amount_minor from invoice_line l
+      sql`select l.id, l.kind, l.period_start::text as period_start, l.amount_minor from invoice_line l
           join invoice i on i.company_id = l.company_id and i.id = l.invoice_id
           join property p on p.company_id = l.company_id and p.id = l.property_id
           join unit u on u.company_id = i.company_id and u.id = i.unit_id
@@ -435,18 +471,18 @@ export class DashboardService {
                 from allocation a
                 where a.invoice_line_id = any(${`{${lines.rows.map((l) => l.id).join(',')}}`}::uuid[])`,
           );
-    const byLine = new Map<string, CollectionLine['allocations'][number][]>();
+    const byLine = new Map<string, PeriodCollectionLine['allocations'][number][]>();
     for (const a of allocations.rows) {
       const list = byLine.get(a.invoice_line_id) ?? [];
       list.push({ source: a.source, amountMinor: Number(a.amount_minor), valueDate: a.value_date });
       byLine.set(a.invoice_line_id, list);
     }
-    return collectionRate({
+    return collectionRateByPeriod({
       month,
       lines: lines.rows.map((l) => ({
         lineId: l.id,
         kind: l.kind,
-        dueDate: l.due_date,
+        periodStart: l.period_start,
         amountMinor: Number(l.amount_minor),
         allocations: byLine.get(l.id) ?? [],
       })),
@@ -477,11 +513,14 @@ export class DashboardService {
   // Refresh (decision 11) ---------------------------------------------------------------------
 
   /**
-   * Queues a fresh rollup for the company through the outbox; it never runs inline. Clicks in
-   * the same minute queue one.
+   * Queues a fresh rollup for the company through the outbox; it never runs inline. Only those
+   * who manage leases may (agency admins, managers and landlords: `lease.manage`, which is also
+   * what shows the button on screen); anyone else is refused (403). Clicks in the same minute,
+   * by anyone in the company, queue one: the outbox key is the company's and the minute's.
    */
   async refresh(actor: Actor | null): Promise<{ queued: boolean }> {
     const staff = this.reader(actor);
+    this.policy.assert(staff, 'lease.manage');
     const minute = this.clock.now().toISOString().slice(0, 16);
     await withCompany(this.database, staffContext(staff), (tx) =>
       enqueueOutbox(tx, {
@@ -656,7 +695,7 @@ export class DashboardService {
     view: DashboardView,
     filters: DashboardFilters,
     company: { readonly displayName: string; readonly timeZone: string },
-  ): DashboardDocumentData {
+  ): DashboardDocumentDataV2 {
     const named = (list: readonly { id: string; name: string }[], id?: string) =>
       id ? (list.find((x) => x.id === id)?.name ?? 'Not in your view') : null;
     const labels: { label: string; value: string | null }[] = [
@@ -668,6 +707,7 @@ export class DashboardService {
     return {
       title: `${company.displayName}: portfolio dashboard`,
       generatedAt: this.clock.now().toISOString(),
+      liveAt: view.liveAt.toISOString(),
       timeZone: company.timeZone,
       asOf: view.asOf ? view.asOf.toISOString() : null,
       date: view.date,
@@ -687,14 +727,20 @@ function checkFilters(filters: DashboardFilters): void {
 }
 
 /** The Excel export (DA-06): one sheet, every figure in its own row, amounts exact in pesewas. */
-export async function dashboardWorkbook(data: DashboardDocumentData): Promise<Buffer> {
+export async function dashboardWorkbook(data: DashboardDocumentDataV2): Promise<Buffer> {
   // Checked as the PDF's data is, so both exports carry the same, valid rows.
   templates.get(DASHBOARD_TEMPLATE.key, DASHBOARD_TEMPLATE.version).schema.parse(data);
   const bold = (value: string) => ({ value, fontWeight: 'bold' as const });
   const text = (value: string | null) => (value === null ? null : { value });
   const head = [
     [bold(data.title)],
-    [text('Figures as of'), text(data.asOf ? `${data.asOf} (UTC)` : 'No rollup yet')],
+    // The snapshot's line names only the snapshot's figures; the live ones have their own.
+    [
+      text('Figures as of'),
+      text(data.asOf ? `${data.asOf} (UTC)` : 'No rollup yet'),
+      text(DASHBOARD_SNAPSHOT_FIGURES),
+    ],
+    [text('Live figures as of'), text(`${data.liveAt} (UTC)`), text(DASHBOARD_LIVE_FIGURES)],
     [text('Snapshot date'), text(data.date)],
     [text('Time zone'), text(data.timeZone)],
     ...data.filters.map((f) => [text(f.label), text(f.value)]),

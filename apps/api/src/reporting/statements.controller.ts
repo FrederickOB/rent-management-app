@@ -34,20 +34,23 @@ export class OwnerStatementsController {
       draft: implement(contract.ownerStatements.draft).handler(async ({ input }) =>
         serialize(await st.draft(a, input)),
       ),
-      issue: implement(contract.ownerStatements.issue).handler(({ input }) =>
-        idempotent(
+      issue: implement(contract.ownerStatements.issue).handler(({ input }) => {
+        // The issue's own answer carries the figures it froze; a replay of the key reads the
+        // statement again, which works the month out once to say whether it still matches.
+        let issued: Awaited<ReturnType<typeof st.issue>> | null = null;
+        return idempotent(
           this.idempotency,
           ctx,
           'reporting.owner_statement_issue',
           input,
           async (claim) => {
-            await st.issue(a, input.statementId, { claim });
+            issued = await st.issue(a, input.statementId, { claim });
             return { statementId: input.statementId };
           },
-          async ({ statementId }) => serialize(await st.get(a, statementId)),
+          async ({ statementId }) => serialize(issued ?? (await st.get(a, statementId))),
           { required: false },
-        ),
-      ),
+        );
+      }),
       document: implement(contract.ownerStatements.document).handler(async ({ input }) =>
         serialize(await st.document(a, input.statementId)),
       ),

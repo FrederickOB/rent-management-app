@@ -41,7 +41,14 @@ import { ApprovalsService, payloadHash } from '../approvals/approvals.service';
 import { BillingEngine, creditNoteWithheld, lineLabel, type LeaseState } from '../billing/engine';
 import { InvoicingService } from '../billing/invoicing.service';
 import { MONEY_APPROVERS } from '../billing/money.service';
-import { isoNow, leaseGroup, lockCounters, lockLeases, requireBook } from '../billing/records';
+import {
+  isoNow,
+  leaseBookOf,
+  leaseGroup,
+  lockCounters,
+  lockLeases,
+  requireBook,
+} from '../billing/records';
 import { companyRecord, staffActor, type StaffActor } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
 import { maintenanceCheckConflict } from '../core/db-errors';
@@ -51,6 +58,7 @@ import { queueMessage } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService, REFUND_PROOF_UPLOAD } from '../documents/documents.service';
+import { assertAgentCash } from '../ledger/agent-cash';
 import { InspectionsService } from '../maintenance/inspections.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RentTaxService } from '../tax/rent-tax.service';
@@ -620,6 +628,21 @@ export class MoveOutService {
     )
       throw conflict('refund_not_payable', 'There is no approved refund waiting to be paid');
     await this.refuseIfDepositReversed(visible);
+    // F3: paid from the agency's account, never more than it holds for the owner (again in the
+    // write, under the lock).
+    if (input.paidFrom === 'agency_account')
+      await withCompany(this.database, this.unscoped(staff), async (tx) => {
+        const company = await companyRecord(tx, staff.companyId);
+        const lease = await billingLeaseOf(tx, visible.leaseId);
+        const book = requireBook(
+          await leaseBookOf(tx, lease, isoNow(this.clock, company!.timeZone)),
+        );
+        await assertAgentCash(tx, {
+          ownerId: book.ownerId,
+          bookId: book.bookId,
+          outMinor: (visible.creditRefundMinor ?? 0) + (visible.depositRefundMinor ?? 0),
+        });
+      });
     const staged = await this.documents.stageEvidenceUpload(
       { companyId: staff.companyId, personId: staff.personId },
       input.proofUploadId,
@@ -640,6 +663,11 @@ export class MoveOutService {
       if (row.approvedOn && input.paidOn < row.approvedOn)
         throw invalid('paid_before_approval', 'A refund is paid after it is approved');
       const state = await this.engine.load(tx, staff.companyId, row.leaseId);
+      // F3: the owner's lock (after the lease locks), then the agent's cash, before anything posts.
+      if (input.paidFrom === 'agency_account') {
+        const book = requireBook(state.book);
+        await assertAgentCash(tx, { ownerId: book.ownerId, bookId: book.bookId, outMinor: refund });
+      }
       const posted = await this.engine.payRefund(tx, state, {
         terminationId: row.id,
         amountMinor: refund,

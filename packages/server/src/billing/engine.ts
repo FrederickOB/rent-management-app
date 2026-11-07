@@ -186,63 +186,26 @@ export interface TaxHooks {
 }
 
 /**
- * M9 (P14; plan 4.2, decisions 2 and 3): the management fee follows the rent and service charge
- * the lease's money settles. Billing sits below reporting and never imports it, so reporting
- * registers these when it starts. Each runs in the event's own transaction, after its postings.
+ * M9 (P14; M9 review, must-fix 1): the management fee follows the allocations. Every write of
+ * allocations is handed to the fee hook in its own transaction, after it is written: a rent or
+ * service-charge allocation of money carries its fee, and a negative allocation takes back the
+ * fee of what it undoes. Billing sits below reporting and never imports it, so reporting registers
+ * the hook when it starts.
  */
-export interface SettledEvent {
-  /** The fee's idempotency key (`managementFeeKeys`). */
-  readonly key: string;
-  readonly source: 'payment' | 'deposit' | 'withholding' | 'credit_draw';
+export interface AllocationWrite {
   readonly valueDate: string;
-  /** The record the money came through: a payment, a move-out, a withholding or the draw's line. */
   readonly recordType: string;
   readonly recordId: string;
+  readonly entryId: string | null;
   readonly causedBy: string | null;
-  /** What it settled, by line and the payment the money was (null for a deposit or withholding). */
-  readonly parts: readonly {
-    readonly lineId: string;
-    readonly paymentId: string | null;
-    readonly amountMinor: number;
-  }[];
 }
 
 export interface FeeHooks {
-  afterSettled(tx: Tx, state: LeaseState, event: SettledEvent): Promise<void>;
-  /** A payment reversed (P21b): its fees are mirrored. */
-  afterReversal(
-    tx: Tx,
-    states: readonly LeaseState[],
-    payment: PaymentRecord,
-    reversal: {
-      readonly reversalId: string;
-      readonly valueDate: string;
-      readonly causedBy: string | null;
-    },
-  ): Promise<void>;
-  /** Credit refunded (P13 approved): each payment's fee follows the base refunded. */
-  afterRefund(
+  afterAllocations(
     tx: Tx,
     state: LeaseState,
-    refund: {
-      readonly refundId: string;
-      readonly valueDate: string;
-      readonly causedBy: string | null;
-      readonly credits: readonly PaymentAmount[];
-    },
-  ): Promise<void>;
-  /** A chargeback took back a deposit share a move-out had applied to rent (M8's P21b unwind). */
-  afterDepositUnwound(
-    tx: Tx,
-    state: LeaseState,
-    unwound: {
-      readonly moveOutId: string;
-      readonly paymentId: string;
-      readonly appliedMinor: number;
-      readonly reversalId: string;
-      readonly valueDate: string;
-      readonly causedBy: string | null;
-    },
+    rows: readonly (typeof schema.allocation.$inferSelect)[],
+    write: AllocationWrite,
   ): Promise<void>;
 }
 
@@ -332,31 +295,9 @@ export class BillingEngine {
     return this.taxHooks !== null;
   }
 
-  /** The reporting module registers its fee hooks once (M9); without them no fee is charged. */
+  /** The reporting module registers its fee hook once (M9); without it no fee is charged. */
   useFeeHooks(hooks: FeeHooks): void {
     this.feeHooks = hooks;
-  }
-
-  /** What credit draws settled, as fee events (P14 on drawn surplus; founder decision). */
-  private async drawSettled(
-    tx: Tx,
-    state: LeaseState,
-    drawKey: string,
-    lineId: string,
-    draws: readonly PaymentAmount[],
-    valueDate: string,
-    causedBy: string | null,
-  ): Promise<void> {
-    if (!this.feeHooks || draws.length === 0) return;
-    await this.feeHooks.afterSettled(tx, state, {
-      key: `P14:${drawKey}`,
-      source: 'credit_draw',
-      valueDate,
-      recordType: 'invoice_line',
-      recordId: lineId,
-      causedBy,
-      parts: draws.map((d) => ({ lineId, paymentId: d.paymentId, amountMinor: d.amountMinor })),
-    });
   }
 
   // Loading -------------------------------------------------------------------------------------
@@ -786,7 +727,6 @@ export class BillingEngine {
           entryId: posted?.entryId ?? null,
         },
       );
-      await this.drawSettled(tx, state, `P02:${record.id}`, record.id, plan.draws, valueDate, null);
       await tx.insert(schema.invoiceLineAccrual).values({
         companyId: state.company.id,
         propertyId: state.lease.propertyId,
@@ -916,6 +856,14 @@ export class BillingEngine {
     if (values.length === 0) return;
     const inserted = await tx.insert(schema.allocation).values(values).returning();
     state.allocations.push(...inserted.map(allocationRecord));
+    // P14: each allocation of money carries its fee; a negative one takes back what it undoes.
+    await this.feeHooks?.afterAllocations(tx, state, inserted, {
+      valueDate: meta.valueDate,
+      recordType: meta.recordType,
+      recordId: meta.recordId,
+      entryId: meta.entryId,
+      causedBy: null,
+    });
   }
 
   /**
@@ -1001,11 +949,22 @@ export class BillingEngine {
    */
   async issueAtSigningIfNone(tx: Tx, state: LeaseState, today: string): Promise<void> {
     if (state.book.kind !== 'book' || state.lines.length > 0) return;
-    const carried = state.lease.renewsLeaseId
-      ? await this.depositHeld(tx, state.lease.renewsLeaseId)
-      : 0;
-    await this.issueDeposit(tx, state, carried, today);
+    await this.issueDeposit(tx, state, await this.carriedDeposit(tx, state), today);
     await this.generate(tx, state, today);
+  }
+
+  /**
+   * The deposit a renewal brings with it (M9 review #7): what its old lease still holds, plus what
+   * P29 has already carried onto the renewal. P29 runs when the renewal starts, which may come
+   * before billing handles its signing, so the old lease alone can read zero. None for a lease that
+   * renews nothing.
+   */
+  async carriedDeposit(tx: Tx, state: LeaseState): Promise<number> {
+    if (!state.lease.renewsLeaseId) return 0;
+    return (
+      (await this.depositHeld(tx, state.lease.renewsLeaseId)) +
+      (await this.depositHeld(tx, state.lease.id))
+    );
   }
 
   /**
@@ -1291,6 +1250,8 @@ export class BillingEngine {
     // The money arrived when it arrived: allocation is classified, and posted, as of that day.
     const arrived = payment.row.receivedOn;
     await this.carryOverIfStarted(tx, state, today);
+    // Matched money pays what is due, as money received does (M9 review #7).
+    await this.issueAtSigningIfNone(tx, state, today);
     await this.issueForAdvance(tx, state, payment.amountMinor, today, arrived);
     await this.accrue(tx, state, today);
     const plan = planAllocation({
@@ -1616,28 +1577,6 @@ export class BillingEngine {
       valueDate: input.today,
       causedBy: input.requestedBy,
     });
-    // And its management fees (P21b; M9 decision 2), the deposit fee of a chargeback included.
-    await this.feeHooks?.afterReversal(tx, states, payment, {
-      reversalId,
-      valueDate: input.today,
-      causedBy: input.requestedBy,
-    });
-    if (this.feeHooks)
-      for (const u of depositUnwound)
-        if (u.appliedMinor > 0)
-          await this.feeHooks.afterDepositUnwound(
-            tx,
-            states.find((st) => st.lease.id === u.leaseId) ??
-              (await this.load(tx, payment.row.companyId, u.leaseId)),
-            {
-              moveOutId: u.moveOutId,
-              paymentId: payment.id,
-              appliedMinor: u.appliedMinor,
-              reversalId,
-              valueDate: input.today,
-              causedBy: input.requestedBy,
-            },
-          );
     return { reversalId, receiptId, depositUnwound };
   }
 
@@ -1995,15 +1934,6 @@ export class BillingEngine {
           recordId: plan.lineId,
           entryId: posted?.entryId ?? null,
         },
-      );
-      await this.drawSettled(
-        tx,
-        state,
-        `P02:${plan.lineId}:redraw:${n}`,
-        plan.lineId,
-        plan.draws,
-        valueDate,
-        causedBy,
       );
     }
     return plans.length;
@@ -2418,24 +2348,6 @@ export class BillingEngine {
   ): Promise<void> {
     await this.recordAdvance(tx, state, payment);
     await this.taxHooks?.afterReceipt(tx, state, { payment, receiptId, causedBy });
-    // P14 per receipt: the rent and service charge the payment settles, advances included.
-    if (this.feeHooks) {
-      const byLine = new Map<string, number>();
-      for (const a of state.allocations)
-        if (a.paymentId === payment.id && a.source === 'payment')
-          byLine.set(a.lineId, (byLine.get(a.lineId) ?? 0) + a.amountMinor);
-      await this.feeHooks.afterSettled(tx, state, {
-        key: `P14:${payment.id}`,
-        source: 'payment',
-        valueDate: payment.row.receivedOn,
-        recordType: 'payment',
-        recordId: payment.id,
-        causedBy,
-        parts: [...byLine]
-          .filter(([, amount]) => amount > 0)
-          .map(([lineId, amountMinor]) => ({ lineId, paymentId: payment.id, amountMinor })),
-      });
-    }
   }
 
   /**
@@ -2668,18 +2580,6 @@ export class BillingEngine {
       recordId: input.withholdingId,
       entryId: posted!.entryId,
     });
-    // P14: tax withheld counts as settled (M9 decision 2).
-    await this.feeHooks?.afterSettled(tx, state, {
-      key: `P14:${input.withholdingId}`,
-      source: 'withholding',
-      valueDate: input.valueDate,
-      recordType: 'withholding',
-      recordId: input.withholdingId,
-      causedBy: input.causedBy,
-      parts: plan.rows
-        .filter((r) => r.source === 'withholding' && r.amountMinor > 0)
-        .map((r) => ({ lineId: r.lineId, paymentId: null, amountMinor: r.amountMinor })),
-    });
     if (plan.released.length > 0) {
       // Credit released on a lease whose renewal has started moves to it (review 11), and the
       // freed credit pays what is still owed, oldest first (M4b review F4).
@@ -2775,16 +2675,6 @@ export class BillingEngine {
       recordId: input.terminationId,
       entryId: posted!.entryId,
     });
-    // P14 on credit drawn onto open lines (P13 apply; founder decision).
-    await this.feeHooks?.afterSettled(tx, state, {
-      key: `P14:P13:${input.terminationId}:${input.key}`,
-      source: 'credit_draw',
-      valueDate: input.valueDate,
-      recordType: moveOut ? 'move_out' : 'early_termination',
-      recordId: input.terminationId,
-      causedBy: input.causedBy,
-      parts: rows.filter((r) => r.amountMinor > 0),
-    });
     return applications.map((a) => ({
       lineId: a.lineId,
       amountMinor: a.draws.reduce((sum, d) => sum + d.amountMinor, 0),
@@ -2831,13 +2721,6 @@ export class BillingEngine {
       lines: refundApprovedLines({ bookId: book.bookId, lease: dimsOf(state.lease), credits }),
       record: { type: moveOut ? 'move_out' : 'early_termination', id: input.terminationId },
       causedBy: input.causedBy,
-    });
-    // P14 follows the money the owner keeps: the fee on the refunded base is taken back (M9 decision 3).
-    await this.feeHooks?.afterRefund(tx, state, {
-      refundId: input.terminationId,
-      valueDate: input.valueDate,
-      causedBy: input.causedBy,
-      credits,
     });
     if (input.recordParts === false) return posted!;
     if (moveOut)
@@ -2972,18 +2855,6 @@ export class BillingEngine {
         entryId: posted!.entryId,
       },
     );
-    // P14 on rent settled from the deposit (M9 decision 2).
-    await this.feeHooks?.afterSettled(tx, state, {
-      key: `P14:${input.moveOutId}`,
-      source: 'deposit',
-      valueDate: input.valueDate,
-      recordType: 'move_out',
-      recordId: input.moveOutId,
-      causedBy: input.causedBy,
-      parts: input.lines
-        .filter((l) => l.amountMinor > 0)
-        .map((l) => ({ lineId: l.lineId, paymentId: null, amountMinor: l.amountMinor })),
-    });
     // The shares, split between what paid the lines and what was retained, in the same order.
     const { taken: toLines, left: toRetained } = takeShares(taken, applied);
     for (const [kind, shares] of [

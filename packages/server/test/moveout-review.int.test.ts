@@ -23,6 +23,7 @@ import {
   type BillingServices,
 } from './support/billing';
 import { maintenanceServices, type MaintenanceServices } from './support/maintenance';
+import { fundAgentCash, ownerOfLease } from './support/owner-funding';
 import { taxItemsOf, taxServices, uploadEvidence, type TaxServices } from './support/tax';
 import {
   propertyWithUnits,
@@ -680,6 +681,15 @@ describe('TL-11 a settlement with a refund reaches Closed (should fix)', () => {
       if (statementFirst) await renderStatement(c.companyId, planned.id);
       const proof = await uploadEvidence(ctx, (i) =>
         m.moveOuts.createRefundUpload(c.accountant, i),
+      );
+      // F3 (founder-approved, 2026-11-07): the owner funds the agency to pay the refund.
+      await fundAgentCash(
+        ctx,
+        s,
+        b,
+        c.accountant,
+        await ownerOfLease(ctx, b, c.companyId, lease.id),
+        done.statement!.refundMinor,
       );
       const paid = await m.moveOuts.recordRefundPaid(c.accountant, planned.id, {
         paidOn: today,

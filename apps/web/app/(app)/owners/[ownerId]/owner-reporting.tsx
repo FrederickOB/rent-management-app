@@ -3,7 +3,7 @@
 import type { FeeTermsView, OwnerRow } from '@rent/contracts';
 import { FEE_KINDS, GRA_PAYERS } from '@rent/domain/ledger';
 import Link from 'next/link';
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
 import { secondaryLink } from '@/components/link-styles';
 import { LoadFailed, Loading } from '@/components/load-state';
@@ -13,12 +13,14 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextField } from '@/components/ui/field';
-import { api } from '@/lib/api';
+import { api, keyedApi } from '@/lib/api';
+import { isKeyReused, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
 import { todayIn } from '@/lib/business-dates';
 import { addDays, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { toProblem } from '@/lib/errors';
 import {
   draftOfTerms,
+  EFFECTIVE_FROM_NOTE,
   FEE_KIND_LABELS,
   feeKindOf,
   feeTermsInput,
@@ -32,6 +34,8 @@ import {
 import { useLoad } from '@/lib/use-load';
 
 export interface OwnerReportingPermissions {
+  /** The plan includes owner reporting (decision 13). */
+  readonly onPlan: boolean;
   readonly reporting: boolean;
   readonly fees: boolean;
   readonly changeFees: boolean;
@@ -81,7 +85,11 @@ export function OwnerReporting({
         </div>
       ) : null}
       {owner && can.fees ? <FeeTermsCard ownerId={owner.id} can={can} /> : null}
-      {owner && !can.fees ? (
+      {owner && !can.onPlan ? (
+        <p className="text-sm text-slate-600" data-testid="owner-reporting-plan">
+          Management fees, owner statements and remittances are not on the Starter plan.
+        </p>
+      ) : owner && !can.fees ? (
         <p className="text-sm text-slate-600">
           Management fees apply only to owners whose properties an agency manages.
         </p>
@@ -142,6 +150,12 @@ function FeeTermsCard({
                   </dd>
                 </div>
               ))}
+              {state.data.coOwnedProperties.length > 0 ? (
+                <div data-testid="fee-terms-co-owned">
+                  <dt className="text-slate-600">No fixed fee is charged on co-owned properties</dt>
+                  <dd>{state.data.coOwnedProperties.map((p) => p.name).join(', ')}</dd>
+                </div>
+              ) : null}
               {state.data.pending ? (
                 <div data-testid="fee-terms-pending">
                   <dt className="flex items-center gap-2 text-slate-600">
@@ -195,6 +209,9 @@ function FeeTermsForm({
   const [tried, setTried] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Review WEB 8: the request's key belongs to the terms asked for; changed terms are a new one.
+  const keeper = useIdempotencyKeeper();
+  const keyedFor = useRef<string | null>(null);
   const parsed = feeTermsInput(draft, today);
   const errors = tried ? parsed.errors : {};
 
@@ -204,14 +221,23 @@ function FeeTermsForm({
     setError(null);
     const input = parsed.input;
     if (!input) return;
+    const content = JSON.stringify(input);
+    if (keyedFor.current !== content) {
+      keeper.reset();
+      keyedFor.current = content;
+    }
     setPending(true);
     try {
-      await api().feeTerms.request({ ownerId, ...input });
+      await sendOnce(keeper, (key) => keyedApi(key).feeTerms.request({ ownerId, ...input }));
       onDone(
         'Asked to change the terms. A second person must approve it; you cannot approve your own request.',
       );
     } catch (failure) {
       setError(feeTermsMessage(failure) ?? toProblem(failure).message);
+      if (isKeyReused(failure)) {
+        keeper.reset();
+        keyedFor.current = null;
+      }
       setPending(false);
     }
   }
@@ -276,6 +302,7 @@ function FeeTermsForm({
         min={today}
         value={draft.effectiveFrom}
         error={errors.effectiveFrom}
+        hint={EFFECTIVE_FROM_NOTE}
         onChange={(event) => setDraft((d) => ({ ...d, effectiveFrom: event.target.value }))}
         className="max-w-xs"
       />

@@ -5,7 +5,7 @@ import { MOVE_OUT_STATUS_LABELS, type MoveOutStatus } from '@rent/domain/moveout
 import { PEOPLE, ready, signIn, unique } from './helpers';
 import { keyed, uploadJobPhoto } from './maintenance-helpers';
 import { fixture } from './register-helpers';
-import { cedis } from './tax-helpers';
+import { cedis, fundLeaseOwner } from './tax-helpers';
 import { daysFromToday, newPropertyWithUnits, newTenant, termEnd, today } from './tenancy-helpers';
 
 /**
@@ -339,6 +339,9 @@ test.describe('TL-11 and MI-11 a move-out made for the test, from the deposit to
       );
       if ((settled.statement?.refundMinor ?? 0) === 0) return;
       expect(settled.status).toBe('approved');
+      // F3 setup (founder-approved, 2026-11-07): the owner's funding first, so the agency holds the
+      // refund for the owner before it is paid from the agency's account.
+      await fundLeaseOwner(page, leaseId, settled.statement!.refundMinor);
       const refund = page.getByRole('form', { name: 'Record the refund as paid' });
       await refund.getByLabel('Transfer or MoMo reference').fill(`TRF-${tag}`);
       const paidFrom = refund.getByLabel('Paid from');

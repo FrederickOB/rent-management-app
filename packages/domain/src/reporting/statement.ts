@@ -52,9 +52,15 @@ export interface StatementPropertyInput {
   /** Rent and service charge earned in the month (4000 and 4100, net of credit notes). */
   readonly rentEarnedMinor: number;
   readonly serviceChargeEarnedMinor: number;
-  /** At the month's end: the rent share of prepayments (AR-03), and the service-charge share. */
+  /**
+   * At the month's end (M9 review; the dashboard splits 2010 by the same words): AR-03's rent share
+   * of prepayments, money allocated to rent lines whose period has not started; the same for
+   * service charge; and the rest of 2010, money held for the tenant and applied to no line (credit).
+   * The three add up to 2010.
+   */
   readonly unearnedRentMinor: number;
   readonly unearnedServiceChargeMinor?: number;
+  readonly creditMinor?: number;
   /** At the month's end: deposits held (2100). */
   readonly depositsHeldMinor: number;
   /** At the month's end: arrears by age (BC-08). */
@@ -78,6 +84,112 @@ export const AGENT_CASH_OUT = [
   'other_out',
 ] as const;
 export type AgentCashOut = (typeof AGENT_CASH_OUT)[number];
+
+/** One journal entry's net effect on the owner's agent-held cash (1070) and fees due (2300). */
+export interface AgentCashEntry {
+  readonly rule: string;
+  /** For a reversal (P21): the rule of the entry it reverses. */
+  readonly reversedRule?: string | null;
+  /** The entry's 1070 lines, net: positive is money into the agent's hands. */
+  readonly cashMinor: number;
+  /** The entry's 2300 lines, net. */
+  readonly feesMinor: number;
+}
+
+export interface AgentCashMovements {
+  readonly in: readonly { readonly kind: AgentCashIn; readonly amountMinor: number }[];
+  readonly out: readonly { readonly kind: AgentCashOut; readonly amountMinor: number }[];
+  /** Fees the provider paid the agent from a settlement split at source (P22, Dr 2300). */
+  readonly settledAtSourceMinor: number;
+  /**
+   * Entries that moved agent cash in a way the statement has no line for (a rule it does not know
+   * moves 1070, or a movement the wrong way for its rule). They are left out of money in and out,
+   * so the `agent_cash` identity, checked against the 1070 balances themselves, fails and names it.
+   */
+  readonly unexplained: readonly AgentCashEntry[];
+}
+
+/** Rules whose money into 1070 is rent and other money from tenants (P03 to P10 as received). */
+const COLLECTION_RULES: ReadonlySet<string> = new Set([
+  'P03',
+  'P04',
+  'P05',
+  'P06',
+  'P07',
+  'P08',
+  'P10',
+  'P22',
+  'P23',
+  'P28',
+]);
+
+/** Rules whose money out of 1070 is a payment the agent made for the owner. */
+const PAYMENT_OUT: Readonly<Record<string, AgentCashOut>> = {
+  P15: 'expenses_paid',
+  P18: 'rent_tax_paid',
+  P33: 'vat_paid',
+  P12: 'refunds_paid',
+  P13: 'refunds_paid',
+  P31: 'refunds_paid',
+};
+
+/**
+ * The agent's money in and out for the month (decision 6; M9 review: the `agent_cash` identity
+ * must be able to fail). Each entry's net 1070 movement is put on the line its rule names, in the
+ * direction the rule moves money: collections (in; a provider or collector taking money back, out
+ * as a reversal), owner funding (P30, in), payments for the owner (P15, P18, P33, P12, P13, P31,
+ * out), opening balances (P25, other), reversals by the rule they reverse (of money in: out as a
+ * reversal; of a payment out: money back in), and remittances with the fees retained (P16 and
+ * their reversals, split apart and netted over the month; a month whose corrections outweigh its
+ * remittances shows the difference as money back in). Anything else is unexplained.
+ */
+export function agentCashMovements(entries: readonly AgentCashEntry[]): AgentCashMovements {
+  const cashIn = new Map<AgentCashIn, number>();
+  const cashOut = new Map<AgentCashOut, number>();
+  const add = <K>(map: Map<K, number>, key: K, amount: number) =>
+    map.set(key, (map.get(key) ?? 0) + amount);
+  const unexplained: AgentCashEntry[] = [];
+  let feesTaken = 0;
+  let remitted = 0;
+  let settledAtSource = 0;
+  for (const e of entries) {
+    const cash = whole(e.cashMinor, 'Agent cash moved');
+    const fees = whole(e.feesMinor, 'Fees due moved');
+    if (e.rule === 'P22' && fees > 0) settledAtSource += fees;
+    if (cash === 0) continue;
+    const reversed = e.rule === 'P21' ? (e.reversedRule ?? null) : null;
+    if (e.rule === 'P16' || reversed === 'P16') {
+      feesTaken += fees;
+      remitted += -cash - fees;
+    } else if (COLLECTION_RULES.has(e.rule)) {
+      if (cash > 0) add(cashIn, 'collections', cash);
+      else add(cashOut, 'reversals', -cash);
+    } else if (e.rule === 'P30' && cash > 0) add(cashIn, 'owner_funding', cash);
+    else if (PAYMENT_OUT[e.rule] && cash < 0) add(cashOut, PAYMENT_OUT[e.rule]!, -cash);
+    else if (e.rule === 'P25') {
+      if (cash > 0) add(cashIn, 'other_in', cash);
+      else add(cashOut, 'other_out', -cash);
+    } else if (
+      reversed !== null &&
+      cash < 0 &&
+      (COLLECTION_RULES.has(reversed) || reversed === 'P30' || reversed === 'P25')
+    )
+      add(cashOut, 'reversals', -cash);
+    else if (reversed !== null && cash > 0 && (PAYMENT_OUT[reversed] || reversed === 'P25'))
+      add(cashIn, 'other_in', cash);
+    else unexplained.push(e);
+  }
+  if (feesTaken >= 0) add(cashOut, 'fees_taken', feesTaken);
+  else add(cashIn, 'other_in', -feesTaken);
+  if (remitted >= 0) add(cashOut, 'remittances', remitted);
+  else add(cashIn, 'other_in', -remitted);
+  return {
+    in: [...cashIn].map(([kind, amountMinor]) => ({ kind, amountMinor })),
+    out: [...cashOut].map(([kind, amountMinor]) => ({ kind, amountMinor })),
+    settledAtSourceMinor: settledAtSource,
+    unexplained,
+  };
+}
 
 /**
  * The agent's side, for an agency-managed owner, at the owner's level: settlements, remittances
@@ -111,6 +223,13 @@ export interface StatementAgentInput {
    * month's end, so the statement needs `rentTaxPayable`. Omitted, nothing is held back.
    */
   readonly graPaidBy?: GraPayer;
+  /**
+   * Withholding tax receivable at the month's end (1150, as a positive amount): tax a tenant
+   * withheld, waiting for its certificate (P19, P20). It is in the rent tax payable (2200) too, but
+   * the agency never pays it to GRA, so it is not held back (M9 review #9; architecture worked
+   * example B): the hold-back is max(0, rent tax payable − withholding pending).
+   */
+  readonly withholdingPendingMinor?: number;
 }
 
 export interface OwnerStatementInput {
@@ -155,6 +274,9 @@ export interface StatementAccrualSection {
   readonly earnedMinor: number;
   readonly unearnedRentMinor: number;
   readonly unearnedServiceChargeMinor: number;
+  /** Money held for tenants and applied to no month: the rest of 2010. */
+  readonly creditMinor: number;
+  /** All of 2010: unearned rent + unearned service charge + credit. */
   readonly unearnedMinor: number;
   readonly depositsHeldMinor: number;
   readonly arrearsByBucket: Readonly<Record<AgeBucket, number>>;
@@ -184,7 +306,10 @@ export interface StatementAgentSection {
   readonly reserveMinor: number;
   /** Null when the statement was not told who pays GRA. */
   readonly graPaidBy: GraPayer | null;
-  /** The owner's rent tax payable at the month's end, when the agency pays GRA; otherwise zero. */
+  /**
+   * When the agency pays GRA, the owner's rent tax payable at the month's end less the withholding
+   * pending its certificate (1150), never below zero; otherwise zero (M9 review #9).
+   */
   readonly rentTaxHeldBackMinor: number;
   /**
    * What the agent could remit at the month's end: cash held, less the rent tax held back, any
@@ -304,6 +429,7 @@ function propertyPage(input: StatementPropertyInput): StatementPage {
     input.unearnedServiceChargeMinor ?? 0,
     'Unearned service charge',
   );
+  const creditMinor = atLeastZero(input.creditMinor ?? 0, 'Credit held for tenants');
   return {
     propertyId: input.propertyId,
     cash: {
@@ -321,7 +447,8 @@ function propertyPage(input: StatementPropertyInput): StatementPage {
       earnedMinor: rentEarnedMinor + serviceChargeEarnedMinor,
       unearnedRentMinor,
       unearnedServiceChargeMinor,
-      unearnedMinor: unearnedRentMinor + unearnedServiceChargeMinor,
+      creditMinor,
+      unearnedMinor: unearnedRentMinor + unearnedServiceChargeMinor + creditMinor,
       depositsHeldMinor: atLeastZero(input.depositsHeldMinor, 'Deposits held'),
       arrearsByBucket,
       arrearsMinor: total(AGE_BUCKETS.map((b) => arrearsByBucket[b])),
@@ -360,6 +487,7 @@ function summaryPage(
       earnedMinor: sum((p) => p.accrual.earnedMinor),
       unearnedRentMinor: sum((p) => p.accrual.unearnedRentMinor),
       unearnedServiceChargeMinor: sum((p) => p.accrual.unearnedServiceChargeMinor),
+      creditMinor: sum((p) => p.accrual.creditMinor),
       unearnedMinor: sum((p) => p.accrual.unearnedMinor),
       depositsHeldMinor: sum((p) => p.accrual.depositsHeldMinor),
       arrearsByBucket,
@@ -382,8 +510,19 @@ function agentSection(
       'statement.rent_tax_payable_missing',
       'When the agency pays GRA, the statement needs the rent tax payable',
     );
+  // M9 review #9: tax a tenant withheld (1150, pending its certificate) is in 2200 but is never
+  // paid to GRA by the agency, so only the rest of the payable is held back.
+  const withholdingPendingMinor = whole(
+    agent.withholdingPendingMinor ?? 0,
+    'Withholding pending its certificate',
+  );
   const rentTax =
-    graPaidBy === null ? null : { graPaidBy, payableMinor: rentTaxPayable?.closingMinor ?? 0 };
+    graPaidBy === null
+      ? null
+      : {
+          graPaidBy,
+          payableMinor: Math.max(0, (rentTaxPayable?.closingMinor ?? 0) - withholdingPendingMinor),
+        };
   const cashIn = keyedTotals(
     AGENT_CASH_IN,
     agent.cash.in.map((m) => ({ key: m.kind, amountMinor: m.amountMinor })),
@@ -599,6 +738,7 @@ function pageRows(prefix: string, page: StatementPage): StatementFigureRow[] {
   add('accrual.earned', page.accrual.earnedMinor);
   add('accrual.unearned_rent', page.accrual.unearnedRentMinor);
   add('accrual.unearned_service_charge', page.accrual.unearnedServiceChargeMinor);
+  add('accrual.credit', page.accrual.creditMinor);
   add('accrual.unearned', page.accrual.unearnedMinor);
   add('accrual.deposits_held', page.accrual.depositsHeldMinor);
   for (const b of AGE_BUCKETS) add(`accrual.arrears.${b}`, page.accrual.arrearsByBucket[b]);

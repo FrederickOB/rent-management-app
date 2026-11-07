@@ -49,7 +49,14 @@ function value(row: DashboardDocumentData['rows'][number]): string {
   return share(row.bps);
 }
 
-function Dashboard({ data, branding }: TemplateProps<DashboardDocumentData>) {
+/** The header lines above the figures: v1's single line, or v2's snapshot and live lines. */
+type Header = (when: (iso: string) => string) => { label: string; value: string }[];
+
+function DashboardBody({
+  data,
+  branding,
+  header,
+}: TemplateProps<DashboardDocumentData> & { header: Header }) {
   const sections: { name: string; rows: DashboardDocumentData['rows'] }[] = [];
   for (const row of data.rows) {
     const last = sections[sections.length - 1];
@@ -63,10 +70,12 @@ function Dashboard({ data, branding }: TemplateProps<DashboardDocumentData>) {
       <h1>{data.title}</h1>
       <table className="summary">
         <tbody>
-          <tr>
-            <th scope="row">Figures as of</th>
-            <td>{data.asOf ? when(data.asOf) : 'Not worked out yet'}</td>
-          </tr>
+          {header(when).map((h) => (
+            <tr key={h.label}>
+              <th scope="row">{h.label}</th>
+              <td>{h.value}</td>
+            </tr>
+          ))}
           <tr>
             <th scope="row">Snapshot date</th>
             <td>{formatBusinessDate(data.date)}</td>
@@ -102,10 +111,63 @@ function Dashboard({ data, branding }: TemplateProps<DashboardDocumentData>) {
   );
 }
 
+function Dashboard(props: TemplateProps<DashboardDocumentData>) {
+  const { data } = props;
+  return (
+    <DashboardBody
+      {...props}
+      header={(when) => [
+        { label: 'Figures as of', value: data.asOf ? when(data.asOf) : 'Not worked out yet' },
+      ]}
+    />
+  );
+}
+
 export const dashboardV1 = defineTemplate({
   key: 'reporting.dashboard',
   version: 1,
   title: 'Portfolio dashboard',
   schema: dashboardSchema,
   Component: Dashboard,
+});
+
+/**
+ * Version 2 (M9 review): "Figures as of" names only the snapshot's figures, and a separate line
+ * says when the live ones (occupancy and this month's collection rate) were read (`liveAt`).
+ */
+const dashboardV2Schema = dashboardSchema.extend({
+  /** When the live figures were read: the moment of the export. */
+  liveAt: z.string().datetime(),
+});
+export type DashboardDocumentDataV2 = z.infer<typeof dashboardV2Schema>;
+
+/** What the snapshot carries, and what is read live, as the screen labels them. */
+export const DASHBOARD_SNAPSHOT_FIGURES =
+  'arrears, rent roll, money held for tenants, paid-until coverage, lease expiries and Gate 1';
+export const DASHBOARD_LIVE_FIGURES = 'occupancy and this month’s collection rate';
+
+function DashboardV2(props: TemplateProps<DashboardDocumentDataV2>) {
+  const { data } = props;
+  return (
+    <DashboardBody
+      {...props}
+      header={(when) => [
+        {
+          label: 'Figures as of',
+          value: data.asOf
+            ? `${when(data.asOf)}: ${DASHBOARD_SNAPSHOT_FIGURES}`
+            : `Not worked out yet: ${DASHBOARD_SNAPSHOT_FIGURES}`,
+        },
+        { label: 'Live figures as of', value: `${when(data.liveAt)}: ${DASHBOARD_LIVE_FIGURES}` },
+      ]}
+    />
+  );
+}
+
+export const dashboardV2 = defineTemplate({
+  key: 'reporting.dashboard',
+  version: 2,
+  title: 'Portfolio dashboard',
+  schema: dashboardV2Schema,
+  Component: DashboardV2,
 });

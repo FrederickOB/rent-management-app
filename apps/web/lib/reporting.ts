@@ -57,7 +57,10 @@ export function barParts(
   return { filled, empty: 10_000 - filled };
 }
 
-/** "0.8 s", "1.2 s", "45 s", "2 min 5 s" for a duration in milliseconds. */
+/**
+ * A duration in milliseconds, cut (not rounded) to the tenth of a second under a minute: "0.8 s",
+ * "1.2 s", "45.0 s"; then minutes and whole seconds: "2 min 5 s".
+ */
 export function durationText(ms: number | null): string {
   if (ms === null || !Number.isSafeInteger(ms) || ms < 0) return NO_RATIO;
   if (ms < 60_000) {
@@ -200,7 +203,10 @@ export interface Gate1Row {
   readonly bps: number | null;
 }
 
-/** The six Gate 1 measures as rows: the share, and the counts or amounts behind it. */
+/**
+ * The Gate 1 measures as seven rows (auto-match has two: provider payments and direct
+ * transfers): the share, and the counts or amounts behind it.
+ */
 export function gate1Rows(g: Gate1): Gate1Row[] {
   return [
     {
@@ -253,4 +259,62 @@ export function gate1Rows(g: Gate1): Gate1Row[] {
       bps: g.repairResponse.rate.bps,
     },
   ];
+}
+
+/** The Gate 1 columns for a table, the same whether or not there are figures yet. */
+export const GATE1_LABELS: readonly { readonly key: string; readonly label: string }[] = [
+  { key: 'collection', label: 'Collection rate' },
+  { key: 'digital', label: 'Paid digitally' },
+  { key: 'auto_match', label: 'Provider payments matched automatically' },
+  { key: 'direct', label: 'Direct transfers matched to a lease' },
+  { key: 'receipt', label: 'Receipts sent within a minute' },
+  { key: 'notice', label: 'Notices e-signed within 7 days' },
+  { key: 'repair', label: 'Emergency repairs started within target' },
+];
+
+/**
+ * Whether a month's Gate 1 figures are final (worked out once more after the month ended) or
+ * provisional, and when they were worked out; a total's time is the oldest across companies.
+ */
+export function gate1StatusText(
+  g: Pick<Gate1, 'status' | 'finalisedAt' | 'computedAt'>,
+  time: (iso: string) => string,
+): string {
+  return g.status === 'final'
+    ? `Final${g.finalisedAt ? `, worked out ${time(g.finalisedAt)}` : ''}.`
+    : `Provisional: the month is not over, or not yet finalised. Worked out ${time(g.computedAt)}.`;
+}
+
+/** Which figures are live and which come from the nightly snapshot (M9 review). */
+export function dashboardTimesText(
+  d: Pick<Dashboard, 'asOf' | 'liveAt'>,
+  time: (iso: string) => string,
+): { readonly live: string; readonly snapshot: string } {
+  return {
+    live: `Occupancy and the collection rate are live, as of ${time(d.liveAt)}.`,
+    snapshot: d.asOf
+      ? `Figures as of ${time(d.asOf)}: arrears, rent roll, money held for tenants, deposits, paid-up-to-date and leases ending.`
+      : 'The other figures have not been worked out yet; they are each night, or on Refresh.',
+  };
+}
+
+/**
+ * `creditMinor` on the dashboard and the statement (founder, 2026-11-07): a tenant's surplus not
+ * yet applied to any invoice line. Never just "Credit" on these two screens.
+ */
+export const CREDIT_NOT_APPLIED_LABEL = 'Paid ahead, not yet applied to a month';
+
+/** The unearned rent figure's detail: what it is, and the other money held for tenants. */
+export function unearnedDetailText(
+  d: Pick<Dashboard, 'unearnedServiceChargeMinor' | 'creditMinor'>,
+): string {
+  return `Paid and applied to rent for months that haven’t started. Also held for tenants: ${formatMinor(d.unearnedServiceChargeMinor)} of service charge paid ahead, and ${formatMinor(d.creditMinor)} paid ahead, not yet applied to a month.`;
+}
+
+/** A refused refresh, in words: someone who may not, or too soon after the last. */
+export function refreshProblemText(status: number | null, fallback: string): string {
+  if (status === 403) return 'Only agency admins, managers and landlords can refresh the figures.';
+  if (status === 429)
+    return 'The figures were refreshed less than a minute ago. Try again in a minute.';
+  return fallback;
 }

@@ -85,13 +85,15 @@ export async function expenseRows(tx: Tx, f: ExpenseFilter): Promise<ExpenseRowV
   }>(sql`
     select e.id, e.category, e.supplier_name, e.amount_minor, e.expense_date::text as expense_date,
            e.paid_by, e.property_id, p.name as property_name, e.unit_id, u.code as unit_code,
-           e.owner_id, o.display_name as owner_name, e.job_id, j.ticket_number,
+           e.owner_id, coalesce(o.display_name, '') as owner_name, e.job_id, j.ticket_number,
            e.receipt_document_id, e.note, e.entry_id, e.book_id, e.created_at,
            pay.paid_on::text as paid_on, pay.entry_id as payment_entry_id,
            r.reason as reversal_reason, r.created_at as reversed_at, pr.name as reversed_by
     from expense e
     join property p on p.company_id = e.company_id and p.id = e.property_id
-    join owner o on o.company_id = e.company_id and o.id = e.owner_id
+    -- A manager limited to properties sees no owner records (AD-02), but does see the expenses
+    -- of their properties: the owner's name is left blank for them.
+    left join owner o on o.company_id = e.company_id and o.id = e.owner_id
     left join unit u on u.company_id = e.company_id and u.id = e.unit_id
     left join maintenance_job j on j.company_id = e.company_id and j.id = e.job_id
     left join expense_payment pay on pay.company_id = e.company_id and pay.expense_id = e.id

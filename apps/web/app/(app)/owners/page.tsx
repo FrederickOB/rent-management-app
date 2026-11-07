@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { NoAccess } from '@/components/no-access';
 import { PageHeader } from '@/components/page-header';
 import { usersByOwner } from '@/lib/owner-users';
+import { hasFeature } from '@/lib/plan';
 import { allowed } from '@/lib/policy';
 import { getCompany, getMe, loadMemberships, loadOwners } from '@/lib/server/session';
 import { OwnersManager } from './owners-manager';
@@ -42,6 +43,7 @@ export default async function OwnersPage() {
           initialRows={owners.data}
           canManage={allowed(me, 'owner.manage')}
           linkedUsers={linkedUsers}
+          showReporting={hasFeature(company, 'owner_reporting')}
         />
       ) : (
         <NoAccess what="owners" />

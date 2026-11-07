@@ -23,6 +23,16 @@ export const methodOf = (value: string): RemittanceMethod | null =>
 
 const decimal = (minor: number) => toDecimal(money(minor));
 
+/** An amount that may be zero: blank or any zero ("0", "0.00") is zero; otherwise as typed. */
+export function nonNegativeMinorOf(text: string): {
+  readonly value: number | null;
+  readonly problem: string | null;
+} {
+  const cleaned = text.trim().replace(/^GH₵\s*/i, '');
+  if (!cleaned || /^0+(?:\.0{1,2})?$/.test(cleaned)) return { value: 0, problem: null };
+  return amountMinorOf(cleaned);
+}
+
 export interface RemittanceDraft {
   readonly net: string;
   readonly feesRetained: string;
@@ -44,8 +54,9 @@ export type RemittanceField = keyof RemittanceDraft | 'proof';
 
 /**
  * A remittance as the API takes it (without the proof the page adds), or the problems. The
- * screen warns when it goes past the suggestion; the API refuses what reaches past the agent's
- * cash, the fees due or the rent tax held back (409), in the words below.
+ * warnings (`remittanceWarning`) are separate: past the fees due, into the rent tax held back,
+ * past the cash held, or past the suggestion. The API refuses what reaches past the agent's cash,
+ * the fees due or the rent tax held back (409), in the words below.
  */
 export function remittanceInput(
   draft: RemittanceDraft,
@@ -63,13 +74,10 @@ export function remittanceInput(
   const errors: Partial<Record<RemittanceField, string>> = {};
   const net = amountMinorOf(draft.net);
   if (net.problem) errors.net = net.problem;
-  let fees = 0;
-  if (draft.feesRetained.trim() && draft.feesRetained.trim() !== '0') {
-    const parsed = amountMinorOf(draft.feesRetained);
-    if (parsed.problem || parsed.value === null)
-      errors.feesRetained = parsed.problem ?? 'Enter the fees retained';
-    else fees = parsed.value;
-  }
+  // Review WEB 1: fees retained may be zero however it is typed ("", "0", "0.00").
+  const parsedFees = nonNegativeMinorOf(draft.feesRetained);
+  if (parsedFees.problem) errors.feesRetained = parsedFees.problem;
+  const fees = parsedFees.value ?? 0;
   const date = pastDateProblem(draft.on, today, 'of the transfer');
   if (date) errors.on = date;
   if (!draft.method) errors.method = 'Choose how it was paid';
@@ -102,12 +110,25 @@ export function remittanceWarning(
     return s.rentTaxHeldBackMinor > 0
       ? `This takes ${formatMinor(total)} out of ${formatMinor(s.agentCashMinor)} held, which reaches into the ${formatMinor(s.rentTaxHeldBackMinor)} of rent tax held back for GRA.`
       : `This takes ${formatMinor(total)}, more than the ${formatMinor(s.agentCashMinor)} held for the owner.`;
+  // Review WEB 8: past the suggestion, though within what is held.
+  if (input.netMinor > s.netMinor)
+    return `This pays the owner ${formatMinor(input.netMinor)}, more than the ${formatMinor(s.netMinor)} suggested from the ledger.`;
   return null;
 }
 
+/** When the suggestion leaves nothing to pay the owner (the fees due take it all, or no cash). */
+export function nothingToRemitText(s: RemittanceSuggestion): string | null {
+  if (s.netMinor > 0 && s.proposal !== 'nothing') return null;
+  return s.agentCashMinor > s.rentTaxHeldBackMinor
+    ? `Nothing to remit: the fees due take all of the ${formatMinor(s.agentCashMinor - s.rentTaxHeldBackMinor)} that could be paid out.`
+    : 'Nothing to remit: the agency holds nothing for this owner beyond the rent tax held back.';
+}
+
 const MONEY_MESSAGES: Readonly<Record<string, string>> = {
+  // The same check as INSUFFICIENT_AGENT_CASH (F3), under the name remittances kept.
   OVER_AGENT_CASH:
-    'This is more than the agency holds for the owner, so nothing was recorded. Check the amount against the suggestion.',
+    'This is more than the agency holds for the owner, so nothing was recorded: the agency doesn’t hold enough of this owner’s cash. Record the owner’s funding first, or pay less.',
+  OWNER_MONEY_REVERSED: 'This was already reversed, so nothing changed.',
   FEES_OVER_DUE:
     'The fees retained are more than the fees due to the agency, so nothing was recorded.',
   INTO_RENT_TAX:
@@ -152,4 +173,28 @@ export function simpleTransferInput(
     input: { amountMinor: amount.value, on: draft.on, reference: reference || null, method },
     errors: {},
   };
+}
+
+/**
+ * What the suggestion proposes (M9 review): a remittance; fees taken on their own, when the fees
+ * due use up everything remittable; or nothing to record.
+ */
+export const suggestionProposal = (s: RemittanceSuggestion): 'remit' | 'take_fees' | 'nothing' =>
+  s.proposal;
+
+/** More fees taken than were charged (2300 above zero): never clamped, always said. */
+export function feesOverTakenText(
+  s: Pick<RemittanceSuggestion, 'feesOverTakenMinor'>,
+): string | null {
+  return s.feesOverTakenMinor > 0
+    ? `More fees have been taken than were due: ${formatMinor(s.feesOverTakenMinor)} too much. Check the fees taken before recording more.`
+    : null;
+}
+
+/** Reversing a record (P21a): a reason of 3 to 500 characters. */
+export function reversalReasonProblem(reason: string): string | null {
+  const text = reason.trim();
+  if (text.length < 3) return 'Give the reason, at least 3 characters';
+  if (text.length > 500) return 'Use at most 500 characters';
+  return null;
 }

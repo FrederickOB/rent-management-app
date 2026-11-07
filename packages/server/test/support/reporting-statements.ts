@@ -40,8 +40,12 @@ export function statementRecords(ctx: ServerTestContext, companyId: string, stat
         document_id: string | null;
         sha256: string | null;
         delivered_at: Date | null;
+        sent_at: Date | null;
+        email_message_id: string | null;
+        email_not_sent_reason: string | null;
       }>(
-        sql`select status, book_id, month, render_request_id, document_id, sha256, delivered_at
+        sql`select status, book_id, month, render_request_id, document_id, sha256, delivered_at,
+              sent_at, email_message_id, email_not_sent_reason
             from owner_statement where id = ${statementId}::uuid`,
       )
     ).rows;

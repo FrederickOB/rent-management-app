@@ -1,3 +1,10 @@
+import {
+  lineBalance,
+  postingClassOf,
+  type AllocationRow,
+  type BillingLine,
+} from '../billing/lines';
+import { AGE_BUCKETS, ageBucket, type AgeBucket } from '../billing/walk';
 import { compareDates, parseBusinessDate } from '../dates';
 import { DomainError } from '../errors';
 import { DISPLAY_STATUSES, type DisplayStatus } from '../portfolio/status';
@@ -191,5 +198,50 @@ export function paidUntilCoverage(input: {
     covered,
     rate: ratioOf(covered, input.units.length),
     medianMonthsPaidAhead: medianOf(input.units.map((u) => u.monthsPaidAhead)),
+  };
+}
+
+// Arrears as the ledger holds them (M9 review: the dashboard counts them as the statement does).
+
+export interface LedgerArrears {
+  /** Earned and unpaid (1100) past its due date, by days past due (BC-08). */
+  readonly byBucket: Readonly<Record<AgeBucket, number>>;
+  readonly totalMinor: number;
+  /**
+   * Billed and past due but not charged yet, so not owed in the ledger: an annual invoice's months
+   * not started (or a month P02 has not reached yet), what is unpaid on them by their allocations.
+   * Credit not applied to them yet is not netted off: it shows as credit (`PrepaymentSplit`).
+   */
+  readonly dueNotStartedMinor: number;
+}
+
+/**
+ * A lease's arrears on a day, as the statement counts them: each line past its due date with an
+ * amount in 1100, which is what is outstanding on a charged line (the nightly sub-ledger check's
+ * invariant 2), aged by days past due. A recurring line not charged yet is not owed in the ledger,
+ * so it is not arrears: what is unpaid on it goes in `dueNotStartedMinor`. Deposits are never
+ * arrears (BC-11). Reads only what it is given.
+ */
+export function ledgerArrears(input: {
+  readonly lines: readonly BillingLine[];
+  readonly allocations: readonly AllocationRow[];
+  readonly asOf: string;
+}): LedgerArrears {
+  parseBusinessDate(input.asOf);
+  const byBucket = Object.fromEntries(AGE_BUCKETS.map((b) => [b, 0])) as Record<AgeBucket, number>;
+  let dueNotStarted = 0;
+  for (const line of input.lines) {
+    const bucket = ageBucket(line.dueDate, input.asOf);
+    if (!bucket) continue;
+    const posting = postingClassOf(line);
+    if (posting === 'deposit') continue;
+    const { outstandingMinor } = lineBalance(line, input.allocations);
+    if (posting === 'receivable') byBucket[bucket] += outstandingMinor;
+    else dueNotStarted += outstandingMinor;
+  }
+  return {
+    byBucket,
+    totalMinor: AGE_BUCKETS.reduce((sum, b) => sum + byBucket[b], 0),
+    dueNotStartedMinor: dueNotStarted,
   };
 }

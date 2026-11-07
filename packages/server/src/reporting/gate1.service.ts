@@ -17,7 +17,7 @@ import type { NoticeType } from '@rent/domain/notices';
 import type { Actor } from '@rent/domain/policy';
 import {
   autoMatchRate,
-  collectionRate,
+  collectionRateByPeriod,
   COLLECTION_METHODS,
   digitalPaymentShare,
   isCollectionMethod,
@@ -26,9 +26,9 @@ import {
   repairResponse,
   reportMonth,
   timeToReceipt,
-  type CollectionLine,
   type CollectionMethod,
   type NoticeForMetric,
+  type PeriodCollectionLine,
   type Ratio,
   type RepairJobForMetric,
   type WindowedShare,
@@ -91,7 +91,13 @@ export interface Gate1Figures {
 
 /** What the figures were worked out from, kept beside them so a total across companies is exact. */
 export interface Gate1Inputs {
+  /** The moment the figures are as of: only what was recorded by then counts. */
   readonly asOf: string;
+  /**
+   * For a month already final: when its notices and repairs were last worked out again, while any
+   * of their windows was still open on the 1st (M9 review). Absent until then.
+   */
+  readonly windowsAsOf?: string;
   readonly collectionLines: number;
   readonly payments: number;
   readonly providerPayments: number;
@@ -109,8 +115,18 @@ export interface StoredGate1 {
 }
 
 export interface Gate1View extends Gate1Figures {
+  /**
+   * `final` once the month is over and its figures were worked out after its end (on the 1st, or
+   * the first rollup after it); `provisional` until then (M9 review).
+   */
+  readonly status: 'final' | 'provisional';
+  readonly finalisedAt: Date | null;
   readonly computedAt: Date;
 }
+
+/** Whether a stored month still has a notice or repair window open at its last working out. */
+export const hasPendingWindows = (g: Gate1Figures): boolean =>
+  g.noticeAcknowledgement.pending > 0 || g.repairResponse.pending > 0;
 
 export interface PlatformGate1View {
   readonly month: string;
@@ -118,7 +134,10 @@ export interface PlatformGate1View {
     readonly company: { readonly id: string; readonly name: string };
     readonly gate1: Gate1View | null;
   }[];
-  /** Every company's figures added up from their inputs; null when no company has any yet. */
+  /**
+   * Every company's figures added up from their inputs; null when no company has any yet. Its
+   * `computedAt` is the oldest company's, and it is final only when every company's month is.
+   */
   readonly total: Gate1View | null;
 }
 
@@ -136,6 +155,20 @@ function monthWindow(month: string, timeZone: string): { from: Date; to: Date } 
 }
 
 const asDate = (value: Date | string): Date => (value instanceof Date ? value : new Date(value));
+
+/** A stored row as read back, for the view. */
+function viewOf(row: {
+  figures: StoredGate1;
+  computed_at: Date | string;
+  finalised_at: Date | string | null;
+}): Gate1View {
+  return {
+    ...row.figures.gate1,
+    status: row.finalised_at === null ? 'provisional' : 'final',
+    finalisedAt: row.finalised_at === null ? null : asDate(row.finalised_at),
+    computedAt: asDate(row.computed_at),
+  };
+}
 
 /** Adds windowed shares (notices, repairs) across companies. */
 function addWindowed(all: readonly WindowedShare[]): WindowedShare {
@@ -215,48 +248,57 @@ export class Gate1Service {
     const range = reportMonth(month);
     const window = monthWindow(month, timeZone);
 
-    // Collection rate (decision 9): rent and service-charge lines due in the month.
+    // Collection rate (F2, founder decision 2026-11-06; replaces decision 9's due-date basis): the
+    // rent and service-charge lines whose charge period starts in the month, whatever the billing
+    // cycle, and what of them was settled by its end, counting only what was recorded by `asOf`.
     const lineRows = await tx.execute<{
       id: string;
       kind: LineKind;
-      due_date: string;
+      period_start: string;
       amount_minor: number;
+      created_at: Date | string;
     }>(
-      sql`select l.id, l.kind, l.due_date::text as due_date, l.amount_minor from invoice_line l
+      sql`select l.id, l.kind, l.period_start::text as period_start, l.amount_minor, l.created_at
+          from invoice_line l
           where l.kind in ('rent', 'service_charge')
-            and l.due_date between ${range.firstDay}::date and ${range.lastDay}::date`,
+            and l.period_start between ${range.firstDay}::date and ${range.lastDay}::date`,
     );
     const allocationRows = await tx.execute<{
       invoice_line_id: string;
       source: AllocationSource;
       amount_minor: number;
       value_date: string;
+      created_at: Date | string;
     }>(
-      sql`select a.invoice_line_id, a.source, a.amount_minor, a.value_date::text as value_date
+      sql`select a.invoice_line_id, a.source, a.amount_minor, a.value_date::text as value_date,
+            a.created_at
           from allocation a
           join invoice_line l on l.company_id = a.company_id and l.id = a.invoice_line_id
           where l.kind in ('rent', 'service_charge')
-            and l.due_date between ${range.firstDay}::date and ${range.lastDay}::date`,
+            and l.period_start between ${range.firstDay}::date and ${range.lastDay}::date`,
     );
-    const byLine = new Map<string, CollectionLine['allocations'][number][]>();
+    const byLine = new Map<string, PeriodCollectionLine['allocations'][number][]>();
     for (const a of allocationRows.rows) {
       const list = byLine.get(a.invoice_line_id) ?? [];
       list.push({
         source: a.source,
         amountMinor: Number(a.amount_minor),
         valueDate: a.value_date,
+        recordedAt: asDate(a.created_at),
       });
       byLine.set(a.invoice_line_id, list);
     }
-    const collection = collectionRate({
+    const collection = collectionRateByPeriod({
       month,
       lines: lineRows.rows.map((l) => ({
         lineId: l.id,
         kind: l.kind,
-        dueDate: l.due_date,
+        periodStart: l.period_start,
         amountMinor: Number(l.amount_minor),
+        recordedAt: asDate(l.created_at),
         allocations: byLine.get(l.id) ?? [],
       })),
+      asOf: await this.inDatabaseClock(tx, asOf),
     });
 
     // Digital share (decision 10, choice 18): money received in the month, reversed money left out.
@@ -306,13 +348,8 @@ export class Gate1Service {
     );
     const receipts = timeToReceipt(latencies.map((latencyMs) => ({ latencyMs })));
 
-    // Notice acknowledgement (decision 10, choice 21).
-    const notices = await this.noticesIn(tx, window);
-    const acknowledgement = noticeAcknowledgement({ notices, asOf });
-
-    // Repair response (decision 10; founder decision: attended means work started).
-    const jobs = await this.emergencyJobsIn(tx, companyId, window);
-    const repairs = repairResponse({ jobs, asOf });
+    // Notice acknowledgement and repair response (decision 10, choices 21 and 22).
+    const windows = await this.windowsIn(tx, companyId, month, asOf, timeZone);
 
     return {
       gate1: {
@@ -325,8 +362,8 @@ export class Gate1Service {
         digitalShare: digital,
         autoMatch: auto,
         timeToReceipt: receipts,
-        noticeAcknowledgement: acknowledgement,
-        repairResponse: repairs,
+        noticeAcknowledgement: windows.noticeAcknowledgement,
+        repairResponse: windows.repairResponse,
       },
       inputs: {
         asOf: asOf.toISOString(),
@@ -335,9 +372,49 @@ export class Gate1Service {
         providerPayments: providerRows.rows.length,
         directTransfers: transferRows.rows.length,
         receiptLatenciesMs: latencies,
-        notices: notices.length,
-        emergencyJobs: jobs.length,
+        notices: windows.notices,
+        emergencyJobs: windows.emergencyJobs,
       },
+    };
+  }
+
+  /**
+   * `asOf` (by CLOCK) on the database's clock, which stamps `created_at`: shifted by the offset
+   * between the two read now, so "recorded by `asOf`" compares one clock with itself. In
+   * production the offset is a few milliseconds; a test's fixed clock may be well behind.
+   */
+  private async inDatabaseClock(tx: Tx, asOf: Date): Promise<Date> {
+    const [row] = (await tx.execute<{ now: Date | string }>(sql`select now() as now`)).rows;
+    const offset = asDate(row!.now).getTime() - this.clock.now().getTime();
+    return new Date(asOf.getTime() + offset);
+  }
+
+  /**
+   * The month's notices and emergency repairs as of an instant (decision 10, choices 21 and 22):
+   * met, missed, and pending only while a window is still open at `asOf`. A month already final
+   * has these worked out again daily until none is pending (M9 review).
+   */
+  async windowsIn(
+    tx: Tx,
+    companyId: string,
+    month: string,
+    asOf: Date,
+    timeZone: string,
+  ): Promise<{
+    readonly noticeAcknowledgement: WindowedShare;
+    readonly repairResponse: WindowedShare;
+    readonly notices: number;
+    readonly emergencyJobs: number;
+  }> {
+    const window = monthWindow(month, timeZone);
+    const notices = await this.noticesIn(tx, window);
+    // Repair response (decision 10; founder decision: attended means work started).
+    const jobs = await this.emergencyJobsIn(tx, companyId, window);
+    return {
+      noticeAcknowledgement: noticeAcknowledgement({ notices, asOf }),
+      repairResponse: repairResponse({ jobs, asOf }),
+      notices: notices.length,
+      emergencyJobs: jobs.length,
     };
   }
 
@@ -455,12 +532,52 @@ export class Gate1Service {
 
   /** The latest stored figures of a month, in the caller's transaction (company context). */
   async latestIn(tx: Tx, month: string): Promise<Gate1View | null> {
-    const rows = await tx.execute<{ figures: StoredGate1; computed_at: Date | string }>(
-      sql`select figures, computed_at from metric_daily where month = ${month}
+    const rows = await tx.execute<{
+      figures: StoredGate1;
+      computed_at: Date | string;
+      finalised_at: Date | string | null;
+    }>(
+      sql`select figures, computed_at, finalised_at from metric_daily where month = ${month}
           order by metric_date desc limit 1`,
     );
     const row = rows.rows[0];
-    return row ? { ...row.figures.gate1, computedAt: asDate(row.computed_at) } : null;
+    return row ? viewOf(row) : null;
+  }
+
+  /**
+   * Past months to finalise (M9 review): each month before `thisMonth` the rollup stored figures
+   * for and never marked final. Normally last month, on the 1st; a month a failed run left behind
+   * is caught by the next run. In the caller's transaction (company context).
+   */
+  async monthsToFinaliseIn(tx: Tx, thisMonth: string): Promise<string[]> {
+    const rows = await tx.execute<{ month: string }>(
+      sql`select month from metric_daily where month < ${thisMonth}
+          group by month having bool_and(finalised_at is null) order by month`,
+    );
+    return rows.rows.map((r) => r.month);
+  }
+
+  /**
+   * Final months whose notices or repairs were still inside their windows when last worked out:
+   * their latest row, to work those two out again (M9 review).
+   */
+  async unsettledIn(
+    tx: Tx,
+    thisMonth: string,
+  ): Promise<{ month: string; metricDate: string; figures: StoredGate1 }[]> {
+    const rows = await tx.execute<{
+      month: string;
+      metric_date: string;
+      figures: StoredGate1;
+      finalised_at: Date | string | null;
+    }>(
+      sql`select distinct on (month) month, metric_date::text as metric_date, figures, finalised_at
+          from metric_daily where month < ${thisMonth}
+          order by month, metric_date desc`,
+    );
+    return rows.rows
+      .filter((r) => r.finalised_at !== null && hasPendingWindows(r.figures.gate1))
+      .map((r) => ({ month: r.month, metricDate: r.metric_date, figures: r.figures }));
   }
 
   private thisMonth(timeZone: string): string {
@@ -514,26 +631,36 @@ export class Gate1Service {
         display_name: string;
         figures: StoredGate1 | null;
         computed_at: Date | string | null;
+        finalised_at: Date | string | null;
       }>(
-        sql`select company_id, display_name, figures, computed_at from app.platform_gate1(${wanted})`,
+        sql`select company_id, display_name, figures, computed_at, finalised_at
+            from app.platform_gate1(${wanted})`,
       ),
     );
     const companies = rows.rows.map((r) => ({
       company: { id: r.company_id, name: r.display_name },
       gate1:
         r.figures && r.computed_at
-          ? { ...r.figures.gate1, computedAt: asDate(r.computed_at) }
+          ? viewOf({ figures: r.figures, computed_at: r.computed_at, finalised_at: r.finalised_at })
           : null,
     }));
+    const views = companies.flatMap((c) => (c.gate1 ? [c.gate1] : []));
     const stored = rows.rows.flatMap((r) => (r.figures ? [r.figures] : []));
     const total = combineGate1(wanted, stored);
-    const latest = rows.rows
-      .flatMap((r) => (r.computed_at ? [asDate(r.computed_at).getTime()] : []))
-      .reduce((a, b) => Math.max(a, b), 0);
+    if (!total) return { month: wanted, companies, total: null };
+    // The total is only as fresh as its stalest part, and final only once every part is.
+    const oldest = Math.min(...views.map((v) => v.computedAt.getTime()));
+    const final = views.every((v) => v.status === 'final');
+    const lastFinalised = Math.max(...views.map((v) => v.finalisedAt?.getTime() ?? 0));
     return {
       month: wanted,
       companies,
-      total: total ? { ...total, computedAt: new Date(latest) } : null,
+      total: {
+        ...total,
+        status: final ? 'final' : 'provisional',
+        finalisedAt: final ? new Date(lastFinalised) : null,
+        computedAt: new Date(oldest),
+      },
     };
   }
 }

@@ -21,6 +21,7 @@ import {
   type BillingServices,
 } from './support/billing';
 import { taxItemsOf, taxServices, uploadEvidence, type TaxServices } from './support/tax';
+import { fundAgentCash } from './support/owner-funding';
 import {
   propertyWithUnits,
   staffIn,
@@ -69,6 +70,15 @@ const transfer = (leaseId: string, amountMinor: number, receivedOn: string) =>
   approvedTransfer(ctx, s, b, agency.manager, agency.accountant, {
     leaseId,
     receivedInto: 'owner_account',
+    amountMinor,
+    receivedOn,
+    senderReference: 'TEST',
+  });
+/** F3 (founder-approved, 2026-11-07): rent the agency collects, so it can pay GRA from it. */
+const intoAgency = (leaseId: string, amountMinor: number, receivedOn: string) =>
+  approvedTransfer(ctx, s, b, agency.manager, agency.accountant, {
+    leaseId,
+    receivedInto: 'agency_account',
     amountMinor,
     receivedOn,
     senderReference: 'TEST',
@@ -200,6 +210,8 @@ describe('TX-03 GRA payments settle items', () => {
     const upload = await uploadEvidence(ctx, (i) => t.gra.createUpload(agency.accountant, i));
     const before = await t.reports.dueList(agency.accountant, { ownerId: ownerA });
     const owed = before.reduce((s, i) => s + i.outstandingMinor, 0);
+    // F3 (founder-approved, 2026-11-07): the owner funds the agency to pay GRA.
+    await fundAgentCash(ctx, s, b, agency.accountant, ownerA, owed);
     await t.gra.recordGraPayment(agency.accountant, {
       ownerId: ownerA,
       paidOn: today,
@@ -312,7 +324,7 @@ describe('TX-02 alerts', () => {
       signedOn: plusDays(start, -1),
       billingStartDate: start,
     });
-    await transfer(lease.id, 100_000, plusDays(today, -21));
+    await intoAgency(lease.id, 100_000, plusDays(today, -21));
     expect(await t.taxAlerts.run(agency.companyId, plusDays(today, -1))).toBe(0);
     expect(await t.taxAlerts.run(agency.companyId, today)).toBe(1);
     expect(await t.taxAlerts.run(agency.companyId, today)).toBe(0);
@@ -378,7 +390,7 @@ describe('P33 VAT returns', () => {
       signedOn: plusDays(start, -1),
       billingStartDate: start,
     });
-    await transfer(lease.id, 1_200_000, today);
+    await intoAgency(lease.id, 1_200_000, today);
     // Rent tax is on the rent only, never the VAT (15% of GH₵10,000).
     expect((await taxItemsOf(ctx, agency.companyId, lease.id)).map((i) => i.taxMinor)).toEqual([
       150_000,

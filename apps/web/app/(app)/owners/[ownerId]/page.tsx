@@ -38,6 +38,7 @@ export default async function OwnerPage({
     <OwnerReporting
       ownerId={ownerId}
       can={{
+        onPlan: hasFeature(company, 'owner_reporting'),
         reporting: hasFeature(company, 'owner_reporting') && allowed(me, 'statements.read'),
         fees: agency && hasFeature(company, 'owner_reporting'),
         changeFees: agency && hasFeature(company, 'owner_reporting') && allowed(me, 'fees.manage'),

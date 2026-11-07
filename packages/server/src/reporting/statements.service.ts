@@ -22,6 +22,7 @@ import type { IdempotencyClaim } from '../core/idempotency';
 import { queueMessage } from '../core/messages';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
+import { ownerEmailOptOutAt } from '../core/owner-consent';
 import { ownerBook } from '../ledger/ledger.queries';
 import { PostingService } from '../ledger/posting.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
@@ -76,9 +77,16 @@ export interface OwnerStatementView {
   readonly sha256: string | null;
   readonly ownerTimeZone: string;
   readonly companyTimeZone: string;
-  /** When the email with the PDF was queued to the owner (null: not sent, or no email). */
+  /** When the email with the PDF was queued to the owner (`owner_statement`); null until then. */
+  readonly sentAt: Date | null;
+  /** When the email provider reported it delivered (or read); null until it does. */
   readonly deliveredAt: Date | null;
+  /** Why no email went: no address on record, no consent, or the owner opted out (CM-09). */
+  readonly emailNotSentReason: EmailNotSentReason | null;
 }
+
+export const EMAIL_NOT_SENT_REASONS = ['no_email', 'no_consent', 'opted_out'] as const;
+export type EmailNotSentReason = (typeof EMAIL_NOT_SENT_REASONS)[number];
 
 export interface OwnerStatementDetailView extends OwnerStatementView {
   readonly figures: OwnerStatementFigures;
@@ -108,7 +116,11 @@ type StatementRecord = {
   readonly render_request_id: string | null;
   readonly document_id: string | null;
   readonly sha256: string | null;
+  /** 0047's column, no longer written: on older rows, when the email was queued. */
   readonly delivered_at: Date | string | null;
+  readonly sent_at: Date | string | null;
+  readonly email_message_id: string | null;
+  readonly email_not_sent_reason: EmailNotSentReason | null;
 };
 
 /** With its owner's facts and its issuer's name, read once the reader may see the owner. */
@@ -118,6 +130,22 @@ type StatementRow = StatementRecord & {
   readonly owner_reference: string;
   readonly owner_time_zone: string | null;
   readonly owner_email: string | null;
+  /** From the statement email's events: when the provider reported it delivered or read. */
+  readonly delivery_reported_at: Date | string | null;
+  /** From the statement email's events: why the send job did not send it, if it did not. */
+  readonly send_refused: EmailNotSentReason | null;
+};
+
+/**
+ * The send job's reasons for not sending (`message_event.reason`), as the statement names them.
+ * The job names every refusal on consent `no_consent` (M6's planner, opt-outs included); an
+ * owner's address on record is their consent, so for an owner's statement that is an opt-out.
+ */
+const NOT_SENT: Readonly<Record<string, EmailNotSentReason>> = {
+  no_address: 'no_email',
+  no_recipient: 'no_email',
+  no_consent: 'opted_out',
+  opted_out: 'opted_out',
 };
 
 const asDate = (value: Date | string): Date => (value instanceof Date ? value : new Date(value));
@@ -184,7 +212,8 @@ export class OwnerStatementsService {
   private async records(tx: Tx, where: SQL): Promise<StatementRecord[]> {
     const result = await tx.execute<StatementRecord>(
       sql`select s.id, s.owner_id, s.book_id, s.month, s.status, s.generated_at, s.issued_at,
-            s.issued_by, s.render_request_id, s.document_id, s.sha256, s.delivered_at
+            s.issued_by, s.render_request_id, s.document_id, s.sha256, s.delivered_at, s.sent_at,
+            s.email_message_id, s.email_not_sent_reason
           from owner_statement s where ${where}`,
     );
     return result.rows;
@@ -216,9 +245,11 @@ export class OwnerStatementsService {
           );
     const ownerOf = new Map(owners.rows.map((o) => [o.id, o]));
     const nameOf = new Map(people.rows.map((p) => [p.id, p.name]));
+    const delivery = await this.emailDelivery(tx, records);
     return records
       .map((r) => {
         const o = ownerOf.get(r.owner_id);
+        const d = delivery.get(r.id);
         return {
           ...r,
           issued_by_name: r.issued_by ? (nameOf.get(r.issued_by) ?? null) : null,
@@ -226,6 +257,8 @@ export class OwnerStatementsService {
           owner_reference: o?.reference ?? 'OWNER',
           owner_time_zone: o?.time_zone ?? null,
           owner_email: o?.email ?? null,
+          delivery_reported_at: d?.deliveredAt ?? null,
+          send_refused: d?.refused ?? null,
         };
       })
       .sort((a, b) =>
@@ -239,6 +272,47 @@ export class OwnerStatementsService {
               ? -1
               : 1,
       );
+  }
+
+  /**
+   * What became of each statement's email (M9 review: `deliveredAt` means the provider reported
+   * delivery), from its message's events: the first `delivered` or `read`, and the send job's
+   * reason when it did not send it. Read on demand, so nothing is copied onto the statement.
+   */
+  private async emailDelivery(
+    tx: Tx,
+    records: readonly StatementRecord[],
+  ): Promise<
+    Map<string, { deliveredAt: Date | string | null; refused: EmailNotSentReason | null }>
+  > {
+    const issued = records.filter((r) => r.status === 'issued');
+    if (issued.length === 0) return new Map();
+    const rows = await tx.execute<{
+      statement_id: string;
+      delivered_at: Date | string | null;
+      sent: boolean;
+      not_sent_reason: string | null;
+    }>(
+      sql`select m.related_id as statement_id,
+            min(e.occurred_at) filter (where e.status in ('delivered', 'read')) as delivered_at,
+            coalesce(bool_or(e.status = 'sent'), false) as sent,
+            (array_agg(e.reason order by e.occurred_at desc, e.id desc)
+               filter (where e.status = 'not_sent'))[1] as not_sent_reason
+          from message m
+          left join message_event e on e.company_id = m.company_id and e.message_id = m.id
+          where m.related_type = 'owner_statement'
+            and m.related_id = any(${`{${issued.map((r) => r.id).join(',')}}`}::uuid[])
+          group by m.related_id`,
+    );
+    return new Map(
+      rows.rows.map((r) => [
+        r.statement_id,
+        {
+          deliveredAt: r.delivered_at,
+          refused: !r.sent && r.not_sent_reason ? (NOT_SENT[r.not_sent_reason] ?? null) : null,
+        },
+      ]),
+    );
   }
 
   /** The company's facts and statements' facts, read over the whole company. */
@@ -282,7 +356,10 @@ export class OwnerStatementsService {
       sha256: row.sha256,
       ownerTimeZone: row.owner_time_zone ?? company.timeZone,
       companyTimeZone: company.timeZone,
-      deliveredAt: orNull(row.delivered_at),
+      // Rows issued before sent_at existed kept the queued time in delivered_at.
+      sentAt: orNull(row.sent_at ?? row.delivered_at),
+      deliveredAt: orNull(row.delivery_reported_at),
+      emailNotSentReason: row.email_not_sent_reason ?? row.send_refused,
     };
   }
 
@@ -513,9 +590,17 @@ export class OwnerStatementsService {
   /**
    * Issues a drafted statement (decision 7), in one transaction: the month must be over and every
    * check must pass; its figures are frozen as worked out now, the month is locked in the owner's
-   * book (anything recorded later takes the open month's accounting date), and its PDF is
-   * requested. The email follows once the PDF exists (`onDocumentRendered`). Nothing is sent to a
-   * provider here. Idempotent by state: a second issue is refused (409 STATEMENT_ISSUED).
+   * book (with every earlier month, F1: anything recorded later takes the open month's accounting
+   * date), and its PDF is requested. The email follows once the PDF exists (`onDocumentRendered`).
+   * Nothing is sent to a provider here. Idempotent by state: a second issue is refused (409
+   * STATEMENT_ISSUED).
+   *
+   * The race with postings (M9 review): the first thing the transaction does is take the book's
+   * period lock exclusively, waiting for postings in flight to commit; postings meeting it are
+   * refused until it commits. The figures are then worked out under READ COMMITTED: each read
+   * sees every posting committed before the lock, and nothing that feeds the figures can commit
+   * for this book until the lock is released. (REPEATABLE READ would fix its snapshot at the
+   * transaction's first statement, before the lock is granted, and miss those postings.)
    */
   async issue(
     actor: Actor | null,
@@ -524,7 +609,8 @@ export class OwnerStatementsService {
   ): Promise<OwnerStatementDetailView> {
     const staff = await this.allowed(actor, 'statements.issue');
     const { row, company } = await this.scopedRow(staff, statementId);
-    await withCompany(this.database, this.wholeOwner(staff), async (tx) => {
+    const done = await withCompany(this.database, this.wholeOwner(staff), async (tx) => {
+      await this.posting.lockBookForIssue(tx, row.book_id);
       await options.claim?.claim(tx);
       const [locked] = (
         await tx.execute<{ status: OwnerStatementStatus }>(
@@ -601,9 +687,19 @@ export class OwnerStatementsService {
         lockedBy: staff.personId,
       });
       await options.claim?.done(tx, { statementId: row.id });
+      return { computed, properties: data.propertyNames };
     });
+    // The figures just frozen: issued in this transaction, so they match by construction, and
+    // working the month out a second time for the answer would only cost time.
     const issued = await this.scopedRow(staff, row.id);
-    return this.detail(staff, issued.row, company);
+    return {
+      ...this.view(issued.row, company),
+      figures: done.computed.figures,
+      properties: done.properties,
+      expenses: done.computed.expenses,
+      matchesIssued: true,
+      actions: { issue: false, regenerate: false },
+    };
   }
 
   /** The PDF's frozen data: the figures as issued, names, times, payments and expenses. */
@@ -678,8 +774,12 @@ export class OwnerStatementsService {
    * `documents.rendered` for a statement (as M8's `MoveOutService.onDocumentRendered`): the PDF's
    * document and SHA-256 are recorded once on the issued statement, and the email with the PDF
    * attached is queued through the outbox to the owner's email on record, in the same
-   * transaction; `delivered_at` is when it was queued. An owner with no email is not emailed, and
-   * sees the statement in the web app. Idempotent.
+   * transaction, with its own purpose (`owner_statement`: business-initiated, so consent and
+   * opt-outs apply; CM-09). `sent_at` is when it was queued and `email_message_id` its message;
+   * delivery is read from the message's events. No email goes to an owner with no address
+   * (`no_email`) or one who opted out (`opted_out`); they see the statement in the web app.
+   * Owners have no consent register: the address on record is the consent, as for M4b's owner
+   * messages (see core/owner-consent.ts). Idempotent.
    */
   async onDocumentRendered(companyId: string, renderRequestId: string): Promise<boolean> {
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
@@ -699,13 +799,16 @@ export class OwnerStatementsService {
       if (!row || row.status !== 'issued' || row.document_id) return false;
       const company = await companyRecord(tx, companyId);
       const now = this.clock.now();
-      let deliveredAt: Date | null = null;
-      if (row.owner_email) {
+      let sent: { readonly at: Date; readonly messageId: string } | null = null;
+      let notSent: EmailNotSentReason | null = null;
+      if (!row.owner_email?.trim()) notSent = 'no_email';
+      else if (await ownerEmailOptOutAt(tx, row.owner_id)) notSent = 'opted_out';
+      else {
+        const messageId = uuidv5(`${row.id}:statement-email`, NAMESPACE);
         await queueMessage(tx, companyId, {
-          messageId: uuidv5(`${row.id}:statement-email`, NAMESPACE),
+          messageId,
           recipient: { type: 'owner', ownerId: row.owner_id },
-          // No purpose of its own yet: an owner's message about their own money, as M4b's alerts.
-          purpose: 'settlement_alert',
+          purpose: 'owner_statement',
           channels: ['email'],
           subject: `Your statement for ${monthLabel(row.month)}`,
           body: `${company?.displayName ?? 'Your agent'} has issued your owner statement for ${monthLabel(row.month)}. It is attached.`,
@@ -716,11 +819,13 @@ export class OwnerStatementsService {
             filename: `owner-statement-${row.month}.pdf`,
           },
         });
-        deliveredAt = now;
+        sent = { at: now, messageId };
       }
       await tx.execute(
         sql`update owner_statement set document_id = ${rendered.documentId}::uuid,
-              sha256 = ${rendered.sha256}, delivered_at = ${deliveredAt}, updated_at = ${now}
+              sha256 = ${rendered.sha256}, sent_at = ${sent?.at ?? null},
+              email_message_id = ${sent?.messageId ?? null}::uuid,
+              email_not_sent_reason = ${notSent}, updated_at = ${now}
             where id = ${row.id}::uuid and document_id is null`,
       );
       return true;

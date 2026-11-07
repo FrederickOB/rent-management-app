@@ -196,6 +196,7 @@ describe('TX-02 TX-04 TX-05 P33 AR-05 the compliance list (decision 14)', () => 
     const overdue = items.filter((i) => i.kind === 'rent_tax_overdue');
     expect(overdue).toEqual([
       {
+        id: `rent_tax_overdue:${c.ownerP}:${c.flats}:${plusDays(today, -10)}`,
         kind: 'rent_tax_overdue',
         owner: { id: c.ownerP, name: 'Owner P' },
         property: { id: c.flats, name: 'ACC-CMP property' },

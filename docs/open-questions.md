@@ -1,6 +1,6 @@
 # Open questions
 
-61 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+63 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
 **Status on 28 Oct 2026:** 16 decided by the founder. 32 wait on counsel, the tax adviser or providers; research findings with sources are at the end of this file. 2 (OQ-35, OQ-37) wait on pricing research.
 
@@ -56,6 +56,7 @@
 | OQ-48 | Services carry VAT with no registration threshold. Must the platform register for VAT, and charge VAT and levies on subscription invoices? | Tax adviser | M10 | Register, and show VAT and levies on subscription invoices. | |
 | OQ-60 | Does an agency's management fee carry VAT and levies? If so, at what rates, and how should it appear on the owner's statement? (AC-02) | Tax adviser | M9 | Fees post gross, with no VAT, until answered (M9 decision 4). A later rules row would add VAT to new fees without changing past ones. | |
 | OQ-61 | When is a VAT return due to GRA, and does it depend on the filing period? (P33; the compliance list, M9 decision 14) | Tax adviser | Before the commercial pilot | No due date is shown or computed. The rules table holds `vat.return_due_days` with no value, `unverified`, and the compliance list shows each unpaid VAT return as "Due date unverified" until the adviser supplies the value and its source. A value, once supplied, is read as days after the end of the month the VAT was charged in; if the answer depends on the filing period, the key's shape changes with it. | |
+| OQ-62 | For an owner who is in the business of letting (Act 896 s.120, OQ-18), tax a corporate tenant withholds is a credit, not final, and is not accrued to rent tax payable (2200). When the agency pays GRA for that owner, the remittance hold-back subtracts the withholding pending its certificate (1150) from 2200: should it, or does that hold back too little of the owner's other rent tax? (M9 review #9) | Tax adviser | Before the commercial pilot | The hold-back is max(0, rent tax payable − withholding pending its certificate) for every owner (architecture worked example B). For a letting-business owner this may hold back too little; staff can keep more back by remitting less than suggested. | |
 
 ## Platform and providers
 
@@ -89,6 +90,7 @@
 | OQ-38 | How long is the free trial or guided onboarding period? (PB-08) | Founder | M10 | 30 days, configurable. | Decided 2026-10-28: as recommended. |
 | OQ-54 | Consent (CM-09) is recorded per channel, not per phone number or email. When staff change a tenant's or contact's phone or email, should the consent on record carry over to the new one, or must it be recorded again? (M3 review) | Founder, with counsel if needed | M6 (WhatsApp and broadcasts) | Ask again: a changed phone or email starts with no consent on that channel, and staff record the person's agreement for the new one. Until then, the edit forms say that consent stays with the new value and ask staff to check (M3). | Decided 2026-11-04: as recommended (M6 decision 8). |
 | OQ-55 | ADR-008 sends the owner an SMS and email alert when a settlement account is added, changed or retired. CM-09 sends a business-initiated message only on a channel with consent recorded. Is this security alert exempt, like a one-time code the person asked for? (M4b) | Founder, with counsel if needed | M4b report | Exempt: the alert goes to the phone and email on record whatever consent says, carries no marketing and no link, and is recorded as a message like any other. Built this way (`settlement_alert` purpose). | |
+| OQ-63 | Owner statements go by email only where the owner has not opted out, and the only opt-out an owner can make today is a spam complaint the email provider reports: unsubscribe links exist for tenants only (`unsubscribe_token` names a tenant). Should owners get an unsubscribe link and route for statements, and which messages may they opt out of? (M9 review, CM-09) | Founder | Before agencies use owner statements in the pilot | Add an owner unsubscribe link and route for statements before the pilot (a schema change: an owner-scoped token), and treat a request to stop as an opt-out for statements only. Until then the only opt-out recorded is the provider's spam complaint, and statements stay available in the web app. | |
 
 ## Research findings, 28 Oct 2026
 

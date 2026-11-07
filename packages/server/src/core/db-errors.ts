@@ -132,6 +132,17 @@ export function maintenanceCheckConflict(error: unknown): AppError | null {
       );
     case 'RA090':
       return conflict('expense_closed', 'This expense was already paid or reversed. Reload it.');
+    // M9 review (0055): an owner statement being issued, and an issue without its month's lock.
+    case 'RA095':
+      return conflict(
+        'statement_issuing',
+        'An owner statement for this book is being issued. Try again in a moment.',
+      );
+    case 'RA096':
+      return conflict(
+        'statement_lock_missing',
+        'An owner statement was issued without locking its month. Nothing was recorded.',
+      );
     default:
       return null;
   }

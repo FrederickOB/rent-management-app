@@ -6,7 +6,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { todayIn } from '@/lib/business-dates';
-import { gate1Rows } from '@/lib/reporting';
+import { GATE1_LABELS, gate1Rows } from '@/lib/reporting';
 import { monthLabel } from '@/lib/rent-tax';
 import { draftableMonths } from '@/lib/statements';
 import { useLoad } from '@/lib/use-load';
@@ -61,17 +61,11 @@ export function PlatformGate1() {
                       <th scope="col" className="py-1 pr-3 font-medium">
                         Company
                       </th>
-                      {state.data.total
-                        ? gate1Rows(state.data.total).map((r) => (
-                            <th
-                              key={r.key}
-                              scope="col"
-                              className="py-1 pr-3 text-right font-medium"
-                            >
-                              {r.label}
-                            </th>
-                          ))
-                        : null}
+                      {GATE1_LABELS.map((r) => (
+                        <th key={r.key} scope="col" className="py-1 pr-3 text-right font-medium">
+                          {r.label}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -91,7 +85,7 @@ export function PlatformGate1() {
                             </td>
                           ))
                         ) : (
-                          <td className="py-2 text-slate-600" colSpan={7}>
+                          <td className="py-2 text-slate-600" colSpan={GATE1_LABELS.length}>
                             No figures yet
                           </td>
                         )}

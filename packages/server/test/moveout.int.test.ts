@@ -19,6 +19,7 @@ import {
   type BillingServices,
 } from './support/billing';
 import { maintenanceServices, type MaintenanceServices } from './support/maintenance';
+import { fundAgentCash, ownerOfLease } from './support/owner-funding';
 import { taxServices, uploadEvidence, type TaxServices } from './support/tax';
 import { propertyWithUnits, tenancyServices, type TenancyServices } from './support/tenancy';
 
@@ -179,6 +180,15 @@ describe('TL-11 and MI-11 the move-out settlement', () => {
     if (st.refundMinor > 0) {
       const proof = await uploadEvidence(ctx, (i) =>
         m.moveOuts.createRefundUpload(c.accountant, i),
+      );
+      // F3 (founder-approved, 2026-11-07): the owner funds the agency to pay the refund.
+      await fundAgentCash(
+        ctx,
+        s,
+        b,
+        c.accountant,
+        await ownerOfLease(ctx, b, c.companyId, lease.id),
+        st.refundMinor,
       );
       const paid = await m.moveOuts.recordRefundPaid(c.accountant, planned.id, {
         paidOn: today,

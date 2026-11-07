@@ -120,6 +120,8 @@ export function feeTermsInput(
 }
 
 const FEE_TERMS_MESSAGES: Readonly<Record<string, string>> = {
+  APPROVAL_OPEN:
+    'A change to this owner’s terms is already waiting for a second person. It must be approved or rejected before another change can be asked for.',
   NOT_AN_AGENCY:
     'Only an agency charges management fees; a landlord who manages their own property pays none.',
   FEE_TERMS:
@@ -130,3 +132,7 @@ const FEE_TERMS_MESSAGES: Readonly<Record<string, string>> = {
 
 export const feeTermsMessage = (error: unknown): string | null =>
   FEE_TERMS_MESSAGES[errorCode(error)] ?? null;
+
+/** Review WEB 8: the date note on the change form. */
+export const EFFECTIVE_FROM_NOTE =
+  'If it is approved after this date, the new terms take effect from the day it is approved: receipts before then keep the terms in force at the time.';

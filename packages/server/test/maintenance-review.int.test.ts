@@ -29,6 +29,7 @@ import {
   putUpload,
   type MaintenanceServices,
 } from './support/maintenance';
+import { fundAgentCash } from './support/owner-funding';
 import { taxServices, uploadEvidence, type TaxServices } from './support/tax';
 import {
   deliverMessages,
@@ -527,6 +528,8 @@ describe('AC-03 expenses: who paid is in the right book, and a landlord has no a
         expenseDate: today,
         paidBy,
       });
+    // F3 (founder-approved, 2026-11-07): the owner funds the agency to pay the bill.
+    await fundAgentCash(ctx, s, b, agency.accountant, agency.ownerId, 12_000);
     const agent = await record(agency, 'agent', 'agent');
     const owner = await record(agency, 'owner', 'owner');
     const [rowA] = await m.expenses.list(agency.accountant, { propertyId: agency.property });

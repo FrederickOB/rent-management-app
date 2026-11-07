@@ -11,6 +11,7 @@ import {
   COMPLIANCE_KIND_LABELS,
   COMPLIANCE_LINK_TEXT,
   complianceHref,
+  complianceKeys,
   dueText,
   sortCompliance,
 } from '@/lib/compliance';
@@ -31,6 +32,8 @@ export function ComplianceView() {
     [ownerId, propertyId],
   );
   const { state, reload } = useLoad(load);
+  const sorted = state.status === 'ready' ? sortCompliance(state.data) : [];
+  const keys = complianceKeys(sorted);
 
   useEffect(() => {
     let current = true;
@@ -86,12 +89,12 @@ export function ComplianceView() {
         ) : null}
         {state.status === 'ready' && state.data.length > 0 ? (
           <ul className="divide-y divide-slate-100 text-sm">
-            {sortCompliance(state.data).map((item, index) => {
+            {sorted.map((item, index) => {
               const href = complianceHref(item);
               const due = dueText(item);
               return (
                 <li
-                  key={`${item.kind}-${item.lease?.id ?? item.property?.id ?? item.owner?.id ?? index}`}
+                  key={item.id || keys[index]}
                   className="space-y-1 py-3"
                   data-testid="compliance-item"
                   data-kind={item.kind}

@@ -25,7 +25,9 @@ export const dashboardOnRendered =
 /**
  * The dashboard's jobs (M9 plan 4.9; architecture section 10). `reporting.metrics-rollup` runs
  * daily at 04:00 Africa/Accra and fans out one company job per company; a refresh from the
- * dashboard queues the same work for one company through the outbox. Both replace the day's
+ * dashboard queues the same work for one company through the outbox. On the 1st the run also
+ * finalises last month's Gate 1 figures (M9 review), and each run settles a final month's notices
+ * and repairs while their windows are still open. Both replace the day's
  * snapshot whole, so a retry or a second run changes nothing (company + date). Neither queue is
  * filled in bulk by the seed or by people, so neither drains.
  */
@@ -44,7 +46,12 @@ export function reportingDashboardJobs(
       async handle({ companyId }, ctx) {
         const done = await deps.rollup.run(companyId);
         ctx.logger.info(
-          { leases: done.leases, snapshotDate: done.snapshotDate },
+          {
+            leases: done.leases,
+            snapshotDate: done.snapshotDate,
+            finalised: done.finalised,
+            settled: done.settled,
+          },
           'metrics rollup done',
         );
       },
@@ -57,7 +64,12 @@ export function reportingDashboardJobs(
       async handle({ companyId }, ctx) {
         const done = await deps.rollup.run(companyId);
         ctx.logger.info(
-          { leases: done.leases, snapshotDate: done.snapshotDate },
+          {
+            leases: done.leases,
+            snapshotDate: done.snapshotDate,
+            finalised: done.finalised,
+            settled: done.settled,
+          },
           'metrics refreshed',
         );
       },
