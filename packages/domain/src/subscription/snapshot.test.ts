@@ -203,15 +203,15 @@ describe('PB-02 snapshot (D8, property-based)', () => {
         const billed = billableUnits(month, units);
         const byId = new Map(billed.map((u) => [u.unitId, u]));
         const { first, last } = monthBounds(month);
+        // The month's days, worked out once per case (founder-approved speed-up, M10 CI).
+        const days = Array.from({ length: daysInMonth(month) }, (_, i) => dayOf(month, i));
         for (const u of units) {
           const overlaps = u.leases.some(
             (l) => l.startDate <= last && (l.lastDay === null || l.lastDay >= first),
           );
           expect(byId.has(u.unitId)).toBe(overlaps);
           expect(byId.has(u.unitId)).toBe(billableInMonth(u.leases, month));
-          let covered = 0;
-          for (let i = 0; i < daysInMonth(month); i += 1)
-            if (u.leases.some((l) => covers(l, dayOf(month, i)))) covered += 1;
+          const covered = days.filter((day) => u.leases.some((l) => covers(l, day))).length;
           const row = byId.get(u.unitId);
           if (!row) {
             expect(covered).toBe(0);
@@ -220,11 +220,7 @@ describe('PB-02 snapshot (D8, property-based)', () => {
           expect(row.daysLeased).toBe(covered);
           expect(row.band).toBe(u.band);
           // The named lease is one of the unit's, with the most days in the month.
-          const daysOf = (l: SnapshotLeaseInput) => {
-            let n = 0;
-            for (let i = 0; i < daysInMonth(month); i += 1) if (covers(l, dayOf(month, i))) n += 1;
-            return n;
-          };
+          const daysOf = (l: SnapshotLeaseInput) => days.filter((day) => covers(l, day)).length;
           const named = u.leases.find((l) => l.leaseId === row.leaseId)!;
           expect(named).toBeDefined();
           for (const other of u.leases) expect(daysOf(named)).toBeGreaterThanOrEqual(daysOf(other));

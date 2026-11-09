@@ -582,7 +582,10 @@ export function registerPayments(
 
   /**
    * Pays out every successful charge not yet settled, one settlement per subaccount, less the
-   * chargebacks and refunds not yet deducted (OQ-41).
+   * chargebacks and refunds not yet deducted (OQ-41). As a provider does, a payout is never
+   * negative: when more is taken back than is due, nothing is paid out to that subaccount and
+   * its charges and deductions wait for a later payout with enough in it. (The store is shared,
+   * so another caller's settle may come between a chargeback and the next charge.)
    */
   app.post('/payments/_test/settle', async (_request, reply) => {
     const due = new Map<string, { paid: FakeTransaction[]; back: FakeTransaction[] }>();
@@ -602,7 +605,7 @@ export function registerPayments(
         group(tx.subaccount).back.push(tx);
     }
     const settledAt = new Date().toISOString();
-    const created = [...due].map(([subaccount, { paid, back }]): FakeSettlement => {
+    const created = [...due].flatMap(([subaccount, { paid, back }]): FakeSettlement[] => {
       const totalAmount = paid.reduce((sum, tx) => sum + tx.amount, 0);
       const totalFees = paid.reduce((sum, tx) => sum + tx.fees, 0);
       const deducted = back.map((tx) => ({
@@ -610,6 +613,7 @@ export function registerPayments(
         amount: tx.chargedBack!.amount,
       }));
       const deductions = deducted.reduce((sum, d) => sum + d.amount, 0);
+      if (totalAmount - totalFees - deductions < 0) return [];
       const settlement: FakeSettlement = {
         id: ids.nextNumber(),
         subaccount,
@@ -624,7 +628,7 @@ export function registerPayments(
       for (const tx of paid) tx.settlementId = settlement.id;
       for (const tx of back)
         tx.chargedBack = { amount: tx.chargedBack!.amount, deductedIn: settlement.id };
-      return settlement;
+      return [settlement];
     });
     store.settlements.push(...created);
     return reply.send({

@@ -273,6 +273,48 @@ describe('PLATFORM fake providers: payments', () => {
     ).toBe(400);
   });
 
+  it('never pays out a negative settlement: a chargeback waits for a payout with enough in it (M10 CI)', async () => {
+    const app = buildServer(createStore(), { paymentsSecretKey: KEY });
+    const sub = await subaccount(app);
+    const settle = async () =>
+      (await app.inject({ method: 'POST', url: '/payments/_test/settle', payload: {} })).json<{
+        settlements: {
+          total_amount: number;
+          deductions: number;
+          effective_amount: number;
+          references: string[];
+          deducted: { reference: string; amount: number }[];
+        }[];
+      }>().settlements;
+    await initialize(app, chargeBody(sub, 'pay-n1', { amount: 40_000 }));
+    await app.inject({
+      method: 'POST',
+      url: '/payments/_test/charges/pay-n1',
+      payload: { status: 'success', feesMinor: 0 },
+    });
+    expect((await settle()).map((s) => s.references)).toEqual([['pay-n1']]);
+    await app.inject({ method: 'POST', url: '/payments/_test/chargebacks/pay-n1', payload: {} });
+
+    // Nothing due yet to cover the 40,000 taken back: no payout, and the deduction waits.
+    expect(await settle()).toEqual([]);
+
+    await initialize(app, chargeBody(sub, 'pay-n2', { amount: 70_000 }));
+    await app.inject({
+      method: 'POST',
+      url: '/payments/_test/charges/pay-n2',
+      payload: { status: 'success', feesMinor: 1_000 },
+    });
+    expect(await settle()).toEqual([
+      expect.objectContaining({
+        total_amount: 70_000,
+        deductions: 40_000,
+        effective_amount: 29_000,
+        references: ['pay-n2'],
+        deducted: [{ reference: 'pay-n1', amount: 40_000 }],
+      }),
+    ]);
+  });
+
   it('serves a fake checkout page whose form completes the charge', async () => {
     const app = buildServer(createStore(), { paymentsSecretKey: KEY });
     const sub = await subaccount(app);
