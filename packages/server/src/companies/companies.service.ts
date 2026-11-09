@@ -1,20 +1,25 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq, schema, withCompany, type Database, type Tx } from '@rent/db';
+import { eq, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
+import { businessDateOf, instantFrom, toIsoDate } from '@rent/domain/dates';
+import {
+  subscriptionAccess,
+  type CompanyAccess,
+  type SubscriptionStatus,
+} from '@rent/domain/subscription';
 import type { Actor } from '@rent/domain/policy';
 import {
   brandingSchema,
-  DEFAULT_INTERIM_PLAN,
   featuresOf,
-  isInterimPlan,
   mergeCompanySettings,
   messagingSettingsOf,
   paidUntilPromptDaysOf,
   parseCompanySettings,
   signingReminderHoursOf,
   tenancySettingsOf,
+  tierOf,
   type CompanySettings,
-  type InterimPlan,
   type PlanFeature,
+  type SubscriptionTier,
 } from '@rent/domain/settings';
 import { forbidden, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
@@ -37,8 +42,21 @@ export interface CompanyProfileView {
   };
   readonly settings: CompanySettings;
   /** M6 decision 9: the interim plan and what it includes, so screens show only what is there. */
-  readonly plan: InterimPlan;
+  readonly plan: SubscriptionTier;
   readonly features: PlanFeature[];
+  /** M10: what the past-due and read-only banner needs; null with no subscription (the platform). */
+  readonly subscription: SubscriptionBanner | null;
+}
+
+export interface SubscriptionBanner {
+  readonly status: SubscriptionStatus;
+  readonly access: CompanyAccess;
+  readonly trialEndsOn: string | null;
+  readonly readOnlyFrom: string | null;
+  readonly oldestDueOn: string | null;
+  /** Only for people with `subscription.read`. */
+  readonly pastDueMinor: number | null;
+  readonly canPay: boolean;
 }
 
 export type StaffActor = Extract<Actor, { kind: 'staff' }>;
@@ -74,12 +92,12 @@ export class CompaniesService {
   async profile(actor: Actor | null): Promise<CompanyProfileView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'company.view');
-    const company = await withCompany(this.database, context(staff), async (tx) => {
+    const { company, banner } = await withCompany(this.database, context(staff), async (tx) => {
       const [row] = await tx
         .select()
         .from(schema.company)
         .where(eq(schema.company.id, staff.companyId));
-      return row;
+      return { company: row, banner: row ? await this.banner(tx, staff, row) : null };
     });
     if (!company) throw notFound('Company');
     const logoUrl = company.logoDocumentId
@@ -100,8 +118,63 @@ export class CompaniesService {
         logoUrl,
       },
       settings: settingsInForce(parseCompanySettings(company.settings)),
-      plan: planOf(company.interimPlan),
-      features: [...featuresOf(planOf(company.interimPlan))],
+      plan: tierOf(company.plan),
+      features: [...featuresOf(tierOf(company.plan))],
+      subscription: banner,
+    };
+  }
+
+  /**
+   * M10 (decision 11): the banner's inputs for every staff member, read in the company's own
+   * context through the select-only policy on its subscription rows. The amount only for those
+   * who may read the subscription.
+   */
+  private async banner(
+    tx: Tx,
+    staff: StaffActor,
+    company: { readonly access: string; readonly timeZone: string },
+  ): Promise<SubscriptionBanner | null> {
+    const rows = await tx.execute<{ status: SubscriptionStatus; trial_ends_on: string | null }>(
+      sql`select status, trial_ends_on::text from subscription
+          where subscriber_company_id = ${staff.companyId}::uuid`,
+    );
+    const sub = rows.rows[0];
+    if (!sub) return null;
+    const today = toIsoDate(businessDateOf(instantFrom(new Date()), company.timeZone));
+    const open = await tx.execute<{ due_on: string; outstanding: string | number }>(
+      sql`select i.due_on::text, i.total_minor - coalesce((select sum(a.amount_minor) from subscription_allocation a
+              left join subscription_payment p on p.company_id = a.company_id and p.id = a.payment_id
+              where a.company_id = i.company_id and a.invoice_id = i.id
+                and (a.payment_id is null or p.status = 'succeeded')), 0) as outstanding
+          from subscription_invoice i
+          where i.subscriber_company_id = ${staff.companyId}::uuid and i.status = 'open'
+          order by i.due_on`,
+    );
+    const owing = open.rows.filter((r) => Number(r.outstanding) > 0);
+    const pastDue = owing.filter((r) => r.due_on < today);
+    const terms = await tx.execute<{ grace_days: number; read_only_enabled: boolean }>(
+      sql`select grace_days, read_only_enabled from subscription_terms where effective_from <= ${today}::date
+          order by effective_from desc, created_at desc limit 1`,
+    );
+    const t = terms.rows[0];
+    const access = subscriptionAccess({
+      today,
+      trialEndsOn: sub.trial_ends_on,
+      cancelsOn: null,
+      oldestUnpaidDueOn: owing[0]?.due_on ?? null,
+      graceDays: Number(t?.grace_days ?? 14),
+      readOnlyEnabled: t?.read_only_enabled ?? true,
+    });
+    return {
+      status: sub.status,
+      access: company.access === 'read_only' ? 'read_only' : 'full',
+      trialEndsOn: sub.status === 'trialing' ? sub.trial_ends_on : null,
+      readOnlyFrom: access.readOnlyFrom,
+      oldestDueOn: pastDue[0]?.due_on ?? null,
+      pastDueMinor: this.policy.can(staff, 'subscription.read').allowed
+        ? pastDue.reduce((sum, r) => sum + Number(r.outstanding), 0)
+        : null,
+      canPay: this.policy.can(staff, 'subscription.manage').allowed,
     };
   }
 
@@ -166,9 +239,6 @@ export class CompaniesService {
     return this.profile(staff);
   }
 }
-
-const planOf = (value: string): InterimPlan =>
-  isInterimPlan(value) ? value : DEFAULT_INTERIM_PLAN;
 
 /** Stored settings with the M3 keys' defaults applied, so screens show the values in force. */
 function settingsInForce(settings: CompanySettings): CompanySettings {

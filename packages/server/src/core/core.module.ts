@@ -45,6 +45,7 @@ import { FieldCipher } from './crypto/field-cipher';
 import { IdempotencyStore } from './idempotency';
 import { PaymentProviders, paymentProvidersFor } from './payment-providers';
 import { createLogger, type AppLogger } from './logging/logger';
+import { StoredAlert } from './stored-alert';
 import {
   ADDRESS_LOOKUP_PORT,
   ALERT_PORT,
@@ -237,18 +238,25 @@ export class CoreModule {
       },
       {
         provide: ALERT_PORT,
-        inject: [EMAIL_PORT],
-        useFactory: (email: EmailPort) =>
-          options.alerts ??
-          new CompositeAlert([
-            new CallbackAlert((alert) =>
-              logger.error(
-                { alert: { severity: alert.severity, code: alert.code, context: alert.context } },
-                alert.message,
-              ),
-            ),
-            new EmailAlert(email, config.OPS_ALERT_EMAIL),
-          ]),
+        inject: [EMAIL_PORT, DATABASE],
+        // M10 decision 15: every alert is also stored (alert_event) for the console's health page.
+        useFactory: (email: EmailPort, database: Database) =>
+          new StoredAlert(
+            options.alerts ??
+              new CompositeAlert([
+                new CallbackAlert((alert) =>
+                  logger.error(
+                    {
+                      alert: { severity: alert.severity, code: alert.code, context: alert.context },
+                    },
+                    alert.message,
+                  ),
+                ),
+                new EmailAlert(email, config.OPS_ALERT_EMAIL),
+              ]),
+            database,
+            logger,
+          ),
       },
     ];
     return {

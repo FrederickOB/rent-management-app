@@ -860,6 +860,8 @@ export class MoneyService {
     this.approvals.register({
       actionType: CASH_RECEIPT_ACTION,
       eligibleRoles: APPROVERS,
+      // M10 decision 11: money received is still recorded while the subscription is read-only.
+      recordsMoneyIn: true,
       schema: cashPayload,
       // Lease, then the counters (receipt; invoices a VAT advance issues), before the decision row.
       prepare: async (tx, request) => {
@@ -900,6 +902,8 @@ export class MoneyService {
     this.approvals.register({
       actionType: DIRECT_RECEIPT_ACTION,
       eligibleRoles: APPROVERS,
+      // M10 decision 11: money received is still recorded while the subscription is read-only.
+      recordsMoneyIn: true,
       schema: transferPayload,
       prepare: async (tx, request) => {
         const leaseId = (request.payload as { leaseId: string | null }).leaseId;
@@ -950,6 +954,8 @@ export class MoneyService {
     this.approvals.register({
       actionType: BANKING_ACTION,
       eligibleRoles: APPROVERS,
+      // M10 decision 11: money received is still recorded while the subscription is read-only.
+      recordsMoneyIn: true,
       schema: bankingPayload,
       prepare: async (tx, request) => {
         const p = request.payload as { collectorPersonId: string; bookId: string };

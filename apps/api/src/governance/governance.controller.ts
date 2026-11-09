@@ -6,8 +6,10 @@ import { ApprovalsService, type ApprovalView } from '@rent/server/approvals';
 import { AuditService } from '@rent/server/audit';
 import { forbidden } from '@rent/server/core';
 import { PolicyService } from '@rent/server/policy';
+import { RulesConsoleService } from '@rent/server/admin';
 import { RulesService } from '@rent/server/rules';
 import { Ctx, type RequestContext } from '../http/request-context';
+import { serialize } from '../http/serialize';
 
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
@@ -44,6 +46,7 @@ export class GovernanceController {
     @Inject(ApprovalsService) private readonly approvals: ApprovalsService,
     @Inject(RulesService) private readonly rules: RulesService,
     @Inject(PolicyService) private readonly policy: PolicyService,
+    @Inject(RulesConsoleService) private readonly rulesConsole: RulesConsoleService,
   ) {}
 
   @Implement(contract.audit.search)
@@ -93,26 +96,35 @@ export class GovernanceController {
     };
   }
 
-  @Implement(contract.rules.list)
-  rulesList(@Ctx() ctx: RequestContext) {
-    return implement(contract.rules.list).handler(async ({ input }) => {
-      if (!ctx.actor) throw forbidden();
-      this.policy.assert(ctx.actor, 'rules.view');
-      const asOf = input.asOf
-        ? parseBusinessDate(input.asOf)
-        : businessDateOf(instantFrom(new Date()));
-      const rules = await this.rules.inForce(input.country, asOf);
-      return rules.map((r) => ({
-        id: r.ruleId,
-        country: input.country,
-        key: r.key,
-        value: r.value,
-        effectiveFrom: r.effectiveFrom,
-        effectiveTo: r.effectiveTo,
-        source: r.source,
-        verificationStatus: r.verificationStatus,
-        warning: r.warning,
-      }));
-    });
+  @Implement(contract.rules)
+  rulesRouter(@Ctx() ctx: RequestContext) {
+    return {
+      list: implement(contract.rules.list).handler(async ({ input }) => {
+        if (!ctx.actor) throw forbidden();
+        this.policy.assert(ctx.actor, 'rules.view');
+        const asOf = input.asOf
+          ? parseBusinessDate(input.asOf)
+          : businessDateOf(instantFrom(new Date()));
+        const rules = await this.rules.inForce(input.country, asOf);
+        return rules.map((r) => ({
+          id: r.ruleId,
+          country: input.country,
+          key: r.key,
+          value: r.value,
+          effectiveFrom: r.effectiveFrom,
+          effectiveTo: r.effectiveTo,
+          source: r.source,
+          verificationStatus: r.verificationStatus,
+          warning: r.warning,
+        }));
+      }),
+      // M10 decision 16: the console's rules screen (platform admins).
+      history: implement(contract.rules.history).handler(async ({ input }) =>
+        serialize(await this.rulesConsole.history(ctx.actor, input)),
+      ),
+      add: implement(contract.rules.add).handler(async ({ input }) =>
+        serialize(await this.rulesConsole.add(ctx.actor, input)),
+      ),
+    };
   }
 }

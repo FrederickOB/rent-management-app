@@ -8,6 +8,7 @@ import { signingCertificateV1, signingCertificateV2 } from './signing-certificat
 import { TemplateRegistry } from './registry';
 import { systemSampleV1 } from './system-sample';
 import { statementV1 } from './statement';
+import { subscriptionInvoiceV1, subscriptionReceiptV1 } from './subscription';
 import { rentTaxReportV1, rentTaxReportV2 } from './tax';
 
 /** Every template the product renders. Old versions stay, so stored documents keep theirs. */
@@ -34,4 +35,7 @@ export const templates = new TemplateRegistry([
   dashboardV2,
   // M9: the monthly owner statement (AC-04).
   ownerStatementV1,
+  // M10: the platform's subscription invoice and receipt (PB-07).
+  subscriptionInvoiceV1,
+  subscriptionReceiptV1,
 ]);

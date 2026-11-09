@@ -879,9 +879,7 @@ describe('OQ-29 and plan decision 14: single-user companies and the plan', () =>
 
   it('keeps notices from a company on Starter (decision 14)', async () => {
     const starterId = await company(ctx, 'landlord', 'Starter Landlord');
-    await asSuperuser(ctx, "update company set interim_plan = 'starter' where id = $1", [
-      starterId,
-    ]);
+    await asSuperuser(ctx, "update company set plan = 'starter' where id = $1", [starterId]);
     const owner = await staffIn(ctx, starterId, 'landlord', 'owner', 'Starter owner');
     await expect(n.notices.list(owner, {})).rejects.toMatchObject({
       status: 403,

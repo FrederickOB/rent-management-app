@@ -91,6 +91,11 @@ const configSchema = z.object({
   EMAIL_INBOUND_DOMAIN: z.string().min(3).max(253).optional(),
   /** Expo push (decision 5): an access token when the project requires one. */
   EXPO_ACCESS_TOKEN: z.string().min(1).optional(),
+  /**
+   * M10: the API's test controls for the web e2e specs (`POST /_test/subscriptions/...`), for
+   * platform admins only. Never in production: the config refuses it there.
+   */
+  E2E_TEST_CONTROLS: z.enum(['on', 'off']).default('off'),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -107,6 +112,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   if (config.NODE_ENV === 'production' && config.AUTH_RATE_LIMITS === 'off') {
     throw new Error('AUTH_RATE_LIMITS cannot be turned off in production');
+  }
+  if (config.NODE_ENV === 'production' && config.E2E_TEST_CONTROLS === 'on') {
+    throw new Error('E2E_TEST_CONTROLS cannot be turned on in production');
   }
   if (
     config.NODE_ENV === 'production' &&
@@ -157,6 +165,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       );
   }
   return config;
+}
+
+/** Whether the API mounts its e2e test controls (M10): switched on, and never in production. */
+export function testControlsEnabled(config: AppConfig): boolean {
+  return config.E2E_TEST_CONTROLS === 'on' && config.NODE_ENV !== 'production';
 }
 
 /**

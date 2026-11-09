@@ -74,10 +74,16 @@ export class MessagingSettingsService {
       displayName: found.displayName,
       status: found.status,
     };
+    // M10 decision 13: a platform admin's own context never enters a customer company without a
+    // grant, so the customer's chain records it through the platform's system path, with the admin.
     for (const companyId of [admin.companyId, ...(found.company ? [found.company.id] : [])])
       await withCompany(
         this.database,
-        { companyId, personId: admin.personId, actorKind: 'platform_admin' },
+        {
+          companyId,
+          personId: admin.personId,
+          actorKind: companyId === admin.companyId ? 'platform_admin' : 'system',
+        },
         (tx) =>
           this.audit!.append(tx, {
             companyId,

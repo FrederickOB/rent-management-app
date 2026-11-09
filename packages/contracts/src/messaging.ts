@@ -12,7 +12,7 @@ import {
   TEMPLATE_KEYS,
   TEMPLATE_STATUSES,
 } from '@rent/domain/messaging';
-import { inboxTag, INTERIM_PLANS, PLAN_FEATURES } from '@rent/domain/settings';
+import { inboxTag, INTERIM_PLANS, SUBSCRIPTION_TIERS, TIER_FEATURES } from '@rent/domain/settings';
 import { z } from 'zod';
 
 /**
@@ -702,8 +702,8 @@ export const messagingSettingsSchema = z.object({
   firstResponseMinutes: z.number().int(),
   /** The tags staff may put on conversations. */
   tags: z.array(z.string()),
-  plan: z.enum(INTERIM_PLANS),
-  features: z.array(z.enum(PLAN_FEATURES)),
+  plan: z.enum(SUBSCRIPTION_TIERS),
+  features: z.array(z.enum(TIER_FEATURES)),
   /** The number the company sends WhatsApp from: its own, or the shared platform number. */
   whatsappNumber: whatsappNumberRefSchema.nullable(),
 });
@@ -751,7 +751,7 @@ export const companyPlanSchema = z.object({
   displayName: z.string(),
   kind: z.enum(['landlord', 'agency']),
   status: z.string(),
-  plan: z.enum(INTERIM_PLANS),
+  plan: z.enum(SUBSCRIPTION_TIERS),
 });
 export type CompanyPlan = z.infer<typeof companyPlanSchema>;
 

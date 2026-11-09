@@ -52,7 +52,7 @@ const M6 = [
   'Reported repairs',
   'Messaging settings',
   'WhatsApp numbers',
-  'Company plans',
+  'Companies',
 ];
 const GROWTH = featuresOf('growth');
 const STARTER = featuresOf('starter');
@@ -99,7 +99,7 @@ describe('CM-05, CM-08 and decision 9 messaging navigation follows the policy an
 
   it('gives a platform admin the numbers and plans, and no company inbox', () => {
     const admin = member('platform_admin', { kind: 'platform', actorKind: 'platform_admin' });
-    expect(labels(admin, [])).toEqual(['WhatsApp numbers', 'Company plans']);
+    expect(labels(admin, [])).toEqual(['WhatsApp numbers', 'Companies']);
   });
 
   it('marks the right section on each new page', () => {

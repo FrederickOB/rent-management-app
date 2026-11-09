@@ -13,3 +13,4 @@ export * from './maintenance';
 export * from './notices';
 export * from './moveout';
 export * from './reporting';
+export * from './subscription';

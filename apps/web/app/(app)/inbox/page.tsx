@@ -36,7 +36,11 @@ export default async function InboxPage({
     return (
       <>
         <PageHeader title="Inbox" />
-        <NotOnPlan feature="inbox" plan={company?.plan} />
+        <NotOnPlan
+          feature="inbox"
+          plan={company?.plan}
+          canSeePlan={allowed(me, 'subscription.read')}
+        />
       </>
     );
   }

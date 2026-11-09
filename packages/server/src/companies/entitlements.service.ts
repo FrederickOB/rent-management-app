@@ -2,13 +2,16 @@ import { Inject, Injectable } from '@nestjs/common';
 import { eq, schema, sql, withCompany, withSystem, type Database, type Tx } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import {
-  DEFAULT_INTERIM_PLAN,
+  COMING_SOON_FEATURES,
   featuresOf,
-  isInterimPlan,
   PLAN_FEATURE_NAMES,
   planHas,
+  TIER_LABELS,
+  tierOf,
+  tierUnlocking,
   type InterimPlan,
   type PlanFeature,
+  type SubscriptionTier,
 } from '@rent/domain/settings';
 import { AppError, forbidden, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
@@ -19,17 +22,25 @@ export interface CompanyPlanView {
   readonly displayName: string;
   readonly kind: 'landlord' | 'agency';
   readonly status: string;
-  readonly plan: InterimPlan;
+  readonly plan: SubscriptionTier;
 }
 
-/** Refused because the company's plan leaves the feature out (decision 9). */
-export const notOnPlan = (feature: PlanFeature) =>
-  new AppError(
+/**
+ * Refused because the company's plan leaves the feature out (decision 9). The data names the
+ * lowest tier that includes it, and whether that is a Portfolio module still to come (M10 PB-04).
+ */
+export const notOnPlan = (feature: PlanFeature) => {
+  const unlockTier = tierUnlocking(feature);
+  const comingSoon = COMING_SOON_FEATURES.includes(feature);
+  return new AppError(
     403,
     'not_on_plan',
-    `${PLAN_FEATURE_NAMES[feature]} is not part of your plan. Ask us about Growth to use it.`,
-    { feature },
+    comingSoon
+      ? `${PLAN_FEATURE_NAMES[feature]} is coming soon on ${TIER_LABELS[unlockTier]}.`
+      : `${PLAN_FEATURE_NAMES[feature]} is not part of your plan. It comes with ${TIER_LABELS[unlockTier]}: change your plan under Settings, Subscription.`,
+    { feature, unlockTier, comingSoon },
   );
+};
 
 /**
  * What a company's plan includes (M6 decision 9; PRD section 21). The one place any module asks
@@ -46,13 +57,13 @@ export class EntitlementsService {
   ) {}
 
   /** The company's plan, inside the caller's transaction for that company. */
-  async planIn(tx: Tx, companyId: string): Promise<InterimPlan> {
+  async planIn(tx: Tx, companyId: string): Promise<SubscriptionTier> {
     const [row] = await tx
-      .select({ plan: schema.company.interimPlan })
+      .select({ plan: schema.company.plan })
       .from(schema.company)
       .where(eq(schema.company.id, companyId));
     if (!row) throw notFound('Company');
-    return isInterimPlan(row.plan) ? row.plan : DEFAULT_INTERIM_PLAN;
+    return tierOf(row.plan);
   }
 
   async hasIn(tx: Tx, companyId: string, feature: PlanFeature): Promise<boolean> {
@@ -75,7 +86,7 @@ export class EntitlementsService {
     if (!(await this.has(companyId, feature))) throw notOnPlan(feature);
   }
 
-  async features(companyId: string): Promise<{ plan: InterimPlan; features: PlanFeature[] }> {
+  async features(companyId: string): Promise<{ plan: SubscriptionTier; features: PlanFeature[] }> {
     const plan = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
       this.planIn(tx, companyId),
     );
@@ -95,7 +106,7 @@ export class EntitlementsService {
           display_name: string;
           kind: 'landlord' | 'agency';
           status: string;
-          interim_plan: string;
+          plan: string;
         }>(sql`select * from app.company_plans()`),
     );
     return rows.rows.map((r) => ({
@@ -103,7 +114,7 @@ export class EntitlementsService {
       displayName: r.display_name,
       kind: r.kind,
       status: r.status,
-      plan: isInterimPlan(r.interim_plan) ? r.interim_plan : DEFAULT_INTERIM_PLAN,
+      plan: tierOf(r.plan),
     }));
   }
 

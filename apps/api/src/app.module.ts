@@ -1,11 +1,13 @@
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ORPCModule } from '@orpc/nest';
+import { AdminModule } from '@rent/server/admin';
+import { SubscriptionModule } from '@rent/server/subscription';
 import { ApprovalsModule } from '@rent/server/approvals';
 import { BillingModule } from '@rent/server/billing';
 import { AuditModule } from '@rent/server/audit';
 import { CompaniesModule } from '@rent/server/companies';
-import { CoreModule, type CoreOptions } from '@rent/server/core';
+import { CoreModule, loadConfig, testControlsEnabled, type CoreOptions } from '@rent/server/core';
 import { DocumentsModule } from '@rent/server/documents';
 import { EsignModule } from '@rent/server/esign';
 import { IdentityModule } from '@rent/server/identity';
@@ -26,6 +28,10 @@ import { RulesModule } from '@rent/server/rules';
 import { TasksModule } from '@rent/server/tasks';
 import { TaxModule } from '@rent/server/tax';
 import { TenancyModule } from '@rent/server/tenancy';
+import { PlatformAdminController } from './admin/platform-admin.controller';
+import { SupportGrantsController } from './admin/support-grants.controller';
+import { TestControlsModule } from './admin/test-controls.module';
+import { SubscriptionController } from './subscription/subscription.controller';
 import { AdvanceController } from './billing/advance.controller';
 import { BillingController } from './billing/billing.controller';
 import { CompanyController } from './company/company.controller';
@@ -82,10 +88,11 @@ import {
 @Module({})
 export class AppModule {
   static forRoot(core: CoreOptions): DynamicModule {
+    const config = core.config ?? loadConfig();
     return {
       module: AppModule,
       imports: [
-        CoreModule.forRoot(core),
+        CoreModule.forRoot({ ...core, config }),
         IdentityModule,
         PolicyModule,
         AuditModule,
@@ -113,6 +120,12 @@ export class AppModule {
         // M9: management fees (charged in every receipt's posting transaction once this module
         // starts), fee terms, remittances, fees taken and owner funding (AC-02, AC-05).
         ReportingMoneyModule,
+        // M10: subscription billing (AD-08, PB-*), with paying; the console builds on it.
+        SubscriptionModule,
+        // M10: the platform admin console and support access (AD-10).
+        AdminModule,
+        // M10: the web e2e specs' test controls, only with E2E_TEST_CONTROLS=on outside production.
+        ...(testControlsEnabled(config) ? [TestControlsModule] : []),
         ORPCModule.forRoot({
           interceptors: [
             async ({ next }) => {
@@ -171,6 +184,10 @@ export class AppModule {
         // M9: owner statements (AC-04).
         OwnerStatementsController,
         OwnerMoneyController,
+        // M10: support access (the company's side) and the platform admin console.
+        SupportGrantsController,
+        PlatformAdminController,
+        SubscriptionController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

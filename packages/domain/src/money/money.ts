@@ -108,6 +108,30 @@ export function multiplyRatio(amount: Money, numerator: number, denominator: num
 }
 
 /**
+ * Multiplies by several whole-number factors and divides by several positive ones, then rounds
+ * half up to the minor unit once (M10: units × rate × days ÷ days in the month, less an annual
+ * discount in basis points). The product is exact in BigInt, so nothing overflows or rounds before
+ * the one rounding; only the result must be a safe integer.
+ */
+export function multiplyFraction(
+  amount: Money,
+  numerators: readonly number[],
+  denominators: readonly number[],
+): Money {
+  if (
+    numerators.some((n) => !Number.isSafeInteger(n)) ||
+    denominators.some((d) => !Number.isSafeInteger(d) || d <= 0)
+  )
+    throw new DomainError(
+      'money.bad_ratio',
+      'A ratio needs whole numbers and positive denominators',
+    );
+  const numerator = numerators.reduce((acc, n) => acc * BigInt(n), BigInt(amount.amountMinor));
+  const denominator = denominators.reduce((acc, d) => acc * BigInt(d), 1n);
+  return fromBigInt(divideRoundHalfUp(numerator, denominator), amount.currency);
+}
+
+/**
  * Splits a total into parts proportional to `weights` by the largest remainder method, so the
  * parts always add up to the total exactly. Ties go to the earlier part (ADR-004: an annual
  * GH₵10,000 gives the four leftover pesewas to the first four months).

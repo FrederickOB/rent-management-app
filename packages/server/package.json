@@ -27,6 +27,8 @@
     "./notices": "./src/notices/index.ts",
     "./moveout": "./src/moveout/index.ts",
     "./reporting": "./src/reporting/index.ts",
+    "./subscription": "./src/subscription/index.ts",
+    "./admin": "./src/admin/index.ts",
     "./testing": "./test/support/index.ts"
   },
   "scripts": {
@@ -36,7 +38,8 @@
     "test:unit": "vitest run --project unit",
     "seed": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/seed.ts",
     "rules:add": "tsx --env-file-if-exists=../../.env scripts/rules-add.ts",
-    "jobs:migrate": "tsx --env-file-if-exists=../../.env scripts/jobs-migrate.ts"
+    "jobs:migrate": "tsx --env-file-if-exists=../../.env scripts/jobs-migrate.ts",
+    "platform:bootstrap": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/platform-bootstrap.ts"
   },
   "dependencies": {
     "@better-auth/expo": "catalog:",

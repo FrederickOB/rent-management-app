@@ -1,6 +1,7 @@
 import type { Me } from '@rent/contracts';
 import type { PolicyAction } from '@rent/domain/policy';
 import type { PlanFeature } from '@rent/domain/settings';
+import { CONSOLE_SECTIONS } from '@/lib/platform-console';
 import { allowed } from '@/lib/policy';
 
 export interface NavItem {
@@ -25,6 +26,21 @@ export interface NavItem {
   /** M9 review: only in an agency's company (a landlord keeps their own money). */
   readonly agencyOnly?: boolean;
 }
+
+/**
+ * The console's sections as menu entries. The two M6 and M9 put in the menu keep their places,
+ * first; the new ones follow in the PRD's order.
+ */
+const KEPT_PLATFORM = ['/platform/whatsapp-numbers', '/platform/gate1'];
+const CONSOLE_ITEMS: readonly NavItem[] = [
+  ...CONSOLE_SECTIONS.filter((section) => KEPT_PLATFORM.includes(section.href)),
+  ...CONSOLE_SECTIONS.filter((section) => !KEPT_PLATFORM.includes(section.href)),
+].map((section) => ({
+  href: section.href,
+  label: section.label,
+  description: section.description,
+  needs: section.needs,
+}));
 
 const ITEMS: readonly NavItem[] = [
   { href: '/', label: 'Home', description: 'Your company at a glance.', needs: null },
@@ -292,33 +308,24 @@ const ITEMS: readonly NavItem[] = [
     description: 'Who works in this company, their roles and their access.',
     needs: 'membership.view',
   },
+  // M10 (plan 4.8 and 4.9): the subscription, read by the agency admin, the landlord and the
+  // accountant.
+  {
+    href: '/settings/subscription',
+    label: 'Subscription',
+    description:
+      'Your plan, its invoices and receipts, paying, changing plan, cancelling and support access.',
+    needs: 'subscription.read',
+  },
   {
     href: '/audit',
     label: 'Audit log',
     description: 'Who changed what, and when.',
     needs: 'audit.search',
   },
-  // M6: platform admins register WhatsApp numbers and set each company's interim plan
-  // (decisions 3 and 9).
-  {
-    href: '/platform/whatsapp-numbers',
-    label: 'WhatsApp numbers',
-    description: 'The shared WhatsApp number and the numbers companies send from.',
-    needs: 'whatsapp_account.manage',
-  },
-  // M9: Gate 1 across companies, for platform admins (decision 13).
-  {
-    href: '/platform/gate1',
-    label: 'Gate 1 metrics',
-    description: 'The Gate 1 measures for each company and in total, month by month.',
-    needs: 'metrics.platform.read',
-  },
-  {
-    href: '/platform/company-plans',
-    label: 'Company plans',
-    description: 'Each company’s interim plan: Starter or Growth.',
-    needs: 'company.plan.manage',
-  },
+  // M10 (plan 4.8): the platform admin console, for platform admins (lib/platform-console). M9's
+  // company plans fold into Companies.
+  ...CONSOLE_ITEMS,
   // Everyone manages their own sessions (session.manage_own), with or without a company.
   {
     href: '/settings/security',

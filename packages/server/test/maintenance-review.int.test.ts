@@ -301,9 +301,7 @@ describe('MI-01 and F2 no repair files on Starter, refused before anything is st
       (await m.tenantRepairs.list(tenant)).find((g) => g.landlord.companyId === c.companyId)!;
     expect((await groupOf()).filesAllowed).toBe(true);
     expect((await groupOf()).landlord.timeZone).toBe('Africa/Accra');
-    await asSuperuser(ctx, "update company set interim_plan = 'starter' where id = $1", [
-      c.companyId,
-    ]);
+    await asSuperuser(ctx, "update company set plan = 'starter' where id = $1", [c.companyId]);
     expect((await groupOf()).filesAllowed).toBe(false);
     await expect(
       m.tenantRepairs.createUpload(tenant, {

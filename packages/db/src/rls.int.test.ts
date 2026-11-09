@@ -269,7 +269,100 @@ async function seedCompany(companyId: string) {
       unitId: units[0]!.id,
       leaseId: leases[0]!.id,
     });
+    await seedSubscription(companyId, {
+      initiator,
+      documentId: docs[0]!.id,
+      unitId: units[0]!.id,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * Subscriptions and support access (M10): one row in each of their company tables. The fixture
+ * company stands in for the platform company and is its own subscriber, so each row is visible to
+ * that company only.
+ */
+async function seedSubscription(
+  companyId: string,
+  ids: { initiator: string; documentId: string; unitId: string; leaseId: string },
+) {
+  const one = async (query: string, values: unknown[]) =>
+    (await app.query<{ id: string }>(query, values)).rows[0]?.id;
+  const subscriptionId = await one(
+    `insert into subscription (company_id, subscriber_company_id, tier, status, started_on)
+     values ($1, $1, 'growth', 'active', '2026-01-01') returning id`,
+    [companyId],
+  );
+  await app.query(
+    `insert into subscription_event (company_id, subscription_id, subscriber_company_id, kind, tier, effective_on)
+     values ($1, $2, $1, 'started', 'growth', '2026-01-01')`,
+    [companyId, subscriptionId],
+  );
+  const snapshotId = await one(
+    `insert into billing_snapshot (company_id, subscription_id, subscriber_company_id, month, single_room_units,
+       self_contained_units, commercial_units)
+     values ($1, $2, $1, '2026-01', 0, 1, 0) returning id`,
+    [companyId, subscriptionId],
+  );
+  await app.query(
+    `insert into billing_snapshot_unit (company_id, snapshot_id, unit_id, unit_code, band, lease_id, days_leased)
+     values ($1, $2, $3, 'ACC-FIX-A-01', 'self_contained', $4, 31)`,
+    [companyId, snapshotId, ids.unitId, ids.leaseId],
+  );
+  const termsId = await one(
+    'select id from subscription_terms order by effective_from limit 1',
+    [],
+  );
+  const invoiceId = await one(
+    `insert into subscription_invoice (company_id, subscription_id, subscriber_company_id, number, month, snapshot_id,
+       issued_on, due_on, subtotal_minor, discount_minor, net_minor, vat_minor, total_minor, price_list_ids, terms_id,
+       template_key, template_version)
+     values ($1, $2, $1, 'SUB-2026-000001', '2026-01', $3, '2026-02-01', '2026-02-08', 15000, 0, 15000, 0, 15000,
+       '{}', $4, 'subscription.invoice', 1) returning id`,
+    [companyId, subscriptionId, snapshotId, termsId],
+  );
+  await app.query(
+    `insert into subscription_invoice_line (company_id, invoice_id, line_no, kind, description, amount_minor)
+     values ($1, $2, 1, 'minimum', 'Fixture minimum', 15000)`,
+    [companyId, invoiceId],
+  );
+  const paymentId = await one(
+    `insert into subscription_payment (company_id, subscription_id, subscriber_company_id, reference, purpose, channel,
+       amount_minor, status, provider, succeeded_at)
+     values ($1, $2, $1, $3, 'invoices', 'card', 15000, 'succeeded', 'paystack', now())
+     returning id`,
+    [companyId, subscriptionId, `SUB-FIXTURE-${companyId}`],
+  );
+  await app.query(
+    `insert into subscription_allocation (company_id, subscriber_company_id, source, payment_id, invoice_id, amount_minor)
+     values ($1, $1, 'payment', $2, $3, 15000)`,
+    [companyId, paymentId, invoiceId],
+  );
+  await app.query(
+    `insert into subscription_receipt (company_id, subscriber_company_id, payment_id, number, paid_on, amount_minor,
+       template_key, template_version)
+     values ($1, $1, $2, 'SUBR-2026-000001', '2026-02-02', 15000, 'subscription.receipt', 1)`,
+    [companyId, paymentId],
+  );
+  const codeId = await one(
+    `insert into discount_code (company_id, code, kind, percent_bps, months) values ($1, 'FIXTURE', 'percentage', 1000, 1)
+     returning id`,
+    [companyId],
+  );
+  await app.query(
+    `insert into discount_redemption (company_id, discount_code_id, subscription_id, subscriber_company_id, first_month, months)
+     values ($1, $2, $3, $1, '2026-01', 1)`,
+    [companyId, codeId, subscriptionId],
+  );
+  await app.query(
+    `insert into subscription_export (company_id, status, document_id, requested_by) values ($1, 'ready', $2, $3)`,
+    [companyId, ids.documentId, ids.initiator],
+  );
+  await app.query(
+    `insert into support_grant (company_id, granted_by, reason, ends_at) values ($1, $2, 'Fixture', now() + interval '1 hour')`,
+    [companyId, ids.initiator],
+  );
 }
 
 /**

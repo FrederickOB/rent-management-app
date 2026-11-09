@@ -27,7 +27,7 @@ import {
   messagingSettingsOf,
   parseCompanySettings,
   planHas,
-  type InterimPlan,
+  type SubscriptionTier,
 } from '@rent/domain/settings';
 import { v5 as uuidv5 } from 'uuid';
 import { BillingReadService } from '../billing/billing-read.service';
@@ -114,7 +114,7 @@ export class BotService {
     input: {
       readonly companyId: string;
       readonly company: CompanyRow;
-      readonly plan: InterimPlan;
+      readonly plan: SubscriptionTier;
       readonly conversation: ConversationRow;
       readonly sender: BotSender;
       readonly inbound: {
@@ -365,7 +365,7 @@ export class BotService {
   private async context(
     tx: Tx,
     company: CompanyRow,
-    plan: InterimPlan,
+    plan: SubscriptionTier,
     sender: BotSender,
     now: Date,
   ): Promise<BotContext> {

@@ -70,6 +70,13 @@ import {
   ReportingRollupService,
   ReportingStatementsModule,
 } from '@rent/server/reporting';
+import {
+  SubscriptionBillingService,
+  SubscriptionLifecycleService,
+  SubscriptionModule,
+  SubscriptionPaymentsService,
+  SubscriptionSubledgerCheck,
+} from '@rent/server/subscription';
 import { TaxAlertsService, TaxAssessmentService, TaxModule } from '@rent/server/tax';
 import {
   IdChecksService,
@@ -98,6 +105,11 @@ import {
   reportingStatementsJobs,
   statementsOnRendered,
 } from './reporting-statements.jobs';
+import {
+  SUBSCRIPTION_EVENT_TYPES,
+  subscriptionJobs,
+  subscriptionOnRendered,
+} from './subscription.jobs';
 import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 
@@ -131,6 +143,9 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     // M9: management fees are charged in every receipt's posting transaction once this module
     // starts; fixed fees monthly and the nightly fee check.
     ReportingMoneyModule,
+    // M10: subscription billing, paying, the lifecycle and dunning (platform `SUB-` charges are
+    // handed to it by the payments webhooks once this module starts).
+    SubscriptionModule,
   ],
 })
 class WorkerModule {}
@@ -189,6 +204,11 @@ const definitions = [
       dashboardOnRendered(app.get(DashboardService)),
       // M9 (AC-04): an issued statement's PDF recorded with its hash, and emailed to the owner.
       statementsOnRendered(app.get(OwnerStatementsService)),
+      // M10: subscription invoices and receipts recorded with their hash.
+      subscriptionOnRendered(
+        app.get(SubscriptionBillingService),
+        app.get(SubscriptionPaymentsService),
+      ),
     ],
   }),
   ...messagingJobs({
@@ -232,6 +252,14 @@ const definitions = [
   ...reportingMoneyJobs({ ...deps, fees: app.get(ManagementFeesService) }),
   // M9 (F3): an owner's 1070 below zero alerts (a chargeback cannot be refused).
   ...agentCashJobs({ ...deps, agentCash: app.get(AgentCashCheckService) }),
+  // M10: the snapshot, invoice, lifecycle and dunning jobs, and the subscription sub-ledger check.
+  ...subscriptionJobs({
+    ...deps,
+    billing: app.get(SubscriptionBillingService),
+    lifecycle: app.get(SubscriptionLifecycleService),
+    payments: app.get(SubscriptionPaymentsService),
+    subledger: app.get(SubscriptionSubledgerCheck),
+  }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -253,6 +281,7 @@ const relay = new OutboxRelay(
     ...MAINTENANCE_EVENT_TYPES,
     ...REPORTING_DASHBOARD_EVENT_TYPES,
     ...REPORTING_STATEMENTS_EVENT_TYPES,
+    ...SUBSCRIPTION_EVENT_TYPES,
   ]),
 );
 await relay.start();

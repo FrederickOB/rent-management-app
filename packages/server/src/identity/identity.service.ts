@@ -159,6 +159,8 @@ export class IdentityService {
       nominatedApprover: m.nominatedApprover,
       scope: m.scope,
       authMethod,
+      // M10 decision 11: only when read-only, so a full-access actor is as before.
+      ...(m.companyAccess === 'read_only' ? { subscriptionAccess: 'read_only' as const } : {}),
     };
   }
 }

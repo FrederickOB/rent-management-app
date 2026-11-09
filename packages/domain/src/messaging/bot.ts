@@ -1,6 +1,6 @@
 import { formatBusinessDate, instantFrom, type Instant } from '../dates';
 import { format, type Money } from '../money';
-import { planHas, type InterimPlan } from '../settings/entitlements';
+import { planHas, type SubscriptionTier } from '../settings/entitlements';
 
 /**
  * The WhatsApp menu bot (CM-03; M6 plan 4.5; decision 9). A pure state machine: (session,
@@ -24,7 +24,7 @@ export type BotOption = (typeof BOT_OPTIONS)[number];
 type LeaseOption = Exclude<BotOption, 'person'>;
 
 /** Decision 9: Starter offers balance, receipt and pay; anything else goes to the landlord. */
-export function menuFor(plan: InterimPlan): readonly BotOption[] {
+export function menuFor(plan: SubscriptionTier): readonly BotOption[] {
   return planHas(plan, 'bot_full_menu') ? BOT_OPTIONS : ['balance', 'receipt', 'pay'];
 }
 
@@ -82,7 +82,7 @@ export interface BotReceipt {
 }
 
 export interface BotContext {
-  readonly plan: InterimPlan;
+  readonly plan: SubscriptionTier;
   readonly companyName: string;
   /**
    * Who is writing: the tenant from their own phone or email (`tenant_phone`), or one of the
@@ -224,7 +224,7 @@ const upper = (text: string) =>
     .trim();
 
 /** The option an input names: a button id, the option's number in this plan's menu, or a word. */
-function optionOf(input: BotInput, plan: InterimPlan): BotOption | null {
+function optionOf(input: BotInput, plan: SubscriptionTier): BotOption | null {
   const options = menuFor(plan);
   if (input.kind === 'choice')
     return (options as readonly string[]).includes(input.id) ? (input.id as BotOption) : null;

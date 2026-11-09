@@ -9,6 +9,13 @@ export const GENERIC_MESSAGE = 'Something went wrong. Try again.';
 const NETWORK_MESSAGE = 'We could not reach the server. Check your connection and try again.';
 const RATE_LIMITED = 'Too many attempts. Wait a minute and try again.';
 
+/**
+ * M10 decision 11: a staff change refused while the company is read-only for an unpaid
+ * subscription (403 `SUBSCRIPTION_READ_ONLY`). Tenants are never affected.
+ */
+export const READ_ONLY_TEXT =
+  'Nothing was changed: your company is read-only until the subscription invoice is paid. Tenants can still pay rent and get receipts. Paying restores full access at once.';
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -48,6 +55,8 @@ export function toProblem(error: unknown): Problem {
     typeof body?.code === 'string' ? body.code : typeof error.code === 'string' ? error.code : null;
   if (status === 429) return { status, code, message: RATE_LIMITED };
   if (status !== null && status >= 500) return { status, code, message: GENERIC_MESSAGE };
+  if (status === 403 && code?.toUpperCase() === 'SUBSCRIPTION_READ_ONLY')
+    return { status, code, message: READ_ONLY_TEXT };
   const issues = isRecord(error.data) && Array.isArray(error.data.issues) ? error.data.issues : [];
   const issueText = issues
     .map((issue) => (isRecord(issue) && typeof issue.message === 'string' ? issue.message : null))

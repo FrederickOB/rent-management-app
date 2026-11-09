@@ -106,6 +106,9 @@ jobs:
           # The web tests sign in many times from one address; Better Auth's per-IP limits
           # would refuse them. The config refuses this setting in production.
           AUTH_RATE_LIMITS: 'off'
+          # M10: the API's test controls (an overdue subscription invoice on demand). The
+          # config refuses this setting in production too.
+          E2E_TEST_CONTROLS: 'on'
         run: |
           mkdir -p "$RUNNER_TEMP/e2e-logs"
           for app in api worker web links; do

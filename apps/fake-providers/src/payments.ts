@@ -30,7 +30,8 @@ const initializeSchema = z.object({
   currency: z.literal('GHS'),
   email: z.email(),
   channels: z.array(z.enum(['mobile_money', 'card', 'bank'])).length(1),
-  subaccount: z.string().min(1),
+  /** Left out only for a platform charge (M10 decision 9): see `checkSubaccount`. */
+  subaccount: z.string().min(1).optional(),
   metadata: z
     .record(z.string(), z.string().max(500))
     .refine((m) => Object.keys(m).length <= 50, 'at most 50 metadata entries')
@@ -55,7 +56,8 @@ const chargeSchema = z.object({
   amount: pesewas,
   currency: z.literal('GHS'),
   email: z.email(),
-  subaccount: z.string().min(1),
+  /** Left out only for a platform charge (M10 decision 9): see `checkSubaccount`. */
+  subaccount: z.string().min(1).optional(),
   metadata: z
     .record(z.string(), z.string().max(500))
     .refine((m) => Object.keys(m).length <= 50, 'at most 50 metadata entries')
@@ -73,6 +75,9 @@ const externalSchema = z.object({
   narration: z.string().max(200).optional(),
   feesMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 });
+
+/** The platform's own charges (the subscription, M10 decision 9) carry this reference prefix. */
+export const PLATFORM_REFERENCE_PREFIX = 'SUB-';
 
 /** Fictional banks: never a real institution's code (ADR-008 tests and the seed). */
 const BANKS = [
@@ -101,7 +106,8 @@ function transactionView(tx: FakeTransaction) {
     created_at: tx.createdAt,
     metadata: tx.metadata,
     customer: { email: tx.email, phone: tx.phone ?? null },
-    subaccount: { subaccount_code: tx.subaccount },
+    // A platform charge names no subaccount (M10 decision 9), as Paystack shows it.
+    subaccount: tx.subaccount ? { subaccount_code: tx.subaccount } : {},
   };
 }
 
@@ -115,7 +121,8 @@ function settlementView(s: FakeSettlement) {
     deductions: s.deductions,
     effective_amount: s.effectiveAmount,
     settlement_date: s.settledAt,
-    subaccount: { subaccount_code: s.subaccount },
+    // The platform's own balance (M10 decision 9) is paid out with no subaccount.
+    subaccount: s.subaccount ? { subaccount_code: s.subaccount } : null,
     deducted: s.deducted,
   };
 }
@@ -137,6 +144,18 @@ export function registerPayments(
   options: PaymentsOptions,
 ): void {
   type Outcome = z.infer<typeof outcomeSchema>;
+
+  /**
+   * Rent always names a known subaccount, so it settles to the landlord or agency (D1). A charge
+   * with none is the platform's own revenue (M10 decision 9), which settles to the platform's
+   * balance; this fake takes it only under the platform's reference prefix, so a rent charge that
+   * lost its subaccount is refused rather than paid to the platform. Returns the refusal, if any.
+   */
+  const checkSubaccount = (ref: string, subaccount: string | undefined): string | null => {
+    if (subaccount === undefined)
+      return ref.startsWith(PLATFORM_REFERENCE_PREFIX) ? null : 'Subaccount required';
+    return store.subaccounts.has(subaccount) ? null : 'Subaccount not found';
+  };
 
   /** Applies an outcome to a pending charge; returns the signed webhook for a success. */
   const complete = async (tx: FakeTransaction, outcome: Outcome) => {
@@ -176,9 +195,8 @@ export function registerPayments(
         const parsed = initializeSchema.safeParse(request.body);
         if (!parsed.success) return invalid(reply, parsed.error);
         const body = parsed.data;
-        if (!store.subaccounts.has(body.subaccount)) {
-          return reply.code(400).send({ status: false, message: 'Subaccount not found' });
-        }
+        const refused = checkSubaccount(body.reference, body.subaccount);
+        if (refused) return reply.code(400).send({ status: false, message: refused });
         if (store.transactions.has(body.reference)) {
           return reply
             .code(409)
@@ -194,7 +212,7 @@ export function registerPayments(
           channel,
           email: body.email,
           ...(body.mobile_money ? { phone: body.mobile_money.phone } : {}),
-          subaccount: body.subaccount,
+          subaccount: body.subaccount ?? '',
           metadata: body.metadata,
           createdAt: new Date().toISOString(),
           status: 'pending',
@@ -231,9 +249,8 @@ export function registerPayments(
         const parsed = chargeSchema.safeParse(request.body);
         if (!parsed.success) return invalid(reply, parsed.error);
         const body = parsed.data;
-        if (!store.subaccounts.has(body.subaccount)) {
-          return reply.code(400).send({ status: false, message: 'Subaccount not found' });
-        }
+        const refused = checkSubaccount(body.reference, body.subaccount);
+        if (refused) return reply.code(400).send({ status: false, message: refused });
         if (store.transactions.has(body.reference)) {
           return reply
             .code(409)
@@ -248,7 +265,7 @@ export function registerPayments(
           channel: 'mobile_money',
           email: body.email,
           phone: body.mobile_money.phone,
-          subaccount: body.subaccount,
+          subaccount: body.subaccount ?? '',
           metadata: body.metadata,
           createdAt: new Date().toISOString(),
           status: 'pending',

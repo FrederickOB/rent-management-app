@@ -36,7 +36,11 @@ export function pageRefusal(
     return (
       <>
         <PageHeader title={page.title} />
-        <NotOnPlan feature={page.feature} plan={company?.plan} />
+        <NotOnPlan
+          feature={page.feature}
+          plan={company?.plan}
+          canSeePlan={allowed(me, 'subscription.read')}
+        />
       </>
     );
   }

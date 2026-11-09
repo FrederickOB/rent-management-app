@@ -66,6 +66,7 @@ import {
 import { ensureMessaging } from './seed-messaging';
 import { ensureMaintenance } from './seed-maintenance';
 import { ensureFeeTerms, ensureReporting } from './seed-reporting';
+import { ensureSubscriptions } from './seed-subscription';
 import {
   ManagementFeesService,
   OwnerMoneyService,
@@ -112,6 +113,13 @@ import {
   TerminationService,
 } from '../src/billing';
 import { RulesService } from '../src/rules';
+import {
+  SubscriptionBillingService,
+  SubscriptionCoreService,
+  SubscriptionLifecycleService,
+  SubscriptionModule,
+  SubscriptionPaymentsService,
+} from '../src/subscription';
 import { GraService, TaxModule, TaxReportService, WithholdingService } from '../src/tax';
 import { LedgerModule } from '../src/ledger';
 import {
@@ -331,6 +339,8 @@ const seedClock: Clock & { offsetMs: number } = {
     ReportingMoneyModule,
     ReportingStatementsModule,
     ReportingDashboardModule,
+    // M10: subscriptions, their invoices and paying (plan 4.11).
+    SubscriptionModule,
   ],
 })
 class SeedModule {}
@@ -2543,6 +2553,20 @@ try {
     billingCompanies: BILLING_COMPANIES,
     actor: (companyId, signIn) => actorFor(database, companyId, signIn),
   });
+  // M10 (plan 4.11): after the rent data, so last month's snapshots count the seeded leases.
+  const subscriptions = await ensureSubscriptions({
+    database,
+    core: app.get(SubscriptionCoreService),
+    billing: app.get(SubscriptionBillingService),
+    lifecycle: app.get(SubscriptionLifecycleService),
+    payments: app.get(SubscriptionPaymentsService),
+    providers: app.get<PaymentProviders>(PAYMENT_PROVIDERS),
+    webhooks: app.get(WebhooksService),
+    agency: AGENCY,
+    landlord: LANDLORD,
+    others: [ABOKOBI],
+    actor: (companyId, signIn) => actorFor(database, companyId, signIn),
+  });
   let checkProblems = 0;
   for (const companyId of BILLING_COMPANIES)
     checkProblems += (await app.get(SubledgerCheckService).check(companyId)).mismatches.length;
@@ -2588,6 +2612,8 @@ try {
   );
   console.log(`Owner reporting (M9): ${feeTerms} new fee terms.`);
   for (const line of reporting) console.log(line);
+  console.log('Subscriptions (M10):');
+  for (const line of subscriptions) console.log(line);
   console.log(`Staff password: ${DEMO_PASSWORD}`);
   console.log(
     `TOTP for every demo staff member: otpauth://totp/Rent%20Platform:demo?secret=${base32(DEMO_TOTP_SECRET)}&issuer=Rent%20Platform`,

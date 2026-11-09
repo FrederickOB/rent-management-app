@@ -1,7 +1,7 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { eq, schema, sql, withCompany, type Database } from '@rent/db';
 import { overdueAlertKey, overdueAlertRecipients } from '@rent/domain/messaging';
-import { DEFAULT_INTERIM_PLAN, isInterimPlan, planHas } from '@rent/domain/settings';
+import { planHas, tierOf } from '@rent/domain/settings';
 import type { PushPort } from '@rent/integrations';
 import { v5 as uuidv5 } from 'uuid';
 import type { Clock } from '../core/clock';
@@ -55,13 +55,7 @@ export class MessagingOperationsService {
           .where(eq(schema.company.id, companyId));
         if (!company) return 0;
         // Review S5: a company without the inbox (Starter) has no response target to miss.
-        if (
-          !planHas(
-            isInterimPlan(company.interimPlan) ? company.interimPlan : DEFAULT_INTERIM_PLAN,
-            'inbox',
-          )
-        )
-          return 0;
+        if (!planHas(tierOf(company.plan), 'inbox')) return 0;
         const overdue = await tx.execute<{
           id: string;
           assigned_to: string | null;

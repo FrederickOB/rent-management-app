@@ -77,6 +77,10 @@ export const book = pgTable(
     uniqueIndex('book_one_company_book')
       .on(t.companyId)
       .where(sql`${t.kind} = 'company'`),
+    // M10 section 4.2: the platform company's own book, for subscriptions (P26).
+    uniqueIndex('book_one_platform_book')
+      .on(t.companyId)
+      .where(sql`${t.kind} = 'platform'`),
     foreignKey({
       name: 'book_owner_fk',
       columns: [t.companyId, t.ownerId],
