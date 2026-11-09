@@ -13,6 +13,8 @@ export interface MembershipView {
   readonly scope: MembershipScope;
   /** M10 decision 11: the company's access; 'read_only' refuses staff changes. */
   readonly companyAccess?: 'full' | 'read_only';
+  /** M10 decision 12 (review BE-27): the company's subscription has ended (it is cancelled). */
+  readonly companyEnded?: true;
 }
 
 interface Row extends Record<string, unknown> {
@@ -45,8 +47,16 @@ export class MembershipDirectory {
       const readOnly = new Set(
         access.rows.filter((a) => a.access === 'read_only').map((a) => a.company_id),
       );
+      const ended = new Set(
+        (
+          await tx.execute<{ company_id: string }>(
+            sql`select company_id from app.company_ended_for_person(${personId}::uuid)`,
+          )
+        ).rows.map((e) => e.company_id),
+      );
       return result.rows.map((r) => ({
         ...(readOnly.has(r.company_id) ? { companyAccess: 'read_only' as const } : {}),
+        ...(ended.has(r.company_id) ? { companyEnded: true as const } : {}),
         membershipId: r.membership_id,
         companyId: r.company_id,
         companyKind: r.company_kind,

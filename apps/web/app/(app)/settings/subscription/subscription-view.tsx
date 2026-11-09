@@ -2,6 +2,7 @@
 
 import type { SubscriptionView as Subscription } from '@rent/contracts';
 import type { SubscriptionTier } from '@rent/domain/settings';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/app-context';
 import { ConfirmBox } from '@/components/confirm-box';
@@ -21,16 +22,17 @@ import { bpsText } from '@/lib/reporting';
 import { monthLabel } from '@/lib/rent-tax';
 import {
   bandRows,
-  cancelConfirmText,
-  cancellationText,
+  cancelNoticeText,
+  cancelPlan,
   COMING_SOON,
   ESTIMATE_NOTE,
+  estimateRows,
   firstOfNextMonth,
-  lastDayOfMonth,
   minimumText,
   PLACEHOLDER_PRICE_TEXT,
+  PORTFOLIO_NOTE,
   rateText,
-  READ_ONLY_TEXT,
+  readOnlyNotice,
   subscriptionMessage,
   tierChangeText,
   tierLabel,
@@ -49,18 +51,22 @@ const problemText = (failure: unknown): string =>
 
 export function SubscriptionView({ canGrantSupport }: { readonly canGrantSupport: boolean }) {
   const { timeZone } = useApp();
+  const router = useRouter();
   const load = useCallback(() => api().subscription.get(), []);
   const { state, reload } = useLoad(load);
   const [history, setHistory] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Review WEB-2: paying, changing plan, cancelling, withdrawing or a code changes the company's
+  // profile, which the layout holds (the banner, the menu's plan features): refresh it too.
   const changed = useCallback(
     (text: string) => {
       setNotice(text);
       reload();
       setHistory((v) => v + 1);
+      router.refresh();
     },
-    [reload],
+    [reload, router],
   );
 
   if (state.status === 'loading') return <Loading what="the subscription" />;
@@ -78,7 +84,9 @@ export function SubscriptionView({ canGrantSupport }: { readonly canGrantSupport
         <PayForm
           canPayInvoices={view.actions.pay}
           canPayAnnual={view.actions.payAnnual}
-          owedMinor={view.arrears?.pastDueMinor ?? null}
+          openMinor={view.openMinor}
+          pastDueMinor={view.arrears?.pastDueMinor ?? null}
+          annualPrice={view.annualPrice}
           onPaid={(text) => changed(text)}
         />
       ) : null}
@@ -103,10 +111,19 @@ function Overview({ view, today }: { readonly view: Subscription; readonly today
             <SubscriptionStatusBadge status={view.status} />
           </span>
         </p>
-        {view.access === 'read_only' ? (
-          <Alert tone="error" title="Read-only for staff">
-            {READ_ONLY_TEXT}
+        {view.access === 'read_only' || view.status === 'cancelled' ? (
+          <Alert
+            tone={view.status === 'cancelled' ? 'warning' : 'error'}
+            title={readOnlyNotice(view).title}
+          >
+            <span data-testid="subscription-read-only">{readOnlyNotice(view).body}</span>
           </Alert>
+        ) : null}
+        {!view.billing.on ? (
+          <p className="text-sm text-slate-700" data-testid="subscription-billing-off">
+            Billing has not started yet: nothing is invoiced, and your free trial runs from the day
+            it does.
+          </p>
         ) : null}
         {view.status === 'trialing' && view.trialEndsOn ? (
           <p className="text-sm text-slate-700" data-testid="subscription-trial">
@@ -129,17 +146,16 @@ function Overview({ view, today }: { readonly view: Subscription; readonly today
             until then.
           </p>
         ) : null}
-        {view.cancelsOn ? (
+        {view.cancelsOn && view.status !== 'cancelled' ? (
           <p className="text-sm text-slate-700" data-testid="subscription-cancels">
-            {view.readOnlyUntil
-              ? cancellationText({ endsOn: view.cancelsOn, readAccessUntil: view.readOnlyUntil })
-              : cancelConfirmText(view.cancelsOn)}
-          </p>
-        ) : null}
-        {view.status === 'cancelled' && view.readOnlyUntil ? (
-          <p className="text-sm text-slate-700">
-            The subscription has ended. Staff can read records and download documents until{' '}
-            {formatBusinessDate(view.readOnlyUntil)}.
+            {cancelNoticeText({
+              endsOn: view.cancelsOn,
+              // Cancelled within the trial: it ends by the trial's last day, with nothing billed.
+              inTrial: view.trialEndsOn !== null && view.cancelsOn <= view.trialEndsOn,
+              // Cancelled in a year paid ahead: it ends when that year ends (founder, Q3).
+              annual: view.annual !== null && view.cancelsOn === view.annual.endsOn,
+              readAccessUntil: view.readOnlyUntil,
+            })}
           </p>
         ) : null}
         <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
@@ -203,22 +219,28 @@ function Estimate({ view }: { readonly view: Subscription }) {
             </tr>
           </tbody>
         </Table>
-        <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
-          <div>
-            <dt className="text-slate-600">Units at their rates</dt>
-            <dd className="tabular-nums">{formatMinor(estimate.unitsMinor)}</dd>
-          </div>
-          <div>
-            <dt className="text-slate-600">The plan’s minimum</dt>
-            <dd className="tabular-nums">{formatMinor(estimate.minimumMinor)}</dd>
-          </div>
-          <div>
-            <dt className="text-slate-600">Estimate for the month</dt>
-            <dd className="font-semibold tabular-nums" data-testid="subscription-estimate-total">
-              {formatMinor(estimate.totalMinor)}
-            </dd>
-          </div>
-        </dl>
+        <Table caption="This month’s estimate, part by part">
+          <tbody className="divide-y divide-slate-100">
+            {estimateRows(
+              estimate,
+              view.tiers.find((t) => t.tier === view.tier)?.minimumMinor ?? null,
+            ).map((row) => (
+              <tr key={row.key} data-testid={`estimate-${row.key}`}>
+                <Td className={row.key === 'total' ? 'font-semibold' : undefined}>{row.label}</Td>
+                <Td
+                  className={
+                    row.key === 'total'
+                      ? 'text-right font-semibold tabular-nums'
+                      : 'text-right tabular-nums'
+                  }
+                  data-testid={row.key === 'total' ? 'subscription-estimate-total' : undefined}
+                >
+                  {formatMinor(row.amountMinor)}
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
       </CardBody>
     </Card>
   );
@@ -329,6 +351,11 @@ function ChangeTier({
               {t.placeholder ? (
                 <p className="text-xs font-medium text-amber-900">{PLACEHOLDER_PRICE_TEXT}</p>
               ) : null}
+              {t.tier === 'portfolio' ? (
+                <p className="text-xs text-slate-700" data-testid="portfolio-note">
+                  {PORTFOLIO_NOTE}
+                </p>
+              ) : null}
               {current ? null : (
                 <Button
                   size="sm"
@@ -348,12 +375,13 @@ function ChangeTier({
       {chosen ? (
         <ConfirmBox
           label={`Confirm the move to ${tierLabel(chosen)}`}
-          confirmText={`Move to ${tierLabel(chosen)}`}
+          confirmText={`Yes, move to ${tierLabel(chosen)}`}
           pending={pending}
           onConfirm={() => void confirm()}
           onCancel={() => setChosen(null)}
         >
           {tierChangeText({ from: view.tier, to: chosen, downgradeOn: firstOfNextMonth(today) })}
+          {chosen === 'portfolio' ? ` ${PORTFOLIO_NOTE}` : ''}
         </ConfirmBox>
       ) : null}
       {problem ? <Alert tone="error">{problem}</Alert> : null}
@@ -412,6 +440,20 @@ function ApplyCode({ onChanged }: { readonly onChanged: (text: string) => void }
   );
 }
 
+/** When cancelling now would end it; null if the API offers it in a state the rule refuses. */
+function safeCancelPlan(view: Subscription, today: string) {
+  try {
+    return cancelPlan({
+      today,
+      status: view.status,
+      trialEndsOn: view.trialEndsOn,
+      annualEndsOn: view.annual?.endsOn ?? null,
+    });
+  } catch {
+    return null;
+  }
+}
+
 const EXPORT_POLL_MS = 3_000;
 const EXPORT_POLL_TRIES = 40;
 
@@ -438,6 +480,8 @@ function EndCard({
   }, []);
 
   if (!view.actions.cancel && !view.actions.withdrawCancel && !view.actions.export) return null;
+  // When cancelling now would end it (review WEB-6): the domain's rule, trials included.
+  const plan = view.actions.cancel ? safeCancelPlan(view, today) : null;
 
   async function cancel() {
     setPending('cancel');
@@ -448,7 +492,7 @@ function EndCard({
       setReason('');
       onChanged(
         next.cancelsOn
-          ? `The subscription will end on ${formatBusinessDate(next.cancelsOn)}.`
+          ? `The subscription will end on ${formatBusinessDate(next.cancelsOn)}.${plan?.inTrial ? ' Nothing is billed.' : ''}`
           : 'The subscription is set to end.',
       );
     } catch (failure) {
@@ -544,12 +588,14 @@ function EndCard({
             />
             <ConfirmBox
               label="Confirm cancelling the subscription"
-              confirmText="Cancel at the end of this month"
+              confirmText={
+                plan ? `Yes, end it on ${formatBusinessDate(plan.endsOn)}` : 'Yes, cancel it'
+              }
               pending={pending === 'cancel'}
               onConfirm={() => void cancel()}
               onCancel={() => setConfirming(false)}
             >
-              {cancelConfirmText(lastDayOfMonth(today))}
+              {plan ? cancelNoticeText({ ...plan, readAccessUntil: null }) : null}
             </ConfirmBox>
           </div>
         ) : null}

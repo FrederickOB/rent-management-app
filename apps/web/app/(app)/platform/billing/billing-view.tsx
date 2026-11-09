@@ -1,7 +1,7 @@
 'use client';
 
 import type { PriceListView, SubscriptionTermsView } from '@rent/contracts';
-import { addDays, DEFAULT_TIME_ZONE, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
+import { DEFAULT_TIME_ZONE } from '@rent/domain/dates';
 import { PRICING_CATEGORIES, type PricingCategory } from '@rent/domain/messaging';
 import type { SubscriptionTier } from '@rent/domain/settings';
 import { useSearchParams } from 'next/navigation';
@@ -22,12 +22,14 @@ import { nonNegativeMinorOf } from '@/lib/owner-money';
 import { amountMinorOf } from '@/lib/payment-form';
 import { CONSOLE_SECTIONS, consoleTab } from '@/lib/platform-console';
 import { bpsText } from '@/lib/reporting';
+import { monthLabel } from '@/lib/rent-tax';
 import {
   bandRows,
   discountLimitsText,
   discountText,
   minimumText,
   PLACEHOLDER_PRICE_TEXT,
+  priceMonthStarts,
   PRICING_CATEGORY_LABELS,
   rateText,
   subscriptionMessage,
@@ -42,6 +44,7 @@ import {
 } from '@/lib/subscription';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
+import { BillingSwitch } from './billing-switch';
 
 const TABS = CONSOLE_SECTIONS.find((section) => section.href === '/platform/billing')!.tabs;
 
@@ -50,7 +53,6 @@ const problemText = (failure: unknown): string =>
 
 /** Prices and terms run on the platform's default time zone; the API refuses a past date. */
 const today = () => todayIn(DEFAULT_TIME_ZONE);
-const tomorrow = () => toIsoDate(addDays(parseBusinessDate(today()), 1));
 
 const STATE_TONES: Record<VersionState, 'green' | 'blue' | 'neutral'> = {
   in_force: 'green',
@@ -73,12 +75,15 @@ export function BillingView({
   const [tab, setTab] = useState(consoleTab(tabs, params.get('tab'))?.key ?? 'prices');
 
   return (
-    <Tabs label="Plans and billing" tabs={tabs} current={tab} onChange={setTab}>
-      {tab === 'prices' ? <PriceLists /> : null}
-      {tab === 'terms' ? <Terms /> : null}
-      {tab === 'codes' ? <DiscountCodes /> : null}
-      {tab === 'whatsapp-rates' ? <WhatsappRates /> : null}
-    </Tabs>
+    <>
+      <BillingSwitch canTurnOn={can.pricing} />
+      <Tabs label="Plans and billing" tabs={tabs} current={tab} onChange={setTab}>
+        {tab === 'prices' ? <PriceLists /> : null}
+        {tab === 'terms' ? <Terms /> : null}
+        {tab === 'codes' ? <DiscountCodes /> : null}
+        {tab === 'whatsapp-rates' ? <WhatsappRates /> : null}
+      </Tabs>
+    </>
   );
 }
 
@@ -110,7 +115,13 @@ function PriceLists() {
 }
 
 function PriceListTable({ lists }: { readonly lists: readonly PriceListView[] }) {
-  const states = versionStates(lists, (row) => row.tier, today());
+  // BE-25: a list is in force from the first month it prices (`appliesFromMonth`), not its date.
+  const states = versionStates(
+    lists,
+    (row) => row.tier,
+    today(),
+    (row) => `${row.appliesFromMonth}-01`,
+  );
   if (lists.length === 0) return <Empty>No price list yet.</Empty>;
   return (
     <div className="grid gap-4 lg:grid-cols-3">
@@ -130,7 +141,8 @@ function PriceListTable({ lists }: { readonly lists: readonly PriceListView[] })
                   >
                     <p className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">
-                        From {formatBusinessDate(list.effectiveFrom)}
+                        From {formatBusinessDate(list.effectiveFrom)}, applies from{' '}
+                        {monthLabel(list.appliesFromMonth)}
                       </span>
                       <VersionBadge state={states.get(list.id)} />
                     </p>
@@ -169,7 +181,7 @@ function AddPriceList({ onAdded }: { readonly onAdded: (added: PriceListView) =>
     commercial: '',
     minimum: '',
     discount: '10',
-    from: tomorrow(),
+    from: priceMonthStarts(today())[0]!,
   });
   const [errors, setErrors] = useState<Partial<Record<PriceField, string>>>({});
   const [pending, setPending] = useState(false);
@@ -195,8 +207,8 @@ function AddPriceList({ onAdded }: { readonly onAdded: (added: PriceListView) =>
       else if (parsed.problem) next[field] = parsed.problem;
     }
     if (discount === null) next.discount = 'Enter a percentage from 0 to 100, such as 10.';
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.from) || draft.from <= today())
-      next.from = 'Choose a date from tomorrow on.';
+    if (!priceMonthStarts(today()).includes(draft.from))
+      next.from = 'Choose the 1st of a coming month.';
     setErrors(next);
     if (Object.keys(next).length > 0 || discount === null) return;
     setPending(true);
@@ -246,11 +258,16 @@ function AddPriceList({ onAdded }: { readonly onAdded: (added: PriceListView) =>
             options={TIERS.map((t) => ({ value: t, label: tierLabel(t) }))}
             onChange={(event) => setTier(event.target.value as SubscriptionTier)}
           />
-          <TextField
+          {/* Review WEB-9: an invoice prices its month with the list in force on the 1st, so a
+              list starts on the 1st of a month. */}
+          <SelectField
             label="From"
-            type="date"
-            min={tomorrow()}
+            hint="Prices start on the 1st of a month: invoices price a month with the list in force on its 1st."
             value={draft.from}
+            options={priceMonthStarts(today()).map((date) => ({
+              value: date,
+              label: formatBusinessDate(date),
+            }))}
             onChange={(event) => set('from')(event.target.value)}
             error={errors.from}
           />
@@ -707,7 +724,9 @@ function WhatsappRates() {
     const next: Record<string, string> = {};
     if (!rate.trim()) next.rate = 'Enter the rate in cedis; 0 is allowed.';
     else if (parsed.problem) next.rate = parsed.problem;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) next.from = 'Choose a date.';
+    // Review N9: an estimate's rate never changes the past.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || from < today())
+      next.from = 'Choose today or a later date.';
     setErrors(next);
     if (Object.keys(next).length > 0) return;
     setPending(true);
@@ -768,6 +787,7 @@ function WhatsappRates() {
               <TextField
                 label="From"
                 type="date"
+                min={today()}
                 value={from}
                 onChange={(event) => setFrom(event.target.value)}
                 error={errors.from}

@@ -9,17 +9,17 @@ const MESSAGING: readonly PlanFeature[] = ['inbox', 'broadcasts', 'tenant_groups
 /**
  * Shown when someone opens a page their company's plan leaves out (M6 decision 9; M10 PB-04).
  * The navigation already hides it, so this is for a bookmark or a typed address. It names the plan
- * that includes the feature and leads to Settings, Subscription, where the plan is changed.
+ * that includes the feature and leads to Settings, Subscription, where the plan is changed, for those who may change it.
  */
 export function NotOnPlan({
   feature,
   plan,
-  canSeePlan = false,
+  canChangePlan = false,
 }: {
   readonly feature: PlanFeature;
   readonly plan: SubscriptionTier | undefined;
-  /** May this person open Settings, Subscription (`subscription.read`)? */
-  readonly canSeePlan?: boolean;
+  /** May this person change the plan (`subscription.manage`; review WEB-14)? */
+  readonly canChangePlan?: boolean;
 }) {
   return (
     <Card data-testid="not-on-plan">
@@ -34,7 +34,7 @@ export function NotOnPlan({
             forwarded to you by SMS or email.
           </p>
         ) : null}
-        {canSeePlan ? (
+        {canChangePlan ? (
           <p className="text-sm">
             <Link
               href="/settings/subscription"
@@ -46,7 +46,7 @@ export function NotOnPlan({
           </p>
         ) : (
           <p className="text-sm text-slate-700">
-            Your agency admin or the landlord can change the plan in Settings, Subscription.
+            Ask your agency admin or the landlord to change the plan in Settings, Subscription.
           </p>
         )}
       </CardBody>

@@ -48,7 +48,7 @@ export default async function ConversationPage({
         <NotOnPlan
           feature="inbox"
           plan={company?.plan}
-          canSeePlan={allowed(me, 'subscription.read')}
+          canChangePlan={allowed(me, 'subscription.manage')}
         />
       </>
     );

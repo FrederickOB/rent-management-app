@@ -28,10 +28,20 @@ export function Tabs({
   );
 
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
-    if (step === 0) return;
+    // Arrows move to the next or previous tab, Home and End to the first and last (M10 review N6).
+    const target =
+      event.key === 'ArrowRight'
+        ? (index + 1) % tabs.length
+        : event.key === 'ArrowLeft'
+          ? (index - 1 + tabs.length) % tabs.length
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? tabs.length - 1
+              : null;
+    if (target === null) return;
     event.preventDefault();
-    const next = tabs[(index + step + tabs.length) % tabs.length]!;
+    const next = tabs[target]!;
     onChange(next.key);
     document.getElementById(`${id}-${next.key}`)?.focus();
   }
@@ -71,6 +81,7 @@ export function Tabs({
       <div
         id={`${id}-panel`}
         role="tabpanel"
+        tabIndex={0}
         aria-labelledby={tabs[index] ? `${id}-${tabs[index].key}` : undefined}
       >
         {children}

@@ -328,7 +328,8 @@ const plus = (a: number, b: number): number => add(money(a), money(b)).amountMin
  * rate × days ÷ days in the month (× (1 − annual discount) when `annual`), rounded once; then a
  * `minimum` top-up line when the span's units lines are below the span's prorated minimum (minimum
  * × days ÷ days in the month, rounded once; never discounted: it is the floor). Then one negative
- * `discount` line (a percentage of the subtotal, or the fixed amount capped at the subtotal), then
+ * `discount` line (a percentage of the subtotal, or the fixed amount), never taking the net below
+ * the prorated minimum (founder answer Q4), then
  * VAT, NHIL and GETFund lines on the net after the discount, only when `vat` is not null. No zero
  * lines. A company with no billable units still owes the prorated minimum (PB-05). The estimate on
  * the subscription page is this bill for the units billable so far (`billableUnits` up to today)
@@ -419,10 +420,14 @@ export function monthlyBill(input: {
   let discountMinor = 0;
   if (input.discount !== null) {
     const terms = checkDiscountTerms(input.discount);
-    const off =
+    const wanted =
       terms.kind === 'percentage'
         ? multiplyBps(money(subtotalMinor), terms.percentBps).amountMinor
-        : Math.min(terms.amountMinor, subtotalMinor);
+        : terms.amountMinor;
+    // Founder answer Q4 (M10 review BE-8): a code never takes the bill below the tier's minimum,
+    // prorated for a part month; it comes off what the units bill above it.
+    const room = Math.max(0, subtotalMinor - proratedMinimumMinor(input.month, input.spans));
+    const off = Math.min(wanted, room);
     if (off > 0) {
       discountMinor = -off;
       lines.push({
@@ -431,7 +436,7 @@ export function monthlyBill(input: {
           terms.kind === 'percentage'
             ? `Discount code ${terms.code}: ${percentText(terms.percentBps)} off`
             : `Discount code ${terms.code}: ${cedis(terms.amountMinor)} off` +
-              (off < terms.amountMinor ? ', up to the amount billed' : ''),
+              (off < terms.amountMinor ? ', down to the monthly minimum' : ''),
         tier: null,
         band: null,
         units: null,

@@ -366,12 +366,12 @@ describe('PB-05 discount codes (decision 8)', () => {
       days: null,
       daysInMonth: null,
       rateBps: 2_000,
-      amountMinor: -3_600,
+      amountMinor: -3_000,
     });
     expect(result).toMatchObject({
       subtotalMinor: 18_000,
-      discountMinor: -3_600,
-      netMinor: 14_400,
+      discountMinor: -3_000,
+      netMinor: 15_000,
     });
     expect(full().netMinor).toBe(18_000);
   });
@@ -382,15 +382,15 @@ describe('PB-05 discount codes (decision 8)', () => {
         discount: { kind: 'fixed', amountMinor, code: 'LAUNCH' },
       });
     expect(fixed(5_000).lines.at(-1)).toMatchObject({
-      description: 'Discount code LAUNCH: GH₵50.00 off',
+      description: 'Discount code LAUNCH: GH₵50.00 off, down to the monthly minimum',
       rateMinor: 5_000,
-      amountMinor: -5_000,
+      amountMinor: -3_000,
     });
     expect(fixed(50_000).lines.at(-1)).toMatchObject({
-      description: 'Discount code LAUNCH: GH₵500.00 off, up to the amount billed',
-      amountMinor: -18_000,
+      description: 'Discount code LAUNCH: GH₵500.00 off, down to the monthly minimum',
+      amountMinor: -3_000,
     });
-    expect(fixed(50_000).netMinor).toBe(0);
+    expect(fixed(50_000).netMinor).toBe(15_000);
   });
 
   it('adds no discount line when there is nothing to take off, and refuses bad terms', () => {
@@ -424,11 +424,11 @@ describe('OQ-48 VAT on subscription invoices (decision 10)', () => {
     expect(
       result.lines.slice(-3).map((l) => [l.kind, l.description, l.rateBps, l.amountMinor]),
     ).toEqual([
-      ['vat', 'VAT at 15%', 1_500, 2_160],
-      ['nhil', 'NHIL at 2.5%', 250, 360],
-      ['getfund', 'GETFund levy at 2.5%', 250, 360],
+      ['vat', 'VAT at 15%', 1_500, 2_250],
+      ['nhil', 'NHIL at 2.5%', 250, 375],
+      ['getfund', 'GETFund levy at 2.5%', 250, 375],
     ]);
-    expect(result).toMatchObject({ netMinor: 14_400, vatMinor: 2_880, totalMinor: 17_280 });
+    expect(result).toMatchObject({ netMinor: 15_000, vatMinor: 3_000, totalMinor: 18_000 });
   });
 
   it('refuses a negative or fractional rate', () => {

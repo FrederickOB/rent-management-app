@@ -18,10 +18,13 @@ class StillRendering extends Error {}
  */
 export function DocumentDownload({
   label,
+  name,
   load,
   testId,
 }: {
   readonly label: string;
+  /** The button's full name for assistive technology, such as "Download invoice SUB-2026-000001". */
+  readonly name?: string;
   readonly load: () => Promise<{ readonly url: string }>;
   readonly testId?: string;
 }) {
@@ -72,6 +75,7 @@ export function DocumentDownload({
         variant="secondary"
         pending={pending}
         onClick={() => void run()}
+        aria-label={name}
         data-testid={testId}
       >
         {label}

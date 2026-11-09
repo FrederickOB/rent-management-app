@@ -15,6 +15,7 @@ import { cn } from '@/lib/cn';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import {
+  pastRuleWarning,
   RULE_STATE_LABELS,
   ruleValueOf,
   ruleValueText,
@@ -147,6 +148,8 @@ function AddRule({ onAdded }: { readonly onAdded: (text: string) => void }) {
     if (!/^[a-z0-9_]+(\.[a-z0-9_*]+)+$/.test(key))
       next.key = 'A dotted key such as vat.platform_subscription.';
     if (value.problem) next.value = value.problem;
+    // BE-25: a past date is allowed (a law can be published after it takes effect); the field
+    // warns what it means instead.
     if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.from)) next.from = 'Choose a date.';
     if (draft.to && draft.to < draft.from) next.to = 'The end comes after the start.';
     if (draft.source.trim().length < 3) next.source = 'Say where the value comes from.';
@@ -217,6 +220,7 @@ function AddRule({ onAdded }: { readonly onAdded: (text: string) => void }) {
             value={draft.from}
             onChange={(event) => set('from')(event.target.value)}
             error={errors.from}
+            hint={pastRuleWarning(draft.from, todayIn(DEFAULT_TIME_ZONE))}
           />
           <TextField
             label="Until (optional)"

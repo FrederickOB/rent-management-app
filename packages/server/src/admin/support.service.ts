@@ -37,7 +37,10 @@ export interface CompanySupportGrantView extends SupportGrantView {
   readonly company: { readonly id: string; readonly name: string };
 }
 
-/** A company opened read-only under its grant: counts and recent activity, no personal data. */
+/**
+ * A company opened read-only under its grant: counts and recent activity, no personal data (review
+ * BE-27): who acted is told by kind ('Staff', 'Tenant', 'System'…), never by name.
+ */
 export interface SupportOverview {
   readonly company: { readonly id: string; readonly name: string };
   readonly grant: { readonly id: string; readonly until: Date; readonly reason: string };
@@ -57,9 +60,19 @@ export interface SupportOverview {
   readonly recentAudit: readonly {
     readonly at: Date;
     readonly action: string;
+    /** The kind of actor, never a person's name. */
     readonly actorName: string | null;
   }[];
 }
+
+/** Who acted, by kind, for the support overview (no names: the plan's "no personal data"). */
+const ACTOR_KIND_LABELS: Readonly<Record<string, string>> = {
+  staff: 'Staff',
+  tenant: 'Tenant',
+  platform_admin: 'Platform support',
+  system: 'System',
+  link: 'Secure link',
+};
 
 /** Refused: the company has granted no support access that is active now (decision 13). */
 export const supportNoGrant = () =>
@@ -325,11 +338,10 @@ export class SupportAccessService {
         const audit = await tx.execute<{
           occurred_at: Date | string;
           action: string;
-          actor_name: string | null;
+          actor_kind: string | null;
         }>(
-          sql`select e.occurred_at, e.action, p.name as actor_name
-              from audit_event e left join person p on p.id = e.actor_person_id
-              order by e.seq desc limit 20`,
+          sql`select e.occurred_at, e.action, e.actor_kind
+              from audit_event e order by e.seq desc limit 20`,
         );
         const c = company.rows[0];
         const g = grant.rows[0];
@@ -355,7 +367,7 @@ export class SupportAccessService {
           recentAudit: audit.rows.map((e) => ({
             at: at(e.occurred_at),
             action: e.action,
-            actorName: e.actor_name,
+            actorName: e.actor_kind ? (ACTOR_KIND_LABELS[e.actor_kind] ?? null) : null,
           })),
         };
       },

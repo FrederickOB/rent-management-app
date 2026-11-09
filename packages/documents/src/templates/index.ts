@@ -47,8 +47,10 @@ export {
 } from './reporting-dashboard';
 export { ownerStatementV1, type OwnerStatementDocumentData } from './reporting-statement';
 export {
+  subscriptionCreditNoteV1,
   subscriptionInvoiceV1,
   subscriptionReceiptV1,
+  type SubscriptionCreditNoteDocumentData,
   type SubscriptionInvoiceDocumentData,
   type SubscriptionReceiptDocumentData,
 } from './subscription';

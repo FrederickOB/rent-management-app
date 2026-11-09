@@ -1,4 +1,4 @@
-import { sql, withCompany } from '@rent/db';
+import { sql, withCompany, withSystem } from '@rent/db';
 import { addDays, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { subscriptionPostingKeys } from '@rent/domain/ledger';
 import { monthBounds, monthOf, nextMonth, previousMonth } from '@rent/domain/subscription';
@@ -120,6 +120,10 @@ beforeAll(async () => {
   );
   companies = new CompaniesService(ctx.database, s.policy, s.documents);
   await company(ctx, 'platform', 'Rent Platform');
+  // Founder answer Q1: nothing is billed until billing is on (setup only).
+  await withSystem(ctx.database, {}, (tx) =>
+    tx.execute(sql`select app.turn_on_billing('2026-01-01'::date, 'M10 billing tests')`),
+  );
   today = isoNow(ctx.clock, 'Africa/Accra');
   month = monthOf(today);
   last = previousMonth(month);
@@ -249,11 +253,8 @@ describe('PB-05 and PB-07 the monthly invoice (decision 2)', () => {
       `select kind, amount_minor from subscription_invoice_line where invoice_id = $1 order by line_no`,
       [issued!.id],
     );
-    expect(lines.map((l) => [l.kind, Number(l.amount_minor)])).toEqual([
-      ['minimum', 15_000],
-      ['discount', -7_500],
-    ]);
-    expect(issued!.totalMinor).toBe(7_500);
+    expect(lines.map((l) => [l.kind, Number(l.amount_minor)])).toEqual([['minimum', 15_000]]);
+    expect(issued!.totalMinor).toBe(15_000);
   });
 });
 

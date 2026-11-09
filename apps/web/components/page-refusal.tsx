@@ -39,7 +39,7 @@ export function pageRefusal(
         <NotOnPlan
           feature={page.feature}
           plan={company?.plan}
-          canSeePlan={allowed(me, 'subscription.read')}
+          canChangePlan={allowed(me, 'subscription.manage')}
         />
       </>
     );

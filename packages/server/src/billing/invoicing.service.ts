@@ -11,6 +11,7 @@ import { leaseIdsIn, renewedLeaseOf, startedRenewalIds } from '../tenancy/billin
 import { BillingEngine, type LeaseState } from './engine';
 import { isoNow, leaseGroup, lockCounters, lockLeases } from './records';
 import { conflict } from '../core/errors';
+import { subscriptionEnded } from '../core/subscription-ended';
 
 /** Lease states the daily invoice run bills (plan 4.4). */
 const BILLED_STATES = ['signed', 'active', 'ending', 'holding_over'] as const;
@@ -120,6 +121,8 @@ export class InvoicingService {
 
   /** `billing.generate-invoices` for one company (daily 00:10): every cycle due by the date. */
   async generateAll(companyId: string, date?: string): Promise<number> {
+    // M10 decision 12: no new rent invoices once the company's subscription has ended.
+    if (await subscriptionEnded(this.database, companyId)) return 0;
     const today = date ?? (await this.todayOf(companyId));
     const ids = await withCompany(this.database, this.system(companyId), (tx) =>
       leaseIdsIn(tx, BILLED_STATES),

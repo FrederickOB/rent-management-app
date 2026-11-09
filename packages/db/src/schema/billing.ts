@@ -568,7 +568,7 @@ export const companyCounter = pgTable(
     // M10: the platform company's subscription invoice and receipt numbers, gap-free per year.
     check(
       'company_counter_name_check',
-      sql`${t.name} in ('receipt', 'invoice', 'notice') or ${t.name} ~ '^subscription_(invoice|receipt):[0-9]{4}$'`,
+      sql`${t.name} in ('receipt', 'invoice', 'notice') or ${t.name} ~ '^subscription_(invoice|receipt|credit):[0-9]{4}$'`,
     ),
     check('company_counter_value_check', sql`${t.value} >= 1`),
   ],

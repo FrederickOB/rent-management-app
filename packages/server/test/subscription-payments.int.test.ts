@@ -735,16 +735,37 @@ describe('PB-05 annual prepayment becomes prepaid credit with its term recorded 
     ).rejects.toMatchObject({ status: 409, code: 'annual_already_paid' });
   });
 
-  it('prices on last month’s invoice net when there is one, never below 12 minimums', async () => {
-    const withInvoice = await subscriber('Annual From Invoice');
-    await openInvoice(ctx, b.posting, withInvoice.companyId, {
-      month: previousMonth(month),
-      totalMinor: 20_000,
-      issuedOn: plusDays(today, -2),
-      dueOn: plusDays(today, 5),
+  it('prices on this month’s units at the tier, never below 12 minimums', async () => {
+    const withUnits = await subscriber('Annual From Units');
+    const owner = (
+      await s.owners.create(withUnits.admin, { kind: 'individual', displayName: 'Owner U' })
+    ).id;
+    const { units } = await propertyWithUnits(s, withUnits.manager, {
+      areaCode: 'ACC',
+      propertyPart: 'ANU',
+      ownerId: owner,
+      units: [{ unitType: 'apartment', count: 12, bedrooms: 1 }],
     });
-    // Growth placeholder: 12 × GH₵200 less 10% is GH₵2,160, above 12 × the GH₵150 minimum.
-    expect((await payAnnual(withInvoice)).amountMinor).toBe(216_000);
+    for (const [i, unitId] of Object.values(units).entries()) {
+      const { tenant } = await s.tenants.create(withUnits.manager, {
+        kind: 'individual',
+        displayName: `Annual Units Tenant ${i}`,
+      });
+      await billedLease(ctx, s, b, withUnits.manager, {
+        unitId,
+        tenantId: tenant.id,
+        startDate: today,
+        endDate: plusDays(today, 364),
+        monthlyRentMinor: 100_000,
+        cycle: 'monthly',
+        depositMinor: null,
+        signedOn: today,
+        billingStartDate: today,
+      });
+    }
+    // Growth placeholder: 12 self-contained units × GH₵15 = GH₵180 a month; 12 months less 10%
+    // is GH₵1,944, above 12 × the GH₵150 minimum.
+    expect((await payAnnual(withUnits)).amountMinor).toBe(194_400);
     const empty = await subscriber('Annual Empty');
     // No units and no invoice: the bill is the GH₵150 minimum; 12 × less 10% (GH₵1,620) is below
     // 12 minimums (GH₵1,800), which is the floor.

@@ -12,7 +12,7 @@ import {
 import { PRICING_CATEGORIES, type PricingCategory } from '@rent/domain/messaging';
 import type { Actor } from '@rent/domain/policy';
 import { SUBSCRIPTION_TIERS, type SubscriptionTier } from '@rent/domain/settings';
-import { normalizeCode, type DiscountKind } from '@rent/domain/subscription';
+import { monthOf, normalizeCode, shiftMonth, type DiscountKind } from '@rent/domain/subscription';
 import { AuditService } from '../audit/audit.service';
 import type { Clock } from '../core/clock';
 import { isUniqueViolation, sqlStateOf } from '../core/db-errors';
@@ -40,8 +40,19 @@ export interface PriceListView {
   readonly minimumMinor: number;
   readonly annualDiscountBps: number;
   readonly effectiveFrom: string;
+  /**
+   * The first month it prices ('YYYY-MM'): the first month whose 1st is on or after
+   * `effectiveFrom`, because a month is priced with the list in force on its 1st (review BE-25).
+   */
+  readonly appliesFromMonth: string;
   readonly placeholder: boolean;
   readonly createdAt: Date;
+}
+
+/** The first month a list dated `effectiveFrom` prices (a month is priced on its 1st). */
+export function firstMonthPriced(effectiveFrom: string): string {
+  const month = monthOf(effectiveFrom);
+  return effectiveFrom.endsWith('-01') ? month : shiftMonth(month, 1);
 }
 
 export type TermsView = TermsVersion;
@@ -110,6 +121,7 @@ const priceView = (p: PriceListVersion): PriceListView => ({
   minimumMinor: p.minimumMinor,
   annualDiscountBps: p.annualDiscountBps,
   effectiveFrom: p.effectiveFrom,
+  appliesFromMonth: firstMonthPriced(p.effectiveFrom),
   placeholder: p.placeholder,
   createdAt: p.createdAt,
 });

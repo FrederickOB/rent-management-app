@@ -442,6 +442,34 @@
       "when": 1794225349576,
       "tag": "0062_subscription_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1794236178118,
+      "tag": "0063_subscription_review_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1794236180399,
+      "tag": "0064_subscription_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1794236182419,
+      "tag": "0065_subscription_review_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1794236184411,
+      "tag": "0066_subscription_review_money",
+      "breakpoints": true
     }
   ]
 }

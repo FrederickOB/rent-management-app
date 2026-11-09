@@ -1,5 +1,6 @@
 'use client';
 
+import type { SubscriptionView } from '@rent/contracts';
 import { tryNormalisePhone } from '@rent/domain/phone';
 import type {
   SubscriptionPaymentChannel,
@@ -14,7 +15,9 @@ import { api, keyedApi } from '@/lib/api';
 import { isKeyReused, moneyProblem, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
 import {
   ANNUAL_NOTE,
+  annualOfferText,
   checkoutLink,
+  chosenPurpose,
   MOMO_PROVIDER_LABELS,
   type MomoProvider,
   PAYMENT_POLL_MS,
@@ -35,27 +38,36 @@ type Payment = Awaited<ReturnType<ReturnType<typeof api>['subscription']['pay']>
 export function PayForm({
   canPayInvoices,
   canPayAnnual,
-  owedMinor,
+  openMinor,
+  pastDueMinor,
+  annualPrice,
   onPaid,
 }: {
   readonly canPayInvoices: boolean;
   readonly canPayAnnual: boolean;
-  /** What is past due, when known. */
-  readonly owedMinor: number | null;
+  /** What every open invoice still owes: what paying the invoices charges (review WEB-4). */
+  readonly openMinor: number;
+  /** Of that, what is past due. */
+  readonly pastDueMinor: number | null;
+  /** What a year ahead costs, when it may be paid. */
+  readonly annualPrice: SubscriptionView['annualPrice'];
   readonly onPaid: (text: string) => void;
 }) {
   const keeper = useIdempotencyKeeper();
   const keyedFor = useRef<string | null>(null);
-  const [purpose, setPurpose] = useState<SubscriptionPaymentPurpose>(
-    canPayInvoices ? 'invoices' : 'annual',
-  );
+  const [picked, setPicked] = useState<SubscriptionPaymentPurpose | null>(null);
+  // Review WEB-5: the purpose is one the API offers now, never one it stopped offering.
+  const purpose = chosenPurpose(picked, { invoices: canPayInvoices, annual: canPayAnnual });
   const [channel, setChannel] = useState<SubscriptionPaymentChannel>('card');
   const [phone, setPhone] = useState('');
   const [provider, setProvider] = useState<MomoProvider>('mtn');
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [payment, setPayment] = useState<Payment | null>(null);
+  // Review N8: while a payment waits for the provider, another one is not started.
+  const waiting = payment !== null && paymentNext(payment.status) === 'wait';
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -84,19 +96,35 @@ export function PayForm({
         `Paid ${formatMinor(current.amountMinor)} (${current.reference}). The receipt is in the list below.`,
       );
     } else if (next === 'failed') {
+      setPayment(null);
       setProblem(
         current.message ??
           'The payment did not go through, and nothing was taken. Try again, or pay another way.',
       );
     } else {
       setProblem(
-        'The payment has not been confirmed yet. If you approved it, it will show in the list below once the provider confirms it.',
+        'The payment has not been confirmed yet. If you approved it, check again in a moment: it shows here and in the list below once the provider confirms it.',
       );
+    }
+  }
+
+  /** After the polls run out, the payment is asked about again on request. */
+  async function checkAgain() {
+    if (!payment) return;
+    setChecking(true);
+    setProblem(null);
+    try {
+      await watch(payment);
+    } catch (failure) {
+      if (mounted.current) setProblem(subscriptionMessage(failure) ?? moneyProblem(failure));
+    } finally {
+      if (mounted.current) setChecking(false);
     }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (waiting || purpose === null) return;
     setProblem(null);
     let momoPhone: string | undefined;
     if (channel === 'momo') {
@@ -160,11 +188,11 @@ export function PayForm({
                   name="purpose"
                   className="mt-1"
                   checked={purpose === 'invoices'}
-                  onChange={() => setPurpose('invoices')}
+                  onChange={() => setPicked('invoices')}
                 />
                 <span>
-                  Every open invoice
-                  {owedMinor ? ` (${formatMinor(owedMinor)} past due)` : ''}
+                  Every open invoice: {formatMinor(openMinor)}
+                  {pastDueMinor ? ` (${formatMinor(pastDueMinor)} of it past due)` : ''}
                 </span>
               </label>
             ) : null}
@@ -175,10 +203,10 @@ export function PayForm({
                   name="purpose"
                   className="mt-1"
                   checked={purpose === 'annual'}
-                  onChange={() => setPurpose('annual')}
+                  onChange={() => setPicked('annual')}
                 />
                 <span>
-                  Twelve months up front
+                  Twelve months up front{annualPrice ? `: ${annualOfferText(annualPrice)}` : ''}
                   <span className="block text-slate-600">{ANNUAL_NOTE}</span>
                 </span>
               </label>
@@ -226,7 +254,7 @@ export function PayForm({
               />
             </div>
           ) : null}
-          <Button type="submit" pending={pending}>
+          <Button type="submit" pending={pending} disabled={waiting && !pending}>
             {channel === 'card' ? 'Pay by card' : 'Send the MoMo prompt'}
           </Button>
         </form>
@@ -255,6 +283,16 @@ export function PayForm({
                 {payment.message ??
                   'Approve the prompt on your phone with your MoMo PIN. If no prompt appears, look in your MoMo menu for a payment waiting for approval.'}
               </p>
+            ) : null}
+            {waiting && !pending ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                pending={checking}
+                onClick={() => void checkAgain()}
+              >
+                Check the payment again
+              </Button>
             ) : null}
           </div>
         ) : null}

@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { Button } from './ui/button';
 
 /** An inline "are you sure" for actions that cannot be undone from the screen (archiving). */
@@ -20,8 +20,16 @@ export function ConfirmBox({
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
 }) {
+  // M10 review N6: focus moves to the question when it appears, so it is read out and the keyboard
+  // is where the choice is. The group itself takes the focus, never the confirming button.
+  const group = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    group.current?.focus();
+  }, []);
   return (
     <div
+      ref={group}
+      tabIndex={-1}
       role="group"
       aria-label={label}
       className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 p-4"

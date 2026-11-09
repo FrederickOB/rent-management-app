@@ -84,6 +84,8 @@ export const APPEND_ONLY_TABLES = [
   'subscription_terms',
   'whatsapp_rate',
   'alert_event',
+  // M10 review BE-5: billing turned on, one row per change.
+  'billing_activation',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */
@@ -112,4 +114,5 @@ export const GLOBAL_TABLES = [
   'subscription_terms',
   'whatsapp_rate',
   'alert_event',
+  'billing_activation',
 ] as const;

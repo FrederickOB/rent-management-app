@@ -14,20 +14,9 @@ import { format, money } from '@rent/domain/money';
 import { compareVerified, reconcileTransactions } from '@rent/domain/payments';
 import { tryNormalisePhone } from '@rent/domain/phone';
 import type { Actor } from '@rent/domain/policy';
-import type { SubscriptionTier } from '@rent/domain/settings';
 import {
-  annualPrice,
   annualTerm,
-  billableUnits,
-  compareMonths,
-  countsByBand,
-  isBillingBand,
-  monthBounds,
   monthOf,
-  monthlyBill,
-  previousMonth,
-  type BandCounts,
-  type SnapshotUnitInput,
   type SubscriptionPaymentChannel,
   type SubscriptionPaymentPurpose,
   type SubscriptionPaymentStatus,
@@ -51,6 +40,7 @@ import { AppError, conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import type { AppLogger } from '../core/logging/logger';
 import { queueMessage } from '../core/messages';
+import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import type { PaymentProviders } from '../core/payment-providers';
 import { ALERT_PORT, CLOCK, CONFIG, DATABASE, LOGGER, PAYMENT_PROVIDERS } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
@@ -60,7 +50,9 @@ import type { PlatformCharges } from '../payments/platform-charges';
 import { membersWhoCan } from '../policy/members';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService } from '../rules/rules.service';
-import { priceListsAsOf, subscriptionVatAsOf, termsAsOf } from './catalogue';
+import { annualQuote, annualRunning } from './annual-quote';
+import { settleFromCredit } from './credit';
+import { unitsWithLeases } from './billing.service';
 import { SubscriptionCoreService } from './core.service';
 import { nextSubscriptionNumber } from './numbering';
 import { lockSubscription, platformBookId, platformCompanyId, withPlatform } from './platform';
@@ -82,6 +74,10 @@ const NOTICE_NAMESPACE = '6b1f2a7c-3d4e-5f60-8a9b-0c1d2e3f4a5b';
 const SETTLEMENT_NAMESPACE = 'a3c9e2d4-7b15-5e8f-9c6a-1d2b3e4f5a60';
 
 const DOWNLOAD_MS = 5 * 60_000;
+/** A charge for the same purpose still waiting this long is returned, not started again (BE-27). */
+const REUSE_PENDING_MS = 30 * 60_000;
+/** How often the status poll may ask the provider about one payment (BE-1). */
+const STATUS_VERIFY_LIMIT: RateLimit = { count: 20, windowMinutes: 1 };
 /** A charge still waiting after this long is checked with the provider (lost webhooks). */
 const VERIFY_AFTER_MS = 5 * 60_000;
 /** A charge the provider never heard of is abandoned after this long. */
@@ -223,26 +219,45 @@ export class SubscriptionPaymentsService implements PlatformCharges {
       staffContext(staff),
       async (tx) => ({
         email: (await personContact(tx, staff.personId))?.email ?? null,
-        liveUnits: input.purpose === 'annual' ? await this.unitsForEstimate(tx) : null,
+        liveUnits: input.purpose === 'annual' ? await unitsWithLeases(tx) : null,
       }),
       { accessMode: 'read only' },
     );
 
     const paymentId = uuidv7();
     const reference = `SUB-${paymentId.replace(/-/g, '')}`;
-    const created = await withPlatform(
+    const outcome = await withPlatform(
       this.database,
       { personId: staff.personId },
       async (tx, platformId) => {
         const company = await this.core.subscriberCompany(tx, staff.companyId);
         if (!company) throw notFound('Subscription');
+        // One payment at a time per subscriber (review BE-27): under the subscription lock, a
+        // charge for the same purpose still waiting is returned rather than a second one started.
+        await lockSubscription(tx, company.id);
         const sub = await this.core.ensure(tx, platformId, company, { personId: staff.personId });
+        const [waiting] = await tx
+          .select()
+          .from(schema.subscriptionPayment)
+          .where(
+            and(
+              eq(schema.subscriptionPayment.subscriberCompanyId, company.id),
+              eq(schema.subscriptionPayment.purpose, input.purpose),
+              eq(schema.subscriptionPayment.channel, input.channel),
+              inArray(schema.subscriptionPayment.status, ['initiated', 'pending']),
+              sql`${schema.subscriptionPayment.createdAt} > ${new Date(this.clock.now().getTime() - REUSE_PENDING_MS)}`,
+            ),
+          )
+          .orderBy(sql`${schema.subscriptionPayment.createdAt} desc`)
+          .limit(1);
+        if (waiting) return { existing: waiting, created: null } as const;
         const today = this.core.todayIn(company.timeZone);
+        const open = await this.core.openInvoices(tx, company.id);
+        const owed = sumOf(open.map((i) => Math.max(0, i.outstandingMinor)));
         let amountMinor: number;
         let annual: { firstMonth: string; lastMonth: string; discountBps: number } | null = null;
         if (input.purpose === 'invoices') {
-          const open = await this.core.openInvoices(tx, company.id);
-          amountMinor = sumOf(open.map((i) => Math.max(0, i.outstandingMinor)));
+          amountMinor = owed;
           if (amountMinor <= 0)
             throw conflict('nothing_to_pay', 'Nothing is owed on the subscription just now');
         } else {
@@ -251,7 +266,15 @@ export class SubscriptionPaymentsService implements PlatformCharges {
               'subscription_cancelled',
               'The subscription is ending, so it cannot be paid a year ahead',
             );
-          const quote = await this.annualQuote(tx, sub, today, liveUnits);
+          // Review BE-3: a year up front never sits beside open invoices.
+          if (owed > 0)
+            throw conflict(
+              'open_invoices',
+              'Pay the open subscription invoices first; then you can pay a year ahead.',
+            );
+          if (await annualRunning(tx, company.id, monthOf(today)))
+            throw conflict('annual_already_paid', 'This subscription is already paid a year ahead');
+          const quote = await annualQuote(tx, this.rules, sub.tier, today, liveUnits ?? []);
           amountMinor = quote.totalMinor;
           annual = quote;
         }
@@ -274,9 +297,19 @@ export class SubscriptionPaymentsService implements PlatformCharges {
             initiatedBy: staff.personId,
           })
           .returning();
-        return row!;
+        return { existing: null, created: row! } as const;
       },
     );
+    if (outcome.existing) {
+      const existing = view(outcome.existing, null);
+      if (claim)
+        await withCompany(this.database, staffContext(staff), async (tx) => {
+          await claim.claim(tx);
+          await claim.done(tx, existing);
+        });
+      return existing;
+    }
+    const created = outcome.created;
 
     if (claim) {
       try {
@@ -374,11 +407,56 @@ export class SubscriptionPaymentsService implements PlatformCharges {
     );
   }
 
-  /** A payment's status, for the page that polls it (`subscription.read`). */
+  /**
+   * A payment's status, for the page that polls it (`subscription.read`). A payment still waiting
+   * is first checked with its provider through the webhook's own path (verify, exact compare, P26,
+   * receipt, access restored), as rent's pay page does, at most a few times a minute per payment,
+   * so the page shows "paid" without waiting for a webhook (M10 review BE-1).
+   */
   async payment(actor: Actor | null, paymentId: string): Promise<SubscriptionPaymentView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'subscription.read');
-    // The subscriber reads its own (decision 1: the select-only policy on its rows).
+    const before = await this.read(staff, paymentId);
+    if (before.status === 'initiated' || before.status === 'pending') {
+      const allowed = await consumeRateLimit(
+        this.database,
+        `subscription:verify:${paymentId}`,
+        STATUS_VERIFY_LIMIT,
+        this.clock.now().getTime(),
+      );
+      if (allowed) {
+        const waiting = await withPlatform(
+          this.database,
+          {},
+          (tx) =>
+            tx
+              .select({
+                provider: schema.subscriptionPayment.provider,
+                reference: schema.subscriptionPayment.reference,
+              })
+              .from(schema.subscriptionPayment)
+              .where(eq(schema.subscriptionPayment.id, paymentId)),
+          { accessMode: 'read only' },
+        );
+        if (waiting[0])
+          await this.processReference(waiting[0].provider, waiting[0].reference).catch(
+            (error: unknown) => {
+              // The provider could not answer now: the page shows the last status and asks again.
+              if (!(error instanceof ProviderError)) throw error;
+              return null;
+            },
+          );
+      }
+      return this.read(staff, paymentId);
+    }
+    return before;
+  }
+
+  /** The subscriber reads its own payment (decision 1: the select-only policy on its rows). */
+  private async read(
+    staff: Extract<Actor, { kind: 'staff' }>,
+    paymentId: string,
+  ): Promise<SubscriptionPaymentView> {
     return withCompany(
       this.database,
       staffContext(staff),
@@ -669,6 +747,8 @@ export class SubscriptionPaymentsService implements PlatformCharges {
         paymentId: payment.id,
         amountMinor: payment.amountMinor,
         allocations,
+        // Provider clearing names its provider, for the platform's clearing check (review BE-26).
+        provider: payment.provider,
       }),
       record: { type: 'subscription_payment', id: payment.id },
     });
@@ -870,6 +950,7 @@ export class SubscriptionPaymentsService implements PlatformCharges {
           paymentId: payment.id,
           amountMinor: payment.amountMinor,
           allocations: direct,
+          provider: payment.provider,
         }),
         record: { type: 'subscription_payment', id: payment.id },
       });
@@ -887,6 +968,14 @@ export class SubscriptionPaymentsService implements PlatformCharges {
               eq(schema.subscriptionInvoice.status, 'paid'),
             ),
           );
+      // Review BE-3: other credit the subscriber holds goes onto the reopened invoices at once.
+      await settleFromCredit(
+        tx,
+        { core: this.core, posting: this.posting },
+        platformId,
+        payment.subscriberCompanyId,
+        this.core.todayIn(company.timeZone),
+      );
       await this.core.refresh(tx, platformId, sub, company);
       return { outcome: 'reversed' as const, payment };
     });
@@ -953,7 +1042,7 @@ export class SubscriptionPaymentsService implements PlatformCharges {
         }>(
           sql`select id, reference, amount_minor, status from subscription_payment
               where provider = ${provider} and status in ('succeeded', 'reversed')
-                and (reference = any(${`{${references.map((r) => `"${r.replace(/"/g, '')}"`).join(',')}}`}::text[])
+                and (reference = any(${sql.param(references)}::text[])
                      or (succeeded_at >= ${range.from}::timestamptz and succeeded_at < ${range.to}::timestamptz))`,
         ),
       { accessMode: 'read only' },
@@ -1111,6 +1200,42 @@ export class SubscriptionPaymentsService implements PlatformCharges {
   }
 
   /**
+   * The platform's provider clearing (M10 review BE-26; CLAUDE.md section 8; rent's invariant 11):
+   * the platform book's 1050 for a provider against what that provider still holds unsettled for
+   * the platform's own account (`providerMinor`: its successful platform charges of the last 14
+   * days not yet paid out, less what it took back and has not deducted yet, worked out by the
+   * daily reconciliation). A line from before P26 carried the provider is attributed through its
+   * payment. Any difference is raised for a person, with ids and amounts only. Returns whether one
+   * was raised.
+   */
+  async clearing(provider: string, providerMinor: number, day: string): Promise<boolean> {
+    const ourMinor = await withPlatform(
+      this.database,
+      {},
+      async (tx, platformId) => {
+        const bookId = await platformBookId(tx, platformId);
+        const rows = await tx.execute<{ total: string | null }>(
+          sql`select coalesce(sum(l.amount_minor), 0)::text as total from journal_line l
+              left join subscription_payment p on p.company_id = l.company_id and p.id = l.payment_id
+              where l.book_id = ${bookId}::uuid and l.account_code = '1050'
+                and coalesce(l.provider, p.provider) = ${provider}`,
+        );
+        return Number(rows.rows[0]?.total ?? 0);
+      },
+      { accessMode: 'read only' },
+    );
+    if (ourMinor === providerMinor) return false;
+    await this.alerts.raise({
+      severity: 'critical',
+      code: 'subscription.clearing_difference',
+      message:
+        'The platform book’s provider clearing does not agree with what the provider holds unsettled for the platform',
+      context: { provider, day, ourMinor, providerMinor },
+    });
+    return true;
+  }
+
+  /**
    * Payments still waiting after 5 minutes are checked with the provider, so a lost webhook is
    * caught within minutes (as rent's verify-pending); one the provider never heard of is
    * abandoned after an hour. For a worker job; returns how many were checked.
@@ -1192,112 +1317,6 @@ export class SubscriptionPaymentsService implements PlatformCharges {
       { accessMode: 'read only' },
     );
     return row ?? null;
-  }
-
-  /**
-   * 12 months up front (decision 7): `annualPrice` on last month's invoice net, or, with none,
-   * this month's bill for a whole month at the current tier from the units leased now (D8), with
-   * the tier's minimum as the floor, its annual discount and the VAT the terms charge.
-   */
-  private async annualQuote(
-    tx: Tx,
-    sub: {
-      readonly id: string;
-      readonly subscriberCompanyId: string;
-      readonly tier: SubscriptionTier;
-    },
-    today: string,
-    liveUnits: readonly SnapshotUnitInput[] | null,
-  ): Promise<{ totalMinor: number; firstMonth: string; lastMonth: string; discountBps: number }> {
-    const month = monthOf(today);
-    const running = await tx
-      .select({ id: schema.subscriptionPayment.id })
-      .from(schema.subscriptionPayment)
-      .where(
-        and(
-          eq(schema.subscriptionPayment.subscriberCompanyId, sub.subscriberCompanyId),
-          eq(schema.subscriptionPayment.purpose, 'annual'),
-          eq(schema.subscriptionPayment.status, 'succeeded'),
-          sql`${schema.subscriptionPayment.annualLastMonth} >= ${month}`,
-        ),
-      );
-    if (running.length > 0)
-      throw conflict('annual_already_paid', 'This subscription is already paid a year ahead');
-    const prices = (await priceListsAsOf(tx, today))[sub.tier];
-    const terms = await termsAsOf(tx, today);
-    const vat = await subscriptionVatAsOf(tx, this.rules, terms, today);
-    const [last] = await tx
-      .select({ netMinor: schema.subscriptionInvoice.netMinor })
-      .from(schema.subscriptionInvoice)
-      .where(
-        and(
-          eq(schema.subscriptionInvoice.subscriberCompanyId, sub.subscriberCompanyId),
-          eq(schema.subscriptionInvoice.month, previousMonth(month)),
-          sql`${schema.subscriptionInvoice.status} <> 'void'`,
-        ),
-      );
-    let monthlyNetMinor = last?.netMinor ?? null;
-    if (monthlyNetMinor === null) {
-      const counts: BandCounts = countsByBand(billableUnits(month, liveUnits ?? []));
-      const bounds = monthBounds(month);
-      monthlyNetMinor = monthlyBill({
-        month,
-        counts,
-        spans: [{ tier: sub.tier, firstDay: bounds.first, lastDay: bounds.last, prices }],
-        annual: false,
-        discount: null,
-        vat: null,
-      }).netMinor;
-    }
-    const price = annualPrice({
-      monthlyNetMinor,
-      minimumMinor: prices.minimumMinor,
-      annualDiscountBps: prices.annualDiscountBps,
-      vat: vat.rates,
-    });
-    const term = annualTerm(month);
-    if (compareMonths(term.lastMonth, month) < 0)
-      throw new Error('An annual term ends before it starts');
-    return {
-      totalMinor: price.totalMinor,
-      firstMonth: term.firstMonth,
-      lastMonth: term.lastMonth,
-      discountBps: prices.annualDiscountBps,
-    };
-  }
-
-  /** The subscriber's units with their leases that became active, for this month's estimate. */
-  private async unitsForEstimate(tx: Tx): Promise<SnapshotUnitInput[]> {
-    const rows = await tx.execute<{
-      unit_id: string;
-      unit_code: string;
-      band: string;
-      lease_id: string;
-      start_date: string;
-      last_day: string | null;
-    }>(
-      sql`select u.id as unit_id, u.code as unit_code, u.billing_band as band, l.id as lease_id,
-            l.start_date::text, coalesce(l.move_out_date, l.ended_on)::text as last_day
-          from unit u join lease l on l.unit_id = u.id
-          where l.status in ('active', 'ending', 'holding_over', 'ended', 'terminated')
-          order by u.id, l.id`,
-    );
-    const units = new Map<
-      string,
-      SnapshotUnitInput & { leases: SnapshotUnitInput['leases'][number][] }
-    >();
-    for (const r of rows.rows) {
-      if (!isBillingBand(r.band)) continue;
-      const unit = units.get(r.unit_id) ?? {
-        unitId: r.unit_id,
-        unitCode: r.unit_code,
-        band: r.band,
-        leases: [],
-      };
-      unit.leases.push({ leaseId: r.lease_id, startDate: r.start_date, lastDay: r.last_day });
-      units.set(r.unit_id, unit);
-    }
-    return [...units.values()];
   }
 
   /** The business day a payment was made, in the subscriber's time zone; never after today. */

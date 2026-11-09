@@ -2,6 +2,8 @@ import { DomainError } from '../errors';
 import type { CompanyAccess } from '../subscription/constants';
 import {
   allowedWhileReadOnly,
+  SUBSCRIPTION_ENDED_MESSAGE,
+  SUBSCRIPTION_ENDED_REASON,
   SUBSCRIPTION_READ_ONLY_CODE,
   SUBSCRIPTION_READ_ONLY_MESSAGE,
   SUBSCRIPTION_READ_ONLY_REASON,
@@ -30,6 +32,11 @@ export type Actor =
        * the allowlist in subscription/read-only.ts. Left out, access is full.
        */
       readonly subscriptionAccess?: CompanyAccess;
+      /**
+       * Set with 'read_only' when the subscription has ended (decision 12; review BE-27): the
+       * refusal then says so instead of "past due". Left out, a read-only refusal is past due.
+       */
+      readonly subscriptionEnded?: true;
     }
   | {
       readonly kind: 'platform_admin';
@@ -630,6 +637,14 @@ const READ_ONLY_REFUSAL: Decision = {
   message: SUBSCRIPTION_READ_ONLY_MESSAGE,
 };
 
+/** The same once the subscription has ended (decision 12): same code, its own words. */
+const ENDED_REFUSAL: Decision = {
+  allowed: false,
+  reason: SUBSCRIPTION_ENDED_REASON,
+  code: SUBSCRIPTION_READ_ONLY_CODE,
+  message: SUBSCRIPTION_ENDED_MESSAGE,
+};
+
 export function can(actor: Actor, action: PolicyAction, resource?: PolicyResource): Decision {
   const decision = decide(actor, action, resource);
   // M10 decision 11: a read-only company's staff keep what the allowlist names; anything else the
@@ -641,7 +656,7 @@ export function can(actor: Actor, action: PolicyAction, resource?: PolicyResourc
     actor.subscriptionAccess === 'read_only' &&
     !allowedWhileReadOnly(action, resource)
   )
-    return READ_ONLY_REFUSAL;
+    return actor.subscriptionEnded ? ENDED_REFUSAL : READ_ONLY_REFUSAL;
   return decision;
 }
 

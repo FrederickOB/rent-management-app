@@ -345,6 +345,13 @@ async function seedSubscription(
      values ($1, $1, $2, 'SUBR-2026-000001', '2026-02-02', 15000, 'subscription.receipt', 1)`,
     [companyId, paymentId],
   );
+  await app.query(
+    `insert into subscription_credit_note (company_id, subscriber_company_id, invoice_id, number, issued_on, net_minor,
+       vat_minor, amount_minor, to_credit_minor, reason, template_key, template_version)
+     values ($1, $1, $2, 'SUBC-2026-000001', '2026-02-03', 1000, 0, 1000, 1000, 'Fixture credit',
+       'subscription.credit-note', 1)`,
+    [companyId, invoiceId],
+  );
   const codeId = await one(
     `insert into discount_code (company_id, code, kind, percent_bps, months) values ($1, 'FIXTURE', 'percentage', 1000, 1)
      returning id`,

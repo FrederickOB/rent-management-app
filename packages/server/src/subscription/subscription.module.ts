@@ -3,7 +3,9 @@ import { DocumentsModule } from '../documents/documents.module';
 import { PolicyModule } from '../policy/policy.module';
 import { SubscriptionBillingService } from './billing.service';
 import { SubscriptionCoreModule } from './core.module';
+import { SubscriptionCreditNotesService } from './credit-notes.service';
 import { SubscriptionLifecycleService } from './lifecycle.service';
+import { SubscriptionNoticesService } from './notices';
 import { SubscriptionPaymentsModule } from './payments.module';
 import { SubscriptionService } from './subscription.service';
 
@@ -14,9 +16,17 @@ import { SubscriptionService } from './subscription.service';
  */
 @Module({
   imports: [SubscriptionCoreModule, SubscriptionPaymentsModule, DocumentsModule, PolicyModule],
-  providers: [SubscriptionBillingService, SubscriptionLifecycleService, SubscriptionService],
+  providers: [
+    SubscriptionBillingService,
+    SubscriptionCreditNotesService,
+    SubscriptionLifecycleService,
+    SubscriptionNoticesService,
+    SubscriptionService,
+  ],
   exports: [
     SubscriptionBillingService,
+    SubscriptionCreditNotesService,
+    SubscriptionNoticesService,
     SubscriptionLifecycleService,
     SubscriptionService,
     SubscriptionCoreModule,

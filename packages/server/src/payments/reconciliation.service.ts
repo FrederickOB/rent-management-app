@@ -36,6 +36,9 @@ import {
 } from './platform-charges';
 import { ProviderPaymentsService } from './provider-payments.service';
 
+/** The platform's own provider account has no subaccount (M10 decision 9; `isPlatformSettlement`). */
+const PLATFORM_ACCOUNT = '';
+
 /** Reconciliation days are Accra days (architecture section 10: jobs run on Accra time). */
 const RECONCILIATION_TIME_ZONE = 'Africa/Accra';
 
@@ -47,6 +50,16 @@ export interface TransactionRun {
 }
 
 /**
+ * The platform's own provider clearing (M10 review BE-26): the platform account is the one with
+ * no subaccount (`isPlatformSettlement`). Given what the provider holds unsettled for it, the
+ * subscription module compares the platform book's 1050 and raises any difference; true when it
+ * did.
+ */
+export interface PlatformClearing {
+  clearing(provider: string, providerMinor: number, day: string): Promise<boolean>;
+}
+
+/**
  * Daily reconciliation (CLAUDE.md section 8; M4b plan 4.8). Transactions first: each successful
  * charge the provider lists that we do not have goes through the normal path (verify, then post
  * or queue); each of ours the provider does not list, or lists differently, is flagged for a
@@ -55,7 +68,7 @@ export interface TransactionRun {
  */
 @Injectable()
 export class ReconciliationService {
-  private platform: PlatformCharges | null = null;
+  private platform: (PlatformCharges & Partial<PlatformClearing>) | null = null;
 
   constructor(
     @Inject(DATABASE) private readonly database: Database,
@@ -66,8 +79,11 @@ export class ReconciliationService {
     @Inject(LOGGER) private readonly logger: AppLogger,
   ) {}
 
-  /** M10: the subscription module takes the platform's own charges (registered at start-up). */
-  usePlatformCharges(handler: PlatformCharges): void {
+  /**
+   * M10: the subscription module takes the platform's own charges (registered at start-up), and
+   * compares the platform's provider clearing when it can (review BE-26).
+   */
+  usePlatformCharges(handler: PlatformCharges & Partial<PlatformClearing>): void {
     this.platform = handler;
   }
 
@@ -618,7 +634,9 @@ export class ReconciliationService {
     const owed = new Map<string, number>();
     const add = (code: string, amount: number) => owed.set(code, (owed.get(code) ?? 0) + amount);
     const subaccountOf = new Map<string, string>();
-    // Every account the provider shows activity for is compared, even with nothing unsettled.
+    // Every account the provider shows activity for is compared, even with nothing unsettled;
+    // the platform's own account (no subaccount) always, when subscriptions compare it (BE-26).
+    if (this.platform?.clearing) add(PLATFORM_ACCOUNT, 0);
     for (const settlement of settlements) add(settlement.subaccountCode, 0);
     for (const c of charges) {
       add(c.subaccountCode, 0);
@@ -634,10 +652,16 @@ export class ReconciliationService {
     for (const [reference, amount] of taken) {
       const code = subaccountOf.get(reference);
       const left = amount - (deducted.get(reference) ?? 0);
-      if (code && left > 0) add(code, -left);
+      // The platform's account is the empty code (review BE-26), so test for a known charge.
+      if (code !== undefined && left > 0) add(code, -left);
     }
     let raised = 0;
     for (const [code, providerMinor] of owed) {
+      if (code === PLATFORM_ACCOUNT) {
+        if (this.platform?.clearing && (await this.platform.clearing(provider, providerMinor, day)))
+          raised += 1;
+        continue;
+      }
       const found = await withSystem(this.database, {}, (tx) =>
         tx.execute<{ company_id: string; settlement_account_id: string }>(
           sql`select company_id, settlement_account_id from app.settlement_by_subaccount(${provider}, ${code})`,

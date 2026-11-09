@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { sql, withCompany, type Database, type Tx } from '@rent/db';
-import { addDays, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
+import { addDays, compareDates, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { DomainError } from '@rent/domain/errors';
 import { format, money } from '@rent/domain/money';
 import type { Actor } from '@rent/domain/policy';
@@ -11,6 +11,7 @@ import {
   SUBSCRIPTION_TIERS,
   TIER_FEATURES,
   tierOf,
+  TIER_LABELS,
   tierUnlocking,
   type SubscriptionTier,
 } from '@rent/domain/settings';
@@ -32,6 +33,7 @@ import {
   percentText,
   subscriptionAccess,
   tierSpans,
+  trialEndsOn as trialLastDay,
   type BandCounts,
   type CompanyAccess,
   type SubscriptionLineKind,
@@ -41,11 +43,14 @@ import type { BillingBand } from '@rent/domain/portfolio';
 import writeXlsxFile from 'write-excel-file/node';
 import { staffActor } from '../companies/companies.service';
 import { AppError, conflict, forbidden, notFound } from '../core/errors';
+import type { IdempotencyClaim } from '../core/idempotency';
+import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import { DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
 import { formatInvoiceNumber, formatReceiptNumber } from '../billing/records';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService } from '../rules/rules.service';
+import { annualQuote } from './annual-quote';
 import { SubscriptionBillingService, unitsWithLeases } from './billing.service';
 import { priceListsAsOf, subscriptionVatAsOf, termsAsOf } from './catalogue';
 import { SubscriptionCoreService, type SubscriberCompany } from './core.service';
@@ -54,6 +59,8 @@ import { lockSubscription, withPlatform } from './platform';
 type StaffActor = Extract<Actor, { kind: 'staff' }>;
 
 const TIER_ORDER: Record<SubscriptionTier, number> = { starter: 0, growth: 1, portfolio: 2 };
+/** Discount codes a company may try in an hour (review BE-27). */
+const CODE_ATTEMPTS: RateLimit = { count: 10, windowMinutes: 60 };
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const DOWNLOAD_MS = 5 * 60_000;
 
@@ -84,9 +91,21 @@ export interface SubscriptionView {
     readonly month: string;
     readonly billableUnits: BandCounts;
     readonly unitsMinor: number;
-    readonly minimumMinor: number;
+    readonly minimumTopUpMinor: number;
+    readonly discountMinor: number;
+    readonly vatMinor: number;
     readonly totalMinor: number;
   };
+  readonly openMinor: number;
+  readonly annualPrice: {
+    readonly netMinor: number;
+    readonly vatMinor: number;
+    readonly totalMinor: number;
+    readonly discountBps: number;
+    readonly firstMonth: string;
+    readonly lastMonth: string;
+  } | null;
+  readonly billing: { readonly on: boolean; readonly startsOn: string | null };
   readonly arrears: { readonly pastDueMinor: number; readonly oldestDueOn: string } | null;
   readonly features: {
     readonly feature: (typeof TIER_FEATURES)[number];
@@ -124,6 +143,7 @@ export interface SubscriptionInvoiceView {
   readonly totalMinor: number;
   readonly prepaidMinor: number;
   readonly paidMinor: number;
+  readonly creditedMinor: number;
   readonly outstandingMinor: number;
   readonly pastDue: boolean;
   readonly snapshotId: string;
@@ -196,29 +216,43 @@ export class SubscriptionService {
     const company = await this.subscriber(companyId);
     const today = this.core.todayIn(company.timeZone);
     const month = monthOf(today);
-    const units = await withCompany(
-      this.database,
-      { companyId, actorKind: 'system' },
-      (tx) => unitsWithLeases(tx),
-      { accessMode: 'read only' },
-    );
+    // The subscriber's own units, read in its context for its own view. The console never reads a
+    // customer's rows without a grant (review BE-16): its estimate counts the latest snapshot.
+    const units = viewer
+      ? await withCompany(
+          this.database,
+          { companyId, actorKind: 'system' },
+          (tx) => unitsWithLeases(tx),
+          { accessMode: 'read only' },
+        )
+      : null;
     return withPlatform(this.database, {}, async (tx, platformId) => {
       const sub = await this.core.ensure(tx, platformId, company);
       const terms = await termsAsOf(tx, today);
-      const prices = await priceListsAsOf(tx, today);
       const monthPrices = await priceListsAsOf(tx, monthBounds(month).first);
       const history = await this.core.tierHistory(tx, sub.id);
       const vat = await subscriptionVatAsOf(tx, this.rules, terms, today);
       const discount = await this.billing.discountFor(tx, companyId, month);
       const annual = await this.billing.annualFor(tx, companyId, month);
-      const spans = tierSpans({
-        month,
-        changes: history.length > 0 ? history : [{ tier: sub.tier, from: sub.startedOn }],
-        billFrom: billingStartsOn(sub.trialEndsOn),
-        billTo: sub.cancelsOn,
-        pricesFor: (tier) => monthPrices[tier],
-      });
-      const counts = countsByBand(billableUnits(month, units, today));
+      const activation = await this.core.billingActivation(tx);
+      const trialStart = billingStartsOn(sub.trialEndsOn);
+      const spans = activation
+        ? tierSpans({
+            month,
+            changes: history.length > 0 ? history : [{ tier: sub.tier, from: sub.startedOn }],
+            billFrom:
+              trialStart === null
+                ? activation.startsOn
+                : trialStart > activation.startsOn
+                  ? trialStart
+                  : activation.startsOn,
+            billTo: sub.cancelsOn,
+            pricesFor: (tier) => monthPrices[tier],
+          })
+        : [];
+      const counts = units
+        ? countsByBand(billableUnits(month, units, today))
+        : await latestSnapshotCounts(tx, companyId);
       const bill =
         spans.length > 0
           ? monthlyBill({ month, counts, spans, annual, discount, vat: vat.rates })
@@ -255,12 +289,27 @@ export class SubscriptionService {
         viewer ? this.policy.can(viewer, action).allowed : action === 'subscription.manage';
       const manage = can('subscription.manage');
       const ending = sub.status === 'cancel_scheduled' || sub.status === 'cancelled';
+      // Review BE-3: a year up front only when nothing is open.
+      const annualPayable = manage && !term && !ending && outstanding === 0;
+      const annualPrice =
+        annualPayable && units ? await annualQuote(tx, this.rules, sub.tier, today, units) : null;
+      const sumKind = (kind: string) =>
+        bill ? bill.lines.filter((l) => l.kind === kind).reduce((t, l) => t + l.amountMinor, 0) : 0;
       return {
         company: { id: company.id, name: company.displayName },
         tier: sub.tier,
         status: sub.status,
         access: company.access,
-        trialEndsOn: sub.status === 'trialing' ? sub.trialEndsOn : null,
+        // The trial's last day while trialing, and while a cancellation made within the trial
+        // waits: it ends by that day with nothing billed, which the subscription page says.
+        trialEndsOn:
+          sub.status === 'trialing' ||
+          (sub.status === 'cancel_scheduled' &&
+            sub.trialEndsOn !== null &&
+            sub.cancelsOn !== null &&
+            compareDates(parseBusinessDate(sub.cancelsOn), parseBusinessDate(sub.trialEndsOn)) <= 0)
+            ? sub.trialEndsOn
+            : null,
         pendingTier:
           sub.pendingTier && sub.pendingTierFrom
             ? { tier: sub.pendingTier, from: sub.pendingTierFrom }
@@ -290,13 +339,17 @@ export class SubscriptionService {
         estimate: {
           month,
           billableUnits: counts,
-          unitsMinor: bill
-            ? bill.lines.filter((l) => l.kind === 'units').reduce((s, l) => s + l.amountMinor, 0)
-            : 0,
-          minimumMinor: bill
-            ? bill.lines.filter((l) => l.kind === 'minimum').reduce((s, l) => s + l.amountMinor, 0)
-            : 0,
+          unitsMinor: sumKind('units'),
+          minimumTopUpMinor: sumKind('minimum'),
+          discountMinor: bill?.discountMinor ?? 0,
+          vatMinor: bill?.vatMinor ?? 0,
           totalMinor: bill?.totalMinor ?? 0,
+        },
+        openMinor: outstanding,
+        annualPrice,
+        billing: {
+          on: activation !== null && activation.startsOn <= today,
+          startsOn: activation?.startsOn ?? null,
         },
         arrears:
           pastDue.length > 0
@@ -312,15 +365,16 @@ export class SubscriptionService {
           unlockTier: tierUnlocking(feature),
           comingSoon: COMING_SOON_FEATURES.includes(feature),
         })),
+        // BE-25: a month is priced with the list in force on its 1st, the cards too.
         tiers: SUBSCRIPTION_TIERS.map((tier) => ({
           tier,
-          ratesMinor: prices[tier].ratesMinor,
-          minimumMinor: prices[tier].minimumMinor,
-          placeholder: prices[tier].placeholder,
+          ratesMinor: monthPrices[tier].ratesMinor,
+          minimumMinor: monthPrices[tier].minimumMinor,
+          placeholder: monthPrices[tier].placeholder,
         })),
         actions: {
           pay: manage && outstanding > 0,
-          payAnnual: manage && !term && !ending,
+          payAnnual: annualPrice !== null,
           changeTier: manage && !ending,
           applyCode: manage && !running && !ending,
           cancel: manage && !ending,
@@ -330,6 +384,17 @@ export class SubscriptionService {
         },
       };
     });
+  }
+
+  /** The paid year up front that covers a month, if any (founder answer Q3). */
+  private async annualTermCovering(tx: Tx, companyId: string, month: string) {
+    const rows = await tx.execute<{ first: string }>(
+      sql`select annual_first_month as first from subscription_payment
+          where subscriber_company_id = ${companyId}::uuid and purpose = 'annual' and status = 'succeeded'
+            and annual_first_month <= ${month} and annual_last_month >= ${month}
+          order by annual_first_month desc limit 1`,
+    );
+    return rows.rows[0] ? annualTerm(rows.rows[0].first) : null;
   }
 
   async invoices(actor: Actor | null): Promise<SubscriptionInvoiceView[]> {
@@ -361,6 +426,8 @@ export class SubscriptionService {
       total_minor: string;
       prepaid_minor: string;
       paid_minor: string;
+      credited_minor: string;
+      credited_owed_minor: string;
       snapshot_id: string;
       render_request_id: string | null;
       document_id: string | null;
@@ -373,6 +440,10 @@ export class SubscriptionService {
                       join subscription_payment p on p.company_id = a.company_id and p.id = a.payment_id
                       where a.company_id = i.company_id and a.invoice_id = i.id and a.source = 'payment'
                         and p.status = 'succeeded'), 0) as paid_minor,
+            coalesce((select sum(n.amount_minor) from subscription_credit_note n
+                      where n.company_id = i.company_id and n.invoice_id = i.id), 0) as credited_minor,
+            coalesce((select sum(n.amount_minor - n.to_credit_minor) from subscription_credit_note n
+                      where n.company_id = i.company_id and n.invoice_id = i.id), 0) as credited_owed_minor,
             i.snapshot_id, i.render_request_id, i.document_id
           from subscription_invoice i
           where i.subscriber_company_id = ${companyId}::uuid
@@ -385,7 +456,8 @@ export class SubscriptionService {
       const total = Number(r.total_minor);
       const prepaid = Number(r.prepaid_minor);
       const paid = Number(r.paid_minor);
-      const outstanding = r.status === 'void' ? 0 : Math.max(0, total - prepaid - paid);
+      const credited = Number(r.credited_owed_minor);
+      const outstanding = r.status === 'void' ? 0 : Math.max(0, total - prepaid - paid - credited);
       return {
         id: r.id,
         number: r.number,
@@ -396,6 +468,7 @@ export class SubscriptionService {
         totalMinor: total,
         prepaidMinor: prepaid,
         paidMinor: paid,
+        creditedMinor: Number(r.credited_minor),
         outstandingMinor: outstanding,
         pastDue: outstanding > 0 && r.due_on < today,
         snapshotId: r.snapshot_id,
@@ -407,87 +480,101 @@ export class SubscriptionService {
   async invoice(actor: Actor | null, invoiceId: string) {
     const staff = this.reader(staffActor(actor));
     return withCompany(this.database, staffContext(staff), async (tx) => {
-      const [view] = await this.invoiceRows(tx, staff.companyId, invoiceId);
-      if (!view) throw notFound('Invoice');
-      const lines = await tx.execute<{
-        kind: SubscriptionLineKind;
-        description: string;
-        tier: string | null;
-        band: BillingBand | null;
-        units: number | null;
-        rate_minor: string | null;
-        days: number | null;
-        days_in_month: number | null;
-        amount_minor: string;
-      }>(
-        sql`select kind, description, tier, band, units, rate_minor, days, days_in_month, amount_minor
-            from subscription_invoice_line where invoice_id = ${invoiceId}::uuid order by line_no`,
-      );
-      const flags = await tx.execute<{ vat_unverified: boolean }>(
-        sql`select vat_unverified from subscription_invoice where id = ${invoiceId}::uuid`,
-      );
-      return {
-        ...view,
-        lines: lines.rows.map((l) => ({
-          kind: l.kind,
-          description: l.description,
-          tier: l.tier === null ? null : tierOf(l.tier),
-          band: l.band,
-          units: l.units === null ? null : Number(l.units),
-          rateMinor: l.rate_minor === null ? null : Number(l.rate_minor),
-          days: l.days === null ? null : Number(l.days),
-          daysInMonth: l.days_in_month === null ? null : Number(l.days_in_month),
-          amountMinor: Number(l.amount_minor),
-        })),
-        vatUnverified: flags.rows[0]?.vat_unverified ?? false,
-      };
+      const detail = await this.invoiceDetail(tx, staff.companyId, invoiceId);
+      if (!detail) throw notFound('Invoice');
+      return detail;
     });
+  }
+
+  /** An invoice with its lines and credit notes, in either the subscriber's or the platform's context. */
+  private async invoiceDetail(tx: Tx, companyId: string, invoiceId: string) {
+    const [view] = await this.invoiceRows(tx, companyId, invoiceId);
+    if (!view) return null;
+    const lines = await tx.execute<{
+      kind: SubscriptionLineKind;
+      description: string;
+      tier: string | null;
+      band: BillingBand | null;
+      units: number | null;
+      rate_minor: string | null;
+      days: number | null;
+      days_in_month: number | null;
+      amount_minor: string;
+    }>(
+      sql`select kind, description, tier, band, units, rate_minor, days, days_in_month, amount_minor
+          from subscription_invoice_line where invoice_id = ${invoiceId}::uuid order by line_no`,
+    );
+    const flags = await tx.execute<{ vat_unverified: boolean }>(
+      sql`select vat_unverified from subscription_invoice where id = ${invoiceId}::uuid`,
+    );
+    return {
+      ...view,
+      lines: lines.rows.map((l) => ({
+        kind: l.kind,
+        description: l.description,
+        tier: l.tier === null ? null : tierOf(l.tier),
+        band: l.band,
+        units: l.units === null ? null : Number(l.units),
+        rateMinor: l.rate_minor === null ? null : Number(l.rate_minor),
+        days: l.days === null ? null : Number(l.days),
+        daysInMonth: l.days_in_month === null ? null : Number(l.days_in_month),
+        amountMinor: Number(l.amount_minor),
+      })),
+      vatUnverified: flags.rows[0]?.vat_unverified ?? false,
+      creditNotes: await creditNoteRows(tx, companyId, invoiceId),
+    };
   }
 
   async snapshot(actor: Actor | null, snapshotId: string) {
     const staff = this.reader(staffActor(actor));
     return withCompany(this.database, staffContext(staff), async (tx) => {
-      const rows = await tx.execute<{
-        id: string;
-        month: string;
-        taken_at: Date;
-        single_room_units: number;
-        self_contained_units: number;
-        commercial_units: number;
-      }>(
-        sql`select id, month, taken_at, single_room_units, self_contained_units, commercial_units
-            from billing_snapshot where id = ${snapshotId}::uuid and subscriber_company_id = ${staff.companyId}::uuid`,
-      );
-      const s = rows.rows[0];
-      if (!s) throw notFound('Snapshot');
-      const units = await tx.execute<{
-        unit_id: string;
-        unit_code: string;
-        band: BillingBand;
-        lease_id: string;
-        days_leased: number;
-      }>(
-        sql`select unit_id, unit_code, band, lease_id, days_leased from billing_snapshot_unit
-            where snapshot_id = ${snapshotId}::uuid order by unit_code`,
-      );
-      return {
-        id: s.id,
-        month: s.month,
-        takenAt: new Date(s.taken_at),
-        countsByBand: {
-          single_room: Number(s.single_room_units),
-          self_contained: Number(s.self_contained_units),
-          commercial: Number(s.commercial_units),
-        },
-        units: units.rows.map((u) => ({
-          unitId: u.unit_id,
-          unitCode: u.unit_code,
-          band: u.band,
-          leaseId: u.lease_id,
-          daysLeased: Number(u.days_leased),
-        })),
-      };
+      const found = await this.snapshotDetail(tx, staff.companyId, snapshotId);
+      if (!found) throw notFound('Snapshot');
+      return found;
     });
+  }
+
+  private async snapshotDetail(tx: Tx, companyId: string, snapshotId: string) {
+    const rows = await tx.execute<{
+      id: string;
+      month: string;
+      taken_at: Date;
+      single_room_units: number;
+      self_contained_units: number;
+      commercial_units: number;
+    }>(
+      sql`select id, month, taken_at, single_room_units, self_contained_units, commercial_units
+          from billing_snapshot where id = ${snapshotId}::uuid and subscriber_company_id = ${companyId}::uuid`,
+    );
+    const snap = rows.rows[0];
+    if (!snap) return null;
+    const units = await tx.execute<{
+      unit_id: string;
+      unit_code: string;
+      band: BillingBand;
+      lease_id: string;
+      days_leased: number;
+    }>(
+      sql`select unit_id, unit_code, band, lease_id, days_leased from billing_snapshot_unit
+          where snapshot_id = ${snapshotId}::uuid order by unit_code`,
+    );
+    return {
+      id: snap.id,
+      month: snap.month,
+      takenAt: new Date(snap.taken_at),
+      countsByBand: {
+        single_room: Number(snap.single_room_units),
+        self_contained: Number(snap.self_contained_units),
+        commercial: Number(snap.commercial_units),
+      },
+      units: units.rows.map((u) => ({
+        unitId: u.unit_id,
+        unitCode: u.unit_code,
+        band: u.band,
+        leaseId: u.lease_id,
+        daysLeased: Number(u.days_leased),
+      })),
+    };
   }
 
   /** The subscription's history for the console. */
@@ -551,6 +638,7 @@ export class SubscriptionService {
         if (sub.status === 'cancelled' || sub.status === 'cancel_scheduled')
           throw conflict('subscription_cancelled', 'This subscription is ending; its plan stays');
         const reason = by.byAdmin?.reason ?? null;
+        const adminMark = by.byAdmin ? { reason: by.byAdmin.reason, byPlatformAdmin: true } : {};
         if (tier === sub.tier) {
           if (!sub.pendingTier)
             throw conflict('tier_unchanged', 'The subscription is already on this plan');
@@ -562,6 +650,10 @@ export class SubscriptionService {
             tier: sub.pendingTier,
             reason,
             actorPersonId: by.personId,
+            mirror: {
+              action: 'subscription.downgrade_withdrawn',
+              data: { from: sub.tier, to: tier, ...adminMark },
+            },
           });
           return { sub, action: 'downgrade_withdrawn', effectiveOn: null as string | null };
         }
@@ -576,6 +668,10 @@ export class SubscriptionService {
             effectiveOn: today,
             reason,
             actorPersonId: by.personId,
+            mirror: {
+              action: 'subscription.tier_changed',
+              data: { from: sub.tier, to: tier, effectiveOn: today, ...adminMark },
+            },
           });
           const updated = (await this.core.byId(tx, sub.id))!;
           await this.core.refresh(tx, platformId, updated, company, {
@@ -594,22 +690,15 @@ export class SubscriptionService {
           effectiveOn: from,
           reason,
           actorPersonId: by.personId,
+          mirror: {
+            action: 'subscription.downgrade_scheduled',
+            data: { from: sub.tier, to: tier, effectiveOn: from, ...adminMark },
+          },
         });
         return { sub, action: 'downgrade_scheduled', effectiveOn: from };
       },
     );
-    await this.core.auditSubscriber(
-      companyId,
-      `subscription.${done.action}`,
-      done.sub.id,
-      {
-        from: done.sub.tier,
-        to: tier,
-        effectiveOn: done.effectiveOn,
-        ...(by.byAdmin ? { reason: by.byAdmin.reason, byPlatformAdmin: true } : {}),
-      },
-      by.personId,
-    );
+    void done;
   }
 
   /** Applies a discount code (decision 8): one at a time, from this month. */
@@ -629,6 +718,20 @@ export class SubscriptionService {
     const today = this.core.todayIn(company.timeZone);
     const month = monthOf(today);
     const code = normalizeCode(text);
+    // Review BE-27: guessing codes is limited per company.
+    if (
+      !(await consumeRateLimit(
+        this.database,
+        `subscription:code:${companyId}`,
+        CODE_ATTEMPTS,
+        Date.now(),
+      ))
+    )
+      throw new AppError(
+        429,
+        'too_many_attempts',
+        'Too many discount codes tried. Try again in an hour.',
+      );
     const done = await withPlatform(
       this.database,
       { personId, actorKind: byAdmin ? 'platform_admin' : 'system' },
@@ -696,17 +799,15 @@ export class SubscriptionService {
         await this.core.event(tx, platformId, sub, 'discount_applied', {
           data: { code, firstMonth: month, months: Number(found.months) },
           actorPersonId: personId,
+          mirror: {
+            action: 'subscription.discount_applied',
+            data: { code, firstMonth: month, ...(byAdmin ? { byPlatformAdmin: true } : {}) },
+          },
         });
         return sub;
       },
     );
-    await this.core.auditSubscriber(
-      companyId,
-      'subscription.discount_applied',
-      done.id,
-      { code, firstMonth: month, ...(byAdmin ? { byPlatformAdmin: true } : {}) },
-      personId,
-    );
+    void done;
   }
 
   /** Cancels at the end of this month (decision 12); withdrawn until then. */
@@ -730,6 +831,9 @@ export class SubscriptionService {
         } catch (error) {
           refusal(error);
         }
+        // Founder answer Q3 (review BE-15): a year paid ahead runs to its end; nothing is refunded.
+        const term = await this.annualTermCovering(tx, company.id, monthOf(today));
+        if (term && term.endsOn > cancelsOn) cancelsOn = term.endsOn;
         await tx.execute(
           sql`update subscription set cancels_on = ${cancelsOn}::date, cancel_reason = ${reason ?? null},
                 updated_at = now() where id = ${sub.id}::uuid`,
@@ -738,6 +842,7 @@ export class SubscriptionService {
           effectiveOn: cancelsOn,
           reason: reason ?? null,
           actorPersonId: staff.personId,
+          mirror: { action: 'subscription.cancel_scheduled', data: { cancelsOn } },
         });
         const updated = (await this.core.byId(tx, sub.id))!;
         await this.core.refresh(tx, platformId, updated, company, {
@@ -747,13 +852,7 @@ export class SubscriptionService {
         return updated;
       },
     );
-    await this.core.auditSubscriber(
-      company.id,
-      'subscription.cancel_scheduled',
-      sub.id,
-      { cancelsOn: sub.cancelsOn },
-      staff.personId,
-    );
+    void sub;
     return this.viewFor(staff.companyId, staff);
   }
 
@@ -775,6 +874,7 @@ export class SubscriptionService {
         );
         await this.core.event(tx, platformId, sub, 'cancel_withdrawn', {
           actorPersonId: staff.personId,
+          mirror: { action: 'subscription.cancel_withdrawn', data: {} },
         });
         const updated = (await this.core.byId(tx, sub.id))!;
         await this.core.refresh(tx, platformId, updated, company, {
@@ -784,13 +884,7 @@ export class SubscriptionService {
         return updated;
       },
     );
-    await this.core.auditSubscriber(
-      company.id,
-      'subscription.cancel_withdrawn',
-      sub.id,
-      {},
-      staff.personId,
-    );
+    void sub;
     return this.viewFor(staff.companyId, staff);
   }
 
@@ -865,9 +959,12 @@ export class SubscriptionService {
 
   // The console (the platform admin's operations) -----------------------------------------------
 
-  private platformAdmin(actor: Actor | null): Extract<Actor, { kind: 'platform_admin' }> {
+  private platformAdmin(
+    actor: Actor | null,
+    action: 'company.manage' | 'pricing.manage' = 'company.manage',
+  ): Extract<Actor, { kind: 'platform_admin' }> {
     if (!actor) throw forbidden();
-    this.policy.assert(actor, 'company.manage');
+    this.policy.assert(actor, action);
     switch (actor.kind) {
       case 'platform_admin':
         return actor;
@@ -900,16 +997,18 @@ export class SubscriptionService {
           },
         );
         await this.core.refresh(tx, platformId, sub, company);
+        await this.core.auditSubscriberIn(
+          tx,
+          companyId,
+          'subscription.started',
+          sub.id,
+          { tier: sub.tier, trialEndsOn: sub.trialEndsOn },
+          `subscription_started:${sub.id}`,
+        );
         return sub;
       },
     );
-    await this.core.auditSubscriber(
-      companyId,
-      'subscription.started',
-      sub.id,
-      { tier: sub.tier, trialEndsOn: sub.trialEndsOn },
-      options.personId ?? null,
-    );
+    void sub;
   }
 
   /** A platform admin sets the tier directly, for example for a pilot, with a reason. */
@@ -929,6 +1028,7 @@ export class SubscriptionService {
     companyId: string,
     days: number,
     reason: string,
+    claim?: IdempotencyClaim | null,
   ): Promise<void> {
     const admin = this.platformAdmin(actor);
     if (!Number.isSafeInteger(days) || days < 1 || days > 365)
@@ -940,8 +1040,13 @@ export class SubscriptionService {
       async (tx, platformId) => {
         await lockSubscription(tx, companyId);
         const sub = await this.core.ensure(tx, platformId, company);
-        if (sub.status !== 'trialing' || !sub.trialEndsOn)
+        if (sub.status !== 'trialing')
           throw conflict('not_trialing', 'This subscription is not in its trial');
+        if (!sub.trialEndsOn)
+          throw conflict(
+            'billing_off',
+            'Billing is not on yet, so the trial has no end to extend: it starts when billing does',
+          );
         const until = toIsoDate(addDays(parseBusinessDate(sub.trialEndsOn), days));
         await tx.execute(
           sql`update subscription set trial_ends_on = ${until}::date, updated_at = now() where id = ${sub.id}::uuid`,
@@ -951,16 +1056,191 @@ export class SubscriptionService {
           reason,
           data: { days },
           actorPersonId: admin.personId,
+          mirror: {
+            action: 'subscription.trial_extended',
+            data: { trialEndsOn: until, days, reason, byPlatformAdmin: true },
+          },
         });
+        // Review BE-21: a retry under the same key extends nothing more.
+        if (claim) {
+          await claim.claim(tx);
+          // What the route's write answers, so a replay renders the same detail.
+          await claim.done(tx, { companyId });
+        }
         return { ...sub, trialEndsOn: until };
       },
     );
-    await this.core.auditSubscriber(
-      companyId,
-      'subscription.trial_extended',
-      sub.id,
-      { trialEndsOn: sub.trialEndsOn, days, reason, byPlatformAdmin: true },
-      admin.personId,
+    void sub;
+  }
+
+  /**
+   * Reactivation (decision 12; review BE-4): a platform admin starts a new subscription for a
+   * cancelled company, on a tier, from today, with an audited reason; the company is active again
+   * and its staff get full access. The cancelled subscription stays as it was.
+   */
+  async reactivate(
+    actor: Actor | null,
+    companyId: string,
+    input: {
+      readonly tier: SubscriptionTier;
+      readonly trialDays?: number | null;
+      readonly reason: string;
+    },
+  ): Promise<void> {
+    const admin = this.platformAdmin(actor);
+    const company = await this.subscriber(companyId);
+    const today = this.core.todayIn(company.timeZone);
+    await withPlatform(
+      this.database,
+      { personId: admin.personId, actorKind: 'platform_admin' },
+      async (tx, platformId) => {
+        await lockSubscription(tx, companyId);
+        const latest = await this.core.find(tx, companyId);
+        if (!latest || latest.status !== 'cancelled')
+          throw conflict('not_cancelled', 'Only a cancelled subscription is started again');
+        await tx.execute(
+          sql`select app.set_subscriber_company_status(${companyId}::uuid, 'active')`,
+        );
+        const sub = await this.core.create(tx, platformId, company, {
+          startedOn: today,
+          trialDays: input.trialDays ?? 0,
+          tier: input.tier,
+          personId: admin.personId,
+        });
+        await this.core.auditSubscriberIn(
+          tx,
+          companyId,
+          'subscription.reactivated',
+          sub.id,
+          { tier: input.tier, reason: input.reason, previous: latest.id, byPlatformAdmin: true },
+          `subscription_reactivated:${sub.id}`,
+        );
+        await this.core.refresh(tx, platformId, sub, { ...company, status: 'active' }, { today });
+      },
+    );
+  }
+
+  /** Whether billing is on (founder answer Q1), for the console. */
+  async billingState(actor: Actor | null) {
+    const admin = this.platformAdmin(actor, 'pricing.manage');
+    void admin;
+    return withPlatform(
+      this.database,
+      {},
+      async (tx) => {
+        const activation = await this.core.billingActivation(tx);
+        const today = this.core.todayIn('Africa/Accra');
+        const prices = await priceListsAsOf(
+          tx,
+          monthBounds(monthOf(activation?.startsOn ?? today)).first,
+        );
+        const by = activation
+          ? await tx.execute<{ name: string | null }>(
+              sql`select p.name from billing_activation a left join person p on p.id = a.turned_on_by
+                  where a.id = ${activation.id}::uuid`,
+            )
+          : null;
+        return {
+          on: activation !== null && activation.startsOn <= today,
+          startsOn: activation?.startsOn ?? null,
+          turnedOnAt: activation?.createdAt ?? null,
+          turnedOnByName: by?.rows[0]?.name ?? null,
+          placeholderTiers: SUBSCRIPTION_TIERS.filter((t) => prices[t].placeholder),
+        };
+      },
+      { accessMode: 'read only' },
+    );
+  }
+
+  /**
+   * Turns billing on from a date (founder answer Q1): refused while a price list in force on that
+   * date is a placeholder, or when it is already on. Every trial that started before then runs
+   * from that date (the trial length it was started with).
+   */
+  async turnOnBilling(
+    actor: Actor | null,
+    input: { readonly startsOn: string; readonly note?: string | null },
+    claim?: IdempotencyClaim | null,
+  ) {
+    const admin = this.platformAdmin(actor, 'pricing.manage');
+    const today = this.core.todayIn('Africa/Accra');
+    if (input.startsOn < today)
+      throw new AppError(400, 'effective_from_past', 'Billing starts today or later');
+    await withPlatform(
+      this.database,
+      { personId: admin.personId, actorKind: 'platform_admin' },
+      async (tx, platformId) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended('billing_activation', 31))`,
+        );
+        if (await this.core.billingActivation(tx))
+          throw conflict('billing_already_on', 'Billing is already on');
+        const prices = await priceListsAsOf(tx, monthBounds(monthOf(input.startsOn)).first);
+        const placeholders = SUBSCRIPTION_TIERS.filter((t) => prices[t].placeholder);
+        if (placeholders.length > 0)
+          throw conflict(
+            'placeholder_prices',
+            `Billing cannot start on placeholder prices. Add real prices for ${placeholders.map((t) => TIER_LABELS[t]).join(', ')} from ${input.startsOn} or earlier first.`,
+          );
+        await this.activateIn(tx, platformId, input.startsOn, input.note ?? null);
+        if (claim) {
+          await claim.claim(tx);
+          await claim.done(tx, { startsOn: input.startsOn });
+        }
+      },
+    );
+    return this.billingState(actor);
+  }
+
+  /**
+   * Records billing as on from `startsOn` and starts every waiting trial from then (the caller
+   * checked who may). The seed uses it too, as the platform's system path.
+   */
+  async activateIn(tx: Tx, platformId: string, startsOn: string, note: string | null) {
+    await tx.execute(sql`select app.turn_on_billing(${startsOn}::date, ${note})`);
+    const waiting = await tx.execute<{ id: string; started_on: string }>(
+      sql`select id, started_on::text from subscription
+          where trial_ends_on is null and status in ('trialing', 'active')`,
+    );
+    for (const row of waiting.rows) {
+      const days = await this.core.trialDaysOf(tx, row.id);
+      if (days <= 0) continue;
+      const from = row.started_on > startsOn ? row.started_on : startsOn;
+      await tx.execute(
+        sql`update subscription set trial_ends_on = ${trialLastDay(from, days)}::date, updated_at = now()
+            where id = ${row.id}::uuid`,
+      );
+    }
+    void platformId;
+  }
+
+  /** A company's invoice with its lines and credit notes, for the console (PB-02). */
+  async invoiceDetailFor(actor: Actor | null, companyId: string, invoiceId: string) {
+    this.platformAdmin(actor);
+    return withPlatform(
+      this.database,
+      {},
+      async (tx) => {
+        const detail = await this.invoiceDetail(tx, companyId, invoiceId);
+        if (!detail) throw notFound('Invoice');
+        return detail;
+      },
+      { accessMode: 'read only' },
+    );
+  }
+
+  /** The billable units behind a company's invoice, for the console (PB-02). */
+  async snapshotFor(actor: Actor | null, companyId: string, snapshotId: string) {
+    this.platformAdmin(actor);
+    return withPlatform(
+      this.database,
+      {},
+      async (tx) => {
+        const found = await this.snapshotDetail(tx, companyId, snapshotId);
+        if (!found) throw notFound('Snapshot');
+        return found;
+      },
+      { accessMode: 'read only' },
     );
   }
 
@@ -1094,4 +1374,59 @@ async function exportSheets(tx: Tx) {
       ]),
     ),
   ];
+}
+
+/** Credit notes on one invoice (founder answer Q2), oldest first. */
+export async function creditNoteRows(tx: Tx, companyId: string, invoiceId?: string) {
+  const rows = await tx.execute<{
+    id: string;
+    number: string;
+    invoice_id: string;
+    invoice_number: string;
+    issued_on: string;
+    net_minor: string;
+    vat_minor: string;
+    amount_minor: string;
+    reason: string;
+    render_request_id: string | null;
+    document_id: string | null;
+  }>(
+    sql`select n.id, n.number, n.invoice_id, i.number as invoice_number, n.issued_on::text, n.net_minor,
+          n.vat_minor, n.amount_minor, n.reason, n.render_request_id, n.document_id
+        from subscription_credit_note n
+        join subscription_invoice i on i.company_id = n.company_id and i.id = n.invoice_id
+        where n.subscriber_company_id = ${companyId}::uuid
+          ${invoiceId ? sql`and n.invoice_id = ${invoiceId}::uuid` : sql``}
+        order by n.issued_on, n.number`,
+  );
+  return rows.rows.map((r) => ({
+    id: r.id,
+    number: r.number,
+    invoiceId: r.invoice_id,
+    invoiceNumber: r.invoice_number,
+    issuedOn: r.issued_on,
+    netMinor: Number(r.net_minor),
+    vatMinor: Number(r.vat_minor),
+    amountMinor: Number(r.amount_minor),
+    reason: r.reason,
+    hasDocument: r.document_id !== null || r.render_request_id !== null,
+  }));
+}
+
+/** The latest snapshot's counts by band (the console's estimate, review BE-16). */
+async function latestSnapshotCounts(tx: Tx, companyId: string): Promise<BandCounts> {
+  const rows = await tx.execute<{
+    single_room_units: number;
+    self_contained_units: number;
+    commercial_units: number;
+  }>(
+    sql`select single_room_units, self_contained_units, commercial_units from billing_snapshot
+        where subscriber_company_id = ${companyId}::uuid order by month desc limit 1`,
+  );
+  const r = rows.rows[0];
+  return {
+    single_room: Number(r?.single_room_units ?? 0),
+    self_contained: Number(r?.self_contained_units ?? 0),
+    commercial: Number(r?.commercial_units ?? 0),
+  };
 }

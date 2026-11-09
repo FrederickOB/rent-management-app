@@ -1,4 +1,4 @@
-import type { PolicyAction, PolicyResource } from '../policy/policy';
+import type { Actor, PolicyAction, PolicyResource } from '../policy/policy';
 
 /**
  * Read-only access (M10 decision 11; PB-11; OQ-34). While a company's subscription is past due
@@ -86,6 +86,50 @@ export const SUBSCRIPTION_READ_ONLY_REASON = 'the subscription is read-only (PB-
 /** For people: what a refused change means. */
 export const SUBSCRIPTION_READ_ONLY_MESSAGE =
   'Your subscription is past due, so changes are paused. Nothing was changed. Tenants can still pay and get receipts. Paying the subscription restores access at once.';
+
+/** Why, for logs and tests, once the subscription has ended (decision 12). */
+export const SUBSCRIPTION_ENDED_REASON =
+  'the subscription has ended; staff read only (decision 12)';
+
+/**
+ * For people: what a refused change means once the subscription has ended (decision 12; review
+ * BE-27). Same code as past due, so the API still answers 403 SUBSCRIPTION_READ_ONLY; only the
+ * words differ, because paying does not restore an ended subscription.
+ */
+export const SUBSCRIPTION_ENDED_MESSAGE =
+  'Your subscription has ended, so changes are paused. Nothing was changed. You can still read and export your records until read access ends.';
+
+/**
+ * Staff steps that stay open while the company is read-only although their policy action is,
+ * in general, a change (review BE-18 and BE-24). Each step names the action that decides WHO may
+ * take it; read-only does not decide whether they may:
+ * - `membership.revoke`: removing someone from the company, which ends what their sessions can do
+ *   there. An admin must be able to remove a person who left, or they keep recording cash and
+ *   revealing ID numbers. Inviting and changing roles (`membership.manage` otherwise) stay paused.
+ * - `dashboard.refresh`: refreshing the dashboard's figures is reading (decision 11); M9 lets
+ *   those who manage leases start it.
+ */
+export const READ_ONLY_KEPT_STEPS = {
+  'membership.revoke': 'membership.manage',
+  'dashboard.refresh': 'lease.manage',
+} as const satisfies Record<string, PolicyAction>;
+
+export type ReadOnlyKeptStep = keyof typeof READ_ONLY_KEPT_STEPS;
+
+/**
+ * What to ask `can()` for a kept step: its deciding action, for the same person as if the company
+ * had full access. Anyone else (full access, tenants, platform admins, jobs) is passed through as
+ * they are, so the step is never wider than the role's own permission.
+ */
+export function keptStep<A extends Actor>(
+  actor: A,
+  step: ReadOnlyKeptStep,
+): { readonly actor: A; readonly action: PolicyAction } {
+  const action = READ_ONLY_KEPT_STEPS[step];
+  if (actor.kind !== 'staff' || actor.subscriptionAccess !== 'read_only') return { actor, action };
+  const { subscriptionAccess: _access, subscriptionEnded: _ended, ...asFull } = actor;
+  return { actor: asFull as A, action };
+}
 
 /** Whether staff of a read-only company may still do this (the rest of `can()` still applies). */
 export function allowedWhileReadOnly(action: PolicyAction, resource?: PolicyResource): boolean {

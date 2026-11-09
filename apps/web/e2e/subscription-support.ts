@@ -10,21 +10,21 @@ import {
 import type { SubscriptionTier } from '@rent/domain/settings';
 import { codeFor, DEMO_PASSWORD, ready, signIn, submitAuth, unique } from './helpers';
 import { fixture, freePropertyPart } from './register-helpers';
-import { newTenant, recordPaperLease, today } from './tenancy-helpers';
+import { freshPhone, newTenant, recordPaperLease, today } from './tenancy-helpers';
 
 /**
  * Helpers for the M10 specs (plan section 6, web). Each spec makes its own company: the platform
  * admin onboards it through the API, and its first admin accepts the emailed invitation, sets a
  * password and enrols TOTP through the real screens. Nothing depends on the seed's subscriptions.
  *
- * ASSUMPTIONS, written before the backend landed (the coordinator passes on anything different):
+ * What they rely on:
  *
- * A1. A test control forces a subscription invoice, the one state no screen can reach in a test:
- *     `POST /api/v1/_test/subscriptions/{companyId}/invoice` with `{ dueDaysAgo }`, called by a
- *     platform admin while the API runs with its e2e test controls on. It issues an open invoice
- *     for the company (last month, at least the plan's minimum), due `dueDaysAgo` days before
- *     today, then runs today's dunning, so 15 days makes the company read-only (grace 14, the
- *     switch on). It answers 200 with `{ id, number, totalMinor }`. Not in the contracts.
+ * A1. The API's test control forces a subscription invoice, the one state no screen can reach in
+ *     a test: `POST /api/v1/_test/subscriptions/{companyId}/invoice` with `{ dueDaysAgo }`, by a
+ *     platform admin, mounted only with E2E_TEST_CONTROLS=on (apps/api/src/admin/
+ *     test-controls.controller.ts). It issues an open invoice through the normal invoice path,
+ *     due `dueDaysAgo` days ago, then runs today's dunning, so 15 days makes the company read-only
+ *     (grace 14, the switch on). It answers `{ id, number, totalMinor }`. Not in the contracts.
  * A2. The fake provider takes platform charges with no subaccount: `checkoutUrl` opens the same
  *     "Fake checkout" page as rent, whose "Pay" button completes the charge and sends the webhook,
  *     and the API issues the receipt within the subscription page's polling.
@@ -33,6 +33,10 @@ import { newTenant, recordPaperLease, today } from './tenancy-helpers';
  * A4. The seeded platform admin is `admin@demo.invalid`, on the demo TOTP.
  * A5. Read-only (decision 11) refuses adding an owner with 403 `SUBSCRIPTION_READ_ONLY`, and
  *     allows recording cash, its photo upload included (it then waits for a second person).
+ * A6. A MoMo payment's charge at the fake provider carries the payment's `SUB-` reference, so the
+ *     fake's test control approves it as the payer's phone would.
+ * A7. Billing is on in the e2e database (the seed turns it on with demo prices, founder answer
+ *     Q1), so a company onboarded here starts its trial at once and can be invoiced.
  */
 
 export const PLATFORM_ADMIN = { email: 'admin@demo.invalid', name: 'Platform Admin (demo)' };
@@ -69,6 +73,7 @@ export async function onboard(
   const adminName = `Ama Admin ${tag} (e2e)`;
   const created = await ok<{ company: { id: string } }>(
     await platform.request.post('/api/v1/platform/companies', {
+      headers: { 'Idempotency-Key': randomUUID() },
       data: {
         kind: options.kind,
         name,
@@ -262,11 +267,16 @@ export async function recordCash(
  * Pays every open invoice by card on the subscription page (A2): the checkout opens in a new tab,
  * where the fake provider's "Pay" completes it; the page then shows the payment as paid.
  */
-export async function payByCard(page: Page): Promise<void> {
+export async function payByCard(
+  page: Page,
+  what: 'invoices' | 'annual' = 'invoices',
+): Promise<void> {
   await page.goto('/settings/subscription');
   const pay = page.getByRole('form', { name: 'Pay the subscription' });
   await ready(page, 'Pay by card');
-  await pay.getByLabel(/^Every open invoice/).check();
+  await pay
+    .getByLabel(what === 'invoices' ? /^Every open invoice/ : /^Twelve months up front/)
+    .check();
   await pay.getByLabel('Card, on the payment provider’s page').check();
   await pay.getByRole('button', { name: 'Pay by card' }).click();
   const checkout = page.getByTestId('subscription-checkout');
@@ -276,4 +286,40 @@ export async function payByCard(page: Page): Promise<void> {
   await tab.getByRole('button', { name: 'Pay' }).click();
   await tab.close();
   await expect(page.getByText(/^Paid GH₵[\d,.]+ \(SUB-/)).toBeVisible({ timeout: 120_000 });
+}
+
+const FAKE_PROVIDERS = process.env.FAKE_PROVIDERS_URL ?? 'http://localhost:4010';
+
+/** The payer approves a charge on their phone (A6), through the fake provider's test control. */
+export async function approveCharge(reference: string): Promise<void> {
+  const response = await fetch(
+    `${FAKE_PROVIDERS}/payments/_test/charges/${encodeURIComponent(reference)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'success' }),
+    },
+  );
+  expect(response.status, `approve the charge: ${await response.text()}`).toBe(200);
+}
+
+/**
+ * Pays every open invoice by MoMo on the subscription page: the prompt goes to a fresh phone,
+ * the fake provider approves it (A6), and the page shows the payment as paid.
+ */
+export async function payByMomo(page: Page): Promise<string> {
+  await page.goto('/settings/subscription');
+  const pay = page.getByRole('form', { name: 'Pay the subscription' });
+  await ready(page, 'Pay by card');
+  await pay.getByLabel(/^Every open invoice/).check();
+  await pay.getByLabel('Mobile money, approved on the phone').check();
+  await pay.getByLabel('MoMo number').fill(freshPhone());
+  await pay.getByLabel('Network').selectOption('mtn');
+  await pay.getByRole('button', { name: 'Send the MoMo prompt' }).click();
+  const status = page.getByTestId('subscription-payment-status');
+  await expect(status).toContainText(/reference SUB-\S+\./, { timeout: 30_000 });
+  const reference = /reference (SUB-\S+)\./.exec(await status.innerText())![1]!;
+  await approveCharge(reference);
+  await expect(page.getByText(/^Paid GH₵[\d,.]+ \(SUB-/)).toBeVisible({ timeout: 120_000 });
+  return reference;
 }

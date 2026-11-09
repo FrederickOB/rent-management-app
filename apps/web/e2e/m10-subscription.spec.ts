@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { money, toDecimal } from '@rent/domain/money';
 import { formatBusinessDate } from '../lib/business-dates';
 import { READ_ONLY_TEXT } from '../lib/errors';
 import { firstOfNextMonth, SUBSCRIPTION_MESSAGES } from '../lib/subscription';
@@ -21,9 +22,9 @@ import { today } from './tenancy-helpers';
 /**
  * M10 plan section 6, end to end (web): subscription billing and the platform admin console.
  * Every test onboards its own company, so none depends on the seed's subscriptions or on an
- * earlier run. Written before the backend landed: the assumptions (a test control that forces an
- * invoice, platform charges on the fake provider, the invitation email, the platform admin's
- * account) are listed at the top of `subscription-support.ts`.
+ * earlier run. What they rely on (the API's invoice test control, platform charges on the fake
+ * provider, the invitation email, the platform admin's account) is listed at the top of
+ * `subscription-support.ts`. More of section 6 is in `m10-subscription-more.spec.ts`.
  */
 
 test.describe.configure({ timeout: 300_000 });
@@ -108,8 +109,8 @@ test.describe('PB-05 changing tier', () => {
       await expect(page.getByText(proration).first()).toBeVisible();
       await expect(page.getByTestId('subscription-tier')).toHaveText('Growth');
       await expect(inbox).toContainText('Included');
-      // The company's features follow the plan at once: the inbox is in the menu.
-      await page.reload();
+      // The company's features follow the plan at once: the inbox is in the menu, without a
+      // reload (review WEB-2).
       await expect(nav(page).getByRole('link', { name: 'Inbox' })).toBeVisible();
       const subscription = await ok<{ tier: string; pendingTier: unknown }>(
         await page.request.get('/api/v1/subscription'),
@@ -163,9 +164,10 @@ test.describe('PB-11 an unpaid subscription goes read-only for staff, never for 
       const cash = await recordCash(page, leaseId, tenantName);
       expect(cash.status(), `record cash while read-only: ${await cash.text()}`).toBe(200);
 
-      // Paying restores full access at once.
+      // Paying restores full access at once: the banner lifts on the same page (review WEB-2).
+      await page.goto('/settings/subscription');
+      await expect(page.getByTestId('subscription-banner')).toHaveCount(1);
       await payByCard(page);
-      await page.goto('/');
       await expect(page.getByTestId('subscription-banner')).toHaveCount(0);
       const profile = await ok<{ subscription: { access: string } | null }>(
         await page.request.get('/api/v1/company'),
@@ -201,7 +203,8 @@ test.describe('AD-10 support access needs the customer’s consent', () => {
         (await support.request.get(`/api/v1/platform/support/${company.companyId}`)).status(),
       ).toBe(403);
       await support.goto(`/platform/support/${company.companyId}`);
-      await expect(support.getByRole('alert')).toContainText(
+      // The app's alert, not Next's route announcer (review WEB-3).
+      await expect(support.locator('main').getByRole('alert')).toContainText(
         SUBSCRIPTION_MESSAGES.SUPPORT_NO_GRANT!,
       );
 
@@ -284,15 +287,19 @@ test.describe('AD-10 the platform admin onboards a company and sets next month�
         1,
       );
 
-      // New Portfolio prices from the 1st of next month; a rate unique to this run finds them.
+      // New Portfolio prices from the 1st of next month. This adds a global price list row, which
+      // stays (rows are never edited); a single-room rate unique to the run, from the clock,
+      // finds this run's row among the earlier runs' (review WEB-13).
       const from = firstOfNextMonth(today());
-      const cents = String(Math.trunc(Math.random() * 90) + 10);
+      const rateMinor = 1_000_000 + (Date.now() % 9_000_000);
+      const typed = toDecimal(money(rateMinor));
       await page.goto('/platform/billing');
       await page.getByRole('button', { name: 'Add new prices' }).click();
       const prices = page.getByRole('form', { name: 'New prices for a plan' });
       await prices.getByLabel('Plan').selectOption('portfolio');
-      await prices.getByLabel('From', { exact: true }).fill(from);
-      await prices.getByLabel('Single room: GH₵ a unit a month').fill(`13.${cents}`);
+      // Review WEB-9: the form offers the 1st of a month only.
+      await prices.getByLabel('From', { exact: true }).selectOption(from);
+      await prices.getByLabel('Single room: GH₵ a unit a month').fill(typed);
       await prices.getByLabel('Self-contained flat or house: GH₵ a unit a month').fill('23');
       await prices.getByLabel('Commercial: GH₵ a unit a month').fill('46');
       await prices.getByLabel('Monthly minimum (GH₵)').fill('410');
@@ -305,7 +312,7 @@ test.describe('AD-10 the platform admin onboards a company and sets next month�
         .getByTestId('price-list-tier')
         .filter({ hasText: 'Portfolio' })
         .getByTestId('price-list')
-        .filter({ hasText: `Single room: GH₵13.${cents} a unit a month` });
+        .filter({ hasText: `Single room: ${cedis(rateMinor)} a unit a month` });
       await expect(added).toHaveCount(1);
       await expect(added).toContainText(`From ${formatBusinessDate(from)}`);
       await expect(added).toContainText('From a future date');

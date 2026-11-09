@@ -3,7 +3,8 @@
 import type { SubscriptionTier } from '@rent/domain/settings';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { DocumentDownload } from '@/components/document-download';
 import { Empty, LoadFailed, Loading } from '@/components/load-state';
 import { PageHeader } from '@/components/page-header';
 import { ReasonForm } from '@/components/reason-form';
@@ -15,14 +16,16 @@ import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextField } from '@/components/ui/field';
 import { Table, Td, Th } from '@/components/ui/table';
-import { api } from '@/lib/api';
+import { api, keyedApi } from '@/lib/api';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
+import { sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
 import { companyKindLabel, formatTime, humanise } from '@/lib/format';
 import { COMPANY_DETAIL_TABS, consoleTab } from '@/lib/platform-console';
 import { monthLabel } from '@/lib/rent-tax';
 import {
   ESTIMATED,
+  grantActiveAt,
   grantStateText,
   invoiceStateText,
   subscriptionMessage,
@@ -33,6 +36,7 @@ import {
   wholeNumberOf,
 } from '@/lib/subscription';
 import { formatMinor } from '@/lib/tenancy-format';
+import { useNow } from '@/lib/use-now';
 
 type Detail = Awaited<ReturnType<ReturnType<typeof api>['platformAdmin']['company']>>;
 
@@ -146,10 +150,15 @@ function SubscriptionTab({
   readonly onUpdated: (next: Detail, text: string) => void;
 }) {
   const s = detail.subscription;
-  const [action, setAction] = useState<'tier' | 'trial' | null>(null);
+  const [action, setAction] = useState<'tier' | 'trial' | 'reactivate' | null>(null);
   const [tier, setTier] = useState<SubscriptionTier>(detail.tier);
   const [days, setDays] = useState('14');
   const [daysError, setDaysError] = useState<string | null>(null);
+  const [trialDays, setTrialDays] = useState('');
+  const [trialDaysError, setTrialDaysError] = useState<string | null>(null);
+  // BE-21: a retried extension adds nothing, so one key per extension asked for.
+  const trialKeeper = useIdempotencyKeeper();
+  const trialKeyedFor = useRef<string | null>(null);
 
   const facts: { label: string; value: string }[] = [
     { label: 'Plan', value: tierLabel(s.tier) },
@@ -214,6 +223,58 @@ function SubscriptionTab({
                   Extend the trial
                 </Button>
               ) : null}
+              {detail.status === 'cancelled' ? (
+                <Button variant="secondary" size="sm" onClick={() => setAction('reactivate')}>
+                  Start a new subscription
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          {action === 'reactivate' ? (
+            <div className="space-y-3">
+              <SelectField
+                label="Plan"
+                value={tier}
+                options={TIERS.map((t) => ({ value: t, label: tierLabel(t) }))}
+                onChange={(event) => setTier(event.target.value as SubscriptionTier)}
+                className="max-w-xs"
+              />
+              <TextField
+                label="Free trial in days (optional)"
+                hint="Blank uses the trial length in the terms."
+                inputMode="numeric"
+                value={trialDays}
+                onChange={(event) => setTrialDays(event.target.value)}
+                error={trialDaysError}
+                className="max-w-48"
+              />
+              <ReasonForm
+                label="Start a new subscription"
+                intro="The company ended its subscription. A new one starts now, and its staff get full access again. The reason is kept in the company’s audit log."
+                minLength={5}
+                submitText={`Start ${tierLabel(tier)}`}
+                onSubmit={async (reason) => {
+                  const parsed = trialDays.trim() ? wholeNumberOf(trialDays, 0, 365) : null;
+                  setTrialDaysError(parsed?.problem ?? null);
+                  if (parsed?.problem) throw new Error(parsed.problem);
+                  const next = await plainly(() =>
+                    api().platformAdmin.reactivate({
+                      companyId: detail.company.id,
+                      tier,
+                      ...(parsed?.value !== null && parsed?.value !== undefined
+                        ? { trialDays: parsed.value }
+                        : {}),
+                      reason,
+                    }),
+                  );
+                  setAction(null);
+                  onUpdated(
+                    next,
+                    `${next.company.name} has a new subscription on ${tierLabel(next.tier)}.`,
+                  );
+                }}
+                onCancel={() => setAction(null)}
+              />
             </div>
           ) : null}
           {action === 'tier' ? (
@@ -259,14 +320,16 @@ function SubscriptionTab({
                   const parsed = wholeNumberOf(days, 1, 365);
                   setDaysError(parsed.problem);
                   if (parsed.value === null) throw new Error(parsed.problem ?? 'Enter the days.');
-                  const count = parsed.value;
+                  const input = { companyId: detail.company.id, days: parsed.value, reason };
+                  const content = JSON.stringify(input);
+                  if (trialKeyedFor.current !== content) {
+                    trialKeeper.reset();
+                    trialKeyedFor.current = content;
+                  }
                   const next = await plainly(() =>
-                    api().platformAdmin.extendTrial({
-                      companyId: detail.company.id,
-                      days: count,
-                      reason,
-                    }),
+                    sendOnce(trialKeeper, (key) => keyedApi(key).platformAdmin.extendTrial(input)),
                   );
+                  trialKeyedFor.current = null;
                   setAction(null);
                   onUpdated(
                     next,
@@ -375,16 +438,41 @@ function InvoicesTab({ detail }: { readonly detail: Detail }) {
                 <Th>Due</Th>
                 <Th className="text-right">Total</Th>
                 <Th>State</Th>
+                <Th>PDF</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {detail.invoices.map((invoice) => (
-                <tr key={invoice.id}>
-                  <Td className="font-medium">{invoice.number}</Td>
+                <tr key={invoice.id} data-testid="platform-invoice-row">
+                  <Td className="font-medium">
+                    <Link
+                      href={`/platform/companies/${detail.company.id}/invoices/${invoice.id}`}
+                      className="underline underline-offset-2"
+                    >
+                      {invoice.number}
+                    </Link>
+                  </Td>
                   <Td>{monthLabel(invoice.month)}</Td>
                   <Td>{formatBusinessDate(invoice.dueOn)}</Td>
                   <Td className="text-right tabular-nums">{formatMinor(invoice.totalMinor)}</Td>
                   <Td>{invoiceStateText(invoice)}</Td>
+                  <Td>
+                    {/* Review WEB-11: the PDF, through the console's own route. */}
+                    {invoice.hasDocument ? (
+                      <DocumentDownload
+                        label="Download"
+                        name={`Download invoice ${invoice.number}`}
+                        load={() =>
+                          api().platformAdmin.invoiceDocument({
+                            companyId: detail.company.id,
+                            invoiceId: invoice.id,
+                          })
+                        }
+                      />
+                    ) : (
+                      '—'
+                    )}
+                  </Td>
                 </tr>
               ))}
             </tbody>
@@ -495,16 +583,19 @@ type GrantRow = Detail['supportGrants'][number];
 
 /** Grants and the requests made under each (AD-10): shared with Support access. */
 export function GrantList({ grants }: { readonly grants: readonly GrantRow[] }) {
+  // Review N7: the server's `active`, ended at the grant's expiry as time moves on.
+  const now = useNow();
   return (
     <ul className="space-y-3">
       {grants.map((grant) => {
+        const active = grantActiveAt(grant, now);
         const state = grantStateText(
           {
             expiresAt: grant.until,
             revokedAt: grant.revokedAt,
             revokedByName: grant.revokedByName,
           },
-          grant.active ? grant.from : grant.until,
+          active ? grant.from : grant.until,
           time,
         );
         return (
@@ -514,9 +605,7 @@ export function GrantList({ grants }: { readonly grants: readonly GrantRow[] }) 
             data-testid="platform-support-grant"
           >
             <p className="flex flex-wrap items-center gap-2">
-              <Badge tone={grant.active ? 'amber' : 'neutral'}>
-                {grant.active ? 'Active' : 'Ended'}
-              </Badge>
+              <Badge tone={active ? 'amber' : 'neutral'}>{active ? 'Active' : 'Ended'}</Badge>
               <span className="text-slate-900">{grant.reason}</span>
             </p>
             <p className="text-slate-700">

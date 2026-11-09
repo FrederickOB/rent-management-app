@@ -14,6 +14,7 @@ import {
 import type { Clock } from '../core/clock';
 import { queueMessage } from '../core/messages';
 import { CLOCK, DATABASE } from '../core/tokens';
+import { subscriptionEnded } from '../core/subscription-ended';
 import { activeMembers } from '../identity/memberships';
 import { PolicyService } from '../policy/policy.service';
 import { currentOwnerIds } from '../portfolio/register-read.service';
@@ -80,6 +81,8 @@ export class TenancyRemindersService {
 
   /** `tenancy.renewal-reminders` (TL-09): leases ending, with no renewal signed or out for signing. */
   async renewals(companyId: string, today?: string): Promise<number> {
+    // M10 decision 12: none once the company's subscription has ended.
+    if (await subscriptionEnded(this.database, companyId)) return 0;
     return this.run(companyId, today, RENEWAL_REMINDERS_JOB, async (tx, company, day) => {
       const leases = await tx.execute<LeaseFacts>(
         sql`${LEASE_FACTS} where l.status = 'active'

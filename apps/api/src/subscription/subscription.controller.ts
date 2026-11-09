@@ -4,6 +4,7 @@ import { contract } from '@rent/contracts';
 import { IdempotencyStore } from '@rent/server/core';
 import {
   SubscriptionBillingService,
+  SubscriptionCreditNotesService,
   SubscriptionPaymentsService,
   SubscriptionService,
 } from '@rent/server/subscription';
@@ -24,6 +25,8 @@ export class SubscriptionController {
     @Inject(SubscriptionService) private readonly subscription: SubscriptionService,
     @Inject(SubscriptionBillingService) private readonly billing: SubscriptionBillingService,
     @Inject(SubscriptionPaymentsService) private readonly payments: SubscriptionPaymentsService,
+    @Inject(SubscriptionCreditNotesService)
+    private readonly credits: SubscriptionCreditNotesService,
     @Inject(IdempotencyStore) private readonly idempotency: IdempotencyStore,
   ) {}
 
@@ -50,6 +53,10 @@ export class SubscriptionController {
       ),
       receiptDocument: implement(contract.subscription.receiptDocument).handler(async ({ input }) =>
         serialize(await this.payments.receiptDocument(a, input.receiptId)),
+      ),
+      creditNoteDocument: implement(contract.subscription.creditNoteDocument).handler(
+        async ({ input }) =>
+          serialize(await this.credits.subscriberDocument(a, input.creditNoteId)),
       ),
       pay: implement(contract.subscription.pay).handler(({ input }) =>
         idempotent(

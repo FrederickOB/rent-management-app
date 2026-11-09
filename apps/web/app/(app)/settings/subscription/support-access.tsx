@@ -13,6 +13,7 @@ import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import {
+  grantActiveAt,
   grantHoursProblem,
   grantStateText,
   SUPPORT_CONSENT_TEXT,
@@ -20,6 +21,7 @@ import {
   subscriptionMessage,
 } from '@/lib/subscription';
 import { useLoad } from '@/lib/use-load';
+import { useNow } from '@/lib/use-now';
 
 type Grant = Awaited<ReturnType<ReturnType<typeof api>['supportGrants']['list']>>[number];
 
@@ -150,13 +152,14 @@ function GrantItem({
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const time = (iso: string) => formatTime(iso, timeZone);
-  // Whether it is active is the server's word (`active`), never this device's clock.
+  // Review N7: the server's `active`, ended at the grant's expiry as time moves on.
+  const now = useNow();
+  const active = grantActiveAt(grant, now);
   const stateText = grantStateText(
     { expiresAt: grant.until, revokedAt: grant.revokedAt, revokedByName: grant.revokedByName },
-    grant.active ? grant.from : grant.until,
+    active ? grant.from : grant.until,
     time,
   );
-  const active = grant.active && stateText.active;
 
   async function revoke() {
     setPending(true);

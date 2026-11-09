@@ -50,6 +50,11 @@ export const priceListSchema = z.object({
   /** The annual prepayment discount (decision 7). */
   annualDiscountBps: minor,
   effectiveFrom: isoDate,
+  /**
+   * The first month it prices (BE-25): a month is priced with the list in force on its 1st, so
+   * this is the first month whose 1st is on or after `effectiveFrom`.
+   */
+  appliesFromMonth: month,
   /** A placeholder until OQ-37 is answered: the console says so. */
   placeholder: z.boolean(),
   createdAt: iso,
@@ -91,7 +96,10 @@ export const subscriptionSchema = z.object({
   tier,
   status: z.enum(SUBSCRIPTION_STATUSES),
   access: z.enum(COMPANY_ACCESS),
-  /** While trialing: the last day of the trial. */
+  /**
+   * The last day of the trial: while trialing, and while a cancellation made within the trial
+   * waits (it ends by that day, unbilled).
+   */
   trialEndsOn: isoDate.nullable(),
   /** A downgrade waiting for the 1st of next month (decision 6). */
   pendingTier: z.object({ tier, from: isoDate }).nullable(),
@@ -108,14 +116,43 @@ export const subscriptionSchema = z.object({
   /** Prepaid credit (2020) outside any annual term. */
   creditMinor: minor,
   discount: z.object({ code: z.string(), description: z.string(), monthsLeft: minor }).nullable(),
-  /** This month so far, from live leases (D8): an estimate, not an invoice. */
+  /**
+   * This month so far, from live leases (D8): an estimate, not an invoice. The parts add up:
+   * `unitsMinor + minimumTopUpMinor + discountMinor + vatMinor = totalMinor`. The top-up is what
+   * brings the units up to the tier's prorated minimum (zero when the units reach it); the tier's
+   * own minimum is in `tiers`. `discountMinor` is zero or negative.
+   */
   estimate: z.object({
     month,
     billableUnits: byBand(minor),
     unitsMinor: minor,
-    minimumMinor: minor,
+    minimumTopUpMinor: minor,
+    discountMinor: minor,
+    vatMinor: minor,
     totalMinor: minor,
   }),
+  /** What every open invoice still owes, past due or not: what "pay" charges. */
+  openMinor: minor,
+  /**
+   * The price of 12 months up front (decision 7), when it may be paid (`actions.payAnnual`): a
+   * full month at the current tier from the units let now, less the annual discount, floored at
+   * 12 minimums, VAT on top when charged; the term is the 12 billing months from this one.
+   */
+  annualPrice: z
+    .object({
+      netMinor: minor,
+      vatMinor: minor,
+      totalMinor: minor,
+      discountBps: minor,
+      firstMonth: month,
+      lastMonth: month,
+    })
+    .nullable(),
+  /**
+   * Whether billing is on (founder answer Q1). Before a platform admin turns it on, nothing is
+   * invoiced and a trial has no end yet (`trialEndsOn` null); from that day every trial runs.
+   */
+  billing: z.object({ on: z.boolean(), startsOn: isoDate.nullable() }),
   /** Open invoices past their due date. */
   arrears: z.object({ pastDueMinor: minor, oldestDueOn: isoDate }).nullable(),
   features: z.array(featureSchema),
@@ -166,6 +203,8 @@ export const subscriptionInvoiceSchema = z.object({
   /** Settled from prepaid credit (2020). */
   prepaidMinor: minor,
   paidMinor: minor,
+  /** Credit notes on it (BE-6): what they took off the total. */
+  creditedMinor: minor,
   outstandingMinor: minor,
   pastDue: z.boolean(),
   snapshotId: uuid,
@@ -173,10 +212,25 @@ export const subscriptionInvoiceSchema = z.object({
 });
 export type SubscriptionInvoiceView = z.infer<typeof subscriptionInvoiceSchema>;
 
+/** A credit note on a subscription invoice (founder answer Q2): gap-free `SUBC-2026-000001`. */
+export const subscriptionCreditNoteSchema = z.object({
+  id: uuid,
+  number: z.string(),
+  invoiceId: uuid,
+  invoiceNumber: z.string(),
+  issuedOn: isoDate,
+  netMinor: minor,
+  vatMinor: minor,
+  amountMinor: minor,
+  reason: z.string(),
+  hasDocument: z.boolean(),
+});
+
 export const subscriptionInvoiceDetailSchema = subscriptionInvoiceSchema.extend({
   lines: z.array(subscriptionInvoiceLineSchema),
   /** Whether VAT lines read an unverified rule (decision 10): the console warns. */
   vatUnverified: z.boolean(),
+  creditNotes: z.array(subscriptionCreditNoteSchema),
 });
 
 /** The month's billable units (PB-02, D8), frozen for audit and dispute. */
@@ -219,7 +273,7 @@ export const subscriptionPaymentSchema = z.object({
   status: z.enum(SUBSCRIPTION_PAYMENT_STATUSES),
   /** For a card: the provider's checkout page. */
   checkoutUrl: z.string().nullable(),
-  /** For MoMo: what the tenant's phone shows next, in plain words. */
+  /** For MoMo: what the wallet's phone shows next, in plain words. */
   message: z.string().nullable(),
   receiptId: uuid.nullable(),
 });
@@ -280,21 +334,37 @@ export const subscriptionContract = {
     .route({ method: 'GET', path: '/subscription/receipts/{receiptId}/document' })
     .input(z.object({ receiptId: uuid }))
     .output(download),
+  creditNoteDocument: oc
+    .route({
+      method: 'GET',
+      path: '/subscription/credit-notes/{creditNoteId}/document',
+      summary: 'A 5-minute link to a credit note’s PDF. 409 DOCUMENT_RENDERING while it renders',
+    })
+    .input(z.object({ creditNoteId: uuid }))
+    .output(download),
   pay: oc
     .route({
       method: 'POST',
       path: '/subscription/payments',
       summary:
-        'Pay every open invoice, or 12 months up front (`annual`), by card (checkout) or MoMo (a prompt on the phone). 409 NOTHING_TO_PAY. Requires an Idempotency-Key',
+        'Pay every open invoice (`invoices`, what `openMinor` says), or 12 months up front (`annual`, what `annualPrice` says), by card (checkout) or MoMo (a prompt on the wallet’s phone). A charge for the same purpose still waiting is returned rather than started again. 409 NOTHING_TO_PAY, OPEN_INVOICES (pay those before a year ahead), ANNUAL_ALREADY_PAID, SUBSCRIPTION_CANCELLED. Requires an Idempotency-Key',
     })
     .input(
-      z.object({
-        purpose: z.enum(SUBSCRIPTION_PAYMENT_PURPOSES),
-        channel: z.enum(SUBSCRIPTION_PAYMENT_CHANNELS),
-        /** For MoMo: the wallet's phone (E.164) and network. */
-        momoPhone: z.string().max(20).optional(),
-        momoProvider: z.enum(['mtn', 'vodafone', 'airteltigo']).optional(),
-      }),
+      z
+        .object({
+          purpose: z.enum(SUBSCRIPTION_PAYMENT_PURPOSES),
+          channel: z.enum(SUBSCRIPTION_PAYMENT_CHANNELS),
+          /** For MoMo, required: the wallet's phone in E.164 (+233…) and its network. */
+          momoPhone: z
+            .string()
+            .regex(/^\+[1-9][0-9]{6,14}$/, 'Use the number in full, such as +233241234567')
+            .optional(),
+          momoProvider: z.enum(['mtn', 'vodafone', 'airteltigo']).optional(),
+        })
+        .refine((p) => p.channel !== 'momo' || (!!p.momoPhone && !!p.momoProvider), {
+          message: 'MoMo needs the wallet’s phone number and network',
+          path: ['momoPhone'],
+        }),
     )
     .output(subscriptionPaymentSchema),
   payment: oc
@@ -481,6 +551,17 @@ export const supportOverviewSchema = z.object({
   recentAudit: z.array(z.object({ at: iso, action: z.string(), actorName: z.string().nullable() })),
 });
 
+/** Subscription billing on or off (founder answer Q1). */
+export const billingStateSchema = z.object({
+  on: z.boolean(),
+  /** The day billing starts (or started); null while it is off. */
+  startsOn: isoDate.nullable(),
+  turnedOnAt: iso.nullable(),
+  turnedOnByName: z.string().nullable(),
+  /** The tiers whose price list in force today is a placeholder: billing cannot start on them. */
+  placeholderTiers: z.array(tier),
+});
+
 export const platformAdminContract = {
   companies: oc
     .route({ method: 'GET', path: '/platform/companies', summary: 'Every subscriber company' })
@@ -490,7 +571,7 @@ export const platformAdminContract = {
       method: 'POST',
       path: '/platform/companies',
       summary:
-        'Onboard a company (decision 14): its subscription starts in trial, and its first admin is invited by email',
+        'Onboard a company (decision 14): its subscription starts in trial (its trial runs once billing is on), and its first admin is invited by email. One transaction. An Idempotency-Key is optional: sent, a retry with it answers the first result and makes nothing twice (the web always sends one)',
     })
     .input(
       z.object({
@@ -521,7 +602,8 @@ export const platformAdminContract = {
     .route({
       method: 'POST',
       path: '/platform/companies/{companyId}/trial',
-      summary: 'Extend a trial by some days, with an audited reason. 409 NOT_TRIALING',
+      summary:
+        'Extend a trial by some days, with an audited reason. 409 NOT_TRIALING. Requires an Idempotency-Key, so a retry adds nothing',
     })
     .input(
       z.object({
@@ -535,6 +617,78 @@ export const platformAdminContract = {
     .route({ method: 'POST', path: '/platform/companies/{companyId}/discount' })
     .input(z.object({ companyId: uuid, code: z.string().trim().min(2).max(40) }))
     .output(platformCompanyDetailSchema),
+  invoice: oc
+    .route({
+      method: 'GET',
+      path: '/platform/companies/{companyId}/invoices/{invoiceId}',
+      summary: 'A company’s invoice with its lines and credit notes (PB-02: audit and dispute)',
+    })
+    .input(z.object({ companyId: uuid, invoiceId: uuid }))
+    .output(subscriptionInvoiceDetailSchema),
+  snapshot: oc
+    .route({
+      method: 'GET',
+      path: '/platform/companies/{companyId}/snapshots/{snapshotId}',
+      summary: 'The billable units behind a company’s invoice (PB-02, D8)',
+    })
+    .input(z.object({ companyId: uuid, snapshotId: uuid }))
+    .output(billingSnapshotSchema),
+  creditInvoice: oc
+    .route({
+      method: 'POST',
+      path: '/platform/companies/{companyId}/invoices/{invoiceId}/credit',
+      summary:
+        'Credit a subscription invoice in full or in part, with a reason (founder answer Q2). Never more than its total less earlier credits: 409 CREDIT_EXCEEDS_INVOICE; 409 INVOICE_VOID. Requires an Idempotency-Key',
+    })
+    .input(
+      z.object({
+        companyId: uuid,
+        invoiceId: uuid,
+        amountMinor: positiveMinor,
+        reason: z.string().trim().min(5).max(500),
+      }),
+    )
+    .output(subscriptionCreditNoteSchema),
+  creditNoteDocument: oc
+    .route({
+      method: 'GET',
+      path: '/platform/companies/{companyId}/credit-notes/{creditNoteId}/document',
+    })
+    .input(z.object({ companyId: uuid, creditNoteId: uuid }))
+    .output(download),
+  reactivate: oc
+    .route({
+      method: 'POST',
+      path: '/platform/companies/{companyId}/reactivate',
+      summary:
+        'Start a new subscription for a cancelled company (decision 12), on a tier, with an audited reason; its staff get full access again. 409 NOT_CANCELLED',
+    })
+    .input(
+      z.object({
+        companyId: uuid,
+        tier,
+        trialDays: z.number().int().min(0).max(365).optional(),
+        reason: z.string().trim().min(5).max(500),
+      }),
+    )
+    .output(platformCompanyDetailSchema),
+  billing: oc
+    .route({
+      method: 'GET',
+      path: '/platform/billing',
+      summary:
+        'Whether subscription billing is on, from when, and what stops it (founder answer Q1)',
+    })
+    .output(billingStateSchema),
+  turnOnBilling: oc
+    .route({
+      method: 'POST',
+      path: '/platform/billing',
+      summary:
+        'Turn subscription billing on from a date (today or later). Every trial that started before then runs from that date. 409 PLACEHOLDER_PRICES while a price list in force on that date is a placeholder; 409 BILLING_ALREADY_ON. Requires an Idempotency-Key',
+    })
+    .input(z.object({ startsOn: isoDate, note: z.string().trim().max(500).optional() }))
+    .output(billingStateSchema),
   invoiceDocument: oc
     .route({
       method: 'GET',

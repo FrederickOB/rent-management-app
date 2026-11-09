@@ -152,6 +152,23 @@ export const alertEvent = pgTable(
   ],
 );
 
+/**
+ * Billing turned on (M10 review BE-5, founder answer Q1): no subscription is invoiced before a
+ * platform admin turns billing on from a date, and every trial that started before then runs from
+ * that date. Append-only: the latest row is in force.
+ */
+export const billingActivation = pgTable(
+  'billing_activation',
+  {
+    id: id(),
+    startsOn: day().notNull(),
+    turnedOnBy: uuid().references(() => person.id),
+    note: text(),
+    createdAt: tsNow(),
+  },
+  (t) => [index('billing_activation_time_idx').on(t.createdAt)],
+);
+
 // Platform company tables -----------------------------------------------------------------------
 
 /** A company's subscription (AD-08), one per subscriber. Its status changes only by the engine. */
@@ -181,7 +198,12 @@ export const subscription = pgTable(
   },
   (t) => [
     unique('subscription_company_id_id_key').on(t.companyId, t.id),
-    unique('subscription_subscriber_key').on(t.subscriberCompanyId),
+    // M10 review BE-4: one live subscription per subscriber; a cancelled one stays, and a platform
+    // admin may start a new one for the company (reactivation).
+    uniqueIndex('subscription_live_key')
+      .on(t.subscriberCompanyId)
+      .where(sql`${t.status} <> 'cancelled'`),
+    index('subscription_subscriber_idx').on(t.subscriberCompanyId, t.createdAt),
     check('subscription_tier_check', sql`${t.tier} in ${TIERS}`),
     check(
       'subscription_pending_tier_check',
@@ -566,6 +588,65 @@ export const subscriptionReceipt = pgTable(
     check('subscription_receipt_amount_check', sql`${t.amountMinor} > 0`),
     check(
       'subscription_receipt_sha_check',
+      sql`${t.sha256} is null or ${t.sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
+/**
+ * A credit note on a subscription invoice (M10 review BE-6, founder answer Q2): gap-free
+ * `SUBC-2026-000001`, in full or in part, never more than the invoice's total less earlier credits.
+ * Immutable but for its PDF.
+ */
+export const subscriptionCreditNote = pgTable(
+  'subscription_credit_note',
+  {
+    id: id(),
+    companyId: companyId(),
+    subscriberCompanyId: subscriberCompanyId(),
+    invoiceId: uuid().notNull(),
+    number: text().notNull(),
+    issuedOn: day().notNull(),
+    netMinor: minor().notNull(),
+    vatMinor: minor().notNull(),
+    amountMinor: minor().notNull(),
+    /** The part beyond what the invoice still owed (a paid invoice): prepaid credit (2020). */
+    toCreditMinor: minor().notNull().default(0),
+    reason: text().notNull(),
+    createdBy: uuid().references(() => person.id),
+    templateKey: text().notNull(),
+    templateVersion: integer().notNull(),
+    renderRequestId: uuid(),
+    documentId: uuid(),
+    sha256: text(),
+    createdAt: tsNow(),
+  },
+  (t) => [
+    unique('subscription_credit_note_company_id_id_key').on(t.companyId, t.id),
+    unique('subscription_credit_note_number_key').on(t.companyId, t.number),
+    index('subscription_credit_note_invoice_idx').on(t.companyId, t.invoiceId),
+    foreignKey({
+      name: 'subscription_credit_note_invoice_fk',
+      columns: [t.companyId, t.invoiceId],
+      foreignColumns: [subscriptionInvoice.companyId, subscriptionInvoice.id],
+    }),
+    foreignKey({
+      name: 'subscription_credit_note_document_fk',
+      columns: [t.companyId, t.documentId],
+      foreignColumns: [document.companyId, document.id],
+    }),
+    foreignKey({
+      name: 'subscription_credit_note_render_fk',
+      columns: [t.companyId, t.renderRequestId],
+      foreignColumns: [documentRenderRequest.companyId, documentRenderRequest.id],
+    }),
+    check('subscription_credit_note_number_check', sql`${t.number} ~ '^SUBC-[0-9]{4}-[0-9]{6,}$'`),
+    check(
+      'subscription_credit_note_amounts_check',
+      sql`${t.netMinor} >= 0 and ${t.vatMinor} >= 0 and ${t.amountMinor} = ${t.netMinor} + ${t.vatMinor} and ${t.amountMinor} > 0 and ${t.toCreditMinor} between 0 and ${t.amountMinor}`,
+    ),
+    check(
+      'subscription_credit_note_sha_check',
       sql`${t.sha256} is null or ${t.sha256} ~ '^[0-9a-f]{64}$'`,
     ),
   ],

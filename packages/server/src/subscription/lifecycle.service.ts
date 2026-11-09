@@ -1,21 +1,19 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { sql, withCompany, type Database, type Tx } from '@rent/db';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { sql, type Database, type Tx } from '@rent/db';
 import { formatBusinessDate } from '@rent/domain/dates';
 import { format, money } from '@rent/domain/money';
 import { TIER_LABELS } from '@rent/domain/settings';
 import { latestStepDue, trialReminderDue, type DunningStepKey } from '@rent/domain/subscription';
-import { v5 as uuidv5 } from 'uuid';
-import { queueMessage } from '../core/messages';
 import { DATABASE } from '../core/tokens';
-import { membersWhoCan } from '../policy/members';
+import { PostingService } from '../ledger/posting.service';
 import { PolicyService } from '../policy/policy.service';
 import { SubscriptionCoreService, type SubscriberCompany } from './core.service';
+import { settleFromCredit } from './credit';
+import { notifySubscriber } from './notices';
 import { lockSubscription, withPlatform } from './platform';
 
 export const SUBSCRIPTION_LIFECYCLE_JOB = 'subscription.lifecycle';
 export const SUBSCRIPTION_DUNNING_JOB = 'subscription.dunning';
-
-const NOTICE_NAMESPACE = '5e2d8c1a-9b47-5f30-a6c2-3d4e5f60718a';
 
 interface Notice {
   readonly key: string;
@@ -41,6 +39,7 @@ export class SubscriptionLifecycleService {
     @Inject(DATABASE) private readonly database: Database,
     @Inject(SubscriptionCoreService) private readonly core: SubscriptionCoreService,
     @Inject(PolicyService) private readonly policy: PolicyService,
+    @Optional() @Inject(PostingService) private readonly posting: PostingService | null = null,
   ) {}
 
   private async company(subscriberCompanyId: string): Promise<SubscriberCompany | null> {
@@ -63,44 +62,52 @@ export class SubscriptionLifecycleService {
           sql`update subscription set tier = ${sub.pendingTier}, pending_tier = null, pending_tier_from = null,
                 updated_at = now() where id = ${sub.id}::uuid`,
         );
-        await this.core.event(tx, platformId, sub, 'tier_changed', {
+        const eventId = await this.core.event(tx, platformId, sub, 'tier_changed', {
           tier: sub.pendingTier,
           effectiveOn: sub.pendingTierFrom,
           reason: 'downgrade',
         });
+        await this.core.auditSubscriberIn(
+          tx,
+          company.id,
+          'subscription.tier_changed',
+          sub.id,
+          { tier: sub.pendingTier, reason: 'downgrade' },
+          `subscription_event:${eventId}`,
+        );
         downgraded = sub.pendingTier;
         sub = (await this.core.byId(tx, sub.id))!;
       }
+      // Review BE-3: credit never sits beside debt (a reversal may have reopened an invoice).
+      if (this.posting)
+        await settleFromCredit(
+          tx,
+          { core: this.core, posting: this.posting },
+          platformId,
+          company.id,
+          day,
+        );
       const state = await this.core.refresh(tx, platformId, sub, company, { today: day });
       const notices: Notice[] = [];
       if (state.status === 'trialing' && sub.trialEndsOn) {
         const days = trialReminderDue(sub.trialEndsOn, day);
         if (days !== null) {
           const key = `trial:${days}:${sub.trialEndsOn}`;
-          if (await this.recordReminder(tx, platformId, sub, key, { days }))
-            notices.push({
-              key,
-              relatedId: sub.id,
-              subject: days === 1 ? 'Your trial ends tomorrow' : 'Your trial ends in a week',
-              body: `Your free trial ends on ${formatBusinessDate(sub.trialEndsOn)}. After that your ${TIER_LABELS[sub.tier]} subscription continues and is billed monthly for the units you let. You can change your plan or cancel on the subscription page.`,
-            });
+          // Recorded once; queued on every run, so a retry still sends it (ids fixed, BE-12).
+          await this.recordReminder(tx, platformId, sub, key, { days });
+          notices.push({
+            key,
+            relatedId: sub.id,
+            subject: days === 1 ? 'Your trial ends tomorrow' : 'Your trial ends in a week',
+            body: `Your free trial ends on ${formatBusinessDate(sub.trialEndsOn)}. After that your ${TIER_LABELS[sub.tier]} subscription continues and is billed monthly for the units you let. You can change your plan or cancel on the subscription page.`,
+          });
         }
       }
+      const readOnly = this.readOnlyNotice(sub.id, state);
+      if (readOnly) notices.push(readOnly);
+      for (const notice of notices) await this.queue(tx, platformId, company.id, notice);
       return { sub, state, downgraded, notices };
     });
-    if (outcome.state.changed)
-      await this.core.auditSubscriber(company.id, 'subscription.status_changed', outcome.sub.id, {
-        from: outcome.sub.status,
-        to: outcome.state.status,
-      });
-    if (outcome.downgraded)
-      await this.core.auditSubscriber(company.id, 'subscription.tier_changed', outcome.sub.id, {
-        tier: outcome.downgraded,
-        reason: 'downgrade',
-      });
-    if (outcome.state.accessChanged)
-      outcome.notices.push(this.accessNotice(outcome.sub.id, outcome.state.access, day));
-    await this.notify(company, outcome.notices);
     return outcome.state;
   }
 
@@ -119,28 +126,22 @@ export class SubscriptionLifecycleService {
         const step = latestStepDue(invoice.dueOn, day);
         if (!step) continue;
         const key = `dunning:${invoice.id}:${step.key}`;
-        if (
-          await this.recordReminder(tx, platformId, sub, key, {
-            invoiceId: invoice.id,
-            step: step.key,
-          })
-        )
-          notices.push(
-            this.dunningNotice(key, invoice.id, invoice.number, invoice.outstandingMinor, step.key),
-          );
+        // Recorded once; queued on every run, so a retry still sends it (ids fixed, BE-12).
+        await this.recordReminder(tx, platformId, sub, key, {
+          invoiceId: invoice.id,
+          step: step.key,
+        });
+        notices.push(
+          this.dunningNotice(key, invoice.id, invoice.number, invoice.outstandingMinor, step.key),
+        );
       }
       const state = await this.core.refresh(tx, platformId, sub, company, { today: day });
+      const readOnly = this.readOnlyNotice(sub.id, state);
+      if (readOnly) notices.push(readOnly);
+      for (const notice of notices) await this.queue(tx, platformId, company.id, notice);
       return { sub, state, notices };
     });
     if (!outcome) return null;
-    if (outcome.state.changed)
-      await this.core.auditSubscriber(company.id, 'subscription.status_changed', outcome.sub.id, {
-        from: outcome.sub.status,
-        to: outcome.state.status,
-      });
-    if (outcome.state.accessChanged)
-      outcome.notices.push(this.accessNotice(outcome.sub.id, outcome.state.access, day));
-    await this.notify(company, outcome.notices);
     return outcome.state;
   }
 
@@ -181,43 +182,35 @@ export class SubscriptionLifecycleService {
     };
   }
 
-  private accessNotice(subscriptionId: string, access: 'full' | 'read_only', day: string): Notice {
-    return access === 'read_only'
-      ? {
-          key: `access:read_only:${day}`,
-          relatedId: subscriptionId,
-          subject: 'Changes are paused until the subscription is paid',
-          body: 'Your subscription is past due, so changes by staff are paused. Nothing was deleted, and tenants can still pay rent and get receipts. Paying the subscription on the subscription page restores access at once.',
-        }
-      : {
-          key: `access:full:${day}`,
-          relatedId: subscriptionId,
-          subject: 'Full access restored',
-          body: 'Your subscription is paid up and full access is restored.',
-        };
+  /**
+   * While read-only for arrears, the notice saying so, keyed by the day read-only began, so it is
+   * queued on every run and sent once (review BE-12). A cancelled company is told by its
+   * cancellation instead. Paying in full tells the admins it is restored (the payments service).
+   */
+  private readOnlyNotice(
+    subscriptionId: string,
+    state: {
+      readonly status: string;
+      readonly access: string;
+      readonly readOnlyFrom: string | null;
+    },
+  ): Notice | null {
+    if (state.access !== 'read_only' || state.status === 'cancelled') return null;
+    return {
+      key: `access:read_only:${state.readOnlyFrom ?? 'now'}`,
+      relatedId: subscriptionId,
+      subject: 'Changes are paused until the subscription is paid',
+      body: 'Your subscription is past due, so changes by staff are paused. Nothing was deleted, and tenants can still pay rent and get receipts. Paying the subscription on the subscription page restores access at once.',
+    };
   }
 
-  /** Staff notices to the subscriber's people who manage the subscription, once per event. */
-  private async notify(company: SubscriberCompany, notices: readonly Notice[]): Promise<void> {
-    if (notices.length === 0) return;
-    await withCompany(this.database, { companyId: company.id, actorKind: 'system' }, async (tx) => {
-      const people = await membersWhoCan(
-        tx,
-        this.policy,
-        { id: company.id, kind: company.kind },
-        'subscription.manage',
-      );
-      for (const notice of notices)
-        for (const personId of people)
-          await queueMessage(tx, company.id, {
-            messageId: uuidv5(`${company.id}:${notice.key}:${personId}`, NOTICE_NAMESPACE),
-            recipient: { type: 'staff', personId },
-            purpose: 'staff_notice',
-            subject: notice.subject,
-            body: notice.body,
-            channels: ['email'],
-            related: { type: 'subscription', id: notice.relatedId },
-          });
+  /** A notice to the subscriber's admins, in the platform's outbox with the change (BE-12). */
+  private async queue(tx: Tx, platformId: string, companyId: string, notice: Notice) {
+    await notifySubscriber(tx, platformId, companyId, {
+      key: notice.key,
+      subject: notice.subject,
+      body: notice.body,
+      related: { type: 'subscription', id: notice.relatedId },
     });
   }
 }

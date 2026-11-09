@@ -28,7 +28,8 @@ export interface SubscriptionSubledgerResult {
  * The nightly subscription sub-ledger check (M10, as billing's `SubledgerCheckService`): in the
  * platform book, 1100 per subscription invoice (`journal_line.invoice_line_id` holds the invoice
  * id) equals what the invoice still owes (its total less the payments and prepaid draws allocated
- * to it; nothing for a void one), and 2020 per subscriber equals its prepaid credit
+ * to it, and less what its credit notes cleared of it, BE-6; nothing for a void one), and 2020 per
+ * subscriber equals its prepaid credit
  * (`SubscriptionCoreService.creditMinor`). 2020 lines name the subscriber through their payment
  * (`payment_id`) or, for a monthly draw, their invoice. Any difference raises an alert naming ids
  * only. Read in one read-only snapshot, so a payment committing midway raises no false alarm.
@@ -80,7 +81,9 @@ export class SubscriptionSubledgerCheck {
             coalesce((select sum(a.amount_minor) from subscription_allocation a
                       left join subscription_payment p on p.company_id = a.company_id and p.id = a.payment_id
                       where a.company_id = i.company_id and a.invoice_id = i.id
-                        and (a.payment_id is null or p.status = 'succeeded')), 0) as settled_minor
+                        and (a.payment_id is null or p.status = 'succeeded')), 0)
+            + coalesce((select sum(n.amount_minor - n.to_credit_minor) from subscription_credit_note n
+                        where n.company_id = i.company_id and n.invoice_id = i.id), 0) as settled_minor
           from subscription_invoice i order by i.id`,
     );
     const receivables = await tx.execute<{ invoice_id: string | null; total: string | number }>(

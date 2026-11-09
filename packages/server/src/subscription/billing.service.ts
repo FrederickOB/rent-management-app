@@ -2,11 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { sql, withCompany, type Database, type Tx } from '@rent/db';
 import { subscriptionInvoiceV1, type SubscriptionInvoiceDocumentData } from '@rent/documents';
 import { addDays, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
-import {
-  prepaidDrawLines,
-  subscriptionInvoiceLines,
-  subscriptionPostingKeys,
-} from '@rent/domain/ledger';
+import { subscriptionInvoiceLines, subscriptionPostingKeys } from '@rent/domain/ledger';
 import { format, money } from '@rent/domain/money';
 import type { Actor } from '@rent/domain/policy';
 import {
@@ -19,43 +15,45 @@ import {
   monthBounds,
   monthlyBill,
   monthOf,
-  prepaidDraw,
+  nextMonth,
   previousMonth,
   redemptionCovers,
+  shiftMonth,
   tierSpans,
   type BandCounts,
   type DiscountTerms,
   type SnapshotUnit,
   type SnapshotUnitInput,
 } from '@rent/domain/subscription';
-import { v5 as uuidv5 } from 'uuid';
 import { staffActor } from '../companies/companies.service';
 import { AppError, conflict, notFound } from '../core/errors';
-import { queueMessage } from '../core/messages';
 import { DATABASE } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
 import { PostingService } from '../ledger/posting.service';
-import { membersWhoCan } from '../policy/members';
 import { PolicyService } from '../policy/policy.service';
 import { RulesService } from '../rules/rules.service';
-import { priceListsAsOf, subscriptionVatAsOf, termsAsOf, type PriceListVersion } from './catalogue';
+import { priceListsAsOf, subscriptionVatAsOf, termsAsOf } from './catalogue';
 import {
   SubscriptionCoreService,
   type SubscriberCompany,
   type SubscriptionRecord,
 } from './core.service';
+import { settleFromCredit } from './credit';
+import { notifySubscriber } from './notices';
 import { nextSubscriptionNumber } from './numbering';
 import { lockSubscription, platformBookId, withPlatform } from './platform';
 
 export const SUBSCRIPTION_SNAPSHOT_JOB = 'subscription.snapshot';
 export const SUBSCRIPTION_INVOICE_JOB = 'subscription.invoice';
 
+/** How many ended months one run of the snapshot or invoice job catches up, at most (BE-13). */
+export const CATCH_UP_MONTHS = 3;
+
 export const SUBSCRIPTION_INVOICE_TEMPLATE = {
   key: subscriptionInvoiceV1.key,
   version: subscriptionInvoiceV1.version,
 } as const;
 
-const NOTICE_NAMESPACE = '0d6c9b3e-41a7-5c2f-8e1d-7a4b5c6d7e80';
 const DOWNLOAD_MS = 5 * 60_000;
 
 const MONTH_NAMES = [
@@ -72,6 +70,10 @@ const MONTH_NAMES = [
   'November',
   'December',
 ];
+/** The later of two optional days (null means no bound). */
+const laterOf = (a: string | null, b: string | null): string | null =>
+  a === null ? b : b === null ? a : a > b ? a : b;
+
 const monthLabel = (month: string): string =>
   `${MONTH_NAMES[Number(month.slice(5, 7)) - 1]} ${month.slice(0, 4)}`;
 
@@ -148,6 +150,84 @@ export class SubscriptionBillingService {
   }
 
   /**
+   * The ended months a job run bills for one subscriber, oldest first (M10 review BE-13): every
+   * month that has ended in the subscriber's own time zone by `asOf`, after the latest month it
+   * was invoiced for, and at most the last {@link CATCH_UP_MONTHS}; never a month before its
+   * subscription started or billing went on, nor after a cancellation's last month. `asOf` is the
+   * earlier of the subscriber's today and the job's date: a run for a day never bills a month that
+   * ended after it, and a company west of Accra waits until its own month has ended.
+   */
+  async dueMonths(
+    subscriberCompanyId: string,
+    options: { readonly date?: string | null } = {},
+  ): Promise<{ readonly asOf: string; readonly months: readonly string[] } | null> {
+    const company = await this.company(subscriberCompanyId);
+    if (!company) return null;
+    const today = this.core.todayIn(company.timeZone);
+    const asOf = options.date && options.date < today ? options.date : today;
+    const months = await withPlatform(this.database, {}, async (tx, platformId) => {
+      const activation = await this.core.billingActivation(tx);
+      if (!activation) return [];
+      const sub = await this.core.ensure(tx, platformId, company);
+      const lastEnded = previousMonth(monthOf(asOf));
+      const latest = await tx.execute<{ month: string | null }>(
+        sql`select max(month) as month from subscription_invoice
+            where subscriber_company_id = ${subscriberCompanyId}::uuid`,
+      );
+      const candidates = [
+        shiftMonth(lastEnded, 1 - CATCH_UP_MONTHS),
+        monthOf(sub.startedOn),
+        monthOf(activation.startsOn),
+        ...(latest.rows[0]?.month ? [nextMonth(latest.rows[0].month)] : []),
+      ];
+      const last =
+        sub.cancelsOn && monthOf(sub.cancelsOn) < lastEnded ? monthOf(sub.cancelsOn) : lastEnded;
+      const due: string[] = [];
+      for (let m = candidates.reduce((a, b) => (a > b ? a : b)); m <= last; m = nextMonth(m))
+        due.push(m);
+      return due;
+    });
+    return { asOf, months };
+  }
+
+  /**
+   * The `subscription.snapshot` job for one subscriber (daily, review BE-13): the snapshot of
+   * every month {@link dueMonths} gives that has none yet, oldest first; returns those it took.
+   * Idempotent per month.
+   */
+  async snapshotDue(
+    subscriberCompanyId: string,
+    options: { readonly date?: string | null } = {},
+  ): Promise<SnapshotRecord[]> {
+    const due = await this.dueMonths(subscriberCompanyId, options);
+    const taken: SnapshotRecord[] = [];
+    for (const month of due?.months ?? []) {
+      if (await this.findSnapshot(subscriberCompanyId, month)) continue;
+      const snapshot = await this.snapshot(subscriberCompanyId, month);
+      if (snapshot) taken.push(snapshot);
+    }
+    return taken;
+  }
+
+  /**
+   * The `subscription.invoice` job for one subscriber (daily, review BE-13): the invoice of every
+   * month {@link dueMonths} gives, oldest first, so numbers and allocation follow the months.
+   * Months with nothing billable (a trial) issue nothing. Idempotent per month.
+   */
+  async invoiceDue(
+    subscriberCompanyId: string,
+    options: { readonly date?: string | null } = {},
+  ): Promise<InvoiceIssued[]> {
+    const due = await this.dueMonths(subscriberCompanyId, options);
+    const issued: InvoiceIssued[] = [];
+    for (const month of due?.months ?? []) {
+      const invoice = await this.invoice(subscriberCompanyId, { month });
+      if (invoice) issued.push(invoice);
+    }
+    return issued;
+  }
+
+  /**
    * `subscription.snapshot` for one subscriber: last month's billable units (or `month`), read in
    * the subscriber's own context and stored in the platform company's. Idempotent per month.
    */
@@ -169,8 +249,20 @@ export class SubscriptionBillingService {
       const again = await this.snapshotIn(tx, subscriberCompanyId, target);
       if (again) return again;
       const sub = await this.core.ensure(tx, platformId, company);
+      if (!(await this.billableMonth(tx, sub, target))) return null;
       return this.insertSnapshot(tx, platformId, sub, target, billable);
     });
+  }
+
+  /**
+   * Whether a month may be snapshotted and invoiced: billing is on and has started by the month's
+   * end (founder answer Q1), and the month is not after a cancellation's last month (review BE-4).
+   */
+  private async billableMonth(tx: Tx, sub: SubscriptionRecord, month: string): Promise<boolean> {
+    const activation = await this.core.billingActivation(tx);
+    if (!activation || monthBounds(month).last < activation.startsOn) return false;
+    if (sub.cancelsOn && month > monthOf(sub.cancelsOn)) return false;
+    return true;
   }
 
   private async insertSnapshot(
@@ -272,6 +364,7 @@ export class SubscriptionBillingService {
           totalMinor: Number(existing.rows[0].total_minor),
         };
       const sub = await this.core.ensure(tx, platformId, company);
+      if (!(await this.billableMonth(tx, sub, month))) return null;
       const result = await this.issue(tx, platformId, sub, company, snapshot, {
         month,
         issuedOn: options.dates?.issuedOn ?? today,
@@ -279,23 +372,26 @@ export class SubscriptionBillingService {
         wholeMonth: options.wholeMonth ?? false,
       });
       if (!result) return null;
+      // In the subscriber's chain with the invoice (review BE-12).
+      await this.core.auditSubscriberIn(
+        tx,
+        subscriberCompanyId,
+        'subscription.invoice_issued',
+        result.id,
+        { number: result.number, month, totalMinor: result.totalMinor },
+        `subscription_invoice:${result.id}`,
+      );
+      // Told with the invoice, in the same transaction (review BE-12).
+      await notifySubscriber(tx, platformId, subscriberCompanyId, {
+        key: `invoice:${result.id}:issued`,
+        subject: `Subscription invoice ${result.number}`,
+        body: `Your subscription invoice ${result.number} for ${monthLabel(month)} is ${format(money(result.totalMinor))}. It is on the subscription page, where you can pay it by MoMo or card.`,
+        related: { type: 'subscription_invoice', id: result.id },
+      });
       await this.core.refresh(tx, platformId, sub, company, { today });
       return { created: true, ...result };
     });
     if (!issued) return null;
-    if (issued.created) {
-      await this.core.auditSubscriber(
-        subscriberCompanyId,
-        'subscription.invoice_issued',
-        issued.id,
-        {
-          number: issued.number,
-          month,
-          totalMinor: issued.totalMinor,
-        },
-      );
-      await this.notifyIssued(subscriberCompanyId, issued, month);
-    }
     return { id: issued.id, number: issued.number, totalMinor: issued.totalMinor };
   }
 
@@ -315,6 +411,7 @@ export class SubscriptionBillingService {
   ): Promise<InvoiceIssued | null> {
     const { month } = options;
     const bounds = monthBounds(month);
+    const activation = await this.core.billingActivation(tx);
     const prices = await priceListsAsOf(tx, bounds.first);
     const history = await this.core.tierHistory(tx, sub.id);
     const spans = tierSpans({
@@ -324,7 +421,9 @@ export class SubscriptionBillingService {
         : history.length > 0
           ? history
           : [{ tier: sub.tier, from: sub.startedOn }],
-      billFrom: options.wholeMonth ? null : billingStartsOn(sub.trialEndsOn),
+      billFrom: options.wholeMonth
+        ? null
+        : laterOf(billingStartsOn(sub.trialEndsOn), activation?.startsOn ?? null),
       billTo: options.wholeMonth ? null : sub.cancelsOn,
       pricesFor: (tier) => prices[tier],
     });
@@ -345,8 +444,10 @@ export class SubscriptionBillingService {
     const number = await nextSubscriptionNumber(tx, platformId, 'invoice', year);
     const dueOn =
       options.dueOn ?? toIsoDate(addDays(parseBusinessDate(options.issuedOn), terms.dueDays));
-    const priceListIds = [...new Set(spans.map((s) => (s.prices as PriceListVersion).id))];
-    const placeholder = spans.some((s) => (s.prices as PriceListVersion).placeholder);
+    // The versions the month was priced with: the domain's span keeps only the rates, so read the
+    // ids and the placeholder flag from the price lists themselves (review).
+    const priceListIds = [...new Set(spans.map((s) => prices[s.tier].id))];
+    const placeholder = spans.some((s) => prices[s.tier].placeholder);
     const inserted = await tx.execute<{ id: string }>(
       sql`insert into subscription_invoice (company_id, subscription_id, subscriber_company_id, number, month,
             snapshot_id, issued_on, due_on, subtotal_minor, discount_minor, net_minor, vat_minor, total_minor,
@@ -376,7 +477,10 @@ export class SubscriptionBillingService {
         companyId: platformId,
         rule: 'P26',
         key: subscriptionPostingKeys.invoice(invoiceId),
-        valueDate: options.issuedOn,
+        // Revenue in the month it covers (review BE-9): dated the billed month's last day (never
+        // after the issue date; only ended months are billed); the accounting date follows the
+        // usual period rules (PostingService).
+        valueDate: bounds.last < options.issuedOn ? bounds.last : options.issuedOn,
         lines: subscriptionInvoiceLines({
           bookId,
           invoiceId,
@@ -385,24 +489,20 @@ export class SubscriptionBillingService {
         }),
         record: { type: 'subscription_invoice', id: invoiceId },
       });
-    // Prepaid credit (2020) first: an annual prepayment or an overpayment (decision 7).
-    const credit = await this.core.creditMinor(tx, sub.subscriberCompanyId);
-    const draw = prepaidDraw(Math.max(0, credit), bill.totalMinor);
-    if (draw.drawMinor > 0) {
-      await tx.execute(
-        sql`insert into subscription_allocation (company_id, subscriber_company_id, source, payment_id, invoice_id, amount_minor)
-            values (${platformId}::uuid, ${sub.subscriberCompanyId}::uuid, 'prepaid', null, ${invoiceId}::uuid, ${draw.drawMinor})`,
-      );
-      await this.posting.post(tx, {
-        companyId: platformId,
-        rule: 'P26',
-        key: subscriptionPostingKeys.prepaidDraw(invoiceId),
-        valueDate: options.issuedOn,
-        lines: prepaidDrawLines({ bookId, invoiceId, amountMinor: draw.drawMinor }),
-        record: { type: 'subscription_invoice', id: invoiceId },
-      });
-    }
-    if (draw.shortfallMinor === 0)
+    // Prepaid credit (2020) first: an annual prepayment or an overpayment (decision 7), drawn onto
+    // the open invoices oldest first, so credit never sits beside debt (review BE-3).
+    const drawn = await settleFromCredit(
+      tx,
+      { core: this.core, posting: this.posting },
+      platformId,
+      sub.subscriberCompanyId,
+      options.issuedOn,
+    );
+    const drawMinor = drawn
+      .filter((d) => d.invoiceId === invoiceId)
+      .reduce((sum, d) => sum + d.amountMinor, 0);
+    const draw = { drawMinor, shortfallMinor: bill.totalMinor - drawMinor };
+    if (bill.totalMinor === 0)
       await tx.execute(
         sql`update subscription_invoice set status = 'paid', paid_at = now(), updated_at = now()
             where id = ${invoiceId}::uuid`,
@@ -590,6 +690,11 @@ export class SubscriptionBillingService {
       if (taken.rows.length === 0) break;
       month = previousMonth(month);
     }
+    const activation = await withPlatform(this.database, {}, (tx) =>
+      this.core.billingActivation(tx),
+    );
+    if (!activation)
+      throw new AppError(409, 'billing_off', 'Billing is not on yet, so nothing is invoiced');
     const issued = await this.invoice(subscriberCompanyId, {
       month,
       dates: { issuedOn, dueOn },
@@ -597,34 +702,5 @@ export class SubscriptionBillingService {
     });
     if (!issued) throw new AppError(409, 'nothing_billable', 'Nothing to bill for that month');
     return issued;
-  }
-
-  /** Tells the subscriber's admins an invoice was issued (once, whatever the retries). */
-  private async notifyIssued(
-    subscriberCompanyId: string,
-    issued: InvoiceIssued,
-    month: string,
-  ): Promise<void> {
-    await withCompany(
-      this.database,
-      { companyId: subscriberCompanyId, actorKind: 'system' },
-      async (tx) => {
-        const rows = await tx.execute<{ id: string; kind: string }>(
-          sql`select id, kind from company where id = ${subscriberCompanyId}::uuid`,
-        );
-        const company = rows.rows[0];
-        if (!company) return;
-        for (const personId of await membersWhoCan(tx, this.policy, company, 'subscription.manage'))
-          await queueMessage(tx, subscriberCompanyId, {
-            messageId: uuidv5(`${issued.id}:issued:${personId}`, NOTICE_NAMESPACE),
-            recipient: { type: 'staff', personId },
-            purpose: 'staff_notice',
-            subject: `Subscription invoice ${issued.number}`,
-            body: `Your subscription invoice ${issued.number} for ${monthLabel(month)} is ${format(money(issued.totalMinor))}. It is on the subscription page, where you can pay it by MoMo or card.`,
-            channels: ['email'],
-            related: { type: 'subscription_invoice', id: issued.id },
-          });
-      },
-    );
   }
 }

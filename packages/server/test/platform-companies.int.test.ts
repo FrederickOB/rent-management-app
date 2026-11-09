@@ -1,5 +1,5 @@
 import { Test, type TestingModule } from '@nestjs/testing';
-import { sql, withCompany } from '@rent/db';
+import { sql, withCompany, withSystem } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import { InMemoryAlert, InMemoryEmail, InMemorySms } from '@rent/integrations';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -78,6 +78,10 @@ beforeAll(async () => {
   pricing = moduleRef.get(PlatformPricingService);
   support = moduleRef.get(SupportAccessService);
   platformId = await company(ctx, 'platform', 'Rent Platform');
+  // Founder answer Q1: trials run once billing is on (setup only).
+  await withSystem(ctx.database, {}, (tx) =>
+    tx.execute(sql`select app.turn_on_billing('2026-01-01'::date, 'M10 console tests')`),
+  );
   const adminPerson = await person(ctx, 'Esi Platform Admin');
   admin = {
     kind: 'platform_admin',

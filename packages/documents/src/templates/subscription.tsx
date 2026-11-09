@@ -273,3 +273,92 @@ export const subscriptionReceiptV1 = defineTemplate({
   schema: receiptSchema,
   Component: SubscriptionReceipt,
 });
+
+// A credit note on a subscription invoice (M10 review BE-6, founder answer Q2) ------------------
+
+const creditNoteSchema = z.strictObject({
+  platformName: z.string().min(1).max(200),
+  subscriberName: z.string().min(1).max(200),
+  /** Gap-free: `SUBC-2026-000001`. */
+  number: z.string().min(1).max(40),
+  issuedOn: isoDate,
+  invoiceNumber: z.string().min(1).max(40),
+  netMinor: z.int().min(0),
+  vatMinor: z.int().min(0),
+  amountMinor: z.int().positive(),
+  /** The part beyond what the invoice still owed: prepaid credit for later invoices. */
+  toCreditMinor: z.int().min(0),
+  reason: z.string().min(1).max(500),
+});
+
+export type SubscriptionCreditNoteDocumentData = z.infer<typeof creditNoteSchema>;
+
+function SubscriptionCreditNote({
+  data,
+  branding,
+}: TemplateProps<SubscriptionCreditNoteDocumentData>) {
+  return (
+    <Letterhead branding={branding}>
+      <h1>Credit note</h1>
+      <table className="summary">
+        <tbody>
+          <tr>
+            <th scope="row">Credit note number</th>
+            <td>{data.number}</td>
+          </tr>
+          <tr>
+            <th scope="row">Issued</th>
+            <td>{formatBusinessDate(data.issuedOn)}</td>
+          </tr>
+          <tr>
+            <th scope="row">To</th>
+            <td>{data.subscriberName}</td>
+          </tr>
+          <tr>
+            <th scope="row">From</th>
+            <td>{data.platformName}</td>
+          </tr>
+          <tr>
+            <th scope="row">On invoice</th>
+            <td>{data.invoiceNumber}</td>
+          </tr>
+          <tr>
+            <th scope="row">Reason</th>
+            <td>{data.reason}</td>
+          </tr>
+        </tbody>
+      </table>
+      <table className="lines">
+        <tbody>
+          <tr>
+            <td>Credited</td>
+            <td className="amount">{amount(data.netMinor)}</td>
+          </tr>
+          {data.vatMinor > 0 ? (
+            <tr>
+              <td>VAT and levies credited</td>
+              <td className="amount">{amount(data.vatMinor)}</td>
+            </tr>
+          ) : null}
+          <tr>
+            <th scope="row">Total credited</th>
+            <td className="amount">{amount(data.amountMinor)}</td>
+          </tr>
+        </tbody>
+      </table>
+      {data.toCreditMinor > 0 ? (
+        <p>
+          {`The invoice was already paid, so ${amount(data.toCreditMinor)} is held as prepaid credit and taken off the next invoice.`}
+        </p>
+      ) : null}
+    </Letterhead>
+  );
+}
+
+export const subscriptionCreditNoteV1 = defineTemplate({
+  key: 'subscription.credit-note',
+  version: 1,
+  title: 'Credit note',
+  schema: creditNoteSchema,
+  Component: SubscriptionCreditNote,
+});

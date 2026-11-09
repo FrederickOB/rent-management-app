@@ -72,6 +72,8 @@ import {
 } from '@rent/server/reporting';
 import {
   SubscriptionBillingService,
+  SubscriptionCreditNotesService,
+  SubscriptionNoticesService,
   SubscriptionLifecycleService,
   SubscriptionModule,
   SubscriptionPaymentsService,
@@ -208,6 +210,7 @@ const definitions = [
       subscriptionOnRendered(
         app.get(SubscriptionBillingService),
         app.get(SubscriptionPaymentsService),
+        app.get(SubscriptionCreditNotesService),
       ),
     ],
   }),
@@ -259,6 +262,7 @@ const definitions = [
     lifecycle: app.get(SubscriptionLifecycleService),
     payments: app.get(SubscriptionPaymentsService),
     subledger: app.get(SubscriptionSubledgerCheck),
+    notices: app.get(SubscriptionNoticesService),
   }),
 ];
 for (const definition of definitions) await jobs.register(definition);

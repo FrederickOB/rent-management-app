@@ -2,10 +2,11 @@
  * A new deployment's platform (M10 decision 14): the platform company and its platform book, and
  * the first platform admin, invited by email to set a password (then TOTP at first sign-in).
  * Idempotent: run it again and nothing new is made; the invitation goes again only while the
- * admin has not set a password. The email address is never printed.
+ * admin has not set a password. Once a platform admin exists, a run for another person is refused
+ * unless it says --add-admin (review BE-27). The email address is never printed.
  *
  *   pnpm platform:bootstrap --name "Rent Platform" --legal-name "Rent Platform Ltd" \
- *     --email ops@example.com [--admin-name "Ama Mensah"]
+ *     --email ops@example.com [--admin-name "Ama Mensah"] [--add-admin]
  */
 import 'reflect-metadata';
 import { parseArgs } from 'node:util';
@@ -24,6 +25,7 @@ const { values } = parseArgs({
     'legal-name': { type: 'string' },
     email: { type: 'string' },
     'admin-name': { type: 'string' },
+    'add-admin': { type: 'boolean', default: false },
   },
 });
 
@@ -60,6 +62,7 @@ try {
       legalName: values['legal-name']!,
       email: values.email!,
       ...(values['admin-name'] ? { adminName: values['admin-name'] } : {}),
+      addAdmin: values['add-admin'] === true,
     },
   );
   console.log(
@@ -69,7 +72,9 @@ try {
   );
   console.log(
     result.membershipCreated
-      ? 'Added the first platform admin.'
+      ? values['add-admin']
+        ? 'Added the platform admin.'
+        : 'Added the first platform admin.'
       : 'That person is a platform admin already.',
   );
   console.log(

@@ -1,3 +1,4 @@
+import { sql, withSystem } from '@rent/db';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   addMembership,
@@ -22,6 +23,10 @@ async function stack(overrides: Parameters<typeof startApi>[0]) {
   const api = await startApi({ AUTH_RATE_LIMITS: 'off', ...overrides });
   running.push(api);
   const platformId = await createCompany(api, 'platform', 'Platform');
+  // Founder answer Q1: nothing is invoiced until billing is on (setup only).
+  await withSystem(api.database, {}, (tx) =>
+    tx.execute(sql`select app.turn_on_billing('2026-01-01'::date, 'M10 test controls')`),
+  );
   const agencyId = await createCompany(api, 'agency', 'Controls Agency');
   const signedIn = async (email: string, role: 'agency_admin' | 'platform_admin', id: string) => {
     const { personId } = await createPerson(api, { name: email, email, password: PASSWORD });

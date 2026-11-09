@@ -39,7 +39,7 @@ export default async function InboxPage({
         <NotOnPlan
           feature="inbox"
           plan={company?.plan}
-          canSeePlan={allowed(me, 'subscription.read')}
+          canChangePlan={allowed(me, 'subscription.manage')}
         />
       </>
     );

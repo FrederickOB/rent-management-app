@@ -10,6 +10,22 @@ export interface PlatformBootstrapInput {
   /** The first platform admin's email; their name is the platform's until they change it. */
   readonly email: string;
   readonly adminName?: string;
+  /**
+   * Adds this person as another platform admin when one exists already (review BE-27: the
+   * command's `--add-admin`). Without it, a run for a new person is refused once a platform admin
+   * exists; a run for an existing platform admin stays idempotent.
+   */
+  readonly addAdmin?: boolean;
+}
+
+/** Refused: a platform admin exists already and the run did not ask to add another. */
+export class PlatformAdminExistsError extends Error {
+  override readonly name = 'PlatformAdminExistsError';
+  constructor() {
+    super(
+      'A platform admin exists already. To add another, run the command again with --add-admin.',
+    );
+  }
 }
 
 export interface PlatformBootstrapResult {
@@ -33,8 +49,10 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * Makes a new deployment's platform (M10 decision 14; `pnpm platform:bootstrap`): the platform
  * company, unless one exists, which brings its platform book (app.create_company_book), and its
  * first platform admin, invited by email to set a password. Idempotent: a second run creates
- * nothing, and sends the invitation again only while the admin has not set a password. The demo
- * seed can call it too. Throws a plain Error for bad input; never logs the email.
+ * nothing, and sends the invitation again only while the admin has not set a password. Once a
+ * platform admin exists, a run for anyone else is refused (PlatformAdminExistsError) unless it
+ * asks to add one (`addAdmin`). The demo seed can call it too. Throws a plain Error for bad input;
+ * never logs the email.
  */
 export async function bootstrapPlatform(
   database: Database,
@@ -69,6 +87,25 @@ export async function bootstrapPlatform(
       return { id: made.rows[0]!.id, created: true };
     },
   );
+
+  // Review BE-27: the command never quietly adds a second platform admin. A run for someone who
+  // is a platform admin already stays idempotent.
+  if (!input.addAdmin) {
+    const admins = await withCompany(
+      database,
+      { companyId: platformCompanyId, actorKind: 'system' },
+      (tx) =>
+        tx.execute<{ others: number; same: number }>(
+          sql`select count(*) filter (where lower(p.email) <> ${email})::int as others,
+                count(*) filter (where lower(p.email) = ${email})::int as same
+              from membership m join person p on p.id = m.person_id
+              where m.company_id = ${platformCompanyId}::uuid and m.role = 'platform_admin'
+                and m.status in ('invited', 'active')`,
+        ),
+    );
+    const { others = 0, same = 0 } = admins.rows[0] ?? {};
+    if (same === 0 && others > 0) throw new PlatformAdminExistsError();
+  }
 
   const person = await personForEmail(database, deps.accounts, {
     name: input.adminName?.trim() || `${name} admin`,

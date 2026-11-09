@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { DocumentDownload } from '@/components/document-download';
 import { Empty, LoadFailed, Loading } from '@/components/load-state';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -12,6 +12,9 @@ import { monthLabel } from '@/lib/rent-tax';
 import { invoiceStateText } from '@/lib/subscription';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
+
+const RECEIPT_PDF_POLL_MS = 3_000;
+const RECEIPT_PDF_POLLS = 20;
 
 /** The subscription's invoices and receipts, newest first, with their PDFs (PB-07). */
 export function BillingHistory({ version }: { readonly version: number }) {
@@ -24,6 +27,25 @@ export function BillingHistory({ version }: { readonly version: number }) {
     [version],
   );
   const { state, reload } = useLoad(load);
+
+  // A receipt's PDF is made by the worker just after the payment. Until it is ready the receipt
+  // has no document, so the lists load again every few seconds, for about a minute, and its
+  // Download appears once the PDF is there.
+  const [polls, setPolls] = useState(0);
+  useEffect(() => setPolls(0), [version]);
+  const receiptPdfWaiting =
+    state.status === 'ready' &&
+    state.data !== null &&
+    state.data[1].some((receipt) => !receipt.hasDocument);
+  const stillPolling = receiptPdfWaiting && polls < RECEIPT_PDF_POLLS;
+  useEffect(() => {
+    if (!stillPolling) return;
+    const timer = window.setTimeout(() => {
+      setPolls((n) => n + 1);
+      reload();
+    }, RECEIPT_PDF_POLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [stillPolling, polls, reload]);
 
   return (
     <Card data-testid="subscription-history">
@@ -76,6 +98,7 @@ export function BillingHistory({ version }: { readonly version: number }) {
                         {invoice.hasDocument ? (
                           <DocumentDownload
                             label="Download"
+                            name={`Download invoice ${invoice.number}`}
                             load={() =>
                               api().subscription.invoiceDocument({ invoiceId: invoice.id })
                             }
@@ -121,10 +144,13 @@ export function BillingHistory({ version }: { readonly version: number }) {
                         {receipt.hasDocument ? (
                           <DocumentDownload
                             label="Download"
+                            name={`Download receipt ${receipt.number}`}
                             load={() =>
                               api().subscription.receiptDocument({ receiptId: receipt.id })
                             }
                           />
+                        ) : stillPolling ? (
+                          <span className="text-slate-600">The PDF is being made…</span>
                         ) : (
                           '—'
                         )}

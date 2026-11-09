@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { schema, sql, withCompany, withSystem, type Database, type Tx } from '@rent/db';
+import { sql, type Database, type Tx } from '@rent/db';
 import { isValidTimeZone } from '@rent/domain/dates';
 import type { Actor } from '@rent/domain/policy';
 import { SUBSCRIPTION_TIERS, type SubscriptionTier } from '@rent/domain/settings';
@@ -11,7 +11,9 @@ import {
 import { AuditService } from '../audit/audit.service';
 import type { AppConfig } from '../core/config';
 import { conflict, invalid, notFound } from '../core/errors';
-import { AUTH, CONFIG, DATABASE } from '../core/tokens';
+import type { IdempotencyClaim } from '../core/idempotency';
+import type { AppLogger } from '../core/logging/logger';
+import { AUTH, CONFIG, DATABASE, LOGGER } from '../core/tokens';
 import type { Auth } from '../identity/auth';
 import { PersonAccounts } from '../identity/person-accounts';
 import { PolicyService } from '../policy/policy.service';
@@ -20,7 +22,7 @@ import { SubscriptionCoreService } from '../subscription/core.service';
 import { withPlatform } from '../subscription/platform';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { invitationSender, personForEmail } from './invitations';
-import { platformAdminFor, platformSystemContext, type PlatformAdmin } from './platform-admin';
+import { platformAdminFor, type PlatformAdmin } from './platform-admin';
 import { SupportAccessService, type SupportGrantView } from './support.service';
 import { UsageService, type UsageView } from './usage.service';
 
@@ -106,6 +108,7 @@ export class PlatformCompaniesService {
     @Inject(PersonAccounts) private readonly accounts: PersonAccounts,
     @Inject(AUTH) private readonly auth: Auth,
     @Inject(CONFIG) private readonly config: AppConfig,
+    @Inject(LOGGER) private readonly logger: AppLogger,
   ) {}
 
   private context(admin: PlatformAdmin, requestId?: string | null) {
@@ -137,7 +140,27 @@ export class PlatformCompaniesService {
     actor: Actor | null,
     input: NewCompany,
     requestId?: string | null,
+    claim?: IdempotencyClaim | null,
   ): Promise<PlatformCompanyDetail> {
+    const admin = platformAdminFor(this.policy, actor, 'company.create');
+    return this.detail(admin, await this.onboard(admin, input, requestId, claim));
+  }
+
+  /**
+   * Onboarding (decision 14; review BE-16 and BE-20), its company's id. The first admin's person
+   * comes first, found by email or made (Better Auth's own transaction; a retry finds it), then ONE
+   * platform-company transaction makes the company, starts its subscription, adds the first admin
+   * through the narrow `app.onboard_first_admin` (the platform admin never enters the customer's
+   * company) and audits it in both chains, with the Idempotency-Key's claim, so a retry under the
+   * same key does nothing twice and a failure leaves nothing half made. The invitation is sent
+   * once that commits.
+   */
+  async onboard(
+    actor: Actor | null,
+    input: NewCompany,
+    requestId?: string | null,
+    claim?: IdempotencyClaim | null,
+  ): Promise<string> {
     const admin = platformAdminFor(this.policy, actor, 'company.create');
     if (input.kind !== 'landlord' && input.kind !== 'agency')
       throw invalid('bad_kind', 'A company is a landlord or an agency');
@@ -162,60 +185,66 @@ export class PlatformCompaniesService {
     const adminEmail = input.adminEmail.trim().toLowerCase();
     if (!EMAIL.test(adminEmail)) throw invalid('bad_email', 'Enter the admin’s email address');
 
-    const companyId = await withSystem(
-      this.database,
-      platformSystemContext(admin, requestId),
-      async (tx) => {
-        const made = await tx.execute<{ id: string }>(
-          sql`select app.create_company(null, ${input.kind}, ${legalName}, ${name}, 'GH', ${timeZone},
-                ${name.slice(0, 40).trim()}, '{}'::jsonb) as id`,
-        );
-        return made.rows[0]!.id;
-      },
-    );
-    // The subscription first, so nothing (the console's list starting one) can come before it.
-    await this.subscriptions.startFor(companyId, { tier, trialDays, personId: admin.personId });
     const person = await personForEmail(this.database, this.accounts, {
       name: adminName,
       email: adminEmail,
     });
-    // The landlord runs a landlord company; an agency's first person is its admin (AD-03).
-    const role = input.kind === 'agency' ? ('agency_admin' as const) : ('owner' as const);
-    await withCompany(
+    const companyId = await withPlatform(
       this.database,
-      { companyId, personId: admin.personId, actorKind: 'system', requestId: requestId ?? null },
-      async (tx) => {
-        const [membership] = await tx
-          .insert(schema.membership)
-          .values({ companyId, personId: person.personId, role, invitedBy: admin.personId })
-          .returning({ id: schema.membership.id });
+      this.context(admin, requestId),
+      async (tx, platformId) => {
+        await claim?.claim(tx);
+        const made = await tx.execute<{ id: string }>(
+          sql`select app.create_company(null, ${input.kind}, ${legalName}, ${name}, 'GH', ${timeZone},
+                ${name.slice(0, 40).trim()}, '{}'::jsonb) as id`,
+        );
+        const id = made.rows[0]!.id;
+        // Its subscription, as SubscriptionService.startFor starts one, in this transaction.
+        const company = await this.core.subscriberCompany(tx, id);
+        if (!company) throw new Error('The new company is not a subscriber company');
+        const sub = await this.core.ensure(
+          tx,
+          platformId,
+          { ...company, plan: tier },
+          { trialDays, personId: admin.personId },
+        );
+        await this.core.refresh(tx, platformId, sub, company);
+        await this.core.auditSubscriberIn(
+          tx,
+          id,
+          'subscription.started',
+          sub.id,
+          { tier: sub.tier, trialEndsOn: sub.trialEndsOn },
+          `subscription_started:${sub.id}`,
+        );
+        // The landlord runs a landlord company; an agency's first person is its admin (AD-03).
+        await tx.execute(
+          sql`select app.onboard_first_admin(${id}::uuid, ${person.personId}::uuid,
+                ${JSON.stringify({ tier, trialDays })}::jsonb)`,
+        );
         await this.audit.append(tx, {
-          companyId,
-          action: 'membership.invited',
-          recordType: 'membership',
-          recordId: membership!.id,
-          data: { role },
-        });
-        await this.audit.append(tx, {
-          companyId,
+          companyId: platformId,
           action: 'company.onboarded',
           recordType: 'company',
-          recordId: companyId,
-          data: { tier, trialDays },
+          recordId: id,
+          data: { kind: input.kind, tier, trialDays },
         });
+        await claim?.done(tx, { companyId: id });
+        return id;
       },
     );
-    await withPlatform(this.database, this.context(admin, requestId), (tx, platformId) =>
-      this.audit.append(tx, {
-        companyId: platformId,
-        action: 'company.onboarded',
-        recordType: 'company',
-        recordId: companyId,
-        data: { kind: input.kind, tier, trialDays },
-      }),
-    );
-    await invitationSender(this.auth, this.config.WEB_ORIGIN)(adminEmail);
-    return this.detail(admin, companyId);
+    try {
+      await invitationSender(this.auth, this.config.WEB_ORIGIN)(adminEmail);
+    } catch (error) {
+      // The company is made and its answer stored: a retry replays it and sends nothing, so the
+      // failure is logged (ids only) for the platform team rather than reported as a failed
+      // onboarding.
+      this.logger.error(
+        { err: error, companyId, personId: person.personId },
+        'the onboarding invitation could not be sent',
+      );
+    }
+    return companyId;
   }
 
   /** `platformAdmin.setTier`: directly, for example for a pilot, with an audited reason. */
@@ -231,12 +260,17 @@ export class PlatformCompaniesService {
     return this.detail(admin, companyId);
   }
 
-  /** `platformAdmin.extendTrial`: 409 `not_trialing` unless the company is on its trial. */
+  /**
+   * `platformAdmin.extendTrial`: 409 `not_trialing` unless the company is on its trial. Under an
+   * Idempotency-Key (review BE-21) the claim is taken in the extension's own transaction, so a
+   * retry adds nothing.
+   */
   async extendTrial(
     actor: Actor | null,
     companyId: string,
     days: number,
     reason: string,
+    claim?: IdempotencyClaim | null,
   ): Promise<PlatformCompanyDetail> {
     const admin = platformAdminFor(this.policy, actor, 'company.manage');
     if (!Number.isSafeInteger(days) || days < 1 || days > 365)
@@ -251,7 +285,34 @@ export class PlatformCompaniesService {
         'not_trialing',
         'The company is not on a free trial, so there is none to extend',
       );
-    await this.subscriptions.extendTrial(admin, companyId, days, why);
+    await this.subscriptions.extendTrial(admin, companyId, days, why, claim);
+    return this.detail(admin, companyId);
+  }
+
+  /**
+   * `platformAdmin.reactivate` (decision 12; review BE-4): a new subscription for a cancelled
+   * company, on a tier, with an audited reason; 409 `not_cancelled` otherwise.
+   */
+  async reactivate(
+    actor: Actor | null,
+    companyId: string,
+    input: {
+      readonly tier: SubscriptionTier;
+      readonly trialDays?: number | null;
+      readonly reason: string;
+    },
+  ): Promise<PlatformCompanyDetail> {
+    const admin = platformAdminFor(this.policy, actor, 'company.manage');
+    const tier = tierOfInput(input.tier);
+    const reason = reasonOf(input.reason);
+    const trialDays = input.trialDays ?? null;
+    if (
+      trialDays !== null &&
+      (!Number.isSafeInteger(trialDays) || trialDays < 0 || trialDays > 365)
+    )
+      throw invalid('bad_trial', 'A trial is 0 to 365 days');
+    await this.existing(admin, companyId);
+    await this.subscriptions.reactivate(admin, companyId, { tier, trialDays, reason });
     return this.detail(admin, companyId);
   }
 
@@ -343,7 +404,13 @@ export class PlatformCompaniesService {
       tier: SubscriptionTier;
       status: SubscriptionStatus;
       trial_ends_on: string | null;
-    }>(sql`select subscriber_company_id, tier, status, trial_ends_on::text from subscription`);
+    }>(
+      // A reactivated company has a cancelled subscription and its new one: the latest is live,
+      // as SubscriptionCoreService.find picks it.
+      sql`select distinct on (subscriber_company_id) subscriber_company_id, tier, status,
+            trial_ends_on::text
+          from subscription order by subscriber_company_id, created_at desc, id desc`,
+    );
     const snapshots = await tx.execute<{ subscriber_company_id: string; units: number }>(
       sql`select distinct on (subscriber_company_id) subscriber_company_id,
             (single_room_units + self_contained_units + commercial_units)::int as units

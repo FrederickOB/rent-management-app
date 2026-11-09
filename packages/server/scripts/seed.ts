@@ -116,7 +116,6 @@ import { RulesService } from '../src/rules';
 import {
   SubscriptionBillingService,
   SubscriptionCoreService,
-  SubscriptionLifecycleService,
   SubscriptionModule,
   SubscriptionPaymentsService,
 } from '../src/subscription';
@@ -2558,13 +2557,12 @@ try {
     database,
     core: app.get(SubscriptionCoreService),
     billing: app.get(SubscriptionBillingService),
-    lifecycle: app.get(SubscriptionLifecycleService),
     payments: app.get(SubscriptionPaymentsService),
     providers: app.get<PaymentProviders>(PAYMENT_PROVIDERS),
     webhooks: app.get(WebhooksService),
     agency: AGENCY,
     landlord: LANDLORD,
-    others: [ABOKOBI],
+    abokobi: ABOKOBI,
     actor: (companyId, signIn) => actorFor(database, companyId, signIn),
   });
   let checkProblems = 0;

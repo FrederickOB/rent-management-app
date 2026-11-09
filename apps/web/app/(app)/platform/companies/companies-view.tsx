@@ -4,7 +4,7 @@ import { DEFAULT_TIME_ZONE, isValidTimeZone } from '@rent/domain/dates';
 import type { SubscriptionTier } from '@rent/domain/settings';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { Empty, LoadFailed, Loading } from '@/components/load-state';
 import { Alert } from '@/components/ui/alert';
 import { SubscriptionStatusBadge } from '@/components/subscription-badges';
@@ -13,13 +13,15 @@ import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { SelectField, TextField } from '@/components/ui/field';
 import { Table, Td, Th } from '@/components/ui/table';
-import { api } from '@/lib/api';
+import { api, keyedApi } from '@/lib/api';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { toProblem } from '@/lib/errors';
+import { isKeyReused, sendOnce, useIdempotencyKeeper } from '@/lib/idempotency';
 import { companyKindLabel } from '@/lib/format';
 import { subscriptionMessage, tierLabel, TIERS, wholeNumberOf } from '@/lib/subscription';
 import { formatMinor } from '@/lib/tenancy-format';
 import { useLoad } from '@/lib/use-load';
+import { BillingSwitch } from '../billing/billing-switch';
 
 export function CompaniesView({ canCreate }: { readonly canCreate: boolean }) {
   const load = useCallback(() => api().platformAdmin.companies(), []);
@@ -27,6 +29,7 @@ export function CompaniesView({ canCreate }: { readonly canCreate: boolean }) {
 
   return (
     <>
+      <BillingSwitch canTurnOn={false} />
       {canCreate ? <CreateCompany /> : null}
       <Card>
         <CardHeader title="Subscribers" />
@@ -124,6 +127,8 @@ const EMPTY: Draft = {
 /** Onboarding (decision 14): no self sign-up in the MVP; a platform admin creates the company. */
 function CreateCompany() {
   const router = useRouter();
+  const keeper = useIdempotencyKeeper();
+  const keyedFor = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [errors, setErrors] = useState<Partial<Record<Field, string>>>({});
@@ -151,7 +156,7 @@ function CreateCompany() {
     if (Object.keys(next).length > 0) return;
     setPending(true);
     try {
-      const created = await api().platformAdmin.createCompany({
+      const input = {
         kind: draft.kind,
         name: draft.name.trim(),
         ...(draft.legalName.trim() ? { legalName: draft.legalName.trim() } : {}),
@@ -160,10 +165,23 @@ function CreateCompany() {
         ...(trial?.value !== null && trial?.value !== undefined ? { trialDays: trial.value } : {}),
         adminName: draft.adminName.trim(),
         adminEmail: draft.adminEmail.trim(),
-      });
+      };
+      const content = JSON.stringify(input);
+      if (keyedFor.current !== content) {
+        keeper.reset();
+        keyedFor.current = content;
+      }
+      // BE-20: one onboarding per form, however often it is sent.
+      const created = await sendOnce(keeper, (key) =>
+        keyedApi(key).platformAdmin.createCompany(input),
+      );
       router.push(`/platform/companies/${created.company.id}?created=1`);
     } catch (failure) {
       setProblem(subscriptionMessage(failure) ?? toProblem(failure).message);
+      if (isKeyReused(failure)) {
+        keeper.reset();
+        keyedFor.current = null;
+      }
       setPending(false);
     }
   }

@@ -15,12 +15,15 @@ import {
   type SubscriptionTier,
 } from '@rent/domain/settings';
 import {
+  cancelEffectiveOn,
   SUPPORT_GRANT_MAX_HOURS as MAX_HOURS,
   type SubscriptionInvoiceStatus,
+  type SubscriptionPaymentPurpose,
   type SubscriptionPaymentStatus,
   type SubscriptionStatus,
 } from '@rent/domain/subscription';
 import { formatBusinessDate } from './business-dates';
+import { monthLabel } from './rent-tax';
 import { errorCode } from './errors';
 import { bpsText } from './reporting';
 import { formatMinor } from './tenancy-format';
@@ -173,13 +176,23 @@ export function bannerFor(
   today: string,
 ): Banner | null {
   if (!facts) return null;
-  if (facts.status === 'cancelled')
+  const owed = facts.oldestDueOn !== null;
+  if (facts.status === 'cancelled') {
+    const unpaid = owed
+      ? `An invoice is still unpaid${facts.pastDueMinor !== null ? ` (${formatMinor(facts.pastDueMinor)})` : ''}, due on ${formatBusinessDate(facts.oldestDueOn!)}.`
+      : null;
     return {
       tone: 'warning',
       title: 'The subscription has ended.',
-      body: 'Staff can read records and download documents for a time, but not change them. Pay links, receipts and notices already issued keep working for tenants.',
-      action: facts.canPay ? 'See your plan' : null,
+      body: [
+        'Staff can read records and download documents for a time, but not change them. Pay links, receipts and notices already issued keep working for tenants.',
+        unpaid,
+      ]
+        .filter(Boolean)
+        .join(' '),
+      action: facts.canPay ? (owed ? 'Pay now' : 'See your plan') : null,
     };
+  }
   if (facts.access === 'read_only' || facts.status === 'read_only')
     return {
       tone: 'error',
@@ -191,7 +204,8 @@ export function bannerFor(
         canPay: facts.canPay,
       }),
     };
-  if (facts.status === 'past_due')
+  // Review N10: money owed while a cancellation is scheduled still shows as past due.
+  if (facts.status === 'past_due' || (facts.status === 'cancel_scheduled' && owed))
     return {
       tone: 'warning',
       ...subscriptionBanner({
@@ -210,6 +224,27 @@ export function bannerFor(
       action: 'See your plan',
     };
   return null;
+}
+
+/**
+ * The read-only notice on the subscription page (review WEB-7): an ended subscription is not
+ * past due, and paying does not restore it.
+ */
+export function readOnlyNotice(input: {
+  readonly status: SubscriptionStatus;
+  readonly readOnlyUntil: string | null;
+}): { readonly title: string; readonly body: string } {
+  if (input.status === 'cancelled')
+    return {
+      title: 'The subscription has ended',
+      body: input.readOnlyUntil
+        ? `Staff can read records and download documents until ${formatBusinessDate(input.readOnlyUntil)}, but not change them. Tenants are not affected by it.`
+        : 'Staff can read records and download documents for a time, but not change them. Tenants are not affected by it.',
+    };
+  return {
+    title: 'Read-only for staff',
+    body: 'The subscription is past due, so staff can read records but not change them. Tenants are not affected. Paying restores full access at once.',
+  };
 }
 
 /** Plain words for the API's 403 `SUBSCRIPTION_READ_ONLY` (lib/errors uses it for every form). */
@@ -314,7 +349,84 @@ export function cancelConfirmText(endsOn: string): string {
 }
 
 export const ANNUAL_NOTE =
-  'Twelve times last month’s bill, less the annual discount, never below twelve months of the plan’s minimum. It is held as credit, and each month’s invoice is paid from it first; anything over is billed as usual.';
+  'A full month at your plan’s rates for the units let now, twelve times, less the annual discount, and never below twelve months of the plan’s minimum. It is held as credit, and each month’s invoice is paid from it first; anything over is billed as usual.';
+
+/** The price of a year ahead, as the API quotes it (BE-23, `annualPrice`; review WEB-4). */
+export function annualOfferText(price: {
+  readonly totalMinor: number;
+  readonly vatMinor: number;
+  readonly discountBps: number;
+  readonly firstMonth: string;
+  readonly lastMonth: string;
+}): string {
+  return `${formatMinor(price.totalMinor)} for ${monthLabel(price.firstMonth)} to ${monthLabel(price.lastMonth)}, ${bpsText(price.discountBps)} off${price.vatMinor > 0 ? `, VAT and levies of ${formatMinor(price.vatMinor)} included` : ''}.`;
+}
+
+/**
+ * This month's estimate, part by part (review WEB-1): the parts add up to the total, as the API
+ * promises (`unitsMinor + minimumTopUpMinor + discountMinor + vatMinor = totalMinor`).
+ */
+export function estimateRows(
+  estimate: {
+    readonly unitsMinor: number;
+    readonly minimumTopUpMinor: number;
+    readonly discountMinor: number;
+    readonly vatMinor: number;
+    readonly totalMinor: number;
+  },
+  tierMinimumMinor: number | null,
+): { readonly key: string; readonly label: string; readonly amountMinor: number }[] {
+  return [
+    { key: 'units', label: 'Units at their rates', amountMinor: estimate.unitsMinor },
+    {
+      key: 'top-up',
+      label:
+        tierMinimumMinor === null
+          ? 'Top-up to the plan’s minimum'
+          : `Top-up to the plan’s minimum of ${formatMinor(tierMinimumMinor)} a month (less for a part month)`,
+      amountMinor: estimate.minimumTopUpMinor,
+    },
+    ...(estimate.discountMinor !== 0
+      ? [{ key: 'discount', label: 'Discount', amountMinor: estimate.discountMinor }]
+      : []),
+    ...(estimate.vatMinor !== 0
+      ? [{ key: 'vat', label: 'VAT and levies', amountMinor: estimate.vatMinor }]
+      : []),
+    { key: 'total', label: 'Estimate for the month', amountMinor: estimate.totalMinor },
+  ];
+}
+
+/** Subscription billing on or off (founder, Q1; review WEB-16), for the console. */
+export function billingStateText(state: {
+  readonly on: boolean;
+  readonly startsOn: string | null;
+  readonly placeholderTiers: readonly Tier[];
+}): { readonly title: string; readonly body: string } {
+  if (state.on)
+    return {
+      title: 'Billing is on',
+      body: state.startsOn
+        ? `Subscriptions are billed from ${formatBusinessDate(state.startsOn)}; every trial that started before then ran from that day.`
+        : 'Subscriptions are billed.',
+    };
+  return {
+    title: 'Billing is off',
+    body: [
+      'Nothing is invoiced, and free trials have not started: each runs from the day billing goes on.',
+      state.placeholderTiers.length > 0
+        ? `It cannot go on while ${state.placeholderTiers.map((t) => TIER_LABELS[t]).join(', ')} ${state.placeholderTiers.length === 1 ? 'has' : 'have'} placeholder prices: add real prices first.`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' '),
+  };
+}
+
+/** The most a new credit note may take off an invoice: its total less earlier credits (Q2). */
+export const creditableMinor = (invoice: {
+  readonly totalMinor: number;
+  readonly creditedMinor: number;
+}): number => Math.max(0, invoice.totalMinor - invoice.creditedMinor);
 
 export const ESTIMATE_NOTE =
   'An estimate from the leases in force this month, not an invoice. The invoice is made on the 1st of next month from the month’s snapshot: every unit with a lease on any day of the month is billed, and vacant units never are.';
@@ -331,6 +443,67 @@ export function tierChangeText(input: {
     ? `${TIER_LABELS[input.to]} starts now. This month’s invoice charges each tier for its days.`
     : `${TIER_LABELS[input.to]} starts on ${formatBusinessDate(input.downgradeOn)}. You keep ${TIER_LABELS[input.from]}’s features until then.`;
 }
+
+/**
+ * When cancelling now ends the subscription (decision 12): the month's end; during a trial the
+ * earlier of the trial's last day and the month's end, with nothing billed (the domain's rule);
+ * and during a year paid ahead, the year's last day (founder, Q3). Only for a subscription that
+ * may still be cancelled.
+ */
+export function cancelPlan(input: {
+  readonly today: string;
+  readonly status: SubscriptionStatus;
+  readonly trialEndsOn: string | null;
+  /** The last day of a year paid ahead, while it runs. */
+  readonly annualEndsOn?: string | null;
+}): { readonly endsOn: string; readonly inTrial: boolean; readonly annual: boolean } {
+  if (input.annualEndsOn && input.annualEndsOn >= input.today)
+    return { endsOn: input.annualEndsOn, inTrial: false, annual: true };
+  const endsOn = cancelEffectiveOn(input);
+  return {
+    endsOn,
+    inTrial:
+      input.status === 'trialing' && input.trialEndsOn !== null && endsOn <= input.trialEndsOn,
+    annual: false,
+  };
+}
+
+/** A cancellation, asked for or scheduled: when it ends, what is billed and what keeps working. */
+export function cancelNoticeText(input: {
+  readonly endsOn: string;
+  readonly inTrial: boolean;
+  readonly annual?: boolean;
+  readonly readAccessUntil: string | null;
+}): string {
+  const ends = formatBusinessDate(input.endsOn);
+  return [
+    input.annual
+      ? `Your service ends on ${ends}, when the year you paid for ends.`
+      : input.inTrial
+        ? `The subscription ends on ${ends}, within the free trial, so nothing is billed.`
+        : `The subscription ends on ${ends}, and this month is billed as usual.`,
+    'You can withdraw the cancellation until then.',
+    input.readAccessUntil
+      ? `After it, staff can read records and download documents until ${formatBusinessDate(input.readAccessUntil)}.`
+      : 'After it, staff can still read records and download documents for a time.',
+    'New rent invoices and automatic messages to tenants stop, but pay links for invoices already sent, receipts and notices already issued keep working.',
+  ].join(' ');
+}
+
+/** The months a new price list may start: the 1st of each of the next `count` months (WEB-9). */
+export function priceMonthStarts(today: string, count = 12): string[] {
+  const first = parseBusinessDate(firstOfNextMonth(today));
+  return Array.from({ length: count }, (_, i) => toIsoDate(addMonths(first, i)));
+}
+
+/** Portfolio today (decision 4, prd-issues 31): its extras are all still to come. */
+export const PORTFOLIO_NOTE = `Portfolio’s extras are all coming soon: ${PORTFOLIO_COMING_SOON.map(
+  (name) => name.charAt(0).toLowerCase() + name.slice(1),
+).join(', ')}. Until they arrive, Portfolio includes what Growth includes, at Portfolio’s prices.`;
+
+/** On a subscriber's invoice while the VAT rule is unverified (decision 10; review N4). */
+export const INVOICE_VAT_NOTE =
+  'The VAT and levy rates on this invoice are still to be confirmed by the platform’s tax adviser.';
 
 /** Annual prepayment (decision 7): what it buys and how it is used. */
 export function annualText(input: {
@@ -386,6 +559,17 @@ export function grantStateText(
   return { active: true, text: `Active until ${time(grant.expiresAt)}.` };
 }
 
+/**
+ * Whether a grant is active now (review N7): the server's word, ended at its expiry time as the
+ * clock moves on, so a grant never shows active past `until`.
+ */
+export function grantActiveAt(
+  grant: { readonly active: boolean; readonly until: string; readonly revokedAt: string | null },
+  nowMillis: number,
+): boolean {
+  return grant.active && grant.revokedAt === null && epochMillisOf(grant.until) > nowMillis;
+}
+
 // Usage and messaging costs (decision 15) ------------------------------------------------------
 
 export const SMS_COST_NOTE = 'SMS cost as the provider reported it for each message.';
@@ -411,8 +595,17 @@ export const SUBSCRIPTION_MESSAGES: Record<string, string> = {
   NOT_CANCELLING: 'The subscription is not set to end, so there is nothing to withdraw.',
   NOT_TRIALING: 'The company is not on a free trial, so there is no trial to extend.',
   DISCOUNT_CODE_TAKEN: 'A discount code with that name already exists. Choose another name.',
-  EFFECTIVE_FROM_PAST: 'Choose a date from tomorrow on: prices and terms never change in the past.',
+  EFFECTIVE_FROM_PAST: 'Choose a later date: prices, terms and rates never change in the past.',
   RULE_VALUE: 'The value does not fit this rule. Check its form against the rule in force.',
+  OPEN_INVOICES: 'Pay the open invoices first; a year ahead can be paid once nothing is owed.',
+  ANNUAL_ALREADY_PAID: 'A year ahead is already paid and still running.',
+  CREDIT_EXCEEDS_INVOICE:
+    'That is more than is left to credit on this invoice: its total less the credit notes already on it.',
+  INVOICE_VOID: 'The invoice is void, so there is nothing to credit.',
+  NOT_CANCELLED: 'The company’s subscription has not ended, so there is nothing to start again.',
+  PLACEHOLDER_PRICES:
+    'Billing cannot go on while a plan’s prices in force on that day are placeholders. Add real prices first.',
+  BILLING_ALREADY_ON: 'Billing is already on.',
 };
 
 /** The plain words for a subscription or console refusal, or null to use the API's own. */
@@ -489,6 +682,21 @@ export function paymentNext(status: SubscriptionPaymentStatus): 'wait' | 'paid' 
   return 'wait';
 }
 
+/**
+ * What the pay form submits (review WEB-5): the purpose the person picked if the API still offers
+ * it, otherwise the first one offered; null when nothing is offered.
+ */
+export function chosenPurpose(
+  picked: SubscriptionPaymentPurpose | null,
+  offers: { readonly invoices: boolean; readonly annual: boolean },
+): SubscriptionPaymentPurpose | null {
+  const offered: SubscriptionPaymentPurpose[] = [
+    ...(offers.invoices ? (['invoices'] as const) : []),
+    ...(offers.annual ? (['annual'] as const) : []),
+  ];
+  return picked !== null && offered.includes(picked) ? picked : (offered[0] ?? null);
+}
+
 export const PAYMENT_POLL_MS = 3_000;
 export const PAYMENT_POLL_TRIES = 60;
 
@@ -563,6 +771,15 @@ export const VERIFICATION_LABELS = {
   unverified: 'Unverified',
 } as const;
 
+/**
+ * A rule from a past date (BE-25): allowed, because a law can be published after it takes effect;
+ * the form says what it changes. Null for today or later.
+ */
+export function pastRuleWarning(from: string, today: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || from >= today) return null;
+  return `This applies from a past date. Records already made keep the rule they used; anything worked out from now on for dates from ${formatBusinessDate(from)} uses this value.`;
+}
+
 /** A rules value for people: numbers, words, true or false, or its JSON. */
 export function ruleValueText(value: unknown): string {
   if (value === null || value === undefined) return 'None';
@@ -619,20 +836,32 @@ export const VERSION_STATE_LABELS: Record<VersionState, string> = {
  */
 export function versionStates<
   T extends { readonly id: string; readonly effectiveFrom: string; readonly createdAt: string },
->(rows: readonly T[], groupOf: (row: T) => string, today: string): Map<string, VersionState> {
+>(
+  rows: readonly T[],
+  groupOf: (row: T) => string,
+  today: string,
+  /**
+   * The day a version starts to count, `effectiveFrom` unless given: a price list counts from the
+   * first month it prices (BE-25), so it passes the 1st of that month.
+   */
+  startOf: (row: T) => string = (row) => row.effectiveFrom,
+): Map<string, VersionState> {
   const states = new Map<string, VersionState>();
   const current = new Map<string, T>();
   for (const row of rows) {
-    if (row.effectiveFrom > today) {
+    const start = startOf(row);
+    if (start > today) {
       states.set(row.id, 'future');
       continue;
     }
     const group = groupOf(row);
     const best = current.get(group);
+    const bestStart = best ? startOf(best) : null;
     const later =
       !best ||
-      row.effectiveFrom > best.effectiveFrom ||
-      (row.effectiveFrom === best.effectiveFrom && row.createdAt > best.createdAt);
+      bestStart === null ||
+      start > bestStart ||
+      (start === bestStart && row.createdAt > best.createdAt);
     if (later) current.set(group, row);
   }
   const inForce = new Set([...current.values()].map((row) => row.id));

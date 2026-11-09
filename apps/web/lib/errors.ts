@@ -10,11 +10,17 @@ const NETWORK_MESSAGE = 'We could not reach the server. Check your connection an
 const RATE_LIMITED = 'Too many attempts. Wait a minute and try again.';
 
 /**
- * M10 decision 11: a staff change refused while the company is read-only for an unpaid
- * subscription (403 `SUBSCRIPTION_READ_ONLY`). Tenants are never affected.
+ * M10 decisions 11 and 12: a staff change refused while the company is read-only (403
+ * `SUBSCRIPTION_READ_ONLY`), either for an unpaid subscription or after it has ended. The refusal
+ * does not say which, so neither is claimed. Tenants are never affected.
  */
 export const READ_ONLY_TEXT =
-  'Nothing was changed: your company is read-only until the subscription invoice is paid. Tenants can still pay rent and get receipts. Paying restores full access at once.';
+  'Nothing was changed: your company is read-only for staff, because the subscription is past due or has ended. Tenants can still pay rent and get receipts. If it is past due, paying restores full access at once.';
+
+/** The API's read-only refusal (403 `SUBSCRIPTION_READ_ONLY`). */
+export function isReadOnlyRefusal(error: unknown): boolean {
+  return statusOf(error) === 403 && errorCode(error) === 'SUBSCRIPTION_READ_ONLY';
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

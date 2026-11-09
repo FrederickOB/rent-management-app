@@ -13,7 +13,7 @@ import { SelectField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { startDownload } from '@/lib/browser-files';
 import { formatBusinessDate } from '@/lib/business-dates';
-import { toProblem } from '@/lib/errors';
+import { isReadOnlyRefusal, toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import { monthLabel } from '@/lib/rent-tax';
 import {
@@ -87,9 +87,14 @@ export function DashboardView({ canRefresh = false }: { readonly canRefresh?: bo
           : 'A refresh is already on its way.',
       );
     } catch (failure) {
-      // M9 review: a refusal or a refresh too soon is said plainly.
+      // M9 review: a refusal or a refresh too soon is said plainly. M10 review WEB-8: a read-only
+      // company's refusal says read-only, not who may refresh.
       const problem = toProblem(failure);
-      setProblem(refreshProblemText(problem.status, problem.message));
+      setProblem(
+        isReadOnlyRefusal(failure)
+          ? problem.message
+          : refreshProblemText(problem.status, problem.message),
+      );
     } finally {
       setRefreshing(false);
     }

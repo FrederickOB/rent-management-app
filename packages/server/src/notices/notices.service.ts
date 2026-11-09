@@ -6,6 +6,7 @@ import {
   desc,
   eq,
   inArray,
+  isNotNull,
   isNull,
   or,
   schema,
@@ -83,7 +84,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { AuditService } from '../audit/audit.service';
 import { BillingReadService } from '../billing/billing-read.service';
 import { staffActor } from '../companies/companies.service';
-import { EntitlementsService } from '../companies/entitlements.service';
+import { EntitlementsService, notOnPlan } from '../companies/entitlements.service';
 import type { Clock } from '../core/clock';
 import type { AppConfig } from '../core/config';
 import { isUniqueViolation } from '../core/db-errors';
@@ -265,12 +266,23 @@ export interface NoticeEvaluation {
   readonly earliestDate: string | null;
 }
 
+/** Notices already in the record: issued, or received from a tenant (BE-19). */
+const issuedOnly = () =>
+  or(isNotNull(schema.notice.issuedAt), eq(schema.notice.status, 'received'));
+
+/** Without notices on the plan, only a notice already issued (or received) is open (BE-19). */
+function issuedUnlessOnPlan(notice: NoticeRow, onPlan: boolean): NoticeRow {
+  if (!onPlan && !notice.issuedAt && notice.status !== 'received') throw notOnPlan('notices');
+  return notice;
+}
+
 /**
  * Legal notices (LN-01 to LN-05, LN-07, LN-09; M7 plan 4): the composer's checks, drafts, approval
  * (one person with notice authority, two for a notice to quit), issue (the date and the s.23 bar
  * checked again, the number taken, the PDF frozen, a signing request per party), the ladder's
- * controls, physical service, closure and corrections. Growth only (decision 14). Nothing here ends
- * a lease or touches a unit: a notice to quit never ends a tenancy by itself.
+ * controls, physical service, closure and corrections. Growth only (decision 14), except that a
+ * notice already issued stays readable and servable after a downgrade (M10 decision 11). Nothing
+ * here ends a lease or touches a unit: a notice to quit never ends a tenancy by itself.
  */
 @Injectable()
 export class NoticesService implements OnModuleInit {
@@ -469,7 +481,7 @@ export class NoticesService implements OnModuleInit {
       search?: string;
     },
   ): Promise<NoticeListRowView[]> {
-    const staff = await this.reader(actor);
+    const { staff, onPlan } = await this.issuedReader(actor);
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const n = schema.notice;
       const recipientTenants = filter.tenantId
@@ -489,6 +501,7 @@ export class NoticesService implements OnModuleInit {
             filter.outcome ? eq(n.outcome, filter.outcome) : undefined,
             filter.servedTooLate === true ? sql`${n.servedTooLate} is not null` : undefined,
             filter.servedTooLate === false ? sql`${n.servedTooLate} is null` : undefined,
+            onPlan ? undefined : issuedOnly(),
           ),
         )
         .orderBy(desc(n.createdAt))
@@ -506,7 +519,7 @@ export class NoticesService implements OnModuleInit {
   }
 
   async summary(actor: Actor | null) {
-    const staff = await this.reader(actor);
+    const { staff, onPlan } = await this.issuedReader(actor);
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const company = await companyFacts(tx, staff.companyId);
       const rows = await tx
@@ -515,7 +528,8 @@ export class NoticesService implements OnModuleInit {
           issuedAt: schema.notice.issuedAt,
           servedTooLate: schema.notice.servedTooLate,
         })
-        .from(schema.notice);
+        .from(schema.notice)
+        .where(onPlan ? undefined : issuedOnly());
       const now = this.clock.now();
       const byStatus = new Map<string, number>();
       const byAge = { '0_7': 0, '8_14': 0, '15_30': 0, over_30: 0 };
@@ -547,9 +561,9 @@ export class NoticesService implements OnModuleInit {
   }
 
   async get(actor: Actor | null, noticeId: string) {
-    const staff = await this.reader(actor);
+    const { staff, onPlan } = await this.issuedReader(actor);
     const detail = await withCompany(this.database, staffContext(staff), async (tx) =>
-      this.detailIn(tx, staff, await noticeRow(tx, noticeId)),
+      this.detailIn(tx, staff, issuedUnlessOnPlan(await noticeRow(tx, noticeId), onPlan)),
     );
     const approval = detail.approvalRequestId
       ? await this.approvals.get(staff, detail.approvalRequestId).catch(() => null)
@@ -1020,7 +1034,8 @@ export class NoticesService implements OnModuleInit {
     },
     claim: IdempotencyClaim | null = null,
   ) {
-    const staff = await this.reader(actor);
+    // Only an issued notice is served (checked below), so this never reaches a draft.
+    const { staff } = await this.issuedReader(actor);
     this.policy.assert(staff, 'notices.service.record');
     const servedAt = new Date(input.servedAt);
     if (Number.isNaN(servedAt.getTime()))
@@ -1161,7 +1176,11 @@ export class NoticesService implements OnModuleInit {
       sizeBytes: number;
     },
   ) {
-    const staff = await this.reader(actor);
+    // Evidence of service for a notice already issued never depends on the plan (BE-19).
+    const staff =
+      input.purpose === 'service_photo' || input.purpose === 'affidavit'
+        ? (await this.issuedReader(actor)).staff
+        : await this.reader(actor);
     const purpose: UploadPurpose = {
       service_photo: NOTICE_PHOTO_UPLOAD,
       affidavit: NOTICE_AFFIDAVIT_UPLOAD,
@@ -1231,10 +1250,10 @@ export class NoticesService implements OnModuleInit {
 
   /** A link to hand over as a QR code (decision 6): earlier links keep working. */
   async handoverLink(actor: Actor | null, noticeId: string, recipientId: string) {
-    const staff = await this.reader(actor);
+    const { staff, onPlan } = await this.issuedReader(actor);
     this.policy.assert(staff, 'notices.issue');
     return withCompany(this.database, staffContext(staff), async (tx) => {
-      const notice = await noticeRow(tx, noticeId);
+      const notice = issuedUnlessOnPlan(await noticeRow(tx, noticeId), onPlan);
       const [recipient] = await tx
         .select()
         .from(schema.noticeRecipient)
@@ -1272,9 +1291,9 @@ export class NoticesService implements OnModuleInit {
     which: 'notice' | 'signed' | 'service_pack' | 'service_photo' | 'affidavit' | 'received',
     recordId?: string,
   ): Promise<string> {
-    const staff = await this.reader(actor);
+    const { staff, onPlan } = await this.issuedReader(actor);
     const found = await withCompany(this.database, staffContext(staff), async (tx) => {
-      const notice = await noticeRow(tx, noticeId);
+      const notice = issuedUnlessOnPlan(await noticeRow(tx, noticeId), onPlan);
       const name = numberOf(notice) ?? 'notice';
       switch (which) {
         case 'notice':
@@ -1742,6 +1761,33 @@ export class NoticesService implements OnModuleInit {
     this.policy.assert(staff, 'notices.read');
     await this.entitlements.assert(staff.companyId, 'notices');
     return staff;
+  }
+
+  /**
+   * Reading notices and recording their service (M10 decision 11; review BE-19): a notice already
+   * issued never depends on the plan. Without notices on the plan (after a downgrade), staff still
+   * list, read, download and hand over the notices already issued (and those received from
+   * tenants) and record their service; drafts, composing, issuing and the ladder's controls stay
+   * with the plan. A company that never issued one is refused as before (`not_on_plan`).
+   */
+  private async issuedReader(
+    actor: Actor | null,
+  ): Promise<{ readonly staff: StaffActor; readonly onPlan: boolean }> {
+    const staff = staffActor(actor);
+    this.policy.assert(staff, 'notices.read');
+    if (await this.entitlements.has(staff.companyId, 'notices')) return { staff, onPlan: true };
+    const issued = await withCompany(
+      this.database,
+      staffContext(staff),
+      (tx) =>
+        tx.execute<{ found: boolean }>(
+          sql`select exists (select 1 from notice n
+                where n.issued_at is not null or n.status = 'received') as found`,
+        ),
+      { accessMode: 'read only' },
+    );
+    if (!issued.rows[0]?.found) throw notOnPlan('notices');
+    return { staff, onPlan: false };
   }
 
   private async drafter(actor: Actor | null): Promise<StaffActor> {

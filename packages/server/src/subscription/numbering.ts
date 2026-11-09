@@ -5,9 +5,13 @@ import { sql, type Tx } from '@rent/db';
  * `SUBR-2026-000001`, one sequence per kind and year in the platform company's counters, taken in
  * the issuing transaction and locked until it ends, so a failed transaction rolls its number back.
  */
-export type SubscriptionNumberKind = 'invoice' | 'receipt';
+export type SubscriptionNumberKind = 'invoice' | 'receipt' | 'credit';
 
-const PREFIX: Record<SubscriptionNumberKind, string> = { invoice: 'SUB', receipt: 'SUBR' };
+const PREFIX: Record<SubscriptionNumberKind, string> = {
+  invoice: 'SUB',
+  receipt: 'SUBR',
+  credit: 'SUBC',
+};
 
 export function formatSubscriptionNumber(
   kind: SubscriptionNumberKind,
