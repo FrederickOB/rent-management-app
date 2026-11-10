@@ -1,6 +1,6 @@
 # Failed webhooks and replay
 
-- **Status:** M11. Intake, retries, the dead letter, verify-pending and the daily reconciliation are built (M4b) and drilled (`packages/server/test/drills/webhooks-lost.int.test.ts`, `webhook-replay.int.test.ts`). The replay and retry tools (console and `pnpm ops:replay-webhooks` / `pnpm ops:redrive`) are the backend's M11 work (decision 9); this runbook names them as the contract does and gets their exact flags when they land.
+- **Status:** M11. Intake, retries, the dead letter, verify-pending and the daily reconciliation are built (M4b) and drilled (`packages/server/test/drills/webhooks-lost.int.test.ts`, `webhook-replay.int.test.ts`). The replay and retry tools (console, `pnpm ops:replay-webhooks` and `pnpm ops:redrive`) are built (M11 decision 9); their flags are below.
 - **Covers:** payment provider webhooks (`charge.success`, disputes, refunds) and the messaging providers' webhooks, from arrival to processing (NFR "payment callbacks retried and never lost"; CLAUDE.md section 8).
 - **Why replay is safe:** a webhook never carries money by itself. Processing asks the provider's verify endpoint and posts what it says, once per payment (keyed postings, one intent per payment). The drill replays a whole day of webhooks twice, both by the provider resending and by processing every stored row again; payments, receipts, allocations, messages and the journal come out identical.
 
@@ -35,11 +35,24 @@ In production use the console (system health: failed and dead-lettered webhooks)
   - every webhook rejected: the provider's secret key changed, or ours did. Fix the key (secrets manager, M12) and ask the provider to resend. Rejected rows have no body to replay, and none is needed: verify-pending and the reconciliation post the payments meanwhile.
 - **`failed` (dead-lettered):** find the cause first (the worker's log for that job: a provider outage, a bug). Once fixed, replay it:
   - console: system health → failed webhooks → Replay, with a reason (audited in the platform's chain);
-  - command line, during an incident: `pnpm ops:replay-webhooks` with the webhook ids or a day, and a reason.
+  - command line, during an incident. `--operator` is your platform admin email and `--reason` is required; the OS user and host are recorded too. `--dry-run` lists what would be replayed and changes nothing:
+
+    ```bash
+    # Named webhooks.
+    pnpm ops:replay-webhooks --operator you@platform.example --reason "Paystack outage, fixed" \
+      --id <webhook id> --id <webhook id>
+    # Every failed or dead-lettered webhook in a window (add --provider paystack to narrow it;
+    # --all also takes rows that did not fail; --limit caps the count, default 1,000).
+    pnpm ops:replay-webhooks --operator you@platform.example --reason "Worker down 02:00-02:40" \
+      --from 2026-11-10T02:00:00Z --to 2026-11-10T02:40:00Z --dry-run
+    ```
+
+  - a dead-lettered job, not a webhook: `pnpm ops:redrive` takes the same `--operator`, `--reason`, `--id`, `--from`/`--to`, `--limit` and `--dry-run`, plus `--queue <name>`. A dead letter can be retried once; if it fails again it comes back as a new dead letter.
+  - both commands refuse the development database `rent` unless `--allow-rent-database` is given.
 
   A replay runs the same processing again. Replaying twice changes nothing.
 - **Stuck `received` for more than a few minutes:** the worker or the queue, not the webhook (see `queue-backlog.md`).
-- **The provider says it sent webhooks we never stored:** nothing to replay. Check the reconciliation of the next morning, or run the day's reconciliation again (the job takes a `day`). Then ask the provider to resend if it can; resent events that were already processed are answered `duplicate`.
+- **The provider says it sent webhooks we never stored:** nothing to replay. Check the reconciliation of the next morning, or run the day's reconciliation again: `pnpm ops:reconcile --day YYYY-MM-DD --operator … --reason …` (it changes nothing already reconciled). Then ask the provider to resend if it can; resent events that were already processed are answered `duplicate`.
 - **Never** insert, edit or delete `webhook_inbox`, `payment` or journal rows by hand. Never post a payment from a webhook body or a screenshot.
 
 ## The drills

@@ -1,7 +1,7 @@
 # Gate 1: pilot proven
 
 - **Status:** M11 (done-when item 3). Written from the code and the docs on 10 Nov 2026. **Nothing below is signed yet.**
-  - **The rules table:** 27 legal and tax values; none is verified (4 are `from_prd`, 23 `unverified`).
+  - **The rules table:** 34 legal and tax values; none is verified (4 are `from_prd`, 30 `unverified`).
   - **Open questions:** 49 are open; 28 of them block the pilot or live rent collection.
   - **Outside tracks:** none is recorded as complete.
 - **Covers:**
@@ -102,6 +102,13 @@ PRD section 19's other measures are computed on the same page. They are not Gate
 | 25 | `data_retention.other.webhook_bodies` | None | unverified | Erasure holds payment providers' webhook bodies (OQ-14) | Legal outcome | Counsel |
 | 26 | `data_retention.other.tenant_profile` | None | unverified | Erasure holds the tenant's name, contact details and contacts (OQ-14, OQ-65) | Legal outcome | Counsel |
 | 27 | `data_protection.request_response_days` | None | unverified | The due date of a data protection request; none is shown until set (OQ-65) | Legal outcome | Counsel |
+| 28 | `data_retention.other.artisans` | None | unverified | Erasure holds artisans' details until it has a verified value (OQ-14) | Legal outcome | Counsel |
+| 29 | `data_retention.other.owners` | None | unverified | Erasure holds owners' details until it has a verified value (OQ-14) | Legal outcome | Counsel |
+| 30 | `data_retention.other.staff` | None | unverified | Erasure holds staff members' details until it has a verified value (OQ-14) | Legal outcome | Counsel |
+| 31 | `data_retention.other.consent_records` | None | unverified | Consent records are kept until it has a verified value (OQ-14) | Legal outcome | Counsel |
+| 32 | `data_retention.other.photos_and_recordings` | None | unverified | Erasure holds photos, videos and voice notes until it has a verified value (OQ-14) | Legal outcome | Counsel |
+| 33 | `data_retention.other.audit_events` | None | unverified | Audit events are kept (they cannot change; names in older events stay, M12 and OQ-65) until it has a verified value (OQ-14) | Legal outcome | Counsel |
+| 34 | `data_retention.other.data_protection_requests` | None | unverified | The data protection register is kept until it has a verified value (OQ-14) | Legal outcome | Counsel |
 
 **Where the warnings show:** an unverified value that affects a legal outcome is flagged to staff where it is used. Examples: the notice composer's warnings on the statutory minimum and the s.23 bar, and the data protection register's "the response time is still to be set by counsel".
 
@@ -182,7 +189,7 @@ None is recorded as complete in the repository as of 10 Nov 2026. The founder up
 | Track | Owner | Needed by | Covers | Status |
 | --- | --- | --- | --- | --- |
 | Payments licensing opinion (Act 987) | Founder with counsel | Before any live rent collection | OQ-03, OQ-43 | Open |
-| Ghanaian property lawyer | Founder | Gate 1, the pilot | OQ-09 to OQ-14, OQ-39, OQ-40, OQ-44 to OQ-47, OQ-49, OQ-50, OQ-53, OQ-57, OQ-58, OQ-65, OQ-66; rules 14 to 27 | Open |
+| Ghanaian property lawyer | Founder | Gate 1, the pilot | OQ-09 to OQ-14, OQ-39, OQ-40, OQ-44 to OQ-47, OQ-49, OQ-50, OQ-53, OQ-57, OQ-58, OQ-65, OQ-66; rules 14 to 34 | Open |
 | Tax adviser | Founder | The pilot; the commercial pilot | OQ-17 to OQ-19, OQ-48, OQ-56, OQ-60 to OQ-62, OQ-64; rules 1 to 13 | Open |
 | Paystack agreement and a test account | Founder | Live rent | OQ-01, OQ-04 to OQ-06, OQ-08, OQ-41, OQ-42 | Open |
 | Second provider due diligence | Founder | Failover | OQ-02 | Open |
@@ -239,6 +246,13 @@ None is recorded as complete in the repository as of 10 Nov 2026. The founder up
 | Rules | 25 `data_retention.other.webhook_bodies` | Counsel | | |
 | Rules | 26 `data_retention.other.tenant_profile` | Counsel | | |
 | Rules | 27 `data_protection.request_response_days` | Counsel | | |
+| Rules | 28 `data_retention.other.artisans` | Counsel | | |
+| Rules | 29 `data_retention.other.owners` | Counsel | | |
+| Rules | 30 `data_retention.other.staff` | Counsel | | |
+| Rules | 31 `data_retention.other.consent_records` | Counsel | | |
+| Rules | 32 `data_retention.other.photos_and_recordings` | Counsel | | |
+| Rules | 33 `data_retention.other.audit_events` | Counsel | | |
+| Rules | 34 `data_retention.other.data_protection_requests` | Counsel | | |
 | Live rent | OQ-03 Bank of Ghana licensing | Counsel | | |
 | Live rent | OQ-43 Licence category and ownership | Founder with counsel | | |
 | Live rent | OQ-01 Paystack direct settlement, in writing | Founder with Paystack | | |
