@@ -1,0 +1,715 @@
+{
+  "source": "docs/plans/roadmap.md, MVP coverage table; titles from docs/prd.md",
+  "generated": "2026-11-10 (M11 groundwork)",
+  "mvp": [
+    {
+      "id": "PR-01",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Create a portfolio with properties, blocks and units in a three-level hierarchy",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-02",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Unit types include chamber and hall, single room self-contained, 1 to 5 bedroom, studio, shop, store, office, warehouse, kiosk",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-03",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Capture GhanaPost GPS address, region, district, MMDA and map pin per property",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-04",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Attach photos, title or indenture, site plan and building permit to a property",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-05",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Record ECG and Ghana Water meter numbers and meter type (prepaid, postpaid, shared) per unit",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-06",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Unit status: vacant, occupied, reserved, under repair, not lettable, with a status history",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-08",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Bulk import of properties and units from Excel",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PR-09",
+      "module": "Portfolio and register",
+      "milestone": "M2",
+      "title": "Amenities and features per unit (parking, borehole, generator, solar, air conditioning, furnished)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-01",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Tenant profile: individual or company, phone, WhatsApp number, email, occupation or business type; a tenant renting from several landlords on the platform signs in once and sees each tenancy, while each landlord sees only their own records",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-02",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Ghana Card number capture and verification through an approved provider; passport for foreign nationals",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-03",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Guarantor, next of kin and employer reference with contact details",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-04",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Company tenants: registration number, TIN, authorised signatories, finance contact",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-05",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Lease builder from templates (residential, commercial, short fixed-term) with editable clauses",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-06",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Lease terms: start, end, rent, rent cycle (monthly, quarterly, 6-month, annual), deposit, service charge, escalation schedule, break clauses",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-07",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "E-signature of the lease by tenant, landlord and guarantor, with a signed PDF stored",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-09",
+      "module": "Tenants and leases",
+      "milestone": "M3",
+      "title": "Renewal workflow: reminder 90, 60 and 30 days before expiry; renewal offer sent as a signable link",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-08",
+      "module": "Tenants and leases",
+      "milestone": "M8",
+      "title": "Move-in condition report with timestamped photos signed by both parties",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TL-11",
+      "module": "Tenants and leases",
+      "milestone": "M8",
+      "title": "Move-out: notice, inspection, deposit deductions, final statement, refund",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-01",
+      "module": "Billing and collection",
+      "milestone": "M4a",
+      "title": "Invoices generated automatically from lease terms for each rent cycle",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-05",
+      "module": "Billing and collection",
+      "milestone": "M4a",
+      "title": "Cash and cheque recorded with receiver name, photo of receipt book or cheque, and manager approval",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-07",
+      "module": "Billing and collection",
+      "milestone": "M4a",
+      "title": "Partial payments, overpayments held as credit, and allocation rules (oldest debt first)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-08",
+      "module": "Billing and collection",
+      "milestone": "M4a",
+      "title": "Arrears ageing: 0 to 30, 31 to 60, 61 to 90 and 90+ days, by tenant, property and owner",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-11",
+      "module": "Billing and collection",
+      "milestone": "M4a",
+      "title": "Security deposit held in a separate ledger, never mixed with rent income",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-02",
+      "module": "Billing and collection",
+      "milestone": "M4b",
+      "title": "Payment by MTN MoMo, Telecel Cash, AT Money, bank transfer and card through a licensed aggregator, settled directly to the landlord's or agency's account; the provider fee is borne by the landlord or agency by default",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-03",
+      "module": "Billing and collection",
+      "milestone": "M4b",
+      "title": "Each tenant gets a unique payment reference; payments matched to the right invoice automatically",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-04",
+      "module": "Billing and collection",
+      "milestone": "M4b",
+      "title": "Payment links sent by WhatsApp, SMS and email; link shows amount due and lets the tenant pay part",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-06",
+      "module": "Billing and collection",
+      "milestone": "M4b",
+      "title": "Digital receipt issued within 1 minute of confirmed payment, sent on the tenant's channel",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-09",
+      "module": "Billing and collection",
+      "milestone": "M4b",
+      "title": "Reminder ladder: 7 days before due, on due date, 3, 7 and 14 days overdue; each step configurable",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "BC-12",
+      "module": "Billing and collection",
+      "milestone": "M4b",
+      "title": "Unmatched payments queue for manual matching, with suggested matches",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AR-01",
+      "module": "Advance rent engine",
+      "milestone": "M4a",
+      "title": "Record a lump-sum advance and spread it month by month over the period it covers",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AR-02",
+      "module": "Advance rent engine",
+      "milestone": "M4a",
+      "title": "Show a \"paid until\" date to tenant, landlord and manager at all times",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AR-03",
+      "module": "Advance rent engine",
+      "milestone": "M4a",
+      "title": "Track unearned rent as a liability in the owner's accounts",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AR-04",
+      "module": "Advance rent engine",
+      "milestone": "M5",
+      "title": "Calculate refund due if a tenancy ends early, net of agreed deductions; unused days of the current month are credited only where the lease provides for it",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AR-05",
+      "module": "Advance rent engine",
+      "milestone": "M5",
+      "title": "Record months paid in advance on every lease; a per-company setting (off by default, warn or block) decides whether residential advances above 6 months (Rent Act, section 25(5)) are flagged on the lease and in compliance reports",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AR-06",
+      "module": "Advance rent engine",
+      "milestone": "M5",
+      "title": "Renewal prompt when the paid-until date is 90 days away",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-01",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Notice templates per type, with mandatory fields and lawful notice periods enforced",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-02",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Secure link per recipient, expiring only after the notice period ends; no login needed, one-time code to sign",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-03",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Tracking: sent, delivered, opened, signed, reminded, escalated, served, closed, each timestamped",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-04",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Signed PDF with signature, timestamp, phone number verified, device details and document fingerprint",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-05",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Automatic reminder ladder with pause and cancel controls",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-07",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Commercial tenants: notice goes to every authorised signatory; one signature acknowledges for the company",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "LN-09",
+      "module": "Legal notices",
+      "milestone": "M7",
+      "title": "Notices dashboard: open notices by status and days outstanding",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-01",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Official WhatsApp Business Platform number per company (or a shared platform number for small landlords)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-02",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Inbound messages matched to the tenant by phone number; unknown numbers go to a triage queue",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-03",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Menu bot for routine requests (balance, receipt, pay, repair) with handover to a person",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-05",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Unified inbox: WhatsApp, SMS, email and in-app messages in one thread per tenant",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-06",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Assign conversations to staff, tag them, set response time targets, alert on overdue replies",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-07",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Approved message templates for reminders, receipts and notices (required by WhatsApp outside the 24-hour reply window)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-08",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Broadcast to a property, block or tenant group (water shutdown, fumigation) with delivery stats",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-09",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Opt-in captured at onboarding; opt-out honoured; SMS fallback for tenants without WhatsApp",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-10",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6",
+      "title": "Email channel with inbound parsing (replies thread back to the record)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CM-04",
+      "module": "Inbox and WhatsApp",
+      "milestone": "M6, M8",
+      "title": "Repair messages create a maintenance ticket automatically, with media attached",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-01",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Repair requests from tenant app, WhatsApp, caretaker app or manager, with photos, video or voice note",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-02",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Priority levels (emergency, urgent, routine) with target response and completion times",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-03",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Categories: plumbing, electrical, roofing, carpentry, painting, pest control, AC, generator, borehole, septic",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-04",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Assign to an in-house person or an external artisan; artisan receives the job by WhatsApp link",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-06",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Before and after photos required to close a job; tenant confirms completion",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-10",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Inspections: routine, move-in, move-out, with room-by-room checklists and photos",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "MI-11",
+      "module": "Maintenance and inspections",
+      "milestone": "M8",
+      "title": "Move-out inspection findings linked to deposit deductions with photo evidence",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AC-01",
+      "module": "Accounting",
+      "milestone": "M4a",
+      "title": "Double-entry ledger per owner and per property: rent, deposits, service charge, expenses, fees",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AC-03",
+      "module": "Accounting",
+      "milestone": "M8",
+      "title": "Expense recording with receipts attached, categorised and allocated to property or unit",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AC-02",
+      "module": "Accounting",
+      "milestone": "M9",
+      "title": "Management fee deducted automatically (a percentage of rent and service charge collected, including advances and excluding deposits, or a fixed amount per unit)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AC-04",
+      "module": "Accounting",
+      "milestone": "M9",
+      "title": "Monthly owner statement as PDF, with a cash section (collections, expenses, fees, tax, net remittance) and an accrual section (rent earned, unearned rent, deposits held, arrears), plus occupancy",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AC-05",
+      "module": "Accounting",
+      "milestone": "M9",
+      "title": "Owner remittance tracking: amount, date, method, reference",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TX-08",
+      "module": "Tax and compliance",
+      "milestone": "M1, M5",
+      "title": "Tax rates and rules held in configuration so changes in law need no code release",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TX-01",
+      "module": "Tax and compliance",
+      "milestone": "M5",
+      "title": "Rent tax calculated on every receipt: 8% residential, 15% commercial and non-residential",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TX-02",
+      "module": "Tax and compliance",
+      "milestone": "M5",
+      "title": "Rent tax due-date tracker: payment due within 30 days of rent received; alerts at 21 and 28 days",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TX-03",
+      "module": "Tax and compliance",
+      "milestone": "M5",
+      "title": "Record of GRA payments with receipts attached; rent tax report per owner",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TX-04",
+      "module": "Tax and compliance",
+      "milestone": "M5",
+      "title": "Withholding tax deducted by corporate tenants tracked against invoices, with certificate upload",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "TX-05",
+      "module": "Tax and compliance",
+      "milestone": "M3",
+      "title": "Rent Control registration number and date per tenancy, with reminders until it is registered; rent collection is never blocked",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CT-04",
+      "module": "Commercial tenant portal",
+      "milestone": "M4a",
+      "title": "Invoices and receipts with company name and TIN; VAT shown where it applies",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "DA-01",
+      "module": "Dashboards",
+      "milestone": "M9",
+      "title": "Portfolio dashboard: occupancy, collection rate, arrears, rent roll, paid-until coverage",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "DA-02",
+      "module": "Dashboards",
+      "milestone": "M9",
+      "title": "Lease expiry pipeline for the next 3, 6 and 12 months",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "DA-06",
+      "module": "Dashboards",
+      "milestone": "M9",
+      "title": "Views filtered by owner, property, region and unit type; export to PDF and Excel",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-01",
+      "module": "Administration",
+      "milestone": "M1",
+      "title": "Company account (landlord or agency) with branding: logo, colours, sender name on messages and documents",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-03",
+      "module": "Administration",
+      "milestone": "M1",
+      "title": "Roles: owner, agency admin, property manager, accountant, caretaker, artisan, tenant, commercial tenant user, read-only adviser",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-05",
+      "module": "Administration",
+      "milestone": "M1",
+      "title": "Approval rules: two-person approval for notices to quit, refunds and write-offs; a landlord with no staff nominates a second approver, or re-confirms with a one-time code after 24 hours",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-06",
+      "module": "Administration",
+      "milestone": "M1",
+      "title": "Two-factor login; session timeout; device list with remote sign-out",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-07",
+      "module": "Administration",
+      "milestone": "M1",
+      "title": "Immutable audit log, searchable by user, record and date",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-02",
+      "module": "Administration",
+      "milestone": "M2",
+      "title": "Multi-owner setup for agencies: each owner sees only their own properties",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-08",
+      "module": "Administration",
+      "milestone": "M10",
+      "title": "Subscription and billing for the platform itself: tiers, per-unit rates by unit type, invoices, MoMo or card payment (section 21)",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "AD-10",
+      "module": "Administration",
+      "milestone": "M10",
+      "title": "Platform admin console: company onboarding, support access with consent, usage and messaging costs",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-01",
+      "module": "Subscription",
+      "milestone": "M2",
+      "title": "Every unit carries a billing band: single room, self-contained flat or house, or commercial",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-09",
+      "module": "Subscription",
+      "milestone": "M3",
+      "title": "A unit counts as occupied whenever it has an active lease; a unit cannot be set to vacant while a lease is active, and every status change is logged",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-02",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Monthly snapshot of occupied (billable) units by band, vacant units excluded, stored for audit and dispute",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-03",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Rate card per tier and unit type held in configuration, with effective dates",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-04",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Feature access controlled by tier; locked features show what upgrading unlocks",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-05",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Tier minimum fee, proration, annual prepayment and discount codes",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-07",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Subscription invoices and receipts in cedis; payment by MoMo or card; automatic renewal",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-08",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Free trial or guided onboarding period: 30 days by default, length configurable",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-10",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Subscription renews monthly until the landlord cancels; cancellation takes effect at the end of the paid cycle, with data export offered",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "PB-11",
+      "module": "Subscription",
+      "milestone": "M10",
+      "title": "Unpaid subscription invoices tracked as arrears with reminders to the landlord; tenant payment links, receipts and notices are never switched off",
+      "prdPriority": "MVP"
+    },
+    {
+      "id": "CF-06",
+      "module": "Caretaker app (manager web tasks)",
+      "milestone": "M7",
+      "title": "Tasks from the notice escalation ladder (in-person reminders, physical service record); handled in the manager web app until the field app ships",
+      "prdPriority": "P2",
+      "note": "P2 in the PRD; the manager web app's tasks are in the MVP (roadmap, M7)"
+    }
+  ],
+  "nfr": [
+    {
+      "tag": "NFR-PERF",
+      "area": "Performance",
+      "requirement": "Key screens load in under 3 seconds on a 3G connection; tenant pages under 1 MB"
+    },
+    {
+      "tag": "NFR-AVAIL",
+      "area": "Availability",
+      "requirement": "99.5% monthly uptime; payment callbacks retried and never lost"
+    },
+    {
+      "tag": "NFR-DEV",
+      "area": "Devices",
+      "requirement": "Android 8 and above, iOS 16.4 and above, modern browsers; tenant app usable on 5-inch screens"
+    },
+    {
+      "tag": "NFR-OFFLINE",
+      "area": "Offline",
+      "requirement": "Offline tolerant tenant flows (the caretaker app's 7 days offline is Phase 2)"
+    },
+    {
+      "tag": "NFR-SEC",
+      "area": "Security",
+      "requirement": "Encryption in transit and at rest; two-factor login for owners, managers and accountants; role-based access"
+    },
+    {
+      "tag": "NFR-DP",
+      "area": "Data protection",
+      "requirement": "Act 843; consent for WhatsApp and SMS; defined retention; tenant data export and deletion on request"
+    },
+    {
+      "tag": "NFR-AUDIT",
+      "area": "Audit",
+      "requirement": "Immutable log of financial entries, notice events, lease changes and permission changes"
+    },
+    {
+      "tag": "NFR-SCALE",
+      "area": "Scalability",
+      "requirement": "Agencies with 5,000+ units and 50+ staff without redesign"
+    },
+    {
+      "tag": "NFR-LOC",
+      "area": "Localisation",
+      "requirement": "Currency, tax rates, ID types, address format and notice periods configurable per country"
+    },
+    {
+      "tag": "NFR-BACKUP",
+      "area": "Backup",
+      "requirement": "Daily backups, point-in-time recovery for 30 days, tested restore every quarter"
+    },
+    {
+      "tag": "NFR-A11Y",
+      "area": "Accessibility",
+      "requirement": "Tenant pages meet WCAG 2.2 AA where practical (M11 prompt)"
+    }
+  ]
+}

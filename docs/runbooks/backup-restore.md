@@ -1,6 +1,6 @@
 # Backup and restore
 
-- **Status:** M1. The local scripts and the CI restore check work now. The production settings are applied at the infrastructure step (first deployment). The full runbook and the first drill are M11.
+- **Status:** M1. The local scripts and the CI restore check work now. The production settings are applied at the infrastructure step (first deployment). The full runbook and the first drill are M11; the recovery targets were set by the founder on 2026-11-10 (M11 decision 10).
 - **Covers:** the PostgreSQL database: the ledger, the audit chains and every business record (NFR backup; `docs/plans/M1.md` section 4.19).
 
 ## Production settings (infrastructure step)
@@ -16,6 +16,8 @@ Apply these when the RDS instance is created, in the region chosen under ADR-009
 | Cross-region copies | The same plan copies each snapshot to the second region (ADR-009), encrypted with a KMS key in that region. |
 | Deletion protection | On, with a final snapshot if the instance is ever deleted. |
 | Restore drill | Quarterly, as below. |
+| Recovery point objective (RPO) | At most 5 minutes of data lost (founder, M11 decision 10). RDS point-in-time recovery meets it. |
+| Recovery time objective (RTO) | Service back within 4 hours of the decision to restore (founder, M11 decision 10). |
 
 Decide at the same step:
 

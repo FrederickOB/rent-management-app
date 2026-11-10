@@ -31,13 +31,14 @@ flowchart LR
     M9 --> M11["M11 Hardening, Gate 1"]
     M10 --> M11
     M7 --> M11
+    M11 --> M12["M12 First deployment"]
     TAX(["Tax adviser"]) -.-> M5
     LAW(["Property lawyer"]) -.-> M7
     PSP(["Paystack agreement"]) -.-> M4b
     META(["Meta verification"]) -.-> M6
 ```
 
-Run order for one Claude Code thread: M1, M2, M3, M4a, M4b, M5, M6, M7, M8, M9, M10, M11. With a second engineer, M6's adapters and inbox can start after M4a, using the fake providers.
+Run order for one Claude Code thread: M1, M2, M3, M4a, M4b, M5, M6, M7, M8, M9, M10, M11, M12. With a second engineer, M6's adapters and inbox can start after M4a, using the fake providers.
 
 | Milestone | Requirement IDs | Depends on | Riskiest part |
 | --- | --- | --- | --- |
@@ -53,6 +54,7 @@ Run order for one Claude Code thread: M1, M2, M3, M4a, M4b, M5, M6, M7, M8, M9, 
 | M9 Owner reporting and dashboards | AC-02, AC-04, AC-05, DA-01, DA-02, DA-06; Gate 1 metrics | M5, M8 | Statement regeneration with period locks; dashboard query speed at 5,000 units |
 | M10 Subscription and admin | AD-08, AD-10, PB-02 to PB-05, PB-07, PB-08, PB-10, PB-11 | M4b | Occupancy snapshot rule (D8); proration; never switching off tenant flows |
 | M11 Hardening, Gate 1 | All NFRs; traceability; pilot onboarding (P25) | all | Expo web inside the 1 MB budget; load at month-end peaks; restore drill |
+| M12 First deployment | Staging and production on AWS (ADR-009): infrastructure as code, RDS with 30-day point-in-time recovery, AWS KMS, Secrets Manager, S3 Object Lock, CDN, container images, deploy pipeline, uptime monitoring (M11 decision 1) | M11; your AWS account; the latency test | Region choice; secrets and keys; the first restore from production backups |
 
 ## Prompt amendments
 
@@ -138,3 +140,5 @@ Start these now; each can block a milestone.
 | SMS two-way short code (Hubtel) and gateway account | Founder | M6 (replies and STOP by SMS) | M6 decision 1 |
 | Email sending and inbound domains (Postmark) | Founder | M6 (CM-10) | M6 decision 2 |
 | Meta developer app with a test number | Founder | M6 (sandbox smoke test) | M6 decision 14 |
+| AWS account (organisation, billing, root MFA) | Founder | M12 | M11 decision 1 |
+| External penetration test | Founder | Before any live rent collection | PRD section 20 (annual security test); M11 decision 6 |
