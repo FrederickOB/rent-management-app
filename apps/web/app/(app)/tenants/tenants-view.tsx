@@ -48,9 +48,10 @@ export function TenantsView({
   const load = useCallback(async () => {
     const current = gate.begin();
     try {
-      const list = await api().tenants.list({
+      // M11 decision 6: by POST, so a phone number or a name never sits in a URL.
+      const list = await api().tenants.search({
         search: query.trim() || undefined,
-        ...(activeOnly ? { withActiveLease: 'true' } : {}),
+        ...(activeOnly ? { withActiveLease: true } : {}),
         ...(idStatus && details ? { idStatus } : {}),
       });
       if (!current()) return;

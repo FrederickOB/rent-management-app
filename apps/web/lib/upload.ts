@@ -1,4 +1,5 @@
 import { leasesContract } from '@rent/contracts';
+import { ONBOARDING_IMPORT_MAX_BYTES } from '@rent/domain/onboarding';
 import {
   PROPERTY_PAPER_MAX_BYTES,
   PROPERTY_PAPER_TYPES,
@@ -75,6 +76,14 @@ export const LEASE_PAPER_UPLOAD: UploadRule = leasePaperRule();
 export const REGISTER_IMPORT_UPLOAD: UploadRule = {
   types: [XLSX_CONTENT_TYPE],
   maxBytes: REGISTER_IMPORT_MAX_BYTES,
+  extensions: ['.xlsx'],
+  noun: 'an Excel workbook (.xlsx)',
+};
+
+/** M11 onboarding workbooks (tenancies, balances, adjustments): the register import's limit. */
+export const ONBOARDING_UPLOAD: UploadRule = {
+  types: [XLSX_CONTENT_TYPE],
+  maxBytes: ONBOARDING_IMPORT_MAX_BYTES,
   extensions: ['.xlsx'],
   noun: 'an Excel workbook (.xlsx)',
 };

@@ -41,7 +41,7 @@ import {
 } from '@/lib/approvals';
 import { formatBusinessDate } from '@/lib/business-dates';
 import { cn } from '@/lib/cn';
-import { toProblem } from '@/lib/errors';
+import { stepUpMessage, toProblem } from '@/lib/errors';
 import { formatTime } from '@/lib/format';
 import { settlementBlock, type SettlementVerdict } from '@/lib/move-out';
 import { approveQuitText, noticeApprovalOutcome } from '@/lib/notices';
@@ -616,7 +616,8 @@ function SelfConfirm({
       const confirmed = 'Confirmed. It has taken effect.';
       await onChanged(readResult ? await readResult(confirmed) : confirmed);
     } catch (failure) {
-      setError(toProblem(failure).message);
+      // M11 security review: a wrong step-up code, or too many tries.
+      setError(stepUpMessage(failure) ?? toProblem(failure).message);
       setPending(false);
     }
   }

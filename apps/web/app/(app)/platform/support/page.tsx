@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { pageRefusal } from '@/components/page-refusal';
 import { PageHeader } from '@/components/page-header';
+import { allowed } from '@/lib/policy';
 import { getCompany, getMe } from '@/lib/server/session';
 import { SupportView } from './support-view';
 
@@ -25,6 +27,15 @@ export default async function PlatformSupportPage() {
         title="Support access"
         description="A company is open to support only while its admin’s grant lasts, and only to read. Every request is recorded in the company’s audit log."
       />
+      {/* M11 founder D4: account recovery sits beside support, outside the menu. */}
+      {allowed(me, 'person.two_factor.reset') || allowed(me, 'person.sessions.revoke') ? (
+        <p className="text-sm">
+          <Link href="/platform/people" className="font-medium underline underline-offset-2">
+            Account recovery
+          </Link>
+          : a lost authenticator, or signing someone out everywhere.
+        </p>
+      ) : null}
       <SupportView />
     </>
   );

@@ -188,12 +188,15 @@ function NotAssessedSection({ ownerNames }: { readonly ownerNames: ReadonlyMap<s
                     )}
                   </Td>
                   <Td>
-                    <Link
-                      href={`/leases/${row.leaseId}`}
-                      className="font-mono underline underline-offset-2"
-                    >
-                      {row.unitCode}
-                    </Link>
+                    {/* M11 (P25): an owner-level item has no lease to link to. */}
+                    {row.leaseId && row.unitCode ? (
+                      <Link
+                        href={`/leases/${row.leaseId}`}
+                        className="font-mono underline underline-offset-2"
+                      >
+                        {row.unitCode}
+                      </Link>
+                    ) : null}
                     <p className="text-xs text-slate-600">
                       {ownerNames.get(row.ownerId) ?? 'An owner'}
                     </p>

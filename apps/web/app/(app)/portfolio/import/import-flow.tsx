@@ -36,7 +36,17 @@ type Step =
  * The register import (PR-08): download the template, upload a filled-in copy, read the dry
  * run's report row by row, then import. The worker parses the file; this screen only polls.
  */
-export function ImportFlow() {
+export function ImportFlow({
+  template: loadTemplate = () => api().registerImports.template(),
+  templateNote = 'Three sheets: Properties, Units, and Lists with every allowed value and your owner references.',
+}: {
+  /**
+   * M11 onboarding step 1: the register template with its Owners sheet
+   * (`onboarding.registerTemplate`). Uploads still go through the register import.
+   */
+  readonly template?: () => Promise<File>;
+  readonly templateNote?: string;
+} = {}) {
   const { timeZone } = useApp();
   const inputId = useId();
   const input = useRef<HTMLInputElement>(null);
@@ -58,7 +68,7 @@ export function ImportFlow() {
   async function downloadTemplate() {
     setTemplate({ kind: 'working', label: 'Preparing the template…' });
     try {
-      const file = await api().registerImports.template();
+      const file = await loadTemplate();
       saveFile(file, file.name || 'register-import-template.xlsx');
       setTemplate({ kind: 'idle' });
     } catch (failure) {
@@ -117,10 +127,7 @@ export function ImportFlow() {
   return (
     <>
       <Card>
-        <CardHeader
-          title="1. Get the template"
-          description="Three sheets: Properties, Units, and Lists with every allowed value and your owner references."
-        />
+        <CardHeader title="1. Get the template" description={templateNote} />
         <CardBody>
           {template.kind === 'error' ? <Alert tone="error">{template.message}</Alert> : null}
           <Button
@@ -244,12 +251,12 @@ function Report({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {(
-                  [
-                    ['Properties', report.counts.properties],
-                    ['Units', report.counts.units],
-                  ] as const
-                ).map(([label, counts]) => (
+                {[
+                  // M11 onboarding step 1: the Owners sheet, for agencies, when the file has one.
+                  ...(report.counts.owners ? [['Owners', report.counts.owners] as const] : []),
+                  ['Properties', report.counts.properties] as const,
+                  ['Units', report.counts.units] as const,
+                ].map(([label, counts]) => (
                   <tr key={label} data-testid={`counts-${label.toLowerCase()}`}>
                     <Th scope="row" className="font-medium">
                       {label}

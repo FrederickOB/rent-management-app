@@ -11,6 +11,7 @@ import { monthLabel } from '@/lib/rent-tax';
 import { draftableMonths } from '@/lib/statements';
 import { useLoad } from '@/lib/use-load';
 import { Gate1Card } from '../../dashboard-view';
+import { Gate1Trend } from './gate1-trend';
 
 /** Months to choose from: this one, then the twelve before it (platform admins work in UTC dates). */
 function months(): string[] {
@@ -98,6 +99,7 @@ export function PlatformGate1() {
           </Card>
         </>
       ) : null}
+      <Gate1Trend months={choices} />
     </>
   );
 }

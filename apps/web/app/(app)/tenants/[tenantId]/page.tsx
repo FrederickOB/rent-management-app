@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { cache } from 'react';
+import { DataProtectionRequests } from '@/components/data-protection-requests';
 import { NoAccess } from '@/components/no-access';
 import { PageHeader } from '@/components/page-header';
 import { hasFeature } from '@/lib/plan';
@@ -48,19 +49,28 @@ export default async function TenantPage({
   }
   if (loaded.data.access === 'limited') return <TenantLimited tenant={loaded.data} />;
   return (
-    <TenantProfile
-      initial={loaded.data}
-      created={query.created === '1'}
-      can={{
-        manage: allowed(me, 'tenant.manage'),
-        verify: allowed(me, 'tenant.id.verify'),
-        reveal: allowed(me, 'tenant.id.reveal'),
-        lease: allowed(me, 'lease.manage'),
-        messages: allowed(me, 'messaging.inbox.read') && hasFeature(company, 'inbox'),
-        write: allowed(me, 'messaging.reply') && hasFeature(company, 'inbox'),
-        notices: allowed(me, 'notices.read') && hasFeature(company, 'notices'),
-        draftNotice: allowed(me, 'notices.draft') && hasFeature(company, 'notices'),
-      }}
-    />
+    <>
+      <TenantProfile
+        initial={loaded.data}
+        created={query.created === '1'}
+        can={{
+          manage: allowed(me, 'tenant.manage'),
+          verify: allowed(me, 'tenant.id.verify'),
+          reveal: allowed(me, 'tenant.id.reveal'),
+          lease: allowed(me, 'lease.manage'),
+          messages: allowed(me, 'messaging.inbox.read') && hasFeature(company, 'inbox'),
+          write: allowed(me, 'messaging.reply') && hasFeature(company, 'inbox'),
+          notices: allowed(me, 'notices.read') && hasFeature(company, 'notices'),
+          draftNotice: allowed(me, 'notices.draft') && hasFeature(company, 'notices'),
+        }}
+      />
+      {/* M11 decision 5: this tenant's data protection requests, for company admins. */}
+      {allowed(me, 'data_protection.manage') ? (
+        <DataProtectionRequests
+          tenant={{ id: loaded.data.id, name: loaded.data.displayName }}
+          canExport={allowed(me, 'data_protection.export')}
+        />
+      ) : null}
+    </>
   );
 }

@@ -296,7 +296,12 @@ export function GraPaymentForm({
               {items.map((item) => (
                 <li key={item.id} data-testid="gra-item" className="space-y-1 py-3">
                   <CheckboxField
-                    label={`${item.receiptNumber ?? 'Receipt'} · ${item.unitCode} · received ${formatBusinessDate(item.valueDate)}: ${formatMinor(item.outstandingMinor)} still to pay`}
+                    label={
+                      // M11 (P25): an opening item is the owner's, owed at the cut-over, with no unit.
+                      item.unitCode
+                        ? `${item.receiptNumber ?? 'Receipt'} · ${item.unitCode} · received ${formatBusinessDate(item.valueDate)}: ${formatMinor(item.outstandingMinor)} still to pay`
+                        : `Opening balance · owed at the cut-over on ${formatBusinessDate(item.valueDate)}: ${formatMinor(item.outstandingMinor)} still to pay`
+                    }
                     checked={ticked.includes(item.id)}
                     disabled={working}
                     onChange={(event) => tick(item.id, event.target.checked)}

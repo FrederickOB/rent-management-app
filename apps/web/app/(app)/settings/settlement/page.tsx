@@ -45,6 +45,7 @@ export default async function SettlementPage() {
         can={{
           change: canChange,
           reveal: allowed(me, 'settlement_account.reveal'),
+          changeAgency: allowed(me, 'settlement_account.change_agency'),
           seeApprovals: allowed(me, 'approval.view'),
         }}
       />
