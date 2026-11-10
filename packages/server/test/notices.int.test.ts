@@ -855,10 +855,13 @@ describe('OQ-29 and plan decision 14: single-user companies and the plan', () =>
     ).rejects.toThrow(/cooling-off/);
     expect((await n.notices.get(solo, draft.id)).status).toBe('pending_approval');
 
+    // Ends before both clocks: the database's (the approval trigger checks now()) and the
+    // service's, which this test drives from START. Using only now() failed once the real date
+    // passed START + 24 hours (founder-approved setup fix, M11, 2026-11-10).
     await asSuperuser(
       ctx,
-      "update approval_request set cooling_off_until = now() - interval '1 minute' where id = $1",
-      [requestId],
+      "update approval_request set cooling_off_until = least(now() - interval '1 minute', $2::timestamptz) where id = $1",
+      [requestId, new Date(ctx.clock.now().getTime() + 24 * HOUR)],
     );
     ctx.clock.advance(24 * HOUR + 60_000);
     try {
