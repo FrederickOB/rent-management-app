@@ -193,6 +193,11 @@ export class ApprovalsService {
       payload: unknown;
       /** The subject's property (AD-02), or null for a company-level request. */
       propertyId?: string | null;
+      /**
+       * People who may not decide it although their role could (M11 review): the person a
+       * membership change is about never approves their own promotion or nomination.
+       */
+      excludeApprovers?: readonly string[];
     },
   ): Promise<string> {
     const staff = asStaff(actor);
@@ -215,7 +220,7 @@ export class ApprovalsService {
       );
     const eligible = [];
     for (const m of others) {
-      if (m.personId === staff.personId) continue;
+      if (m.personId === staff.personId || input.excludeApprovers?.includes(m.personId)) continue;
       const candidate = {
         ...staff,
         personId: m.personId,

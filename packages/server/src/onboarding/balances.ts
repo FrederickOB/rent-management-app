@@ -25,7 +25,12 @@ import {
 } from '@rent/domain/onboarding';
 import type { ImportIssue } from '@rent/domain/portfolio';
 import { v7 as uuidv7 } from 'uuid';
-import { lastBillableDay, type BillingEngine, type LeaseState } from '../billing/engine';
+import {
+  lastBillableDay,
+  paidUntilFloor,
+  type BillingEngine,
+  type LeaseState,
+} from '../billing/engine';
 import { dimsOf, lockCounters, lockLeases, openingPaymentOrder } from '../billing/records';
 import { balance, ownerBook } from '../ledger/ledger.queries';
 import { lockOwnersTax, taxItems } from '../tax/tax-records';
@@ -33,6 +38,7 @@ import type { RulesService } from '../rules/rules.service';
 import {
   emptyTotals,
   openingItems,
+  type OwnerSummary,
   type BalanceTotals,
   type ItemRecord,
   type SheetCounts,
@@ -122,6 +128,38 @@ export interface BalanceCheck {
   readonly totals: BalanceTotals;
   readonly leases: LeaseWork[];
   readonly owners: OwnerWork[];
+  /** M11 review C2: the leases it touches and each owner's share, for the approval card. */
+  readonly summary: { readonly leases: number; readonly owners: OwnerSummary[] };
+}
+
+/** Each owner's share of the plans: the items' signed amounts, by kind (review C2). */
+function summaryOf(leases: readonly LeaseWork[], owners: readonly OwnerWork[]) {
+  const by = new Map<string, { -readonly [K in keyof OwnerSummary]: OwnerSummary[K] }>();
+  const of = (ownerId: string) => {
+    const was = by.get(ownerId) ?? { ownerId, ...emptyTotals() };
+    by.set(ownerId, was);
+    return was;
+  };
+  const field: Record<ItemMeta['kind'], keyof BalanceTotals> = {
+    arrears: 'arrearsMinor',
+    advance: 'advancesMinor',
+    deposit: 'depositsMinor',
+    withholding: 'withholdingMinor',
+    agent_cash: 'agentCashMinor',
+    rent_tax: 'rentTaxOutstandingMinor',
+  };
+  for (const l of leases) {
+    const o = of(l.ownerId);
+    for (const m of l.meta.values()) o[field[m.kind]] += m.amountMinor;
+  }
+  for (const w of owners) {
+    const o = of(w.ownerId);
+    for (const m of w.meta.values()) o[field[m.kind]] += m.amountMinor;
+  }
+  return {
+    leases: leases.length,
+    owners: [...by.values()].sort((a, b) => (a.ownerId < b.ownerId ? -1 : 1)),
+  };
 }
 
 const S = ONBOARDING_SHEETS;
@@ -173,6 +211,7 @@ export function figuresOf(
     scheduled: engine.scheduled(state),
     asOf: today,
     lastDay,
+    floor: paidUntilFloor(state.lease),
     depositAdjustmentMinor: extra.depositAdjustmentMinor,
     withholdingOutstandingMinor: extra.withholdingMinor,
   });
@@ -439,6 +478,9 @@ export async function checkBalances(
       issue(S.arrears, r.row, 'Period start', 'The platform already bills this period');
       continue;
     }
+    // Founder 2026-11-10 (M11 review S1): a raise on a month brought in already is a second
+    // opening line on the same charge period (0081 exempts opening lines from one-per-period);
+    // the lowering below works across the month's opening lines, latest first.
     if (r.amountMinor > 0) {
       const d = draftOf(state, S.arrears, r.row);
       const itemId = `arrears.${leaseId}.${r.periodStart}.${r.kind}`;
@@ -939,11 +981,13 @@ export async function checkBalances(
     let rentTax: OwnerWork['rentTax'] = null;
     if (r.agentCashMinor !== null) {
       const itemId = `agent_cash.${owner.id}`;
+      // M11 review S3: never below what the agent still holds, nor more than was brought in.
+      const cashAvailable = Math.max(0, Math.min(cashHad, cashNow));
       changes.push({
         itemId,
         kind: 'agent_cash',
         amountMinor: r.agentCashMinor,
-        availableMinor: cashNow,
+        availableMinor: cashAvailable,
       });
       meta.set(itemId, {
         kind: 'agent_cash',
@@ -953,12 +997,14 @@ export async function checkBalances(
         invoiceLineId: null,
         paymentId: null,
       });
-      if (r.agentCashMinor < 0 && -r.agentCashMinor > cashNow) {
+      if (r.agentCashMinor < 0 && -r.agentCashMinor > cashAvailable) {
         issue(
           S.ownerItems,
           r.row,
           'Agent-held cash',
-          'Agent-held cash cannot be lowered below what the agent still holds',
+          cashAvailable < cashNow
+            ? 'Agent-held cash can be lowered only by what was brought in at the cut-over'
+            : 'Agent-held cash cannot be lowered below what the agent still holds',
         );
         continue;
       }
@@ -1039,5 +1085,5 @@ export async function checkBalances(
     totals.rentTaxOutstandingMinor += r.rentTaxOutstandingMinor ?? 0;
   }
 
-  return { issues, counts, totals, leases, owners };
+  return { issues, counts, totals, leases, owners, summary: summaryOf(leases, owners) };
 }

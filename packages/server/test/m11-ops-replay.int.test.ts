@@ -5,6 +5,8 @@ import { chargeReference } from '@rent/domain/payments';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isoNow } from '../src/billing/records';
 import { MESSAGING_INBOUND_JOB } from '../src/core/messages';
+import { cliIdentity, operatorByEmail } from '../src/ops/operator';
+import { paymentsByReference, storeFailedChargeWebhook } from '../src/ops/test-controls';
 import { WebhookReplayService } from '../src/ops/webhook-replay.service';
 import { PROCESS_WEBHOOK_JOB } from '../src/payments/webhooks.service';
 import { startServerTest, type ServerTestContext } from './support';
@@ -443,5 +445,180 @@ describe('NFR-SEC replay is for platform admins, with a reason, of what can be r
       tx.select().from(schema.opsAction).where(eq(schema.opsAction.targetId, rejected!.id)),
     );
     expect(recorded).toEqual([]);
+  });
+});
+
+describe('NFR-AVAIL a replay survives the original job dead-lettering after it (M11 review)', () => {
+  it('keeps the replayed row waiting for its own job, and fails it only for a job queued after the replay', async () => {
+    const lease = await tenancy('Late Dead Letter Tenant');
+    const { url } = await withCompany(ctx.database, sys(agency.companyId), async (tx) =>
+      p.links.mint(tx, await p.links.invoice(tx, lease.invoiceId)),
+    );
+    const intent = await p.page.start(url.split('/p/')[1]!, CLIENT, {
+      amountMinor: 150_000,
+      method: 'momo',
+      momo: { phone: '024 000 0003', network: 'mtn' },
+      submissionId: randomUUID(),
+    });
+    const webhook = await p.primary.completeCharge(chargeReference(intent.intentId), {
+      status: 'success',
+    });
+    await p.webhooks.intake('paystack', Buffer.from(webhook!.rawBody), webhook!.headers);
+    // The relay queued the original job a minute ago; it is still failing its retries.
+    const [inboxId] = await claimInbox(ctx);
+    const originalQueuedAt = new Date(Date.now() - 60_000);
+    await ops.replayAs({ personId: admin.personId, via: 'cli' }, inboxId!, REASON);
+    // Now the original gives up: its dead letter must not undo the replay.
+    await p.webhooks.failed(inboxId!, 'ProviderError: provider unavailable', originalQueuedAt);
+    const rowOf = async () =>
+      (
+        await withSystem(ctx.database, {}, (tx) =>
+          tx.select().from(schema.webhookInbox).where(eq(schema.webhookInbox.id, inboxId!)),
+        )
+      )[0]!;
+    expect(await rowOf()).toMatchObject({ status: 'received', replayCount: 1 });
+    expect(await runReplays()).toEqual(['posted']);
+    expect((await rowOf()).status).toBe('processed');
+
+    // A job queued after the replay that gives up does fail the row (its retries are spent).
+    await ops.replayAs({ personId: admin.personId, via: 'cli' }, inboxId!, REASON);
+    await p.webhooks.failed(
+      inboxId!,
+      'ProviderError: provider unavailable',
+      new Date(Date.now() + 60_000),
+    );
+    expect(await rowOf()).toMatchObject({ status: 'failed', outcome: 'dead_lettered' });
+    expect(await runReplays()).toEqual(['skipped']);
+  });
+});
+
+describe('NFR-SEC a failed webhook’s last error never shows personal data or tokens (M11 review)', () => {
+  it('scrubs what is stored and what the console is served', async () => {
+    const [stored] = await withSystem(ctx.database, {}, (tx) =>
+      tx
+        .insert(schema.webhookInbox)
+        .values({
+          provider: 'paystack',
+          eventId: `scrub:${randomUUID()}`,
+          eventType: 'charge.success',
+          reference: `SCRUB-${randomUUID().slice(0, 8)}`,
+          rawBody: '{}',
+          headers: {},
+          signatureValid: true,
+          status: 'received',
+          publishedAt: new Date(),
+        })
+        .returning({ id: schema.webhookInbox.id }),
+    );
+    const secret = `could not reach +233 20 000 0101 or ama@example.com, token ${'a'.repeat(40)}`;
+    await p.webhooks.failed(stored!.id, `ProviderError: ${secret}`);
+    const [row] = await withSystem(ctx.database, {}, (tx) =>
+      tx.select().from(schema.webhookInbox).where(eq(schema.webhookInbox.id, stored!.id)),
+    );
+    expect(row!.lastError).not.toMatch(/233|ama@|aaaa/);
+    expect(row!.lastError).toContain('[PHONE]');
+    // A row written raw by anything else is scrubbed on the way out.
+    await withSystem(ctx.database, {}, (tx) =>
+      tx
+        .update(schema.webhookInbox)
+        .set({ lastError: `raw ${secret}` })
+        .where(eq(schema.webhookInbox.id, stored!.id)),
+    );
+    const listed = (await ops.list(admin)).find((w) => w.id === stored!.id)!;
+    expect(listed.lastError).not.toMatch(/233|ama@|aaaa/);
+    expect(listed.lastError).toContain('[EMAIL]');
+  });
+});
+
+describe('NFR-AVAIL the e2e charge control: a lost webhook a replay posts once (M11 review C6)', () => {
+  it('makes a real pending charge, paid at the provider, whose dead-lettered webhook posts one payment and one receipt on replay', async () => {
+    const lease = await tenancy('Charge Control Tenant');
+    const made = await storeFailedChargeWebhook(
+      { database: ctx.database, links: p.links, page: p.page, providers: p.providers },
+      { companyId: agency.companyId, invoiceId: lease.invoiceId },
+    );
+    expect(made.reference).toMatch(/^pi-[0-9a-f]{32}$/);
+    // Paid at the provider, but nothing here yet: its webhook is the stored, dead-lettered one.
+    expect(await paymentsByReference(ctx.database, made.reference)).toEqual({
+      payments: 0,
+      receipts: 0,
+    });
+    expect(await claimInbox(ctx)).toEqual([]);
+    expect(await ops.get(admin, made.id)).toMatchObject({
+      status: 'dead_lettered',
+      replayCount: 0,
+    });
+
+    await ops.replay(admin, made.id, REASON);
+    expect(await ops.get(admin, made.id)).toMatchObject({ status: 'pending', replayCount: 1 });
+    expect(await runReplays()).toEqual(['posted']);
+    expect(await ops.get(admin, made.id)).toMatchObject({ status: 'processed', replayCount: 1 });
+    expect(await paymentsByReference(ctx.database, made.reference)).toEqual({
+      payments: 1,
+      receipts: 1,
+    });
+
+    await ops.replay(admin, made.id, 'Checking the replay is idempotent');
+    expect(await runReplays()).toEqual(['already_posted']);
+    expect(await paymentsByReference(ctx.database, made.reference)).toEqual({
+      payments: 1,
+      receipts: 1,
+    });
+
+    // The one-webhook view: platform admins only; unknown or rejected ids are not found.
+    await expect(ops.get(agency.admin, made.id)).rejects.toMatchObject({ status: 403 });
+    await expect(ops.get(admin, randomUUID())).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('NFR-AUDIT an incident command records its OS user and host (M11 review B4)', () => {
+  it('the operator found by email carries them, and the replay’s audit event records them', async () => {
+    const [found] = await withSystem(ctx.database, {}, (tx) =>
+      tx
+        .select({ email: schema.person.email })
+        .from(schema.person)
+        .where(eq(schema.person.id, admin.personId)),
+    );
+    const operator = await operatorByEmail(ctx.database, found!.email!.toUpperCase());
+    expect(operator).toEqual({ personId: admin.personId, via: 'cli', cli: cliIdentity() });
+    expect(operator.cli!.osUser).not.toBe('');
+    const lease = await tenancy('Operator Identity Tenant');
+    const made = await storeFailedChargeWebhook(
+      { database: ctx.database, links: p.links, page: p.page, providers: p.providers },
+      { companyId: agency.companyId, invoiceId: lease.invoiceId },
+    );
+    await ops.replayAs(operator, made.id, REASON);
+    const [event] = await withCompany(
+      ctx.database,
+      sys(admin.companyId),
+      async (tx) =>
+        (
+          await tx.execute<{ data: Record<string, unknown> }>(
+            sql`select data from audit_event
+              where action = 'ops.webhook_replayed' and record_id = ${made.id}`,
+          )
+        ).rows,
+    );
+    expect(event!.data).toMatchObject({
+      via: 'cli',
+      osUser: operator.cli!.osUser,
+      host: operator.cli!.host,
+    });
+    await runReplays();
+    // A console replay has no OS user or host to record.
+    await ops.replay(admin, made.id, 'From the console this time');
+    const consoleEvent = await withCompany(
+      ctx.database,
+      sys(admin.companyId),
+      async (tx) =>
+        (
+          await tx.execute<{ data: Record<string, unknown> }>(
+            sql`select data from audit_event where action = 'ops.webhook_replayed'
+              and record_id = ${made.id} order by seq desc limit 1`,
+          )
+        ).rows[0]!,
+    );
+    expect(consoleEvent.data).not.toHaveProperty('osUser');
+    await runReplays();
   });
 });

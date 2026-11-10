@@ -12,7 +12,7 @@ import { CLOCK, DATABASE, PAYMENT_PROVIDERS } from '../core/tokens';
 import { PaymentsModule } from '../payments/payments.module';
 import { ReconciliationService, type TransactionRun } from '../payments/reconciliation.service';
 import { withPlatform } from '../subscription/platform';
-import { opsReason, type OpsOperator } from './operator';
+import { operatorData, opsReason, type OpsOperator } from './operator';
 
 /** One provider's part of a run: what the transactions and settlements reconciliation did. */
 export interface ReconcileProviderResult {
@@ -143,7 +143,7 @@ export class ReconciliationRunService {
           action: `ops.reconciliation_${outcome}`,
           recordType: 'reconciliation_run',
           recordId: run.runId,
-          data,
+          data: { ...data, ...operatorData(operator) },
         });
       },
     );

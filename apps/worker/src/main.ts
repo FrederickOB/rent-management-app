@@ -18,7 +18,7 @@ import {
   CoreModule,
   createLogger,
   DATABASE,
-  loadConfig,
+  loadProcessConfig,
   NestLogger,
   PAYMENT_PROVIDERS,
   STORAGE_PORT,
@@ -132,7 +132,7 @@ import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
 import { UPLOADS_EVENT_TYPES, uploadsJobs } from './uploads.jobs';
 
-const config = loadConfig();
+const config = loadProcessConfig();
 const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
 
 @Module({

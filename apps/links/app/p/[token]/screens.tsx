@@ -1,6 +1,7 @@
 import { MOMO_NETWORK_LABELS, MOMO_NETWORKS } from '@rent/contracts';
 import { PAY_LINK_DAYS } from '@rent/domain/payments';
 import { LandlordContact } from '../../_components/landlord-contact';
+import { Recheck } from '../../_components/recheck';
 import type { PayIntent, PayPage } from '../../../lib/links-api';
 import {
   amountFieldValue,
@@ -262,8 +263,9 @@ export function PayScreen({
 
 /**
  * A payment the provider has not finished with. MoMo: approve on the phone. Card: continue to the
- * checkout, or wait while the payment is checked after it. The page checks again by refreshing
- * itself, less often as time goes on (lib/pay.ts), and "Check now" does the same at once.
+ * checkout, or wait while the payment is checked after it. The page checks again by itself, less
+ * often as time goes on (lib/pay.ts), and updates in place (Recheck); "Check now" does the same at
+ * once, and is how a browser without JavaScript checks.
  */
 export function WaitingScreen({
   token,
@@ -313,7 +315,6 @@ export function WaitingScreen({
   const heading = momo ? 'Approve the payment on your phone' : 'Checking your card payment';
   return (
     <>
-      <meta httpEquiv="refresh" content={`${nextCheckSeconds};url=${recheck}`} />
       <h1>{heading}</h1>
       {momo ? (
         <p>
@@ -331,10 +332,10 @@ export function WaitingScreen({
         <p className="panel notice">{intent.message}</p>
       ) : null}
       <p className="small" role="status">
-        This page checks again every {nextCheckSeconds} seconds.
+        <Recheck href={recheck} seconds={nextCheckSeconds} />
       </p>
       <p>
-        <a className="button secondary" href={recheck}>
+        <a className="button secondary" href={recheck} data-recheck-link="">
           Check now
         </a>
       </p>

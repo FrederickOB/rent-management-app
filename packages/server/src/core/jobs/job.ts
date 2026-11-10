@@ -47,11 +47,16 @@ export interface JobDefinition<T = unknown> {
    * Runs once the job has failed its last retry (or expired), after the dead-letter alert, so
    * the work it was doing can be marked failed instead of looking busy for ever. Idempotent.
    * M11 decision 9: `error` is why the last try failed, as a code and a short message
-   * (jobErrorSummary); null or absent when pg-boss kept no output.
+   * (jobErrorSummary); null or absent when pg-boss kept no output. `createdAt` is when the failed
+   * job was first queued (the database's clock), so a step can tell work redone since from this.
    */
   onDeadLetter?(
     payload: T,
-    ctx: { readonly logger: AppLogger; readonly error?: string | null },
+    ctx: {
+      readonly logger: AppLogger;
+      readonly error?: string | null;
+      readonly createdAt?: Date | null;
+    },
   ): Promise<void>;
 }
 

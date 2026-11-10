@@ -35,6 +35,9 @@ export class OpsController {
       webhooks: implement(c.webhooks).handler(async ({ input }) =>
         serialize(await this.webhooks.list(a, input)),
       ),
+      webhook: implement(c.webhook).handler(async ({ input }) =>
+        serialize(await this.webhooks.get(a, input.webhookId)),
+      ),
       replayWebhook: implement(c.replayWebhook).handler(async ({ input }) =>
         serialize(await this.webhooks.replay(a, input.webhookId, input.reason, ctx.requestId)),
       ),

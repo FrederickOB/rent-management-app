@@ -281,3 +281,61 @@ describe('AD-10 a platform admin ends a support grant early over HTTP (M11)', ()
     expect(again.json).toMatchObject({ code: 'SUPPORT_NO_GRANT' });
   });
 });
+
+describe('NFR-AVAIL the review-round operations routes and controls over HTTP (M11 review C6, C8)', () => {
+  it('shows one stored webhook to platform admins, to follow a replay', async () => {
+    const made = await platformAdmin.call('/_test/webhooks/failed', {
+      body: { provider: 'paystack' },
+    });
+    const id = String(made.json.id);
+    const one = await platformAdmin.call(`/platform/ops/webhooks/${id}`);
+    expect(one.status, JSON.stringify(one.json)).toBe(200);
+    expect(one.json).toMatchObject({ id, status: 'dead_lettered', replayCount: 0 });
+    expect((await agencyAdmin.call(`/platform/ops/webhooks/${id}`)).status).toBe(403);
+    expect(
+      (await platformAdmin.call('/platform/ops/webhooks/01a1c56b-0000-7000-8000-000000000000'))
+        .status,
+    ).toBe(404);
+  });
+
+  it('the charge control asks for a company and an open invoice of it; the payments count needs a known reference', async () => {
+    const noInvoice = await platformAdmin.call('/_test/webhooks/failed', {
+      body: { provider: 'paystack', charge: true },
+    });
+    expect(noInvoice.status).toBe(400);
+    const unknownInvoice = await platformAdmin.call('/_test/webhooks/failed', {
+      body: {
+        provider: 'paystack',
+        charge: true,
+        companyId: platformId,
+        invoiceId: '01a1c56b-0000-7000-8000-000000000001',
+      },
+    });
+    expect(unknownInvoice.status).toBe(404);
+    expect((await platformAdmin.call('/_test/payments')).status).toBe(400);
+    expect(
+      (await platformAdmin.call(`/_test/payments?reference=pi-${'0'.repeat(32)}`)).status,
+    ).toBe(404);
+    expect((await agencyAdmin.call(`/_test/payments?reference=pi-${'0'.repeat(32)}`)).status).toBe(
+      403,
+    );
+  });
+
+  it('runs a company’s nightly ledger checks, read only: no differences for a fresh company', async () => {
+    const companyId = await createCompany(api, 'landlord', 'Ledger Checks Landlord');
+    const checked = await platformAdmin.call(`/_test/ledger-checks/${companyId}`, { body: {} });
+    expect(checked.status, JSON.stringify(checked.json)).toBe(200);
+    expect(checked.json).toEqual({ differences: [] });
+    expect(
+      (
+        await platformAdmin.call('/_test/ledger-checks/01a1c56b-0000-7000-8000-000000000002', {
+          body: {},
+        })
+      ).status,
+    ).toBe(404);
+    expect((await platformAdmin.call('/_test/ledger-checks/nope', { body: {} })).status).toBe(400);
+    expect((await agencyAdmin.call(`/_test/ledger-checks/${companyId}`, { body: {} })).status).toBe(
+      403,
+    );
+  });
+});

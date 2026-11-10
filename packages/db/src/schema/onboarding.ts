@@ -17,7 +17,7 @@ import { invoiceLine, payment } from './billing';
 import { company } from './company';
 import { person } from './identity';
 import { journalEntry } from './ledger';
-import { approvalRequest } from './platform';
+import { approvalRequest, uploadIntent } from './platform';
 import { owner } from './register';
 import { lease } from './tenancy';
 
@@ -93,6 +93,12 @@ export const onboardingBatch = pgTable(
   (t) => [
     unique('onboarding_batch_company_id_id_key').on(t.companyId, t.id),
     unique('onboarding_batch_upload_key').on(t.companyId, t.uploadIntentId),
+    // M11 review B10: the upload a batch was made from belongs to its company.
+    foreignKey({
+      name: 'onboarding_batch_upload_fk',
+      columns: [t.companyId, t.uploadIntentId],
+      foreignColumns: [uploadIntent.companyId, uploadIntent.id],
+    }),
     foreignKey({
       name: 'onboarding_batch_approval_fk',
       columns: [t.companyId, t.approvalRequestId],

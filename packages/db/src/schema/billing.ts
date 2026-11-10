@@ -197,15 +197,22 @@ export const invoiceLine = pgTable(
     rateBps: integer(),
     ruleId: uuid().references(() => rule.id),
     createdAt: tsNow(),
+    /**
+     * M11 (P25): a line of an opening invoice, set by the database from its invoice's kind on
+     * insert (0081). Opening lines may share a charge period: a raise of a month brought in.
+     */
+    opening: boolean().notNull().default(false),
   },
   (t) => [
     unique('invoice_line_company_id_id_key').on(t.companyId, t.id),
     unique('invoice_line_lease_key').on(t.companyId, t.leaseId, t.id),
     unique('invoice_line_invoice_key').on(t.companyId, t.invoiceId, t.id),
     unique('invoice_line_position_key').on(t.companyId, t.invoiceId, t.position),
+    // One platform line per charge period. M11 (P25, founder 2026-11-10): opening lines are exempt,
+    // so an adjustment can raise a month already brought in with a second opening line.
     uniqueIndex('invoice_line_one_per_period')
       .on(t.companyId, t.chargePeriodId)
-      .where(sql`${t.chargePeriodId} is not null`),
+      .where(sql`${t.chargePeriodId} is not null and not ${t.opening}`),
     foreignKey({
       name: 'invoice_line_invoice_fk',
       columns: [t.companyId, t.leaseId, t.invoiceId],

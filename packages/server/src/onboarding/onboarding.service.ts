@@ -26,6 +26,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { z } from 'zod';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { BillingEngine } from '../billing/engine';
+import { MONEY_APPROVERS } from '../billing/money.service';
 import { isoNow } from '../billing/records';
 import { companyRecord, staffActor, type StaffActor } from '../companies/companies.service';
 import { ownerFacts } from '../companies/owners.service';
@@ -52,7 +53,9 @@ import {
   batchRow,
   batchViews,
   cutOverOf,
+  emptyTotals,
   latestBatch,
+  lockOnboarding,
   nothingToWrite,
   reportOf,
   settleClosedApprovals,
@@ -68,15 +71,66 @@ export const ONBOARDING_VALIDATE_JOB = 'onboarding.validate';
 export const ONBOARDING_COMMIT_JOB = 'onboarding.commit';
 export const ONBOARDING_POST_JOB = 'onboarding.post-balances';
 
-/** Who approves opening balances (plan 4.13): company admins; the engine adds nominated approvers. */
-const OPENING_APPROVERS: readonly StaffRole[] = ['owner', 'agency_admin'];
+/**
+ * Who approves opening balances (founder decision 2, review round): the money approvers, owners,
+ * agency admins, property managers and accountants; never the person who committed (AD-05).
+ */
+const OPENING_APPROVERS: readonly StaffRole[] = MONEY_APPROVERS;
 
-const openingPayload = z.object({
-  batchId: z.string().uuid(),
-  validationId: z.string().uuid(),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+const minor = z.number().int();
+const openingTotals = z.object({
+  arrearsMinor: minor,
+  advancesMinor: minor,
+  depositsMinor: minor,
+  withholdingMinor: minor,
+  agentCashMinor: minor,
+  rentTaxOutstandingMinor: minor,
 });
-type OpeningPayload = z.infer<typeof openingPayload>;
+
+/**
+ * The `opening_balances` request's payload (M11 review C2), what the approval card shows: the
+ * batch, its cut-over and file, where to check it, how many leases, each owner's share and the
+ * totals. The same shape as the contract's `openingBalancesApprovalSchema`.
+ */
+export const openingApprovalSchema = z.object({
+  batchId: z.string().uuid(),
+  kind: z.enum(['balances', 'adjustment']),
+  cutOverDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  fileName: z.string().nullable(),
+  link: z.literal('/onboarding'),
+  leases: minor,
+  owners: z.array(
+    openingTotals.extend({ owner: z.object({ id: z.string().uuid(), name: z.string() }) }),
+  ),
+  totals: openingTotals,
+});
+export type OpeningApprovalPayload = z.infer<typeof openingApprovalSchema>;
+
+/**
+ * A batch's approval payload, from its row and its validation's report; owners named as given.
+ * At the decision the engine rebuilds it from the batch (`currentPayload`) and compares hashes, so
+ * a batch whose figures changed is never approved as asked.
+ */
+export function openingApprovalPayload(
+  row: Pick<BatchRow, 'id' | 'kind' | 'cutOverDate' | 'fileName' | 'report'>,
+  names: ReadonlyMap<string, string>,
+): OpeningApprovalPayload {
+  const report = row.report as BatchReport | null;
+  const summary = report?.summary ?? { leases: 0, owners: [] };
+  return {
+    batchId: row.id,
+    kind: row.kind === 'adjustment' ? 'adjustment' : 'balances',
+    cutOverDate: row.cutOverDate ?? '',
+    fileName: row.fileName,
+    link: '/onboarding',
+    leases: summary.leases,
+    owners: summary.owners.map(({ ownerId, ...figures }) => ({
+      owner: { id: ownerId, name: names.get(ownerId) ?? '' },
+      ...figures,
+    })),
+    totals: report?.totals ?? emptyTotals(),
+  };
+}
 
 /** Shown when a job gave up after its last retry. Each write is one transaction: nothing changed. */
 const VALIDATION_ABANDONED = 'The file could not be checked.';
@@ -138,18 +192,20 @@ export class OnboardingService implements OnModuleInit {
   registerApprovals(): void {
     if (this.approvalsRegistered) return;
     this.approvalsRegistered = true;
-    this.approvals.register<OpeningPayload>({
+    this.approvals.register<OpeningApprovalPayload>({
       actionType: OPENING_BALANCES_APPROVAL,
       eligibleRoles: OPENING_APPROVERS,
-      schema: openingPayload,
+      schema: openingApprovalSchema,
       onePerSubject: true,
+      // Rebuilt from the batch as it is now, with the owners named as they were when asked (a
+      // renamed owner never cancels the request; changed figures do).
       currentPayload: async (tx, request) => {
         const row = await batchRow(tx, request.subjectId);
-        return {
-          batchId: row.id,
-          validationId: row.validationId ?? '',
-          sha256: row.fileSha256 ?? '',
-        };
+        const asked = openingApprovalSchema.safeParse(request.payload);
+        const names = new Map(
+          asked.success ? asked.data.owners.map((o) => [o.owner.id, o.owner.name] as const) : [],
+        );
+        return openingApprovalPayload(row, names);
       },
       execute: async (tx, request, payload) => {
         const row = await batchRow(tx, payload.batchId, { lock: true });
@@ -606,6 +662,7 @@ export class OnboardingService implements OnModuleInit {
         counts: result.counts,
         issues: [...workbook.issues, ...result.issues],
         totals: result.totals,
+        summary: result.summary,
       }),
       balances: result,
       tenancies: null,
@@ -776,15 +833,15 @@ export class OnboardingService implements OnModuleInit {
             'nothing_to_post',
             'Every row is already recorded as it says: nothing would change',
           );
+        const owners = await ownerFacts(tx, report.summary?.owners.map((o) => o.ownerId) ?? []);
         const requestId = await this.approvals.createInTx(tx, staff, {
           actionType: OPENING_BALANCES_APPROVAL,
           subjectType: 'onboarding_batch',
           subjectId: batchId,
-          payload: {
-            batchId,
-            validationId: row.validationId,
-            sha256: row.fileSha256 ?? report.sha256,
-          },
+          payload: openingApprovalPayload(
+            row,
+            new Map([...owners].map(([id, o]) => [id, o.displayName])),
+          ),
           propertyId: null,
         });
         await withOnboardingChecks(() =>
@@ -829,6 +886,7 @@ export class OnboardingService implements OnModuleInit {
     // ID numbers and TINs are sealed in the commit's transaction: the company's key exists first.
     await this.tenants.ensureFieldKey(companyId);
     await withCompany(this.database, this.system(companyId, row.createdBy), async (tx) => {
+      await lockOnboarding(tx, companyId);
       const current = await batchRow(tx, batchId, { lock: true });
       if (current.status !== 'committing' || current.validationId !== validationId)
         return 'skipped';
@@ -897,6 +955,7 @@ export class OnboardingService implements OnModuleInit {
       this.database,
       this.system(companyId, approver ?? row.createdBy),
       async (tx) => {
+        await lockOnboarding(tx, companyId);
         const current = await batchRow(tx, batchId, { lock: true });
         if (current.status !== 'posting') return 'skipped' as const;
         const { report, balances } = await this.check(tx, current, loaded.file, loaded.sha256, {

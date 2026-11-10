@@ -362,10 +362,24 @@ export const NO_DATABASE_PATH: Readonly<Partial<Record<RetentionCategory, string
 /**
  * Anonymises the tenant's profile in place (decision 5): name, phone, WhatsApp, email,
  * occupation, company details, notes and the tenant app link, and every contact's name and
- * details. The rows stay, so leases, money and notices still refer to them; `anonymised_at` is set
- * once (RA126). Returns the records changed.
+ * details; with `identity`, the ID and TIN numbers too. The rows stay, so leases, money and notices
+ * still refer to them. `anonymised_at` is set in this one update and never again (RA126): once it
+ * is, no personal field changes (RA127, M11 review B8), except that identity data still held may
+ * later be cleared (0080; `anonymiseIdentityIn`). Returns the records changed: the tenant and its
+ * contacts, and the identity values cleared.
  */
-export async function anonymiseProfileIn(tx: Tx, tenantId: string): Promise<number> {
+export async function anonymiseTenantIn(
+  tx: Tx,
+  tenantId: string,
+  options: { readonly identity: boolean },
+): Promise<{ profile: number; identity: number }> {
+  const [before] = (
+    await tx.execute<{ n: number }>(
+      sql`select ((id_number_encrypted is not null)::int + (tin_encrypted is not null)::int) as n
+          from tenant where id = ${tenantId}::uuid and anonymised_at is null`,
+    )
+  ).rows;
+  if (!before) return { profile: 0, identity: 0 };
   const contacts = await tx.execute<{ id: string }>(
     sql`update tenant_contact set name = 'Anonymised contact', phone = null, email = null,
           relationship = null, organisation = null, position = null, notes = null,
@@ -373,20 +387,30 @@ export async function anonymiseProfileIn(tx: Tx, tenantId: string): Promise<numb
         where tenant_id = ${tenantId}::uuid and anonymised_at is null
         returning id`,
   );
+  const identity = options.identity
+    ? sql`id_type = null, id_number_encrypted = null, id_number_index = null,
+          id_number_masked = null, id_status = 'none', id_verified_at = null,
+          tin_encrypted = null, tin_index = null, tin_masked = null,`
+    : sql``;
   const tenant = await tx.execute<{ id: string }>(
     sql`update tenant set display_name = 'Anonymised tenant', legal_name = null, phone = null,
           whatsapp_phone = null, email = null, occupation = null, business_type = null,
-          registration_number = null, notes = null, person_id = null,
+          registration_number = null, notes = null, person_id = null, ${identity}
           anonymised_at = now(), updated_at = now()
         where id = ${tenantId}::uuid and anonymised_at is null
         returning id`,
   );
-  return tenant.rows.length + contacts.rows.length;
+  return {
+    profile: tenant.rows.length + contacts.rows.length,
+    identity: options.identity && tenant.rows.length > 0 ? Number(before.n) : 0,
+  };
 }
 
 /**
- * Clears the tenant's identity data (decision 5): the encrypted ID and TIN numbers, their blind
- * indexes and masks. The identity checks keep only their status and the provider's check id.
+ * Clears the tenant's identity data alone (decision 5): the encrypted ID and TIN numbers, their
+ * blind indexes and masks. The identity checks keep only their status and the provider's check
+ * id. Works on an anonymised tenant too, whose profile went first while its ID was still held:
+ * 0080 lets those columns be cleared (to null, `id_status` to 'none'), never set (RA127).
  */
 export async function anonymiseIdentityIn(tx: Tx, tenantId: string): Promise<number> {
   const before = await tx.execute<{ n: number }>(

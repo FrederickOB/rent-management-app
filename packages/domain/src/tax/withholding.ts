@@ -92,6 +92,16 @@ export const certificateDebitFor = (record: {
   readonly accruedToRentTax: boolean;
 }): '2200' | '1160' => (record.accruedToRentTax ? '2200' : '1160');
 
+/**
+ * P20's debit for withholding brought in at the cut-over (P25; M11 founder decision 4, OQ-64): no
+ * P17 item exists for it on the platform. For an owner in the letting business it is a tax credit
+ * (1160); for any other owner it settled rent tax owed before the platform, so it closes against
+ * opening balances (3900). Pass the owner's flag as recorded with the opening item at commit.
+ */
+export const openingCertificateDebit = (owner: {
+  readonly lettingBusiness: boolean;
+}): '1160' | '3900' => (owner.lettingBusiness ? '1160' : '3900');
+
 /** A certificate is confirmed by a user for that owner, or an agency admin; never its uploader. */
 export function checkCertificateConfirmer(input: {
   readonly uploadedBy: string;

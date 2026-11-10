@@ -56,6 +56,7 @@ import {
   loadLines,
   paymentsByIds,
   pendingBanking,
+  raisedOpeningLineIds,
   type AllocationRecord,
   type LineRecord,
   type PaymentRecord,
@@ -585,9 +586,16 @@ export class BillingReadService {
           `The VAT and levy rates on this invoice come from a rule that is not verified yet (${r.key}, ${r.verificationStatus === 'from_prd' ? 'taken from the PRD' : 'unverified'}): the tax adviser is to confirm it (OQ-20).`,
       );
       const { lines: _lines, allocations: _allocations, ...base } = view!;
+      const raised = await raisedOpeningLineIds(tx, view!.lines);
       return {
         ...base,
-        lines: view!.lines.map((l) => this.lineView(l, view!.allocations, rules.get(l.id) ?? null)),
+        lines: view!.lines.map((l) => {
+          const line = this.lineView(l, view!.allocations, rules.get(l.id) ?? null);
+          // A month brought in again by an adjustment shows as the raise (founder 2026-11-10).
+          return raised.has(l.id)
+            ? { ...line, label: `${line.label} (raised by an adjustment)` }
+            : line;
+        }),
         allocations: await this.allocationViews(tx, mineAllocations, view!.lines),
         billedTo: { name: row.billedToName, tin: row.billedToTin },
         billedFrom: { name: row.billedFromName, tin: row.billedFromTin },

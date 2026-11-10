@@ -107,7 +107,9 @@ export function BalancesPreview({
                     }
                   />
                 </Td>
-                <Td className="text-right tabular-nums">{money('depositHeldMinor')}</Td>
+                <Td className="text-right tabular-nums" data-testid="preview-deposit">
+                  {money('depositHeldMinor')}
+                </Td>
                 <Td className="text-right tabular-nums">{money('withholdingOutstandingMinor')}</Td>
               </tr>
             );

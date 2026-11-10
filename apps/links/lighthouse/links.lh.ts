@@ -1,4 +1,4 @@
-import { test, type APIRequestContext } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import {
   jobSheetLink,
   leaseSigningLink,
@@ -13,6 +13,7 @@ import {
   measure,
   openBrowser,
   record,
+  type Expected,
   type Measured,
   type MeasuringBrowser,
 } from './collect';
@@ -36,19 +37,51 @@ test.afterAll(async () => {
   await staff?.dispose();
 });
 
+/** A page whose main heading says `text`. */
+const headed =
+  (text: string | RegExp): Expected['marker'] =>
+  async (page: Page) => {
+    // The page's own heading comes first (a notice's document has one of its own).
+    await expect(page.getByRole('heading', { level: 1 }).first()).toHaveText(text);
+  };
+
+/** A link page that offers its action: still open, neither used nor replaced. */
+const offering =
+  (heading: string | RegExp, action: RegExp): Expected['marker'] =>
+  async (page: Page) => {
+    await headed(heading)(page);
+    await expect(page.getByRole('button', { name: action }).first()).toBeVisible();
+  };
+
 test('NFR-PERF BC-04 BC-06 TL-07 LN-04 MI-04 CM-09 every links page on a first visit over 3G', async () => {
   const pay = await payLink(staff, 'Akua Measures-Links (e2e)');
-  const pages: [name: string, path: string][] = [
-    ['home', '/'],
-    ['pay', pay.path],
-    ['lease signing', await leaseSigningLink(staff)],
-    ['notice', await noticeLink(staff)],
-    ['job sheet', await jobSheetLink(staff)],
-    ['unsubscribe', await unsubscribeLink(staff)],
-    ['not found', `/l/${'x'.repeat(43)}`],
+  const pages: [name: string, path: string, expected: Expected][] = [
+    ['home', '/', { marker: headed('This page opens from a link we sent you') }],
+    ['pay', pay.path, { marker: offering(/^Pay rent to /, /^Pay$/) }],
+    [
+      'lease signing',
+      await leaseSigningLink(staff),
+      { marker: offering(/./, /send me a code|send a new code/i) },
+    ],
+    [
+      'notice',
+      await noticeLink(staff),
+      { marker: offering(/./, /send me a code|send a new code/i) },
+    ],
+    ['job sheet', await jobSheetLink(staff), { marker: offering(/./, /^Accept the job$/) }],
+    [
+      'unsubscribe',
+      await unsubscribeLink(staff),
+      { marker: offering(/^Stop emails from /, /stop emails/i) },
+    ],
+    [
+      'not found',
+      `/l/${'x'.repeat(43)}`,
+      { marker: headed('This link is not valid or has expired'), status: 404 },
+    ],
   ];
   const measured: Measured[] = [];
-  for (const [name, path] of pages)
+  for (const [name, path, expected] of pages)
     measured.push(
       await measure(browser, {
         group: 'links',
@@ -56,6 +89,7 @@ test('NFR-PERF BC-04 BC-06 TL-07 LN-04 MI-04 CM-09 every links page on a first v
         url: `${LINKS_URL}${path}`,
         firstVisit: true,
         keepStorage: false,
+        expect: expected,
       }),
     );
 
@@ -68,6 +102,7 @@ test('NFR-PERF BC-04 BC-06 TL-07 LN-04 MI-04 CM-09 every links page on a first v
       url: `${LINKS_URL}${receipt}`,
       firstVisit: true,
       keepStorage: false,
+      expect: { marker: headed('Your receipt') },
     }),
   );
   record(measured);

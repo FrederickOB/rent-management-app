@@ -18,6 +18,7 @@ import { platformAdminFor } from '../admin/platform-admin';
 import { AuditService } from '../audit/audit.service';
 import type { Clock } from '../core/clock';
 import { conflict, notFound } from '../core/errors';
+import { scrubString } from '../core/logging/redact';
 import { MESSAGING_INBOUND_JOB, MESSAGING_WEBHOOK_PREFIX } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
@@ -25,7 +26,7 @@ import { PROCESS_WEBHOOK_JOB } from '../payments/webhooks.service';
 import { PolicyService } from '../policy/policy.service';
 import { platformCompanyId, withPlatform } from '../subscription/platform';
 import { OPS_CLI_MAX, OPS_LIST_LIMIT } from './constants';
-import { consoleOperator, isUuid, opsReason, type OpsOperator } from './operator';
+import { consoleOperator, isUuid, operatorData, opsReason, type OpsOperator } from './operator';
 
 type InboxRow = typeof schema.webhookInbox.$inferSelect;
 
@@ -145,6 +146,25 @@ export class WebhookReplayService {
     });
   }
 
+  /**
+   * The console: one stored webhook, whatever its status (M11 review C6: a replay is followed
+   * until it is processed). `health.read`; a rejected row is not shown (404), as it kept no body.
+   */
+  async get(actor: Actor | null, webhookId: string): Promise<OpsWebhookView> {
+    platformAdminFor(this.policy, actor, 'health.read');
+    if (!isUuid(webhookId)) throw notFound('Webhook');
+    const w = schema.webhookInbox;
+    const [found] = await withSystem(this.database, {}, (tx) =>
+      tx
+        .select({ row: w, name: schema.person.name })
+        .from(w)
+        .leftJoin(schema.person, eq(schema.person.id, w.lastReplayedBy))
+        .where(and(eq(w.id, webhookId), ne(w.status, 'rejected'))),
+    );
+    if (!found) throw notFound('Webhook');
+    return viewOf(found.row, found.name);
+  }
+
   /** The console's replay (`platform.ops.replay`), with a reason of 5 to 500 characters. */
   async replay(
     actor: Actor | null,
@@ -191,7 +211,8 @@ export class WebhookReplayService {
             outcome: null,
             processedAt: null,
             replayCount: sql`${w.replayCount} + 1`,
-            lastReplayedAt: this.clock.now(),
+            // The database's clock, as pg-boss stamps jobs: a dead letter compares the two.
+            lastReplayedAt: sql`now()`,
             lastReplayedBy: operator.personId,
           })
           .where(eq(w.id, webhookId))
@@ -233,6 +254,7 @@ export class WebhookReplayService {
                 replayCount: updated!.replayCount,
                 via: operator.via,
                 reason: why,
+                ...operatorData(operator),
               },
             });
             await enqueueOutbox(ptx, {
@@ -290,7 +312,8 @@ function viewOf(row: InboxRow, replayedByName: string | null): OpsWebhookView {
     eventType: row.eventType,
     receivedAt: new Date(row.receivedAt),
     status: webhookStatusOf(row),
-    lastError: row.lastError,
+    // M11 review: scrubbed again on the way out, whatever wrote it.
+    lastError: row.lastError ? scrubString(row.lastError) : null,
     replayCount: row.replayCount,
     lastReplayedAt: row.lastReplayedAt ? new Date(row.lastReplayedAt) : null,
     lastReplayedByName: replayedByName,

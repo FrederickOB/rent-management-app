@@ -1,5 +1,6 @@
 import { sql, type Tx } from '@rent/db';
 import { businessDateOf, instantFrom, toIsoDate } from '@rent/domain/dates';
+import { formatTicketNumber } from '@rent/domain/maintenance';
 import { consentText } from '@rent/domain/messaging';
 import { money, toDecimal } from '@rent/domain/money';
 import writeXlsxFile from 'write-excel-file/node';
@@ -24,6 +25,14 @@ export interface ExportFile {
   readonly documentId: string;
   readonly name: string;
   readonly what: string;
+  /** As recorded when it was stored: what the export's size cap counts (M11 review B7). */
+  readonly sizeBytes: number;
+  /** A photo or recording the tenant sent: left out first when the export is over its cap. */
+  readonly media: boolean;
+  /** The record it belongs to, where staff can download it: `Repair MT-0042`, `Message on …`. */
+  readonly belongsTo: string;
+  /** Its business date. */
+  readonly on: string | null;
 }
 
 export interface TenantExport {
@@ -277,12 +286,19 @@ export async function tenantExportIn(
   const day = (v: Date | string) => toIsoDate(businessDateOf(instantFrom(new Date(v)), timeZone));
   // The photos, videos and voice notes the tenant sent: by message, and on repair reports in the
   // tenant app (the retention category `photos_and_recordings`). Never staff's inspection photos.
-  const media = await tx.execute<{ document_id: string; at: Date | string; source: string }>(
-    sql`select a.document_id, a.created_at as at, 'message' as source from message_attachment a
+  const media = await tx.execute<{
+    document_id: string;
+    at: Date | string;
+    source: string;
+    ticket: number | null;
+  }>(
+    sql`select a.document_id, a.created_at as at, 'message' as source, null::int as ticket
+        from message_attachment a
         join message m on m.company_id = a.company_id and m.id = a.message_id
         where m.tenant_id = ${id} and m.direction = 'inbound' and a.document_id is not null
         union all
-        select j.document_id, j.created_at as at, 'repair' as source from maintenance_job_attachment j
+        select j.document_id, j.created_at as at, 'repair' as source, mj.ticket_number as ticket
+        from maintenance_job_attachment j
         join maintenance_job mj on mj.company_id = j.company_id and mj.id = j.job_id
         where mj.tenant_id = ${id} and j.added_by_kind = 'tenant'
         order by at, document_id`,
@@ -290,53 +306,94 @@ export async function tenantExportIn(
 
   // The stored PDFs (and scans) of the tenant's leases, receipts and notices, and their media.
   const ids = new Set<string>();
-  const wanted: { documentId: string; stem: string; what: string }[] = [];
-  const want = (documentId: string | null, stem: string, what: string) => {
+  type Wanted = {
+    documentId: string;
+    stem: string;
+    what: string;
+    media: boolean;
+    belongsTo: string;
+    on: string | null;
+  };
+  const wanted: Wanted[] = [];
+  const want = (documentId: string | null, file: Omit<Wanted, 'documentId'>) => {
     if (!documentId || ids.has(documentId)) return;
     ids.add(documentId);
-    wanted.push({ documentId, stem, what });
+    wanted.push({ documentId, ...file });
   };
   for (const l of leases.rows) {
     const base = `leases/${safe(l.unit_code)}-${l.start_date}`;
-    want(l.signed_document_id, `${base}-signed`, 'Signed lease');
-    want(l.stamped_document_id, `${base}-stamped`, 'Stamped lease');
-    want(l.formal_wet_signed_document_id, `${base}-formal`, 'Formal lease');
+    const lease = {
+      media: false,
+      belongsTo: `Lease of ${l.unit_code} from ${l.start_date}`,
+      on: l.start_date,
+    };
+    want(l.signed_document_id, { ...lease, stem: `${base}-signed`, what: 'Signed lease' });
+    want(l.stamped_document_id, { ...lease, stem: `${base}-stamped`, what: 'Stamped lease' });
+    want(l.formal_wet_signed_document_id, {
+      ...lease,
+      stem: `${base}-formal`,
+      what: 'Formal lease',
+    });
   }
-  for (const r of receipts.rows)
-    want(r.document_id, `receipts/${r.kind}-${String(r.number).padStart(6, '0')}`, 'Receipt');
-  for (const n of notices.rows)
-    want(
-      n.document_id,
-      `notices/${n.number === null ? safe(n.id) : `N-${String(n.number).padStart(6, '0')}`}`,
-      'Notice',
-    );
+  for (const r of receipts.rows) {
+    const number = String(r.number).padStart(6, '0');
+    want(r.document_id, {
+      stem: `receipts/${r.kind}-${number}`,
+      what: 'Receipt',
+      media: false,
+      belongsTo: `Receipt ${number}`,
+      on: day(r.issued_at),
+    });
+  }
+  for (const n of notices.rows) {
+    const label = n.number === null ? null : `N-${String(n.number).padStart(6, '0')}`;
+    want(n.document_id, {
+      stem: `notices/${label ?? safe(n.id)}`,
+      what: 'Notice',
+      media: false,
+      belongsTo: label ? `Notice ${label}` : 'Notice',
+      on: n.issue_date,
+    });
+  }
   media.rows.forEach((m, i) =>
-    want(
-      m.document_id,
-      `photos-and-recordings/${m.source}-${day(m.at)}-${String(i + 1).padStart(3, '0')}`,
-      m.source === 'message' ? 'Sent by message' : 'Added to a repair report',
-    ),
+    want(m.document_id, {
+      stem: `photos-and-recordings/${m.source}-${day(m.at)}-${String(i + 1).padStart(3, '0')}`,
+      what: m.source === 'message' ? 'Sent by message' : 'Added to a repair report',
+      media: true,
+      belongsTo:
+        m.source === 'repair' && m.ticket !== null
+          ? `Repair ${formatTicketNumber(m.ticket)}`
+          : `Message on ${day(m.at)}`,
+      on: day(m.at),
+    }),
   );
   const types =
     wanted.length === 0
-      ? new Map<string, string>()
+      ? new Map<string, { contentType: string; sizeBytes: number }>()
       : new Map(
           (
-            await tx.execute<{ id: string; content_type: string }>(
-              sql`select id, content_type from document
+            await tx.execute<{ id: string; content_type: string; size_bytes: number }>(
+              sql`select id, content_type, size_bytes from document
                   where id in (${sql.join(
                     wanted.map((w) => sql`${w.documentId}::uuid`),
                     sql`, `,
                   )})`,
             )
-          ).rows.map((d) => [d.id, d.content_type]),
+          ).rows.map((d) => [
+            d.id,
+            { contentType: d.content_type, sizeBytes: Number(d.size_bytes) },
+          ]),
         );
   const files: ExportFile[] = wanted
     .filter((w) => types.has(w.documentId))
     .map((w) => ({
       documentId: w.documentId,
-      name: `${w.stem}.${EXTENSION[types.get(w.documentId)!] ?? 'bin'}`,
+      name: `${w.stem}.${EXTENSION[types.get(w.documentId)!.contentType] ?? 'bin'}`,
       what: w.what,
+      sizeBytes: types.get(w.documentId)!.sizeBytes,
+      media: w.media,
+      belongsTo: w.belongsTo,
+      on: w.on,
     }));
 
   return {
@@ -539,6 +596,9 @@ export async function exportWorkbook(
     /** Null for a file left out: one the malware scan quarantined (M11 decision 6). */
     readonly bytes: Buffer | null;
   }[],
+  /** Files left out to keep the archive under its cap (review round), largest first. */
+  leftOut: readonly Pick<ExportFile, 'name' | 'what' | 'belongsTo' | 'on' | 'sizeBytes'>[] = [],
+  capBytes = 0,
 ): Promise<Buffer> {
   const bold = (value: string) => ({ value, fontWeight: 'bold' as const });
   const cover = [
@@ -572,6 +632,29 @@ export async function exportWorkbook(
             },
           ],
     ),
+    ...(leftOut.length === 0
+      ? []
+      : [
+          [],
+          [bold('Not included in this archive')],
+          [
+            {
+              value: `One archive holds at most ${Math.ceil(capBytes / (1024 * 1024))} MB of files, so these were left out, largest first. They are still kept: staff can download each one from the record it belongs to and send it to you.`,
+            },
+          ],
+          [bold('File'), bold('What it is'), bold('Date'), bold('Belongs to'), bold('Size (MB)')],
+          ...leftOut.map((f) => [
+            { value: f.name },
+            { value: f.what },
+            f.on ? { value: f.on } : null,
+            { value: f.belongsTo },
+            {
+              value: (f.sizeBytes / (1024 * 1024)).toLocaleString('en-GB', {
+                maximumFractionDigits: 1,
+              }),
+            },
+          ]),
+        ]),
   ];
   return writeXlsxFile([
     { sheet: 'About', data: cover },

@@ -89,7 +89,8 @@ export async function postBalancePlan(
           entryId: entry.entryId,
           recordedBy: input.causedBy,
           // No rent tax item of kind `withholding` exists for it (P17 posts nothing on opening
-          // money, OQ-64), so its certificate posts P20 against 1160 (decision recorded for OQ-64).
+          // money, OQ-64). Its certificate posts P20 against 1160 for a letting-business owner and
+          // against 3900 for any other (founder decision 4), by the flag recorded here.
           rentTaxTreatment: owner?.lettingBusiness ? 'letting_business' : 'not_assessed',
         });
       }

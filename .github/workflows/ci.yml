@@ -51,6 +51,9 @@ jobs:
       # Ignored, approved by the founder on 2026-11-10 (M11 plan section 9, Operations):
       # GHSA-mrhx-c7xc-m3w5, zod 3.25.76 inside @expo/cli, a build-time CLI that never ships in the
       # app bundle; zod 3 has no fixed release. Drop the ignore when Expo moves to zod 4.
+      # The exception covers one zod version through two build-time tools only (M11 review B11).
+      - name: The audit exception still covers only zod 3.25.76 through @expo/cli and chromium-bidi
+        run: node scripts/ci-check-audit-exception.mjs
       - name: Production dependencies, failing on high and critical
         run: pnpm audit --prod --audit-level high --ignore GHSA-mrhx-c7xc-m3w5
       - name: Every dependency, dev included (advisory)
@@ -252,16 +255,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      # The `test` script (jest --ci), with Jest's JSON report for the traceability table.
+      # The `test` script (jest --ci), with Jest's JSON report for the traceability table. Jest
+      # writes the report whether the tests pass or fail, but does not create its folder.
       - name: Tenant app tests
-        run: pnpm --filter @rent/tenant exec jest --ci --json --outputFile=test-results/jest.json
+        run: |
+          mkdir -p apps/tenant/test-results
+          pnpm --filter @rent/tenant exec jest --ci --json --outputFile=test-results/jest.json
       - name: Keep the test report for the traceability table
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: test-reports-jest
           path: apps/tenant/test-results/jest.json
-          if-no-files-found: warn
+          # Jest writes it in every case, so a missing report is an error, never hidden.
+          if-no-files-found: error
           retention-days: 30
       - run: pnpm --filter @rent/tenant build
 

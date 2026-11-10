@@ -591,10 +591,22 @@ export function createAuth(deps: AuthDependencies) {
     },
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
-        const body = (ctx.body ?? {}) as Record<string, unknown>;
+        const body = { ...((ctx.body ?? {}) as Record<string, unknown>) };
+        /**
+         * M11 review: a hook's body is merged into the request's (defu), so keys it leaves out would
+         * pass through (disableSession, updatePhoneNumber). The request's own body is emptied of
+         * every key the replacement doesn't name, so exactly the replacement reaches Better Auth.
+         */
+        const only = (replacement: Record<string, unknown>) => {
+          const original = ctx.body as Record<string, unknown> | undefined;
+          if (original && typeof original === 'object')
+            for (const key of Object.keys(original))
+              if (!(key in replacement)) delete original[key];
+          return { context: { body: replacement } };
+        };
         switch (ctx.path) {
           case '/phone-number/send-otp': {
-            const phone = normalisedPhone(ctx.body);
+            const phone = normalisedPhone(body);
             const allowed = await allowCodeSend(phone);
             if (allowed === 'short')
               throw APIError.from('TOO_MANY_REQUESTS', {
@@ -606,20 +618,22 @@ export function createAuth(deps: AuthDependencies) {
                 code: 'DAILY_CODES_EXCEEDED',
                 message: 'Too many codes requested today. Try again tomorrow.',
               });
-            return { context: { body: { phoneNumber: phone } } };
+            return only({ phoneNumber: phone });
           }
           case '/phone-number/verify': {
             const code = typeof body.code === 'string' ? body.code : '';
-            const phone = normalisedPhone(ctx.body);
+            const phone = normalisedPhone(body);
             if (ctx.request) pending.set(ctx.request, { personId: '', extra: { phone } });
-            return { context: { body: { phoneNumber: phone, code } } };
+            return only({ phoneNumber: phone, code });
           }
           case '/sign-in/email': {
             // R1 F1: wrong passwords are limited per account too, from whatever address.
+            // M11 review B1: each attempt is counted, atomically, before the password is checked,
+            // so parallel guesses each use one up; a correct password clears the count (after).
             const key = accountKey(body.email);
             if (
               key &&
-              (await count(key, SIGN_IN_FAILURE_WINDOW_MINUTES)) >= SIGN_IN_FAILURES_PER_ACCOUNT
+              (await hit(key, SIGN_IN_FAILURE_WINDOW_MINUTES)) > SIGN_IN_FAILURES_PER_ACCOUNT
             )
               throw APIError.from('TOO_MANY_REQUESTS', {
                 code: 'TOO_MANY_ATTEMPTS',
@@ -633,18 +647,12 @@ export function createAuth(deps: AuthDependencies) {
             const personId = session?.user.id ?? (await challengedPerson(ctx));
             if (personId && ctx.request)
               pending.set(ctx.request, { personId, extra: { enrolling: !!session } });
-            // Staff always give a code: no "trust this device".
-            return {
-              context: {
-                body: {
-                  ...body,
-                  trustDevice: false,
-                  ...(ctx.path === '/two-factor/verify-backup-code'
-                    ? { code: backupHash(typeof body.code === 'string' ? body.code : '') }
-                    : {}),
-                },
-              },
-            };
+            // Staff always give a code: no "trust this device", and nothing else is passed on.
+            const code = typeof body.code === 'string' ? body.code : '';
+            return only({
+              code: ctx.path === '/two-factor/verify-backup-code' ? backupHash(code) : code,
+              trustDevice: false,
+            });
           }
           case '/two-factor/generate-backup-codes': {
             // R1 F9: new backup codes need a current TOTP code as well as the password.
@@ -671,19 +679,15 @@ export function createAuth(deps: AuthDependencies) {
               });
             }
             if (ctx.request) pending.set(ctx.request, { personId: session.user.id });
-            return { context: { body: { password: body.password } } };
+            return only({ password: body.password });
           }
           case '/request-password-reset':
             // R1 F8: the link always lands on the web app's set-password page, never a URL the
             // request named (a custom scheme could hand the token to another app).
-            return {
-              context: {
-                body: {
-                  email: typeof body.email === 'string' ? body.email : '',
-                  redirectTo: `${config.WEB_ORIGIN}/accept-invite`,
-                },
-              },
-            };
+            return only({
+              email: typeof body.email === 'string' ? body.email : '',
+              redirectTo: `${config.WEB_ORIGIN}/accept-invite`,
+            });
           case '/reset-password': {
             const token = typeof body.token === 'string' ? body.token : '';
             const [row] = token
@@ -724,43 +728,58 @@ export function createAuth(deps: AuthDependencies) {
         }
       }),
       after: createAuthMiddleware(async (ctx) => {
+        /** After the response outside tests (backgroundTasks), awaited in tests. */
+        const later = (work: () => Promise<void>) => ctx.context.runInBackgroundOrAwait(work());
         const returned = ctx.context.returned;
         const failed = isAPIError(returned);
         const known = ctx.request ? pending.get(ctx.request) : undefined;
         switch (ctx.path) {
           case '/sign-in/email': {
-            if (!failed) return;
-            const status = (returned as { statusCode?: number }).statusCode;
-            if (status !== 401 && status !== 400) return;
             const body = (ctx.body ?? {}) as Record<string, unknown>;
             const key = accountKey(body.email);
-            if (key) await hit(key, SIGN_IN_FAILURE_WINDOW_MINUTES);
-            const personId = await personByEmail(body.email);
-            if (personId)
-              await audit({
-                personId,
-                action: 'auth.sign_in_failed',
-                recordType: 'person',
-                recordId: personId,
-                data: { step: 'password' },
-              });
+            if (!failed) {
+              // The right password clears the account's count (counted before the check).
+              if (key)
+                await withSystem(database, {}, (tx) =>
+                  tx.execute(sql`delete from rate_limit where key = ${key}`),
+                );
+              return;
+            }
+            const status = (returned as { statusCode?: number }).statusCode;
+            if (status !== 401 && status !== 400) return;
+            // M11 review B2: looked up and audited after the response, so its timing says nothing
+            // about whether the email is registered.
+            await later(async () => {
+              const personId = await personByEmail(body.email);
+              if (personId)
+                await audit({
+                  personId,
+                  action: 'auth.sign_in_failed',
+                  recordType: 'person',
+                  recordId: personId,
+                  data: { step: 'password' },
+                });
+            });
             return;
           }
           case '/two-factor/verify-totp':
           case '/two-factor/verify-backup-code': {
             if (!known?.personId) return;
             const step = ctx.path === '/two-factor/verify-totp' ? 'totp' : 'backup_code';
-            if (failed)
-              await audit({
-                personId: known.personId,
-                action: known.extra?.enrolling
-                  ? 'auth.totp_enrolment_failed'
-                  : 'auth.sign_in_failed',
-                recordType: 'person',
-                recordId: known.personId,
-                data: { step },
-              });
-            else if (known.extra?.enrolling && step === 'totp')
+            if (failed) {
+              const action = known.extra?.enrolling
+                ? 'auth.totp_enrolment_failed'
+                : 'auth.sign_in_failed';
+              await later(() =>
+                audit({
+                  personId: known.personId,
+                  action,
+                  recordType: 'person',
+                  recordId: known.personId,
+                  data: { step },
+                }),
+              );
+            } else if (known.extra?.enrolling && step === 'totp')
               await audit({
                 personId: known.personId,
                 action: 'auth.totp_enrolled',
@@ -779,15 +798,18 @@ export function createAuth(deps: AuthDependencies) {
           case '/phone-number/verify': {
             if (!failed) return;
             const phone = known?.extra?.phone;
-            const personId = typeof phone === 'string' ? await personWithPhone(phone) : null;
-            if (personId)
-              await audit({
-                personId,
-                action: 'auth.sign_in_failed',
-                recordType: 'person',
-                recordId: personId,
-                data: { step: 'phone_code' },
-              });
+            // After the response, as for passwords (review B2).
+            await later(async () => {
+              const personId = typeof phone === 'string' ? await personWithPhone(phone) : null;
+              if (personId)
+                await audit({
+                  personId,
+                  action: 'auth.sign_in_failed',
+                  recordType: 'person',
+                  recordId: personId,
+                  data: { step: 'phone_code' },
+                });
+            });
             return;
           }
           case '/reset-password': {

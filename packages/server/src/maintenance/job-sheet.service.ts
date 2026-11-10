@@ -237,6 +237,20 @@ export class JobSheetService {
     });
   }
 
+  /**
+   * M11 review B13: whether the sheet is live (not closed, expired or revoked), for apps/links to
+   * check before it reads a photo upload's body. It records nothing about the link (no open, no
+   * open count); only the per-address limit counts it. An unknown token is not found.
+   */
+  async check(token: string, client: ClientInfo): Promise<{ live: boolean }> {
+    await this.limit('open', client, SIGNING_LIMITS.opensPerIp);
+    const { companyId, linkId } = await this.resolve(token);
+    return withCompany(this.database, this.context(companyId), async (tx) => {
+      const { link, job } = await this.rows(tx, linkId);
+      return { live: !DEAD_SCREENS.includes(this.screen(link, job)) };
+    });
+  }
+
   async respond(
     token: string,
     client: ClientInfo,

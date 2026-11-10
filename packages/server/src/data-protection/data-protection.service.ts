@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
-import { sql, withCompany, type Database, type Tx } from '@rent/db';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { sql, withCompany, withSystem, type Database, type Tx } from '@rent/db';
 import {
   DATA_PROTECTION_REQUEST_KINDS,
   DATA_PROTECTION_REQUEST_STATUSES,
@@ -25,22 +25,24 @@ import {
   type ConsentChannel,
 } from '@rent/domain/messaging';
 import type { Actor, PolicyAction } from '@rent/domain/policy';
+import type { StoragePort } from '@rent/integrations';
 import { v7 as uuidv7 } from 'uuid';
 import { AuditService } from '../audit/audit.service';
 import { companyRecord, staffActor } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
+import type { AppConfig } from '../core/config';
 import { sqlStateOf } from '../core/db-errors';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import { enqueueOutbox } from '../core/outbox';
-import { CLOCK, DATABASE } from '../core/tokens';
+import { CLOCK, CONFIG, DATABASE, STORAGE_PORT } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
 import { exportWorkbook, tenantExportIn } from './export';
 import {
   anonymiseIdentityIn,
-  anonymiseProfileIn,
+  anonymiseTenantIn,
   CATEGORY_ORDER,
   decide,
   NO_DATABASE_PATH,
@@ -53,6 +55,35 @@ import { zipArchive } from './zip';
 
 /** The job that prepares an access request's export (plan 4.14; keyed by the export). */
 export const DATA_PROTECTION_EXPORT_JOB = 'data-protection.export';
+/** The daily job that deletes exports older than `EXPORT_KEEP_DAYS` (founder, review round). */
+export const DATA_PROTECTION_EXPORT_CLEANUP_JOB = 'data-protection.export-cleanup';
+
+/**
+ * Founder decision 5 (M11 review round): an export is kept 7 days in the ordinary files bucket,
+ * then deleted; the register keeps its fingerprint (the document's SHA-256) and who downloaded it
+ * (the audit log). A product setting, not law. M12's bucket configuration adds the backstop: a
+ * lifecycle rule expiring objects under `EXPORT_PREFIX/` (current and noncurrent versions) after
+ * 7 days.
+ */
+export const EXPORT_KEEP_DAYS = 7;
+export const EXPORT_PREFIX = 'data-protection-exports';
+const KEEP_MS = EXPORT_KEEP_DAYS * 86_400_000;
+/** The cleanup looks back this far, so a few missed days are caught up (the lifecycle rule is the backstop). */
+const CLEANUP_LOOKBACK_MS = 30 * 86_400_000;
+
+/**
+ * M11 review B7: the archive is built in memory (the storage port has no streamed plain upload;
+ * M12's streamed put removes this), so one archive holds at most this much of stored files,
+ * counted from their recorded sizes. An access request is still always answered: over the cap,
+ * the largest photos and recordings, then the largest other files, are left out until it fits,
+ * and listed in the workbook with the record each belongs to (coordinator, review round; a
+ * reversible default). Memory stays bounded by the cap.
+ */
+export const DEFAULT_MAX_EXPORT_BYTES = 100 * 1024 * 1024;
+export interface DataProtectionLimits {
+  readonly maxExportBytes: number;
+}
+export const DATA_PROTECTION_LIMITS = Symbol('DATA_PROTECTION_LIMITS');
 
 type StaffActor = Extract<Actor, { kind: 'staff' }>;
 
@@ -72,6 +103,9 @@ export interface DataProtectionExportView {
   /** A five-minute link, from `exportGet` only once ready; null in the register's lists. */
   readonly url: string | null;
   readonly expiresAt: Date | null;
+  /** Once ready: whether files were left out to keep it under the cap, and how many (B7). */
+  readonly split?: boolean;
+  readonly leftOut?: number;
 }
 
 export interface HeldRecords {
@@ -130,6 +164,7 @@ type RequestRow = {
   completed_at: Date | string | null;
   export_id: string | null;
   export_status: DataProtectionExportView['status'] | null;
+  export_left_out: number | null;
 };
 
 const viewOf = (r: RequestRow): DataProtectionRequestView => ({
@@ -147,7 +182,13 @@ const viewOf = (r: RequestRow): DataProtectionRequestView => ({
   held: r.result?.held ?? [],
   export:
     r.export_id && r.export_status
-      ? { id: r.export_id, status: r.export_status, url: null, expiresAt: null }
+      ? {
+          id: r.export_id,
+          status: r.export_status,
+          url: null,
+          expiresAt: null,
+          ...splitOf(r.export_status, r.export_left_out),
+        }
       : null,
   createdBy:
     r.created_by && r.created_by_name !== null
@@ -156,6 +197,13 @@ const viewOf = (r: RequestRow): DataProtectionRequestView => ({
   createdAt: asDate(r.created_at),
   completedAt: r.completed_at === null ? null : asDate(r.completed_at),
 });
+
+/** A ready export's split: whether files were left out to stay under the cap, and how many. */
+const splitOf = (
+  status: DataProtectionExportView['status'],
+  leftOut: number | null,
+): { split?: boolean; leftOut?: number } =>
+  status === 'ready' ? { split: Number(leftOut ?? 0) > 0, leftOut: Number(leftOut ?? 0) } : {};
 
 /** A request closed by another transaction meanwhile (RA121) is the same 409 as one closed before. */
 const closedConflict = () =>
@@ -184,8 +232,9 @@ async function closedChecks<T>(fn: () => Promise<T>): Promise<T> {
  *   notice without electronic service. Then each category of records is anonymised only where its
  *   retention rule is verified and its period has passed; the rest is held, with until when.
  * - **Access:** a job prepares one archive of the tenant's own records (an Excel workbook) and
- *   their stored lease, receipt and notice PDFs, stored write-once and downloaded through a
- *   five-minute link.
+ *   their stored lease, receipt and notice PDFs and the photos and recordings they sent, kept 7
+ *   days in the ordinary files bucket (founder, review round) with its SHA-256 recorded, and
+ *   downloaded through a five-minute link. One export holds at most `DEFAULT_MAX_EXPORT_BYTES`.
  */
 @Injectable()
 export class DataProtectionService {
@@ -196,7 +245,44 @@ export class DataProtectionService {
     @Inject(DocumentsService) private readonly documents: DocumentsService,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(CLOCK) private readonly clock: Clock,
-  ) {}
+    @Inject(STORAGE_PORT) private readonly storage: StoragePort,
+    @Inject(CONFIG) private readonly config: AppConfig,
+    @Optional()
+    @Inject(DATA_PROTECTION_LIMITS)
+    limits: DataProtectionLimits | null = null,
+  ) {
+    this.maxExportBytes = limits?.maxExportBytes ?? DEFAULT_MAX_EXPORT_BYTES;
+  }
+
+  private readonly maxExportBytes: number;
+
+  /** Exports made before this instant are gone (B6): older than `EXPORT_KEEP_DAYS`. */
+  private keptSince(): Date {
+    return new Date(this.clock.now().getTime() - KEEP_MS);
+  }
+
+  /**
+   * The files one archive holds, and those left out to stay within the cap: photos and
+   * recordings first, then other files, largest first, until the rest fits.
+   */
+  private split<T extends { readonly sizeBytes: number; readonly media: boolean }>(
+    files: readonly T[],
+  ): { kept: T[]; leftOut: T[] } {
+    let total = files.reduce((t, f) => t + f.sizeBytes, 0);
+    const order = [...files].sort(
+      (a, b) => Number(b.media) - Number(a.media) || b.sizeBytes - a.sizeBytes,
+    );
+    const leftOut = new Set<T>();
+    for (const f of order) {
+      if (total <= this.maxExportBytes) break;
+      leftOut.add(f);
+      total -= f.sizeBytes;
+    }
+    return {
+      kept: files.filter((f) => !leftOut.has(f)),
+      leftOut: order.filter((f) => leftOut.has(f)),
+    };
+  }
 
   private admin(actor: Actor | null, action: PolicyAction): StaffActor {
     const staff = staffActor(actor);
@@ -242,14 +328,20 @@ export class DataProtectionService {
             r.received_on::text as received_on, r.due_on::text as due_on, r.due_rule_id,
             ru.verification_status as rule_status, r.status, r.notes, r.outcome,
             r.messaging_stopped_at, r.result, r.created_by, p.name as created_by_name, r.created_at,
-            r.completed_at, x.id as export_id, x.status as export_status
+            r.completed_at, x.id as export_id, x.status as export_status,
+            x.left_out as export_left_out
           from data_protection_request r
           join tenant t on t.company_id = r.company_id and t.id = r.tenant_id
           left join person p on p.id = r.created_by
           left join rule ru on ru.id = r.due_rule_id
           left join lateral (
-            select e.id, e.status from data_protection_export e
+            select e.id, e.status,
+              (select jsonb_array_length(coalesce(d.data_snapshot->'leftOut', '[]'::jsonb))
+               from document d where d.company_id = e.company_id and d.id = e.document_id) as left_out
+            from data_protection_export e
             where e.company_id = r.company_id and e.request_id = r.id
+              -- B6: an export deleted after its 7 days is no longer offered.
+              and not (e.status = 'ready' and e.ready_at <= ${this.keptSince()})
             order by e.created_at desc, e.id desc limit 1) x on true
           where ${where}
           order by r.received_on desc, r.created_at desc, r.id desc`,
@@ -522,13 +614,14 @@ export class DataProtectionService {
         const earlier = new Map(
           (row.result?.anonymised ?? []).map((a) => [a.category, a.records] as const),
         );
-        const anonymised: { category: RetentionCategory; records: number }[] = [];
         const held: HeldRecords[] = [];
+        // Every category is decided first, then the tenant row changes once (B8: after the update
+        // that sets `anonymised_at`, RA127 refuses any other).
+        const due = new Set<RetentionCategory>();
         for (const category of CATEGORY_ORDER) {
           const rule = rules[category];
           const records = category === 'webhook_bodies' ? webhookBodies : facts.records[category];
           const decision = decide(rule, records, facts.from[category], today, facts.live);
-          let done = 0;
           if (decision.kind === 'held')
             held.push({
               category,
@@ -536,22 +629,30 @@ export class DataProtectionService {
               until: decision.until,
               reason: decision.reason,
             });
-          if (decision.kind === 'anonymise') {
-            const blocked = NO_DATABASE_PATH[category];
-            if (blocked) {
-              held.push({
-                category,
-                records: decision.records,
-                until: retainedUntil(facts.from[category]!, rule.years!),
-                reason: blocked,
-              });
-            } else if (category === 'tenant_profile') {
-              done = await anonymiseProfileIn(tx, row.tenant_id);
-            } else if (category === 'identity') {
-              done = await anonymiseIdentityIn(tx, row.tenant_id);
-            }
-          }
-          const total = done + (earlier.get(category) ?? 0);
+          if (decision.kind !== 'anonymise') continue;
+          const blocked = NO_DATABASE_PATH[category];
+          if (blocked)
+            held.push({
+              category,
+              records: decision.records,
+              until: retainedUntil(facts.from[category]!, rule.years!),
+              reason: blocked,
+            });
+          else due.add(category);
+        }
+        const done = new Map<RetentionCategory, number>();
+        if (due.has('tenant_profile')) {
+          const changed = await anonymiseTenantIn(tx, row.tenant_id, {
+            identity: due.has('identity'),
+          });
+          done.set('tenant_profile', changed.profile);
+          done.set('identity', changed.identity);
+        } else if (due.has('identity')) {
+          done.set('identity', await anonymiseIdentityIn(tx, row.tenant_id));
+        }
+        const anonymised: { category: RetentionCategory; records: number }[] = [];
+        for (const category of CATEGORY_ORDER) {
+          const total = (done.get(category) ?? 0) + (earlier.get(category) ?? 0);
           if (total > 0) anonymised.push({ category, records: total });
         }
         const result: ErasureResult = {
@@ -594,7 +695,8 @@ export class DataProtectionService {
 
   /**
    * Prepares the tenant's export, in a job. A request has one live export at a time: asked again
-   * while one is preparing or ready, it gets that one; after a failure, a new one.
+   * while one is preparing or ready (and not yet deleted after its 7 days), it gets that one;
+   * after a failure or once deleted, a new one.
    */
   async exportCreate(actor: Actor | null, requestId: string): Promise<DataProtectionExportView> {
     const staff = this.admin(actor, 'data_protection.export');
@@ -608,7 +710,8 @@ export class DataProtectionService {
         const [live] = (
           await tx.execute<{ id: string }>(
             sql`select id from data_protection_export
-                where request_id = ${requestId}::uuid and status in ('preparing', 'ready')
+                where request_id = ${requestId}::uuid
+                  and (status = 'preparing' or (status = 'ready' and ready_at > ${this.keptSince()}))
                 order by created_at desc, id desc limit 1`,
           )
         ).rows;
@@ -656,10 +759,26 @@ export class DataProtectionService {
           id: string;
           status: DataProtectionExportView['status'];
           document_id: string | null;
+          ready_at: Date | string | null;
+          left_out: number | null;
         }>(
-          sql`select id, status, document_id from data_protection_export where id = ${exportId}::uuid`,
+          sql`select e.id, e.status, e.document_id, e.ready_at,
+                (select jsonb_array_length(coalesce(d.data_snapshot->'leftOut', '[]'::jsonb))
+                 from document d where d.company_id = e.company_id and d.id = e.document_id) as left_out
+              from data_protection_export e where e.id = ${exportId}::uuid`,
         )
       ).rows;
+      // B6: deleted after its 7 days; a new one can be prepared.
+      if (
+        found?.status === 'ready' &&
+        found.ready_at !== null &&
+        asDate(found.ready_at).getTime() <= this.keptSince().getTime()
+      )
+        throw new AppError(
+          410,
+          'export_expired',
+          'This export was deleted after 7 days. Prepare a new one.',
+        );
       if (found?.status === 'ready')
         await this.audit.append(tx, {
           companyId: staff.companyId,
@@ -673,6 +792,7 @@ export class DataProtectionService {
     if (!row) throw notFound('Export');
     if (row.status !== 'ready' || !row.document_id)
       return { id: row.id, status: row.status, url: null, expiresAt: null };
+    const split = splitOf(row.status, row.left_out);
     const url = await this.documents.downloadUrl(
       staff.companyId,
       row.document_id,
@@ -684,13 +804,18 @@ export class DataProtectionService {
       status: 'ready',
       url,
       expiresAt: new Date(this.clock.now().getTime() + DOWNLOAD_MS),
+      ...split,
     };
   }
 
   /**
-   * The `data-protection.export` job: one archive of the tenant's own records and stored PDFs,
-   * stored write-once and recorded in one transaction. Idempotent: a ready or failed export is
-   * left as it is. Logs nothing of what it holds.
+   * The `data-protection.export` job: one archive of the tenant's own records and stored files,
+   * kept in the ordinary files bucket for 7 days (founder, review round; not write-once) and
+   * recorded with its SHA-256. Idempotent: a ready or failed export is left as it is, and a run
+   * after one that stored the archive but did not record it records that object rather than
+   * storing a second copy. Over the size cap (B7) the largest photos and recordings are left out
+   * and listed, and the export is still ready (`split`). Only the files kept are read, so memory
+   * stays bounded by the cap. Logs nothing of what it holds.
    */
   async prepareExport(companyId: string, exportId: string): Promise<'ready' | 'skipped'> {
     const ctx = { companyId, actorKind: 'system' as const };
@@ -714,6 +839,7 @@ export class DataProtectionService {
     );
     if (!found) return 'skipped';
     const { row, company, data } = found;
+    const { kept, leftOut } = this.split(data.files);
     const files: {
       name: string;
       what: string;
@@ -721,7 +847,7 @@ export class DataProtectionService {
       intact: boolean;
       bytes: Buffer | null;
     }[] = [];
-    for (const f of data.files) {
+    for (const f of kept) {
       // A file still being scanned fails this run, which is retried; a quarantined one is listed
       // and left out (M11 decision 6: never served).
       let file: Awaited<ReturnType<DocumentsService['documentFile']>>;
@@ -746,18 +872,41 @@ export class DataProtectionService {
       data,
       { companyName: company.displayName, preparedAt, timeZone: company.timeZone },
       files,
+      leftOut,
+      this.maxExportBytes,
     );
     const archive = zipArchive([
       { name: 'personal-data.xlsx', bytes: workbook },
       ...files.flatMap((f) => (f.bytes ? [{ name: f.name, bytes: f.bytes }] : [])),
     ]);
-    const stored = await this.documents.storeWriteOnce({
-      companyId,
-      countryCode: company.countryCode,
-      key: `documents/${companyId}/data-protection-exports/${exportId}.zip`,
-      bytes: archive,
-      contentType: ZIP_CONTENT_TYPE,
-    });
+    // B6: re-check before anything is written, so a retry of a finished run stores nothing.
+    const still = await withCompany(this.database, ctx, (tx) =>
+      tx.execute<{ status: string }>(
+        sql`select status from data_protection_export where id = ${exportId}::uuid`,
+      ),
+    );
+    if (still.rows[0]?.status !== 'preparing') return 'skipped';
+    const ref = {
+      bucket: this.config.S3_BUCKET_FILES,
+      key: `${EXPORT_PREFIX}/${companyId}/${exportId}.zip`,
+    };
+    // A run that stored the archive and then failed before recording it left one copy: record
+    // that one rather than store a second.
+    const earlier = await this.storage.head(ref);
+    const stored = earlier
+      ? {
+          versionId: earlier.versionId,
+          bytes: await this.storage.get({
+            ...ref,
+            ...(earlier.versionId ? { versionId: earlier.versionId } : {}),
+          }),
+        }
+      : {
+          versionId: (
+            await this.storage.put({ ...ref, body: archive, contentType: ZIP_CONTENT_TYPE })
+          ).versionId,
+          bytes: archive,
+        };
     return withCompany(this.database, ctx, async (tx) => {
       const [current] = (
         await tx.execute<{ status: string }>(
@@ -765,13 +914,38 @@ export class DataProtectionService {
         )
       ).rows;
       if (current?.status !== 'preparing') return 'skipped' as const;
-      const documentId = await this.documents.recordWriteOnce(tx, stored, {
+      const documentId = await this.documents.insertDocument(tx, {
+        origin: 'generated',
+        companyId,
         kind: 'data_protection_export',
+        contentType: ZIP_CONTENT_TYPE,
+        bytes: stored.bytes,
+        bucket: ref.bucket,
+        storageKey: ref.key,
+        storageVersionId: stored.versionId,
+        writeOnce: false,
         createdBy: row.requested_by,
+        // What the archive left out to stay under the cap, for the register (no personal data:
+        // file names, record references, dates and sizes).
+        dataSnapshot: {
+          capBytes: this.maxExportBytes,
+          leftOut: leftOut.map((f) => ({
+            name: f.name,
+            belongsTo: f.belongsTo,
+            on: f.on,
+            sizeBytes: f.sizeBytes,
+          })),
+        },
       });
+      const [doc] = (
+        await tx.execute<{ sha256: string }>(
+          sql`select sha256 from document where id = ${documentId}::uuid`,
+        )
+      ).rows;
       await tx.execute(
         sql`update data_protection_export
-            set status = 'ready', document_id = ${documentId}::uuid, ready_at = now(), updated_at = now()
+            set status = 'ready', document_id = ${documentId}::uuid, ready_at = ${this.clock.now()},
+                updated_at = now()
             where id = ${exportId}::uuid`,
       );
       await this.audit.append(tx, {
@@ -781,9 +955,11 @@ export class DataProtectionService {
         recordId: exportId,
         data: {
           documentId,
-          sha256: stored.sha256,
+          sha256: doc!.sha256,
+          keptDays: EXPORT_KEEP_DAYS,
           files: files.filter((f) => f.bytes).length,
           withheld: files.filter((f) => !f.bytes).length,
+          leftOut: leftOut.length,
         },
       });
       return 'ready' as const;
@@ -799,5 +975,62 @@ export class DataProtectionService {
             where id = ${exportId}::uuid and status = 'preparing'`,
       ),
     );
+  }
+
+  /**
+   * The daily `data-protection.export-cleanup` (B6, founder: 7 days): every company's exports
+   * older than `EXPORT_KEEP_DAYS` have their object deleted, exactly the version recorded. The
+   * document row stays, with its SHA-256, and the export is refused from then on (410). Each
+   * company in its own context (ADR-002); idempotent, as an object already gone is skipped.
+   */
+  async cleanupExports(): Promise<{ deleted: number }> {
+    const keptSince = this.keptSince();
+    const lookback = new Date(keptSince.getTime() - CLEANUP_LOOKBACK_MS);
+    const companies = await withSystem(this.database, {}, (tx) =>
+      tx.execute<{ id: string }>(sql`select id from app.company_ids() as id`),
+    );
+    let deleted = 0;
+    for (const { id: companyId } of companies.rows) {
+      const ctx = { companyId, actorKind: 'system' as const };
+      const old = await withCompany(
+        this.database,
+        ctx,
+        (tx) =>
+          tx.execute<{
+            id: string;
+            document_id: string;
+            bucket: string;
+            storage_key: string;
+            storage_version_id: string | null;
+          }>(
+            sql`select e.id, d.id as document_id, d.bucket, d.storage_key, d.storage_version_id
+                from data_protection_export e
+                join document d on d.company_id = e.company_id and d.id = e.document_id
+                where e.status = 'ready' and e.ready_at <= ${keptSince} and e.ready_at > ${lookback}
+                  and not d.write_once`,
+          ),
+        { accessMode: 'read only' },
+      );
+      for (const e of old.rows) {
+        const ref = {
+          bucket: e.bucket,
+          key: e.storage_key,
+          ...(e.storage_version_id ? { versionId: e.storage_version_id } : {}),
+        };
+        if (!(await this.storage.head(ref))) continue;
+        await this.storage.delete(ref);
+        deleted += 1;
+        await withCompany(this.database, ctx, (tx) =>
+          this.audit.append(tx, {
+            companyId,
+            action: 'data_protection.export_deleted',
+            recordType: 'data_protection_export',
+            recordId: e.id,
+            data: { documentId: e.document_id, keptDays: EXPORT_KEEP_DAYS },
+          }),
+        );
+      }
+    }
+    return { deleted };
   }
 }

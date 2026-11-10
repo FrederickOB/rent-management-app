@@ -163,6 +163,7 @@ test.describe('LN-04 notices in the tenant app', () => {
     await expect(page.getByText(`Notice ${notice.number}`)).toHaveCount(0);
   });
   test('TL-12: once /me/notices has answered with the agency’s notice, the other landlord’s tenancy still shows none (M7 review, LT 5)', async () => {
+    await page.goto('about:blank');
     const answered = page.waitForResponse(
       (response) =>
         /\/me\/notices(\?|$)/.test(

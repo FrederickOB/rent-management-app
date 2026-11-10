@@ -338,7 +338,7 @@ describe('P25 opening balances: the Balances workbook', () => {
     const a = preview.leases.find((l) => l.leaseId === leaseA)!;
     const bb = preview.leases.find((l) => l.leaseId === leaseB)!;
     // The opening arrears, plus what the platform has billed since the cut-over and is due.
-    expect(a.after.arrearsMinor).toBeGreaterThanOrEqual(250_000);
+    expect(a.after.arrearsMinor).toBe(250_000 + 150_000);
     expect(a.after.depositHeldMinor).toBe(150_000);
     expect(bb.after.paidUntil).toBe(plusDays(plusMonths(cutOver, 3), -1));
     expect(bb.after.depositHeldMinor).toBe(200_000);
@@ -358,11 +358,18 @@ describe('P25 opening balances: the Balances workbook', () => {
     await expect(
       s.approvals.decide(agency.admin, asked.approval!.requestId, { decision: 'approve' }),
     ).rejects.toMatchObject({ status: 403 });
-    await expect(
-      s.approvals.decide(agency.manager, asked.approval!.requestId, { decision: 'approve' }),
-    ).rejects.toMatchObject({ status: 403 });
+    // The money approvers decide (founder decision 2, review round); a caretaker is not one.
+    const caretaker = await staffIn(ctx, agency.companyId, 'agency', 'caretaker', 'Caretaker');
+    const refused = await s.approvals
+      .decide(caretaker, asked.approval!.requestId, { decision: 'approve' })
+      .then(
+        () => null,
+        (e: { status?: number }) => e.status,
+      );
+    // Refused: the request is not even visible to a caretaker (404), or not theirs to decide (403).
+    expect([403, 404]).toContain(refused);
     // Nothing posts until the second person approves (RA124 refuses a move without it).
-    expect(await journal(`e.rule = 'P25'`)).toBe(0);
+    expect(await countOf(ctx, agency.companyId, 'journal_entry', `rule = 'P25'`)).toBe(0);
     await expect(
       withCompany(ctx.database, system(agency.companyId), (tx) =>
         tx
@@ -400,9 +407,24 @@ describe('P25 opening balances: the Balances workbook', () => {
       ['rent', true, true, cutOver],
       ['deposit', true, false, null],
     ]);
-    expect(await journal(`e.rule = 'P25' and e.value_date <> '${cutOver}'`)).toBe(0);
+    // One entry per item: two arrears, the advance, two deposits, the withholding, agent cash and
+    // rent tax; every one dated the cut-over, none touching income, rent tax expense or fees.
+    expect(await countOf(ctx, agency.companyId, 'journal_entry', `rule = 'P25'`)).toBe(8);
     expect(
-      await journal(`e.rule = 'P25' and l.account_code in ('4000', '4100', '5300', '5100')`),
+      await countOf(
+        ctx,
+        agency.companyId,
+        'journal_entry',
+        `rule = 'P25' and value_date <> '${cutOver}'`,
+      ),
+    ).toBe(0);
+    expect(
+      await countOf(
+        ctx,
+        agency.companyId,
+        'journal_line l join journal_entry e on e.id = l.entry_id',
+        `e.rule = 'P25' and l.account_code in ('4000', '4100', '5300', '5100')`,
+      ),
     ).toBe(0);
     // Every entry sums to zero in each book.
     const unbalanced = await withCompany(ctx.database, system(agency.companyId), (tx) =>

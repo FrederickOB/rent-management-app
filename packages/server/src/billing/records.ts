@@ -121,6 +121,30 @@ export async function openingPaymentIds(
   return new Set(rows.map((r) => r.id));
 }
 
+/**
+ * Founder 2026-11-10 (P25): the opening lines that raise a month brought in already, among
+ * `lines`: those with an opening line of the same charge period on an earlier invoice.
+ */
+export async function raisedOpeningLineIds(
+  tx: Tx,
+  lines: readonly Pick<LineRecord, 'id' | 'opening' | 'chargePeriodId'>[],
+): Promise<Set<string>> {
+  const ids = lines.filter((l) => l.opening === true && l.chargePeriodId).map((l) => l.id);
+  if (ids.length === 0) return new Set();
+  const rows = await tx.execute<{ id: string }>(
+    sql`select l.id from invoice_line l
+          join invoice i on i.company_id = l.company_id and i.id = l.invoice_id
+        where l.id in (${sql.join(
+          ids.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )}) and exists (select 1 from invoice_line x
+          join invoice xi on xi.company_id = x.company_id and xi.id = x.invoice_id
+          where x.company_id = l.company_id and x.charge_period_id = l.charge_period_id
+            and x.opening and xi.number < i.number)`,
+  );
+  return new Set(rows.rows.map((r) => r.id));
+}
+
 export async function loadLines(tx: Tx, leaseIds: readonly string[]): Promise<LineRecord[]> {
   if (leaseIds.length === 0) return [];
   const rows = await tx

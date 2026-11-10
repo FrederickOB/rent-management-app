@@ -61,6 +61,25 @@ export const canCommit = (batch: Pick<OnboardingBatchView, 'status' | 'report'>)
 /** Balances and adjustments post money, so a preview comes first (decision 3). */
 export const hasPreview = (kind: OnboardingBatchKind): boolean => kind !== 'tenancies';
 
+/**
+ * Whether the preview is shown: for balances and adjustments, from a clean check until the second
+ * person decides. Once posting starts, the API refuses the preview (the books then hold the
+ * figures), so a posted batch shows its posted state instead (M11 review C5).
+ */
+export const showsPreview = (batch: Pick<OnboardingBatchView, 'kind' | 'status'>): boolean =>
+  hasPreview(batch.kind) && (batch.status === 'validated' || batch.status === 'awaiting_approval');
+
+/** How often the screen asks again: every 1.5 s while the worker is busy (BUSY). */
+export const BUSY_POLL_MS = 1_500;
+/** While a batch waits for the second person, so it turns to posted without a reload. */
+export const APPROVAL_POLL_MS = 10_000;
+
+/** How often to ask for a batch again, or null when nothing it waits for can change it. */
+export function pollEvery(status: OnboardingBatchStatus): number | null {
+  if (isBusy(status)) return BUSY_POLL_MS;
+  return status === 'awaiting_approval' ? APPROVAL_POLL_MS : null;
+}
+
 /** The kinds a step's workbooks may be: the balances step has its adjustment too. */
 export const STEP_KINDS: Record<Exclude<OnboardingStep, 'register'>, OnboardingBatchKind[]> = {
   tenancies: ['tenancies'],

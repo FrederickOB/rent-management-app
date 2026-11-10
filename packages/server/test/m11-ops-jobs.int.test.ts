@@ -11,6 +11,7 @@ import { createLogger } from '../src/core/logging/logger';
 import { OPS_RETRY_JOB, QUEUE_AGE_JOB } from '../src/ops/constants';
 import { DeadLetterService } from '../src/ops/dead-letters.service';
 import { WorkerHeartbeat, WorkerHeartbeatService } from '../src/ops/heartbeat';
+import { cliIdentity } from '../src/ops/operator';
 import { OpsPruningService } from '../src/ops/pruning.service';
 import { QueueMonitorService } from '../src/ops/queues.service';
 import { storeDeadLetter } from '../src/ops/test-controls';
@@ -99,11 +100,11 @@ beforeAll(async () => {
         .passthrough(),
       retry: { limit: 5, delaySeconds: 1, backoff: false },
       async handle({ deadLetterJobId, opsActionId }, jobCtx) {
-        await jobCtx.once(`ops:job_retry:${opsActionId}`, async (tx) => {
-          await deadLetters.requeue(tx, deadLetterJobId, (queue, payload) =>
-            jobs.send(queue, payload, { tx }),
-          );
-        });
+        await deadLetters.runRetry(
+          (key, fn) => jobCtx.once(key, fn),
+          { deadLetterJobId, opsActionId },
+          (queue, payload, tx) => jobs.send(queue, payload, { tx }),
+        );
       },
     }),
   );
@@ -173,7 +174,12 @@ describe('NFR-AVAIL a dead-lettered job is retried by a platform admin, once (M1
     const [action] = await withCompany(
       ctx.database,
       { companyId: admin.companyId, actorKind: 'system' },
-      (tx) => tx.select().from(schema.opsAction).where(eq(schema.opsAction.targetId, job!.id)),
+      (tx) =>
+        tx
+          .select()
+          .from(schema.opsAction)
+          .where(eq(schema.opsAction.targetId, job!.id))
+          .orderBy(schema.opsAction.createdAt, schema.opsAction.id),
     );
     expect(action).toMatchObject({
       kind: 'job_retry',
@@ -438,5 +444,175 @@ describe('NFR-AVAIL the dead-lettered job test control looks like a real dead le
     await deadLetters.retry(admin, id, 'The queue check is safe to run again');
     await waitFor(() => checks > 0);
     expect(checks).toBe(1);
+  });
+});
+
+describe('NFR-AVAIL a dead letter is retried once: a second retry is refused (M11 review B12)', () => {
+  it('refuses the same dead letter retried again, one after the other or both at once; the job runs once', async () => {
+    const sequentialItem = `twice-${randomUUID()}`;
+    const racedItem = `raced-${randomUUID()}`;
+    failing = true;
+    await jobs.send('test.ops-flaky', { companyId, item: sequentialItem });
+    await jobs.send('test.ops-flaky', { companyId, item: racedItem });
+    let sequential: { id: string } | undefined;
+    let raced: { id: string } | undefined;
+    await waitFor(async () => {
+      const rows = await withSystem(ctx.database, {}, (tx) =>
+        tx.execute<{ id: string; item: string }>(
+          sql`select id::text as id, data ->> 'item' as item from pgboss.job
+              where name = 'jobs.dead-letter' and data ->> 'item' in (${sequentialItem}, ${racedItem})`,
+        ),
+      );
+      sequential = rows.rows.find((r) => r.item === sequentialItem);
+      raced = rows.rows.find((r) => r.item === racedItem);
+      return Boolean(sequential && raced);
+    });
+    failing = false;
+
+    // One after the other: the second is refused, and only the first is recorded.
+    await deadLetters.retry(admin, sequential!.id, REASON);
+    await expect(
+      deadLetters.retry(admin, sequential!.id, 'Retrying it again'),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'already_retried',
+    });
+    // Both at once: exactly one goes through.
+    const both = await Promise.allSettled([
+      deadLetters.retry(admin, raced!.id, 'First of two at once'),
+      deadLetters.retry(admin, raced!.id, 'Second of two at once'),
+    ]);
+    expect(both.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = both.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(refused.reason).toMatchObject({ status: 409, code: 'already_retried' });
+
+    await waitFor(() => runs.includes(sequentialItem) && runs.includes(racedItem));
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(runs.filter((r) => r === sequentialItem)).toHaveLength(1);
+    expect(runs.filter((r) => r === racedItem)).toHaveLength(1);
+    const actions = await withCompany(
+      ctx.database,
+      { companyId: admin.companyId, actorKind: 'system' },
+      (tx) =>
+        tx
+          .select({ targetId: schema.opsAction.targetId })
+          .from(schema.opsAction)
+          .where(
+            sql`${schema.opsAction.targetId} in (${sequential!.id}, ${raced!.id}) and ${schema.opsAction.outcome} = 'queued'`,
+          ),
+    );
+    expect(actions.map((a) => a.targetId).sort()).toEqual([sequential!.id, raced!.id].sort());
+  });
+});
+
+describe('NFR-AVAIL a dead letter says when its job was queued (M11 review)', () => {
+  it('passes the failed job’s queue time, on the database’s clock, to the job’s own dead-letter step', async () => {
+    const seen: { error: string | null | undefined; createdAt: Date | null | undefined }[] = [];
+    await jobs.register(
+      defineJob({
+        name: 'test.ops-dies',
+        scope: 'system',
+        schema: z.object({}).passthrough(),
+        retry: { limit: 0, delaySeconds: 1, backoff: false },
+        async handle() {
+          throw new Error('gone for good');
+        },
+        async onDeadLetter(_payload, { error, createdAt }) {
+          seen.push({ error, createdAt });
+        },
+      }),
+    );
+    const [{ now }] = (
+      await withSystem(ctx.database, {}, (tx) =>
+        tx.execute<{ now: Date | string }>(sql`select now() as now`),
+      )
+    ).rows as [{ now: Date | string }];
+    await jobs.send('test.ops-dies', {});
+    await waitFor(() => seen.length > 0);
+    expect(seen[0]!.error).toBe('Error: gone for good');
+    const createdAt = seen[0]!.createdAt!;
+    expect(createdAt).toBeInstanceOf(Date);
+    expect(createdAt.getTime()).toBeGreaterThanOrEqual(new Date(now).getTime() - 1_000);
+    expect(createdAt.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+  });
+});
+
+describe('NFR-AVAIL a retry’s outcome is recorded and shown (M11 review C7)', () => {
+  it('shows queued, then sent once the worker sends it, and done_already for a repeated delivery', async () => {
+    const item = `outcome-${randomUUID()}`;
+    failing = true;
+    await jobs.send('test.ops-flaky', { companyId, item });
+    let deadId: string | undefined;
+    await waitFor(async () => {
+      const rows = await withSystem(ctx.database, {}, (tx) =>
+        tx.execute<{ id: string }>(
+          sql`select id::text as id from pgboss.job
+              where name = 'jobs.dead-letter' and data ->> 'item' = ${item}`,
+        ),
+      );
+      deadId = rows.rows[0]?.id;
+      return Boolean(deadId);
+    });
+    const listed = async () =>
+      (await deadLetters.list(admin, { name: 'test.ops-flaky' })).find((j) => j.id === deadId)!;
+    expect(await listed()).toMatchObject({ retriedAt: null, retryOutcome: null });
+    failing = false;
+    const retried = await deadLetters.retry(admin, deadId!, REASON);
+    expect(retried).toMatchObject({ retryOutcome: 'queued' });
+    await waitFor(async () => (await listed()).retryOutcome === 'sent');
+    await waitFor(() => runs.includes(item));
+    // The retry job delivered again (at-least-once): recorded, nothing sent again.
+    const [asked] = await withCompany(
+      ctx.database,
+      { companyId: admin.companyId, actorKind: 'system' },
+      (tx) =>
+        tx
+          .select()
+          .from(schema.opsAction)
+          .where(
+            sql`${schema.opsAction.targetId} = ${deadId!} and ${schema.opsAction.outcome} = 'queued'`,
+          ),
+    );
+    await jobs.send(OPS_RETRY_JOB, {
+      companyId: admin.companyId,
+      deadLetterJobId: deadId!,
+      opsActionId: asked!.id,
+    });
+    await waitFor(async () => (await listed()).retryOutcome === 'done_already');
+    expect(runs.filter((r) => r === item)).toHaveLength(1);
+    const rows = await withCompany(
+      ctx.database,
+      { companyId: admin.companyId, actorKind: 'system' },
+      (tx) =>
+        tx
+          .select({ outcome: schema.opsAction.outcome, personId: schema.opsAction.personId })
+          .from(schema.opsAction)
+          .where(eq(schema.opsAction.targetId, deadId!))
+          .orderBy(schema.opsAction.createdAt, schema.opsAction.id),
+    );
+    expect(rows).toEqual([
+      { outcome: 'queued', personId: admin.personId },
+      { outcome: 'sent', personId: admin.personId },
+      { outcome: 'done_already', personId: admin.personId },
+    ]);
+  });
+});
+
+describe('NFR-AUDIT a retry from the incident command records its OS user and host (M11 review B4)', () => {
+  it('puts them in the retry’s audit event', async () => {
+    const id = await storeDeadLetter(ctx.database, { queue: 'test.ops-flaky' });
+    const cli = cliIdentity();
+    await deadLetters.retryAs({ personId: admin.personId, via: 'cli', cli }, id, REASON);
+    const [event] = await withCompany(
+      ctx.database,
+      { companyId: admin.companyId, actorKind: 'system' },
+      async (tx) =>
+        (
+          await tx.execute<{ data: Record<string, unknown> }>(
+            sql`select data from audit_event where action = 'ops.job_retried' and record_id = ${id}`,
+          )
+        ).rows,
+    );
+    expect(event!.data).toMatchObject({ via: 'cli', osUser: cli.osUser, host: cli.host });
   });
 });

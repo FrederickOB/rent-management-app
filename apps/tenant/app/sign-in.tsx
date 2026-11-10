@@ -24,7 +24,7 @@ export default function SignIn() {
 
   async function sendCode() {
     setError(null);
-    const phone = signInPhone(phoneInput);
+    const phone = await signInPhone(phoneInput);
     if (!phone) {
       setError('Enter your phone number, for example 024 412 3456.');
       return;
@@ -103,7 +103,9 @@ export default function SignIn() {
         value={code}
         onChangeText={(text) => setCode(text.replace(/\D/g, '').slice(0, 6))}
         keyboardType="number-pad"
-        autoComplete="sms-otp"
+        // The web's own value, valid HTML (axe, M11). React Native turns it into Android's
+        // `sms-otp`, which keeps SMS autofill there, and iOS reads textContentType.
+        autoComplete="one-time-code"
         textContentType="oneTimeCode"
         maxLength={6}
       />

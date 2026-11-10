@@ -182,7 +182,7 @@ export const tenantsContract = {
     .route({ method: 'GET', path: '/tenants', summary: 'Tenants this person may see (TL-01)' })
     .input(
       z.object({
-        search: z.string().max(80).optional(),
+        // M11 review: no `search` here; a name or phone goes by POST (`search` below).
         kind: z.enum(TENANT_KINDS).optional(),
         withActiveLease: flag,
         idStatus: z.enum(ID_STATUSES).optional(),
@@ -191,8 +191,8 @@ export const tenantsContract = {
     )
     .output(z.array(tenantAnySchema)),
   /**
-   * M11 decision 6: the same search by POST, so a phone number or a name never sits in a URL (and
-   * so in no access log or browser history). `list` keeps working for filters without `search`.
+   * M11 decision 6: the search by POST, so a phone number or a name never sits in a URL (and so
+   * in no access log or browser history). `list` takes the filters only (M11 review).
    */
   search: oc
     .route({ method: 'POST', path: '/tenants/search', summary: 'Search tenants (TL-01)' })
@@ -718,6 +718,22 @@ export const signingRequestsContract = {
 export const leasesContract = {
   list: oc
     .route({ method: 'GET', path: '/leases' })
+    .input(
+      z.object({
+        status: z.enum(LEASE_STATUSES).optional(),
+        unitId: uuid.optional(),
+        tenantId: uuid.optional(),
+        propertyId: uuid.optional(),
+        search: z.string().max(80).optional(),
+      }),
+    )
+    .output(z.array(z.discriminatedUnion('access', [leaseListRowSchema, leaseLimitedSchema]))),
+  /**
+   * M11 review: the lease search by POST, so a tenant's name or a unit code typed into the search
+   * never sits in a URL; the same filters and answer as `list`.
+   */
+  search: oc
+    .route({ method: 'POST', path: '/leases/search', summary: 'Search leases (TL-06)' })
     .input(
       z.object({
         status: z.enum(LEASE_STATUSES).optional(),

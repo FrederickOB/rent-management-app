@@ -91,6 +91,11 @@ const stateSchema = z
 const changeSchema = z
   .object({
     membershipId: z.string().uuid(),
+    /**
+     * Who the change is about, for the approver's screen (review C2): the name the inviter typed,
+     * or the name this company sees, never another landlord's record of the person (TL-12).
+     */
+    personName: z.string().min(1).max(200),
     change: z.enum(['invite', 'update']),
     from: stateSchema.extend({ status: z.enum(['invited', 'active']) }).strict(),
     to: stateSchema,
@@ -233,12 +238,10 @@ export class MembershipsService {
         await this.accounts.create({
           name: input.name,
           email,
-          // A typed phone is kept for a new password-role person only when nobody holds it.
-          phone: passwordRole
-            ? phone && !(await this.personByPhone(phone))
-              ? phone
-              : undefined
-            : phone,
+          // M11 review B-M1: only the identifier the role signs in with. A phone typed beside a
+          // password role's email is never stored: nobody proved it, and it could later link
+          // its owner's tenancies to this record.
+          phone: passwordRole ? undefined : phone,
         })
       ).personId;
     const needsAcceptance = existing !== null;
@@ -287,8 +290,10 @@ export class MembershipsService {
               subjectType: 'membership',
               subjectId: row!.id,
               propertyId: null,
+              excludeApprovers: [personId],
               payload: {
                 membershipId: row!.id,
+                personName: input.name.trim().slice(0, 200),
                 change: 'invite',
                 from: { role: input.role, nominatedApprover, scope, status: 'invited' },
                 to: { role: input.role, nominatedApprover, scope },
@@ -371,8 +376,10 @@ export class MembershipsService {
           subjectType: 'membership',
           subjectId: membershipId,
           propertyId: null,
+          excludeApprovers: [current.personId],
           payload: {
             membershipId,
+            personName: await this.nameSeenBy(tx, current),
             change: 'update',
             from: { ...before, status: current.status as 'invited' | 'active' },
             to: after,
@@ -781,14 +788,47 @@ export class MembershipsService {
     });
   }
 
+  /**
+   * The person a caretaker invite attaches to (M11 review B-M1): one whose phone is verified, or a
+   * phone-only person (no real email, no password), whom only the phone's owner can sign in as. An
+   * unverified phone on anyone else's record was never proved: it is released from that record,
+   * as app.ensure_tenant_person does, and the caller makes a new person for it.
+   */
   private async personByPhone(phone: string): Promise<string | null> {
     return withSystem(this.database, {}, async (tx) => {
-      const [row] = await tx
-        .select({ id: schema.person.id })
-        .from(schema.person)
-        .where(eq(schema.person.phoneNumber, phone));
-      return row?.id ?? null;
+      const result = await tx.execute<{ id: string }>(sql`
+        select p.id from person p
+        where p.phone_number = ${phone}
+          and (p.phone_number_verified is true
+               or (p.email like '%@users.invalid'
+                   and not exists (select 1 from account a
+                                   where a.user_id = p.id and a.provider_id = 'credential')))`);
+      if (result.rows[0]) return result.rows[0].id;
+      await tx
+        .update(schema.person)
+        .set({ phoneNumber: null, phoneNumberVerified: null, updatedAt: new Date() })
+        .where(
+          sql`${schema.person.phoneNumber} = ${phone} and ${schema.person.phoneNumberVerified} is not true`,
+        );
+      return null;
     });
+  }
+
+  /** The name this company sees for a member: what it typed while invited, else their own. */
+  private async nameSeenBy(
+    tx: Tx,
+    membership: {
+      readonly personId: string;
+      readonly status: string;
+      readonly invitedName: string | null;
+    },
+  ): Promise<string> {
+    if (membership.status === 'invited' && membership.invitedName) return membership.invitedName;
+    const [row] = await tx
+      .select({ name: schema.person.name })
+      .from(schema.person)
+      .where(eq(schema.person.id, membership.personId));
+    return (row?.name ?? 'Member').slice(0, 200);
   }
 
   private async hasPassword(personId: string): Promise<boolean> {

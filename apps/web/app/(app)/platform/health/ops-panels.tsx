@@ -15,6 +15,7 @@ import { formatTime } from '@/lib/format';
 import {
   ageText,
   heartbeatText,
+  mayRunAgain,
   opsReasonProblem,
   QUEUE_LEVEL_LABELS,
   QUEUE_LEVEL_TONES,
@@ -231,7 +232,7 @@ export function JobsPanel({ canRetry }: { readonly canRetry: boolean }) {
                   {job.lastError ? ` Last error: ${job.lastError}` : ''}
                   {job.retriedAt ? ` Run again ${time(job.retriedAt)}.` : ''}
                 </p>
-                {canRetry ? (
+                {canRetry && mayRunAgain(job) ? (
                   <ReasonAction
                     what={`job ${job.name}`}
                     button="Run again"

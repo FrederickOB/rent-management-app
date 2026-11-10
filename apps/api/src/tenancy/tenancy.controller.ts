@@ -136,6 +136,12 @@ export class TenancyController {
           status: input.status ? [input.status] : undefined,
         }),
       ),
+      search: implement(contract.leases.search).handler(async ({ input }) =>
+        this.leases.list(ctx.actor, {
+          ...input,
+          status: input.status ? [input.status] : undefined,
+        }),
+      ),
       expiring: implement(contract.leases.expiring).handler(({ input }) =>
         this.leases.expiring(ctx.actor, input.days),
       ),

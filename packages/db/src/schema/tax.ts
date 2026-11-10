@@ -403,10 +403,12 @@ export const withholdingCertificate = pgTable(
       sql`(${t.status} = 'awaiting_confirmation') = (${t.decidedBy} is null)`,
     ),
     check(
+      // M11 review S4 (founder 4): an opening withholding certificate of an owner outside the
+      // letting business clears against opening balances (3900); a letting business's, 1160.
       'withholding_certificate_posted_check',
       sql`(${t.status} = 'confirmed') = (${t.entryId} is not null)
           and (${t.status} = 'confirmed') = (${t.debitAccount} is not null)
-          and (${t.debitAccount} is null or ${t.debitAccount} in ('2200', '1160'))`,
+          and (${t.debitAccount} is null or ${t.debitAccount} in ('2200', '1160', '3900'))`,
     ),
   ],
 );

@@ -6,6 +6,10 @@ export const RECOVERY_REASON_MAX = 500;
 
 export const RUNBOOK_PATH = 'docs/runbooks/lost-authenticator.md';
 
+/** The reason goes into the audit chain by value, so it carries no personal data (M11 review). */
+export const RECOVERY_REASON_HINT =
+  'Say how you checked who they are, with no ID numbers or personal details. It is kept in the audit log.';
+
 export function recoveryReasonProblem(reason: string): string | null {
   const length = reason.trim().length;
   if (length < RECOVERY_REASON_MIN)

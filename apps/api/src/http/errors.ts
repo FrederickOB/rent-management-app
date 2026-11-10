@@ -8,6 +8,7 @@ import {
   noticeCheckConflict,
   registerCheckConflict,
   sqlStateOf,
+  tenantCheckConflict,
   type AppLogger,
 } from '@rent/server/core';
 import type { FastifyReply } from 'fastify';
@@ -21,7 +22,10 @@ function fromDatabase(error: unknown): AppError | null {
   if (error instanceof AppError || error instanceof DomainError || error instanceof ORPCError)
     return null;
   const check =
-    registerCheckConflict(error) ?? noticeCheckConflict(error) ?? maintenanceCheckConflict(error);
+    registerCheckConflict(error) ??
+    noticeCheckConflict(error) ??
+    maintenanceCheckConflict(error) ??
+    tenantCheckConflict(error);
   if (check) return check;
   if (sqlStateOf(error) === '23505')
     return conflict(

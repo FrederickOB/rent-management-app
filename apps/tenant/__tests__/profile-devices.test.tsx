@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import Profile from '../app/profile';
 import { PushProvider } from '../src/push-context';
 import { SessionProvider } from '../src/session';
@@ -10,6 +10,7 @@ import { ME } from './fixtures';
 
 const mockListSessions = jest.fn();
 const mockMe = jest.fn();
+const mockRedirect = jest.fn();
 
 jest.mock('expo-notifications', () => ({
   getPermissionsAsync: jest.fn(),
@@ -34,7 +35,10 @@ jest.mock('expo-router', () => ({
   }),
   usePathname: () => '/profile',
   useFocusEffect: jest.fn(),
-  Redirect: () => null,
+  Redirect: ({ href }: { href: string }) => {
+    mockRedirect(href);
+    return null;
+  },
 }));
 jest.mock('../src/api', () => ({
   api: {
@@ -88,6 +92,22 @@ describe('AD-06 the devices signed in, when the list cannot be loaded', () => {
     mockListSessions.mockResolvedValueOnce({ data: [phone], error: null });
     await fireEvent.press(screen.getByTestId('retry-devices'));
     expect(await screen.findByText('Tecno Spark 10')).toBeOnTheScreen();
+    expect(screen.queryByTestId('devices-error')).not.toBeOnTheScreen();
+  });
+
+  it('a list the API refuses with 401 ends the session, and Profile goes to sign-in', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    mockListSessions.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    await renderProfile();
+    // Signed in first: the session was in use when the API stopped accepting it.
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(mockRedirect).not.toHaveBeenCalled();
+
+    await act(async () =>
+      answer({ data: null, error: { status: 401, statusText: 'Unauthorized' } }),
+    );
+    await waitFor(() => expect(mockRedirect).toHaveBeenCalledWith('/sign-in'));
     expect(screen.queryByTestId('devices-error')).not.toBeOnTheScreen();
   });
 

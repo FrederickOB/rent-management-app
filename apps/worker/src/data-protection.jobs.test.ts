@@ -1,6 +1,10 @@
 import { Writable } from 'node:stream';
 import { createLogger } from '@rent/server/core';
-import { DATA_PROTECTION_EXPORT_JOB, RETENTION_REVIEW_JOB } from '@rent/server/data-protection';
+import {
+  DATA_PROTECTION_EXPORT_CLEANUP_JOB,
+  DATA_PROTECTION_EXPORT_JOB,
+  RETENTION_REVIEW_JOB,
+} from '@rent/server/data-protection';
 import type { JobContext, JobDefinition } from '@rent/server/jobs';
 import { describe, expect, it, vi } from 'vitest';
 import { DATA_PROTECTION_EVENT_TYPES, dataProtectionJobs } from './data-protection.jobs';
@@ -21,6 +25,7 @@ function harness() {
   const dataProtection = {
     prepareExport: vi.fn().mockResolvedValue('ready'),
     failExport: vi.fn().mockResolvedValue(undefined),
+    cleanupExports: vi.fn().mockResolvedValue({ deleted: 2 }),
   };
   const retention = {
     run: vi.fn().mockResolvedValue({
@@ -97,5 +102,17 @@ describe('NFR-DP the data protection jobs (M11 decision 5, plan 4.14)', () => {
       stored: true,
       pastRetention: { messages: 0 },
     });
+  });
+
+  it('B6 deletes exports older than 7 days daily, logging only how many', async () => {
+    const h = harness();
+    const job = h.byName.get(DATA_PROTECTION_EXPORT_CLEANUP_JOB)!;
+    expect(job.scope).toBe('system');
+    expect(job.cron).toBe('45 3 * * *');
+    await job.handle({}, h.ctx);
+    expect(h.dataProtection.cleanupExports).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(h.output().trim()) as Record<string, unknown>;
+    expect(logged).toMatchObject({ deleted: 2 });
+    expect(Object.keys(logged).sort()).toEqual(['deleted', 'level', 'msg', 'name', 'time']);
   });
 });

@@ -21,9 +21,10 @@ import {
   BATCH_STATUS_LABELS,
   canCommit,
   countRows,
-  hasPreview,
   isBusy,
   onboardingMessage,
+  pollEvery,
+  showsPreview,
   totalsRows,
 } from '@/lib/onboarding';
 import { formatMinor } from '@/lib/tenancy-format';
@@ -37,8 +38,6 @@ import {
 } from '@/lib/upload';
 import { useInterval } from '@/lib/use-interval';
 import { BalancesPreview } from './balances-preview';
-
-const POLL_MS = 1_500;
 
 const problemText = (failure: unknown): string =>
   onboardingMessage(failure) ?? toProblem(failure).message;
@@ -101,7 +100,9 @@ export function BatchFlow({
       setProblem(problemText(failure));
     }
   }, [batch, onChanged]);
-  useInterval(() => void poll(), batch && isBusy(batch.status) ? POLL_MS : null);
+  // While the worker is busy, and while the batch waits for the second person (M11 review), so it
+  // turns to posted, or turned down, without a reload.
+  useInterval(() => void poll(), batch ? pollEvery(batch.status) : null);
 
   async function downloadTemplate() {
     setTemplatePending(true);
@@ -162,7 +163,12 @@ export function BatchFlow({
       onChanged();
     } catch (failure) {
       setProblem(onboardingMessage(failure) ?? moneyProblem(failure));
-      if (isKeyReused(failure)) keeper.reset();
+      // A reused key means an earlier attempt reached the API and may have committed: the key is
+      // kept (M11 review), and the batch is read again so its status shows what happened.
+      if (isKeyReused(failure))
+        await api()
+          .onboarding.batch({ batchId: batch.id })
+          .then(setBatch, () => undefined);
     } finally {
       setWorking(null);
     }
@@ -275,7 +281,11 @@ function Report({
       {batch.status === 'posted' ? (
         <Alert tone="success" title="Posted">
           The opening balances are on the books, dated the cut-over
-          {batch.postedAt ? `, posted ${time(batch.postedAt)}` : ''}.
+          {batch.postedAt ? `, posted ${time(batch.postedAt)}` : ''}. Each lease’s balance is now on
+          its lease page.{' '}
+          <Link href="/leases" className="font-medium underline underline-offset-2">
+            Go to the leases
+          </Link>
         </Alert>
       ) : null}
 
@@ -351,8 +361,7 @@ function Report({
         </>
       ) : null}
 
-      {hasPreview(batch.kind) &&
-      ['validated', 'awaiting_approval', 'posting', 'posted'].includes(batch.status) ? (
+      {showsPreview(batch) ? (
         <BalancesPreview batchId={batch.id} adjustment={batch.kind === 'adjustment'} />
       ) : null}
 

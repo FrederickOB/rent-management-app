@@ -289,6 +289,16 @@ export async function reencodeImage(bytes: Buffer, contentType: string): Promise
 
 const sha256Of = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
+/**
+ * What arrived, when an upload was re-encoded before it was stored (F10; founder, review round):
+ * its SHA-256 and byte count, kept on the document row and in its audit event, so the original is
+ * shown to have arrived whole although only the re-encoded copy is kept.
+ */
+export interface OriginalFile {
+  readonly sha256: string;
+  readonly bytes: number;
+}
+
 /** A media upload checked and streamed to write-once storage, waiting to be recorded. */
 export interface StagedMedia {
   readonly companyId: string;
@@ -309,6 +319,8 @@ export interface StagedMedia {
   readonly scan: ScanResult | null;
   /** F10: the upload's own hash when a photo was re-encoded to drop its metadata. */
   readonly originalSha256: string | null;
+  /** F10 (founder, review round): the upload's own byte count, with its hash. */
+  readonly originalBytes: number | null;
 }
 
 /** The domain's media refusals as named 400s (`MEDIA_TYPE_MISMATCH`, `MEDIA_TOO_LARGE`, ...). */
@@ -334,6 +346,8 @@ export interface StagedEvidence {
   readonly scan: ScanResult | null;
   /** F10: the upload's own hash when a photo was re-encoded to drop its metadata. */
   readonly originalSha256: string | null;
+  /** F10 (founder, review round): the upload's own byte count, with its hash. */
+  readonly originalBytes: number | null;
 }
 
 /** One evidence key per upload, so staging it again finds the copy already made. */
@@ -562,13 +576,13 @@ export class DocumentsService {
       readonly dataSnapshot?: Record<string, unknown> | null;
       readonly createdBy?: string | null;
       readonly origin?: DocumentOrigin;
-      /** Facts for the `document.stored` audit event: ids and hashes (F10: `originalSha256`). */
-      readonly auditData?: Record<string, string>;
+      /** F10: what arrived, when a photo was re-encoded before it was stored. */
+      readonly original?: OriginalFile | null;
     },
   ): Promise<string> {
     return this.insertDocument(tx, {
       origin: meta.origin ?? 'generated',
-      ...(meta.auditData ? { auditData: meta.auditData } : {}),
+      original: meta.original ?? null,
       companyId: file.companyId,
       kind: meta.kind,
       contentType: file.contentType,
@@ -886,7 +900,7 @@ export class DocumentsService {
       versionId: string,
       lock: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
       scan: ScanResult | null,
-      originalSha256: string | null = null,
+      original: OriginalFile | null = null,
     ): StagedMedia => ({
       companyId: ctx.companyId,
       uploadId,
@@ -902,7 +916,8 @@ export class DocumentsService {
       retainUntil: lock.retainUntil,
       createdBy: uploader,
       scan,
-      originalSha256,
+      originalSha256: original?.sha256 ?? null,
+      originalBytes: original?.bytes ?? null,
     });
     const fromEarlier = async (info: ObjectInfo): Promise<StagedMedia> => {
       if (!info.versionId || !info.sha256)
@@ -981,7 +996,7 @@ export class DocumentsService {
               versionId,
               retention,
               await this.preScan(cleaned),
-              sha256Of(original),
+              { sha256: sha256Of(original), bytes: original.length },
             ),
         );
       }
@@ -1038,6 +1053,9 @@ export class DocumentsService {
         retentionMode: staged.retentionMode,
         retainUntil: staged.retainUntil,
         createdBy: staged.createdBy,
+        // F10 (founder, review round): what arrived, before the re-encoding dropped its metadata.
+        originalSha256: staged.originalSha256,
+        originalBytes: staged.originalBytes,
       })
       .returning({ id: schema.document.id });
     await this.audit.append(tx, {
@@ -1049,7 +1067,9 @@ export class DocumentsService {
         kind,
         sha256: staged.sha256,
         writeOnce: true,
-        ...(staged.originalSha256 ? { originalSha256: staged.originalSha256 } : {}),
+        ...(staged.originalSha256
+          ? { originalSha256: staged.originalSha256, originalBytes: staged.originalBytes }
+          : {}),
       },
     });
     await this.recordScan(tx, staged.companyId, row!.id, 'upload', staged.scan);
@@ -1214,7 +1234,7 @@ export class DocumentsService {
       versionId: string,
       lock: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
       scan: ScanResult | null,
-      originalSha256: string | null = null,
+      original: OriginalFile | null = null,
     ): StagedEvidence => ({
       companyId: ctx.companyId,
       uploadId,
@@ -1227,7 +1247,8 @@ export class DocumentsService {
       retainUntil: lock.retainUntil,
       createdBy: ctx.personId,
       scan,
-      originalSha256,
+      originalSha256: original?.sha256 ?? null,
+      originalBytes: original?.bytes ?? null,
     });
     const fromEarlier = async (info: ObjectInfo) => {
       const [bytes, versionId, lock] = await this.earlierEvidence(
@@ -1292,7 +1313,7 @@ export class DocumentsService {
       stored.versionId,
       retention,
       await this.preScan(bytes),
-      cleaned ? sha256Of(uploaded) : null,
+      cleaned ? { sha256: sha256Of(uploaded), bytes: uploaded.length } : null,
     );
   }
 
@@ -1341,7 +1362,10 @@ export class DocumentsService {
     const documentId = await this.insertDocument(tx, {
       origin: 'upload',
       scan: staged.scan,
-      ...(staged.originalSha256 ? { auditData: { originalSha256: staged.originalSha256 } } : {}),
+      original:
+        staged.originalSha256 && staged.originalBytes
+          ? { sha256: staged.originalSha256, bytes: staged.originalBytes }
+          : null,
       companyId: staged.companyId,
       kind,
       contentType: staged.contentType,
@@ -1428,8 +1452,11 @@ export class DocumentsService {
       origin: DocumentOrigin;
       /** For an upload: the scan staging took of exactly these bytes. */
       scan?: ScanResult | null;
-      /** Facts added to the `document.stored` audit event (ids and hashes only). */
-      auditData?: Record<string, string>;
+      /**
+       * F10 (founder, review round): a re-encoded upload's original hash and byte count, on the
+       * document row and in its `document.stored` audit event.
+       */
+      original?: OriginalFile | null;
       id?: string;
       companyId: string;
       kind: string;
@@ -1471,6 +1498,8 @@ export class DocumentsService {
         dataSnapshot: doc.dataSnapshot ?? null,
         dataSnapshotSha256: snapshotSha,
         createdBy: doc.createdBy ?? null,
+        originalSha256: doc.original?.sha256 ?? null,
+        originalBytes: doc.original?.bytes ?? null,
       })
       .returning({ id: schema.document.id });
     await this.audit.append(tx, {
@@ -1478,7 +1507,14 @@ export class DocumentsService {
       action: 'document.stored',
       recordType: 'document',
       recordId: row!.id,
-      data: { kind: doc.kind, sha256, writeOnce: doc.writeOnce, ...doc.auditData },
+      data: {
+        kind: doc.kind,
+        sha256,
+        writeOnce: doc.writeOnce,
+        ...(doc.original
+          ? { originalSha256: doc.original.sha256, originalBytes: doc.original.bytes }
+          : {}),
+      },
     });
     await this.recordScan(tx, doc.companyId, row!.id, doc.origin, doc.scan ?? null);
     return row!.id;

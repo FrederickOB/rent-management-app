@@ -10,10 +10,10 @@ import { proxy } from '../proxy';
 import { JOB_SHEET_FORM_LIMITS } from './body-limit';
 import { forgetUploads } from './job-sheet-store';
 import { clientFrom } from './links-api';
-import { readMultipart } from './multipart';
+import { readDeadline, readMultipart } from './multipart';
 import { installPeerAddress, missingClientIpHeader, PEER_ADDRESS_HEADER } from './peer-address';
 import { HSTS_VALUE, secured, securityHeaders } from './security-headers';
-import { admitUpload, resetUploadGate } from './upload-gate';
+import { admitUpload, rememberedAddresses, resetUploadGate } from './upload-gate';
 
 // The M11 security review (ASVS L2) for apps/links: F2, the job sheet's photo forms are guarded
 // before they are read and then read part by part, never whole into memory; F8, the client's
@@ -100,6 +100,10 @@ afterEach(() => {
 
 describe('NFR-SEC F2: a photo form is guarded before it is read (MI-06)', () => {
   it('an address with two photo forms under way gets no third, and its body is never read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ live: true })),
+    );
     const first = admitUpload('203.0.113.50');
     const second = admitUpload('203.0.113.50');
     expect([first.ok, second.ok]).toEqual([true, true]);
@@ -127,11 +131,44 @@ describe('NFR-SEC F2: a photo form is guarded before it is read (MI-06)', () => 
       expect(refused.headers.get('content-security-policy')).toContain("default-src 'none'");
     }
     // The token check is the only call made: no upload is asked for, nothing reaches storage.
-    expect(asked).toEqual(['/job-sheets/open', '/job-sheets/open']);
+    expect(asked).toEqual(['/job-sheets/check', '/job-sheets/check']);
     // Both refusals gave their places back (two at once per address).
     const a = admitUpload('203.0.113.60');
     const b = admitUpload('203.0.113.60');
     expect([a.ok, b.ok]).toEqual([true, true]);
+  });
+
+  it('posts to unknown links use up nothing of an address’s upload window (M11 review C10)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ code: 'NOT_FOUND' }, { status: 404 })),
+    );
+    for (let i = 0; i < 35; i += 1) {
+      const refused = await start(unread({ 'x-forwarded-for': '203.0.113.70' }), params);
+      expect(refused.status).toBe(404);
+    }
+    expect(rememberedAddresses()).toBe(0);
+    expect(admitUpload('203.0.113.70').ok).toBe(true);
+  });
+
+  it('a closed, expired or replaced sheet is refused before its body is read, and goes to its own page (M11 review B13)', async () => {
+    const asked: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        asked.push(new URL(url).pathname);
+        return Response.json({ live: false });
+      }),
+    );
+    for (const route of [complete, start]) {
+      const refused = await route(unread({ 'x-forwarded-for': '203.0.113.71' }), params);
+      expect(refused.status).toBe(303);
+      expect(refused.headers.get('location')).toBe(`/j/${TOKEN}`);
+      expect(refused.headers.get('content-security-policy')).toContain("default-src 'none'");
+    }
+    // The check records nothing: the sheet's open is never called for a photo form.
+    expect(asked).toEqual(['/job-sheets/check', '/job-sheets/check']);
+    expect(rememberedAddresses()).toBe(0);
   });
 
   it('the server takes only so many photo forms at once, and frees a place once one is handled', () => {
@@ -142,6 +179,21 @@ describe('NFR-SEC F2: a photo form is guarded before it is read (MI-06)', () => 
     if (a.ok) a.release();
     expect(admitUpload('198.51.100.3').ok).toBe(true);
     if (b.ok) b.release();
+  });
+
+  it('the gate forgets addresses that hold nothing and whose window has passed (M11 review)', () => {
+    const now = Date.parse('2026-11-10T09:00:00Z');
+    for (let i = 0; i < 50; i += 1) {
+      const once = admitUpload(`198.51.100.${i}`, now);
+      if (once.ok) once.release();
+    }
+    const held = admitUpload('203.0.113.9', now);
+    expect(rememberedAddresses()).toBe(51);
+    // Past the window, the next form's sweep keeps only the address still holding a place.
+    const later = admitUpload('192.0.2.200', now + 11 * 60_000);
+    expect(rememberedAddresses()).toBe(2);
+    if (held.ok) held.release();
+    if (later.ok) later.release();
   });
 
   it('an address gets 30 photo forms in 10 minutes, then waits', () => {
@@ -179,6 +231,77 @@ describe('NFR-SEC F2: a photo form is guarded before it is read (MI-06)', () => 
     expect(many.pulled()).toBeLessThan(many.size);
   });
 
+  it('a body that stops arriving is refused after the idle wait, and its photo is not kept (M11 review)', async () => {
+    const boundary = '----rent-test-boundary';
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent) return new Promise<void>(() => undefined); // nothing more, ever
+        sent = true;
+        controller.enqueue(
+          new TextEncoder().encode(
+            `--${boundary}\r\nContent-Disposition: form-data; name="photos"; filename="a.jpg"\r\nContent-Type: image/jpeg\r\n\r\n${'x'.repeat(1000)}`,
+          ),
+        );
+      },
+    });
+    const request = new Request('http://links.test/', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      duplex: 'half',
+    } as RequestInit);
+    const begun = Date.now();
+    const read = await readMultipart(request, { ...JOB_SHEET_FORM_LIMITS, idleMs: 100 });
+    expect(read).toEqual({ ok: false, error: 'UPLOAD_TOO_SLOW' });
+    expect(Date.now() - begun).toBeLessThan(2_000);
+    expect(ourFolders()).toEqual([]);
+  });
+
+  it('a body that keeps trickling is refused at its deadline (M11 review)', async () => {
+    const boundary = '----rent-test-boundary';
+    let first = true;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        controller.enqueue(
+          new TextEncoder().encode(
+            first
+              ? `--${boundary}\r\nContent-Disposition: form-data; name="photos"; filename="a.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`
+              : 'x',
+          ),
+        );
+        first = false;
+      },
+    });
+    const request = new Request('http://links.test/', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      duplex: 'half',
+    } as RequestInit);
+    const read = await readMultipart(request, {
+      ...JOB_SHEET_FORM_LIMITS,
+      idleMs: 1_000,
+      deadlineMs: 300,
+      minBytesPerSecond: undefined,
+    });
+    expect(read).toEqual({ ok: false, error: 'UPLOAD_TOO_SLOW' });
+  });
+
+  it('the deadline follows the declared length: at least a minute, at most 20 (M11 review)', () => {
+    const declaring = (bytes: number | null) =>
+      new Request('http://links.test/', {
+        method: 'POST',
+        headers: bytes === null ? {} : { 'content-length': String(bytes) },
+      });
+    expect(readDeadline(declaring(3_000_000), JOB_SHEET_FORM_LIMITS)).toBe(60_000);
+    // 40 minutes' worth at 64 KB a second, held to 20.
+    expect(readDeadline(declaring(40 * 64 * 1024 * 60), JOB_SHEET_FORM_LIMITS)).toBe(20 * 60_000);
+    expect(readDeadline(declaring(10 * 64 * 1024 * 60), JOB_SHEET_FORM_LIMITS)).toBe(10 * 60_000);
+    expect(readDeadline(declaring(null), JOB_SHEET_FORM_LIMITS)).toBe(20 * 60_000);
+  });
+
   it('photos are kept on disk while the form is handled, and the folder goes afterwards', async () => {
     const before = ourFolders();
     vi.stubGlobal(
@@ -186,6 +309,7 @@ describe('NFR-SEC F2: a photo form is guarded before it is read (MI-06)', () => 
       vi.fn(async (url: string) => {
         if (url === STORAGE) return new Response(null, { status: 204 });
         const path = new URL(url).pathname;
+        if (path === '/job-sheets/check') return Response.json({ live: true });
         if (path === '/job-sheets/uploads') {
           // While the post is handled, its photos are in a folder of their own.
           expect(ourFolders().length).toBe(before.length + 1);
@@ -246,6 +370,15 @@ describe('NFR-SEC F8: the client’s address is never the client’s own word (T
       clientFrom(new Headers({ 'x-forwarded-for': '6.6.6.6' }), { CLIENT_IP_HEADER: 'x-real-ip' })
         .ip,
     ).toBe('unknown');
+  });
+
+  it('the edge’s header carries one address: of a list only the last counts, and a non-address is unknown (M11 review)', () => {
+    const edge = { CLIENT_IP_HEADER: 'x-real-ip' };
+    const from = (value: string) => clientFrom(new Headers({ 'x-real-ip': value }), edge).ip;
+    expect(from('6.6.6.6, 198.51.100.99')).toBe('198.51.100.99');
+    expect(from(' 2001:db8::7 ')).toBe('2001:db8::7');
+    expect(from('not-an-address')).toBe('unknown');
+    expect(from('198.51.100.99; drop')).toBe('unknown');
   });
 
   it('with no edge, the connection’s own address, never X-Forwarded-For', () => {

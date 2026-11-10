@@ -3,13 +3,15 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
   expect,
+  type APIRequestContext,
   type Browser,
   type BrowserContext,
   type Locator,
   type Page,
 } from '@playwright/test';
 import { codeFor, DEMO_PASSWORD, ready, submitAuth, unique } from './helpers';
-import { invitationToken } from './subscription-support';
+import { FAKE_PROVIDERS } from './register-helpers';
+import { invitationToken, ok } from './subscription-support';
 
 /**
  * Helpers for the M11 onboarding spec (plan section 6; P25). The workbooks are built at run time
@@ -108,6 +110,34 @@ export async function inviteManager(
   });
   expect(confirmed.status(), `self-confirm the invite: ${await confirmed.text()}`).toBe(200);
   return { email, name };
+}
+
+/**
+ * Every message the fake providers hold for a phone, on any channel (SMS and WhatsApp address it
+ * by E.164), so new ones can be told apart. The tenant in the spec has no email and no app.
+ */
+export async function messageIds(request: APIRequestContext, phone: string): Promise<Set<string>> {
+  const response = await request.get(`${FAKE_PROVIDERS}/messages?to=${encodeURIComponent(phone)}`);
+  return new Set(((await response.json()) as { id: string }[]).map((m) => m.id));
+}
+
+/**
+ * Waits for the outbox to drain and the jobs it queued to run (M11 review C8), read from System
+ * health's queues as a platform admin: no queue has a job due and waiting, and none is running,
+ * twice in a row a few seconds apart. The outbox relay publishes every second, so an event written
+ * before the first look has reached its queue by the second.
+ */
+export async function jobsSettled(platform: Page): Promise<void> {
+  let quiet = 0;
+  for (let look = 0; look < 60 && quiet < 2; look += 1) {
+    await platform.waitForTimeout(2_500);
+    const queues = await ok<{ name: string; active: number; oldestAgeSeconds: number | null }[]>(
+      await platform.request.get('/api/v1/platform/ops/queues'),
+      'read the queues',
+    );
+    quiet = queues.every((q) => q.active === 0 && q.oldestAgeSeconds === null) ? quiet + 1 : 0;
+  }
+  expect(quiet, 'the queues settle: nothing due is waiting or running').toBe(2);
 }
 
 /** Waits until a batch card's status reads one of these. */

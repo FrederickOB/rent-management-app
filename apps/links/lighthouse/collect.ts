@@ -32,7 +32,22 @@ export const TENANT_URL = (process.env.TENANT_WEB_ORIGIN ?? 'http://localhost:80
 );
 
 interface Lhr {
-  readonly audits: Record<string, { readonly numericValue?: number } | undefined>;
+  readonly finalDisplayedUrl?: string;
+  readonly mainDocumentUrl?: string;
+  readonly audits: Record<
+    string,
+    | {
+        readonly numericValue?: number;
+        readonly details?: {
+          readonly items?: readonly {
+            readonly url?: string;
+            readonly statusCode?: number;
+            readonly resourceType?: string;
+          }[];
+        };
+      }
+    | undefined
+  >;
   readonly runtimeError?: { readonly message?: string };
 }
 type Lighthouse = (
@@ -121,8 +136,23 @@ export interface Measured {
 let saved = 0;
 
 /**
+ * What the measured page must be (M11 review C9), so a report never stands for another page: a
+ * sign-in screen after a lost session, or a link that says it was replaced.
+ */
+export interface Expected {
+  /** What the page shows, checked in the same browser just before Lighthouse measures it. */
+  readonly marker: (page: Page) => Promise<void>;
+  /** The address Lighthouse must end on, when the page moves on from the one asked for. */
+  readonly finalUrl?: string;
+  /** The document's status, 200 unless said. Lighthouse measures a 404 only when told to. */
+  readonly status?: number;
+}
+
+/**
  * Measures one page. `firstVisit` empties the browser's cache first; `keepStorage` keeps the
  * session (cookies and the app's storage) for the signed-in screens, and for a repeat visit.
+ * The page is checked against `expect` first, then the report: the address it ended on, and its
+ * document's status.
  */
 export async function measure(
   browser: MeasuringBrowser,
@@ -132,10 +162,21 @@ export async function measure(
     readonly url: string;
     readonly firstVisit: boolean;
     readonly keepStorage: boolean;
+    readonly expect: Expected;
   },
 ): Promise<Measured> {
+  const status = options.expect.status ?? 200;
+  const finalUrl = options.expect.finalUrl ?? options.url;
+  const page = await browser.page();
+  await page.goto(options.url);
+  try {
+    await options.expect.marker(page);
+  } catch (error) {
+    throw new Error(`${options.name} is not the page to measure`, { cause: error });
+  }
+  // Nothing of the check keeps running while Lighthouse measures.
+  await page.goto('about:blank');
   if (options.firstVisit && options.keepStorage) {
-    const page = await browser.page();
     const cdp = await browser.context.newCDPSession(page);
     await cdp.send('Network.clearBrowserCache');
     await cdp.detach();
@@ -150,13 +191,30 @@ export async function measure(
       logLevel: 'error',
       disableStorageReset: options.keepStorage,
     },
-    CONFIG,
+    status === 200
+      ? CONFIG
+      : { ...CONFIG, settings: { ...CONFIG.settings, ignoreStatusCode: true } },
   );
   if (!run) throw new Error(`Lighthouse returned nothing for ${options.name}`);
   if (run.lhr.runtimeError?.message)
     throw new Error(`Lighthouse failed on ${options.name}: ${run.lhr.runtimeError.message}`);
+  if (run.lhr.finalDisplayedUrl !== finalUrl)
+    throw new Error(
+      `Lighthouse measured ${options.name} at another address: ${tokenless(run.lhr.finalDisplayedUrl)}, not ${tokenless(finalUrl)}`,
+    );
+  const document = run.lhr.audits['network-requests']?.details?.items?.find(
+    (item) => item.resourceType === 'Document' && item.url === run.lhr.mainDocumentUrl,
+  );
+  if (document?.statusCode !== status)
+    throw new Error(
+      `${options.name} answered ${String(document?.statusCode)} to Lighthouse, not ${status}`,
+    );
   const label = options.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-  const json = JSON.stringify(run.lhr).replace(/\/([lpruj])\/[A-Za-z0-9_-]{43}/g, `/$1/${label}`);
+  // Only in addresses: a screenshot's base64 can hold the same shape, and must stay as it is.
+  const json = JSON.stringify(run.lhr).replace(
+    /(:\/\/[^\s"/]+)\/([lpruj])\/[A-Za-z0-9_-]{43}/g,
+    `$1/$2/${label}`,
+  );
   const dir = path.join(RESULTS, options.group, '.lighthouseci');
   mkdirSync(dir, { recursive: true });
   saved += 1;
@@ -172,6 +230,10 @@ export async function measure(
     tbtMs: value('total-blocking-time'),
   };
 }
+
+/** An address with its link token replaced, for messages. */
+const tokenless = (url: string | undefined) =>
+  String(url).replace(/\/([lpruj])\/[A-Za-z0-9_-]{43}/g, '/$1/<token>');
 
 /** Appends what was measured, for run.mjs's summary. */
 export function record(measured: readonly Measured[]): void {

@@ -165,13 +165,23 @@ export interface OpeningItems {
 
 // What an adjustment lowers.
 
+/**
+ * Arrears lowered by `amountMinor`, never below what has been paid: one opening line (`lineId`),
+ * or a month (`kind` and `periodStart`), across its opening lines, latest first.
+ */
+export type OpeningArrearsLowering =
+  | { readonly itemId: string; readonly lineId: string; readonly amountMinor: number }
+  | {
+      readonly itemId: string;
+      readonly lineId?: null;
+      readonly kind: RecurringKind;
+      readonly periodStart: string;
+      readonly amountMinor: number;
+    };
+
 export interface OpeningLowering {
   /** An opening line's arrears lowered by `amountMinor`, never below what has been paid of it. */
-  readonly arrears?: readonly {
-    readonly itemId: string;
-    readonly lineId: string;
-    readonly amountMinor: number;
-  }[];
+  readonly arrears?: readonly OpeningArrearsLowering[];
   /**
    * An advance lowered by `amountMinor`, never below what has been drawn from it: the credit of one
    * opening payment, or with no `paymentId`, of the lease's opening payments, latest first.
@@ -401,6 +411,10 @@ function raise(plan: Plan, items: OpeningItems, today: string): void {
         'opening.period_billed',
         `The platform already bills the period from ${periodStart}`,
       );
+    if (plan.state.lines.some((l) => l.id === item.lineId))
+      throw new DomainError('opening.line_exists', `Line ${item.lineId} already exists`);
+    // A month already brought in takes another opening line for what is raised (founder,
+    // 2026-11-10): on the same charge period, after the earlier ones in allocation order.
     fresh(item.lineId, 'Line');
     plan.addLine({
       id: item.lineId,
@@ -623,39 +637,61 @@ export function planOpeningAdjustment(
 
   for (const change of lower.arrears ?? []) {
     positive(change.amountMinor, 'The change');
-    const line = plan.state.lines.find((l) => l.id === change.lineId);
-    if (!line || line.opening !== true || !isRecurring(line.kind))
+    const openingLines = plan.state.lines.filter((l) => l.opening === true && isRecurring(l.kind));
+    const targets =
+      'kind' in change
+        ? openingLines
+            .filter(
+              (l) =>
+                l.kind === change.kind &&
+                l.periodStart === isoDate(change.periodStart, 'The period'),
+            )
+            .sort((a, b) => b.sequence - a.sequence)
+        : openingLines.filter((l) => l.id === change.lineId);
+    if (targets.length === 0)
       throw new DomainError('opening.not_opening_line', 'Only opening arrears can be lowered here');
-    const { outstandingMinor } = lineBalance(line, plan.state.allocations);
-    if (change.amountMinor > outstandingMinor)
+    // Each line's unpaid part, latest line first; never into what has been paid.
+    let need = change.amountMinor;
+    const parts: { line: BillingLine; amountMinor: number }[] = [];
+    for (const line of targets) {
+      if (need === 0) break;
+      const take = Math.min(lineBalance(line, plan.state.allocations).outstandingMinor, need);
+      if (take <= 0) continue;
+      parts.push({ line, amountMinor: take });
+      need -= take;
+    }
+    if (need > 0)
       throw new DomainError(
         'opening.below_paid',
         'Opening arrears cannot be lowered below what has been paid of them',
       );
-    plan.allocate(
-      {
-        lineId: line.id,
-        source: 'credit_note',
-        paymentId: null,
-        amountMinor: change.amountMinor,
-        recordId: change.itemId,
-      },
-      change.itemId,
-      ctx.cutOver,
-    );
+    for (const part of parts)
+      plan.allocate(
+        {
+          lineId: part.line.id,
+          source: 'credit_note',
+          paymentId: null,
+          amountMinor: part.amountMinor,
+          recordId: change.itemId,
+        },
+        change.itemId,
+        ctx.cutOver,
+      );
     plan.post({
       rule: 'P25',
       key: plan.key(change.itemId),
       itemId: change.itemId,
       valueDate: ctx.cutOver,
-      lines: creditNoteLines({
-        bookId: ctx.bookId,
-        lease: ctx.lease,
-        invoiceLineId: line.id,
-        chargedTo: '3900',
-        unpaidMinor: change.amountMinor,
-        released: [],
-      }),
+      lines: parts.flatMap((part) =>
+        creditNoteLines({
+          bookId: ctx.bookId,
+          lease: ctx.lease,
+          invoiceLineId: part.line.id,
+          chargedTo: '3900',
+          unpaidMinor: part.amountMinor,
+          released: [],
+        }),
+      ),
     });
   }
 
@@ -1005,6 +1041,11 @@ export function openingLeaseFigures(input: {
    */
   readonly depositAdjustmentMinor?: number;
   readonly withholdingOutstandingMinor?: number;
+  /**
+   * An imported lease's billing start (founder decision 3): paid-until floors at the day before
+   * it, or at the day before the earliest opening month still owed (`forwardWalk`'s `floor`).
+   */
+  readonly floor?: { readonly billingStart: string } | null;
 }): OpeningLeaseFigures {
   const asOf = isoDate(input.asOf, 'The date');
   const { lines, allocations, payments } = input.state;
@@ -1015,14 +1056,27 @@ export function openingLeaseFigures(input: {
   let arrears = 0;
   let prepaidOnLines = 0;
   let deposits = 0;
+  // Each line's allocations once, rather than all of them for every line.
+  const byLine = new Map<string, AllocationRow[]>();
+  for (const a of allocations) {
+    const rows = byLine.get(a.lineId);
+    if (rows) rows.push(a);
+    else byLine.set(a.lineId, [a]);
+  }
+  const buckets = new Map<string, AgeBucket | null>();
+  const bucketOf = (dueDate: string): AgeBucket | null => {
+    if (!buckets.has(dueDate)) buckets.set(dueDate, ageBucket(dueDate, asOf));
+    return buckets.get(dueDate) ?? null;
+  };
   for (const line of lines) {
     const posting = postingClassOf(line);
-    const balance = lineBalance(line, allocations);
+    const balance = lineBalance(line, byLine.get(line.id) ?? []);
     if (posting === 'deposit') deposits += balance.settledMinor;
     else if (posting === 'prepayment') prepaidOnLines += balance.settledMinor;
     else if (line.dueDate <= asOf) {
       arrears += balance.outstandingMinor;
-      const bucket = ageBucket(line.dueDate, asOf);
+      // Only what is still owed is aged (a paid line adds nothing to any bucket), each due date once.
+      const bucket = balance.outstandingMinor > 0 ? bucketOf(line.dueDate) : null;
       if (bucket) arrearsByAge[bucket] += balance.outstandingMinor;
     }
   }
@@ -1030,6 +1084,7 @@ export function openingLeaseFigures(input: {
   const advance = prepaidOnLines + pools.reduce((sum, p) => sum + p.amountMinor, 0);
   const walk = forwardWalk(walkLines({ lines, allocations, scheduled: input.scheduled }), pools, {
     lastDay: input.lastDay ?? null,
+    floor: input.floor ?? null,
   });
   const withholding = input.withholdingOutstandingMinor ?? 0;
   const adjustment = input.depositAdjustmentMinor ?? 0;

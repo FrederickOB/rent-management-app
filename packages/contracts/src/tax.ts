@@ -369,7 +369,8 @@ export const withholdingSchema = z.object({
       decidedAt: iso.nullable(),
       rejectReason: z.string().nullable(),
       /** 2200 (settles the owner's rent tax) or 1160 (a credit for a letting business). */
-      debitAccount: z.enum(['2200', '1160']).nullable(),
+      /** M11 review S4: 3900 for an opening withholding of an owner outside the letting business. */
+      debitAccount: z.enum(['2200', '1160', '3900']).nullable(),
       /** Whether you may confirm or reject it (a user for the owner, never its uploader). */
       mayDecide: z.boolean(),
       /**

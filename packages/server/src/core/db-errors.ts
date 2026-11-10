@@ -148,6 +148,28 @@ export function maintenanceCheckConflict(error: unknown): AppError | null {
   }
 }
 
+/**
+ * M11 review B8 (0078): an anonymised tenant or contact keeps no personal data (Act 843), so its
+ * personal fields are never filled in again. The service refuses first; the database (RA127, and
+ * RA126 for `anonymised_at` itself) is the backstop.
+ */
+export const tenantAnonymised = () =>
+  conflict(
+    'tenant_anonymised',
+    'This tenant’s personal data was erased on request (Data Protection Act, 2012), so it is not filled in again.',
+  );
+
+/** RA126 and RA127 as the same clear conflict (409); null for any other failure. */
+export function tenantCheckConflict(error: unknown): AppError | null {
+  switch (sqlStateOf(error)) {
+    case 'RA126':
+    case 'RA127':
+      return tenantAnonymised();
+    default:
+      return null;
+  }
+}
+
 /** Runs `fn`, turning a commit-time register check into its clear conflict (409). */
 export async function withRegisterChecks<T>(fn: () => Promise<T>): Promise<T> {
   try {

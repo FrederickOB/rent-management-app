@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray, schema, sql, withSystem, type Database, type Tx } from '@rent/db';
+import { and, eq, inArray, schema, sql, withSystem, type Database, type Tx } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import { platformAdminFor } from '../admin/platform-admin';
 import { AuditService } from '../audit/audit.service';
@@ -14,7 +14,7 @@ import { PROCESS_WEBHOOK_JOB } from '../payments/webhooks.service';
 import { PolicyService } from '../policy/policy.service';
 import { platformCompanyId, withPlatform } from '../subscription/platform';
 import { OPS_CLI_MAX, OPS_LIST_LIMIT, OPS_RETRY_JOB } from './constants';
-import { consoleOperator, isUuid, opsReason, type OpsOperator } from './operator';
+import { consoleOperator, isUuid, operatorData, opsReason, type OpsOperator } from './operator';
 
 /** A dead-lettered job as the console shows it (the contract's `opsJobSchema`): no payload. */
 export interface OpsJobView {
@@ -27,9 +27,15 @@ export interface OpsJobView {
   readonly failedAt: Date | null;
   readonly attempts: number;
   readonly lastError: string | null;
-  /** The last retry a platform admin made of it. */
+  /** When a platform admin retried it (each dead letter is retried once, review B12). */
   readonly retriedAt: Date | null;
+  /** M11 review C7: where the retry stands, from its ops_action rows; null before any. */
+  readonly retryOutcome: RetryOutcome | null;
 }
+
+/** A retry's progress (M11 review C7): asked for, then what the worker's `ops.retry-job` did. */
+export type RetryOutcome = 'queued' | 'sent' | 'gone' | 'done_already';
+const RETRY_OUTCOMES: readonly string[] = ['queued', 'sent', 'gone', 'done_already'];
 
 /** Which dead-lettered jobs an incident command retries (`pnpm ops:redrive`). */
 export interface DeadLetterSelection {
@@ -70,7 +76,9 @@ const hasJobSchema = async (tx: Tx): Promise<boolean> =>
  * error. A retry takes a reason and is recorded as an ops_action in the platform company with an
  * audit event (`ops.job_retried`), and queues `ops.retry-job` through the outbox in the same
  * transaction; the worker then sends the payload to its queue again, once per retry (`requeue`).
- * Every job is idempotent, so a retry of work already done changes nothing.
+ * Every job is idempotent, so a retry of work already done changes nothing. Each dead letter is
+ * retried once (409 `already_retried` after that, review B12): a job that fails again comes back
+ * as a new dead letter, retried in its turn.
  */
 @Injectable()
 export class DeadLetterService {
@@ -90,7 +98,7 @@ export class DeadLetterService {
   /** Dead-lettered jobs, newest first, with each one's last retry (the system path). */
   async deadLettered(selection: DeadLetterSelection = {}): Promise<OpsJobView[]> {
     const rows = await this.rows(selection, 'newest', OPS_LIST_LIMIT);
-    const retried = await this.retriedAt(rows.map((r) => r.id));
+    const retried = await this.retries(rows.map((r) => r.id));
     return rows.map((r) => viewOf(r, retried.get(r.id) ?? null));
   }
 
@@ -143,6 +151,21 @@ export class DeadLetterService {
         actorKind: operator.via === 'console' ? 'platform_admin' : 'system',
       },
       async (tx, platformId) => {
+        // M11 review B12: a dead letter is retried once. Two retries at once take turns on this
+        // lock, and the second finds the first's row.
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`ops:job_retry:${row.id}`}, 0))`,
+        );
+        const [earlier] = await tx
+          .select({ id: schema.opsAction.id })
+          .from(schema.opsAction)
+          .where(and(eq(schema.opsAction.kind, 'job_retry'), eq(schema.opsAction.targetId, row.id)))
+          .limit(1);
+        if (earlier)
+          throw conflict(
+            'already_retried',
+            'This dead-lettered job has been retried already; if it failed again, retry its new dead letter',
+          );
         const [action] = await tx
           .insert(schema.opsAction)
           .values({
@@ -166,6 +189,7 @@ export class DeadLetterService {
             jobCompanyId: row.company_id,
             via: operator.via,
             reason: why,
+            ...operatorData(operator),
           },
         });
         await enqueueOutbox(tx, {
@@ -176,7 +200,48 @@ export class DeadLetterService {
         });
       },
     );
-    return viewOf(row, now);
+    return viewOf(row, { at: now, outcome: 'queued' });
+  }
+
+  /**
+   * `ops.retry-job` (the worker): once per retry (processed_job, keyed on the ops action), sends the
+   * dead letter's payload to its queue again through `send`, in the same transaction as a second
+   * ops_action row with the outcome (`sent` or `gone`; the table is append-only). A delivery of
+   * the job after that finds the key taken and records `done_already`. Answers the outcome.
+   */
+  async runRetry(
+    once: (key: string, fn: (tx: Tx) => Promise<void>) => Promise<boolean>,
+    input: { readonly deadLetterJobId: string; readonly opsActionId: string },
+    send: (queue: string, payload: Record<string, unknown>, tx: Tx) => Promise<void>,
+  ): Promise<'sent' | 'gone' | 'done_already'> {
+    let outcome: 'sent' | 'gone' | 'done_already' = 'done_already';
+    const ran = await once(`ops:job_retry:${input.opsActionId}`, async (tx) => {
+      outcome = await this.requeue(tx, input.deadLetterJobId, (queue, payload) =>
+        send(queue, payload, tx),
+      );
+      await this.recordRetryOutcome(tx, input.opsActionId, outcome);
+    });
+    if (!ran)
+      await withPlatform(this.database, {}, (tx) =>
+        this.recordRetryOutcome(tx, input.opsActionId, 'done_already'),
+      );
+    return outcome;
+  }
+
+  /** The retry's outcome, as a row beside the one that asked for it (same target and person). */
+  private async recordRetryOutcome(tx: Tx, opsActionId: string, outcome: RetryOutcome) {
+    const a = schema.opsAction;
+    const [asked] = await tx.select().from(a).where(eq(a.id, opsActionId));
+    if (!asked) return;
+    await tx.insert(a).values({
+      companyId: asked.companyId,
+      kind: 'job_retry',
+      targetId: asked.targetId,
+      targetName: asked.targetName,
+      reason: asked.reason,
+      personId: asked.personId,
+      outcome,
+    });
   }
 
   /**
@@ -205,7 +270,7 @@ export class DeadLetterService {
     const limit = Math.min(Math.max(1, selection.limit ?? 1_000), OPS_CLI_MAX);
     let rows = await this.rows(selection, 'oldest', limit);
     if (selection.skipRetried) {
-      const retried = await this.retriedAt(rows.map((r) => r.id));
+      const retried = await this.retries(rows.map((r) => r.id));
       rows = rows.filter((r) => !retried.has(r.id));
     }
     return rows.map((r) => ({ id: r.id, name: r.name }));
@@ -245,25 +310,42 @@ export class DeadLetterService {
     });
   }
 
-  /** Each job's last retry, from the platform company's ops_action rows. */
-  private async retriedAt(ids: readonly string[]): Promise<Map<string, Date>> {
+  /**
+   * Each job's retry, from the platform company's ops_action rows: when it was asked for (the
+   * first row) and where it stands (the latest row's outcome).
+   */
+  private async retries(
+    ids: readonly string[],
+  ): Promise<Map<string, { at: Date; outcome: RetryOutcome | null }>> {
     if (ids.length === 0) return new Map();
     return withPlatform(this.database, {}, async (tx) => {
       const a = schema.opsAction;
       const rows = await tx
-        .select({ targetId: a.targetId, at: sql<Date | string>`max(${a.createdAt})` })
+        .select({ targetId: a.targetId, at: a.createdAt, outcome: a.outcome })
         .from(a)
         .where(and(eq(a.kind, 'job_retry'), inArray(a.targetId, [...ids])))
-        .groupBy(a.targetId)
-        .orderBy(desc(sql`max(${a.createdAt})`));
-      return new Map(rows.map((r) => [r.targetId, new Date(r.at)]));
+        .orderBy(a.createdAt, a.id);
+      const out = new Map<string, { at: Date; outcome: RetryOutcome | null }>();
+      for (const r of rows) {
+        const outcome =
+          r.outcome && RETRY_OUTCOMES.includes(r.outcome) ? (r.outcome as RetryOutcome) : null;
+        const seen = out.get(r.targetId);
+        out.set(r.targetId, {
+          at: seen?.at ?? new Date(r.at),
+          outcome: outcome ?? seen?.outcome ?? null,
+        });
+      }
+      return out;
     });
   }
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function viewOf(row: DeadRow, retriedAt: Date | null): OpsJobView {
+function viewOf(
+  row: DeadRow,
+  retry: { readonly at: Date; readonly outcome: RetryOutcome | null } | null,
+): OpsJobView {
   return {
     id: row.id,
     name: row.name ?? 'unknown',
@@ -271,6 +353,7 @@ function viewOf(row: DeadRow, retriedAt: Date | null): OpsJobView {
     failedAt: row.created_on ? new Date(row.created_on) : null,
     attempts: (row.source_retry_count ?? 0) + 1,
     lastError: jobErrorSummary(row.source_output),
-    retriedAt,
+    retriedAt: retry?.at ?? null,
+    retryOutcome: retry ? (retry.outcome ?? 'queued') : null,
   };
 }

@@ -83,8 +83,18 @@ services:
   clamav:
     image: clamav/clamav:1.5.4-debian
     profiles: ['scan']
+    # M11 review: clamd has no authentication, so it listens on this machine only.
     ports:
-      - '3310:3310'
+      - '127.0.0.1:3310:3310'
+    # M11 review: every upload is scanned whole. The largest we accept is a 50 MB video
+    # (MEDIA_RULES); these limits are twice that, and a file past any limit is reported as
+    # Heuristics.Limits.Exceeded (AlertExceedsMax), which the worker quarantines, never "clean".
+    # A stream past StreamMaxLength is refused ("size limit exceeded"): left pending and retried.
+    environment:
+      CLAMD_CONF_StreamMaxLength: 100M
+      CLAMD_CONF_MaxFileSize: 100M
+      CLAMD_CONF_MaxScanSize: 400M
+      CLAMD_CONF_AlertExceedsMax: 'yes'
     volumes:
       - clamav-data:/var/lib/clamav
     healthcheck:

@@ -10,12 +10,14 @@ export const MIGRATIONS_FOLDER = path.resolve(
 
 /** Applies every migration as the owner role (`rent_owner`). Never run as the application role. */
 export async function runMigrations(ownerUrl: string): Promise<void> {
+  await runMigrationsFrom(ownerUrl, MIGRATIONS_FOLDER);
+}
+
+/** Applies the migrations of one folder (tests stop part-way with a shortened copy). */
+export async function runMigrationsFrom(ownerUrl: string, migrationsFolder: string): Promise<void> {
   const database = createDatabase(ownerUrl, { max: 1, applicationName: 'rent-migrate' });
   try {
-    await migrate(database.db, {
-      migrationsFolder: MIGRATIONS_FOLDER,
-      migrationsSchema: 'drizzle',
-    });
+    await migrate(database.db, { migrationsFolder, migrationsSchema: 'drizzle' });
   } finally {
     await database.close();
   }

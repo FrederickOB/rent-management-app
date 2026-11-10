@@ -98,6 +98,8 @@ const outcomeSchema = z.object({
   status: z.enum(['success', 'failed', 'abandoned']),
   amountMinor: pesewas.optional(),
   feesMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** M11 (e2e test controls): false marks the charge paid without sending its webhook. */
+  webhook: z.boolean().optional(),
 });
 
 function transactionView(tx: FakeTransaction) {
@@ -234,6 +236,7 @@ export function registerPayments(
     tx.amount = amount;
     tx.fees = fees;
     tx.paidAt = new Date().toISOString();
+    if (outcome.webhook === false) return { webhook: null, delivery: null } as const;
     const rawBody = JSON.stringify({ event: 'charge.success', data: transactionView(tx) });
     const signature = hmacHex('sha512', options.secretKey, rawBody);
     const delivery = await sendWebhook('charge.success', rawBody, {

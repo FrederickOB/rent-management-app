@@ -122,13 +122,15 @@ export const payStatus = (token: string, client: Client, intentId: string) =>
  *
  * - **Behind the edge** (production): only the header the edge overwrites with the address it saw,
  *   named by CLIENT_IP_HEADER. Production refuses to start without it (instrumentation.ts).
+ *   **It carries one address, overwritten by the edge.** A list means something appended to it
+ *   instead, so only its last entry counts, the one added nearest this server (M11 review).
  * - **With no edge** (development, CI): the connection's own address, which this server stamps on
  *   every request (lib/peer-address.ts).
  *
- * X-Forwarded-For is never trusted in a running server: Next.js fills it from the socket only when
- * the request has none, so otherwise it is whatever the client wrote (M11 security review F8).
- * Code that runs outside the server, unit tests calling a route, has neither header, and gets the
- * last X-Forwarded-For entry as before.
+ * A value that is not an IP address counts as unknown. X-Forwarded-For is never trusted in a
+ * running server: Next.js fills it from the socket only when the request has none, so otherwise it
+ * is whatever the client wrote (M11 security review F8). Code that runs outside the server, unit
+ * tests calling a route, has neither header, and gets the last X-Forwarded-For entry as before.
  */
 export function clientFrom(
   headers: Headers,
@@ -136,20 +138,23 @@ export function clientFrom(
 ): Client {
   const configured = env.CLIENT_IP_HEADER?.trim().toLowerCase();
   const ip =
-    (configured ? headers.get(configured) : headers.get(PEER_ADDRESS_HEADER))?.trim() ||
-    (configured
-      ? null
-      : headers
-          .get('x-forwarded-for')
-          ?.split(',')
-          .map((part) => part.trim())
-          .filter(Boolean)
-          .at(-1)) ||
+    oneAddress(configured ? headers.get(configured) : headers.get(PEER_ADDRESS_HEADER)) ??
+    (configured ? null : oneAddress(headers.get('x-forwarded-for'))) ??
     'unknown';
   return {
-    ip: ip.slice(0, 64),
+    ip,
     userAgent: (headers.get('user-agent') ?? 'unknown').slice(0, 500),
   };
+}
+
+/** One IPv4 or IPv6 address from a header: the last entry of a list, if it looks like one. */
+function oneAddress(value: string | null): string | null {
+  const last = value
+    ?.split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .at(-1);
+  return last && /^[0-9A-Fa-f:.]{2,45}$/.test(last) && /[.:]/.test(last) ? last : null;
 }
 
 /** Only well-formed tokens reach the API; anything else is simply not found. */
@@ -171,6 +176,10 @@ export const receiptDocument = (token: string, client: Client) =>
 
 export const openJobSheet = (token: string, client: Client) =>
   call<JobSheetView>('/job-sheets/open', { token, client });
+
+/** Whether the sheet is live (not closed, expired or replaced); records nothing (M11 review B13). */
+export const checkJobSheet = (token: string, client: Client) =>
+  call<{ live: boolean }>('/job-sheets/check', { token, client });
 
 export const respondJobSheet = (
   token: string,

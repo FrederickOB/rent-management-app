@@ -1,3 +1,4 @@
+import { hostname, userInfo } from 'node:os';
 import { sql, withCompany, type Database } from '@rent/db';
 import { OPS_REASON_MAX, OPS_REASON_MIN } from '@rent/domain/ops';
 import type { Actor, PolicyAction } from '@rent/domain/policy';
@@ -15,7 +16,38 @@ export interface OpsOperator {
   readonly personId: string;
   readonly via: 'console' | 'cli';
   readonly requestId?: string | null;
+  /**
+   * M11 review B4: at the incident commands, the operating-system account and machine they ran
+   * from, recorded with every action, since an email alone proves nothing about who typed it.
+   */
+  readonly cli?: CliIdentity;
 }
+
+export interface CliIdentity {
+  readonly osUser: string;
+  readonly host: string;
+}
+
+/** The OS account and machine this process runs as ('unknown' when the OS will not say). */
+export function cliIdentity(): CliIdentity {
+  let osUser: string;
+  try {
+    osUser = userInfo().username || 'unknown';
+  } catch {
+    osUser = process.env.USER || process.env.USERNAME || 'unknown';
+  }
+  let host: string;
+  try {
+    host = hostname() || 'unknown';
+  } catch {
+    host = 'unknown';
+  }
+  return { osUser: osUser.slice(0, 100), host: host.slice(0, 200) };
+}
+
+/** What an action's audit data adds for its operator: the CLI's OS user and host, if any. */
+export const operatorData = (operator: OpsOperator): Record<string, string> =>
+  operator.cli ? { osUser: operator.cli.osUser, host: operator.cli.host } : {};
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (value: string): boolean => UUID.test(value);
@@ -65,5 +97,5 @@ export async function operatorByEmail(database: Database, email: string): Promis
       'not_a_platform_admin',
       'The operator must be an active platform admin, named by their email',
     );
-  return { personId, via: 'cli' };
+  return { personId, via: 'cli', cli: cliIdentity() };
 }

@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { payByMomo, payLink, type PayLink } from '../e2e/page-fixtures';
+import { anotherLeaseFor, payByMomo, payLink, type PayLink } from '../e2e/page-fixtures';
 import { managerApi, smsTo } from '../e2e/signing-support';
 import {
   LINKS_URL,
@@ -7,6 +7,7 @@ import {
   openBrowser,
   record,
   TENANT_URL,
+  type Expected,
   type Measured,
   type MeasuringBrowser,
 } from './collect';
@@ -70,8 +71,17 @@ test.afterAll(async () => {
 
 test('NFR-PERF AD-06 TL-01 BC-04 BC-06 the tenant web app on a first and a repeat visit over 3G', async () => {
   const measured: Measured[] = [];
-  const twice = async (name: string, path: string, signedIn: boolean) => {
+  const twice = async (
+    name: string,
+    path: string,
+    signedIn: boolean,
+    expected: Omit<Expected, 'finalUrl'> & { readonly finalPath?: string },
+  ) => {
     const url = `${TENANT_URL}${path}`;
+    const check = {
+      marker: expected.marker,
+      finalUrl: `${TENANT_URL}${expected.finalPath ?? path}`,
+    };
     measured.push(
       await measure(browser, {
         group: 'tenant-first',
@@ -79,6 +89,7 @@ test('NFR-PERF AD-06 TL-01 BC-04 BC-06 the tenant web app on a first and a repea
         url,
         firstVisit: true,
         keepStorage: signedIn,
+        expect: check,
       }),
     );
     measured.push(
@@ -88,14 +99,30 @@ test('NFR-PERF AD-06 TL-01 BC-04 BC-06 the tenant web app on a first and a repea
         url,
         firstVisit: false,
         keepStorage: true,
+        expect: check,
       }),
     );
   };
+  /** The screen shows this test id: the screen asked for, not sign-in after a lost session. */
+  const showing = (testId: string) => async (page: Page) => {
+    await expect(page.getByTestId(testId).first()).toBeVisible({ timeout: 30_000 });
+  };
 
-  await twice('sign-in', '/', false);
+  // Signed out, the app's first address goes to sign-in.
+  await twice('sign-in', '/', false, { marker: showing('phone-input'), finalPath: '/sign-in' });
   await signIn(await browser.page(), tenant.lease.tenantPhone);
-  await twice('home and pay', '/home', true);
-  await twice('tenancy', `/tenancy/${tenant.lease.leaseId}`, true);
-  await twice('history and receipts', '/payments', true);
+  await twice('home and pay', '/home', true, { marker: showing('landlord-group') });
+  await twice('tenancy', `/tenancy/${tenant.lease.leaseId}`, true, {
+    marker: showing('tenancy-detail'),
+  });
+  await twice('history and receipts', '/payments', true, { marker: showing('receipt-number') });
+  // Home again with two tenancies, which the held place must also cover (M11 review). An address
+  // of its own, so `lhci assert` checks it apart from Home with one tenancy.
+  await anotherLeaseFor(staff, tenant.lease.leaseId);
+  await twice('home, two tenancies', '/home?tenancies=2', true, {
+    marker: async (page: Page) => {
+      await expect(page.getByTestId('tenancy-row').nth(1)).toBeVisible({ timeout: 30_000 });
+    },
+  });
   record(measured);
 });

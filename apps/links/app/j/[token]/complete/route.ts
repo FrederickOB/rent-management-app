@@ -6,7 +6,7 @@ import {
 import {
   codeDetails,
   errorOf,
-  knownSheet,
+  liveSheet,
   photosFrom,
   textOf,
   uploadPhotos,
@@ -28,9 +28,10 @@ import { admitUpload } from '../../../../lib/upload-gate';
  *   New photos replace the kept ones.
  * - **A second tap** on the same form gets the first one's answer.
  * - **The proxy never sees this post** (proxy.ts), so this route guards it before reading it: a
- *   body declared over the job sheet's limit is refused, each address and the server take only
- *   a few photo forms at once (lib/upload-gate.ts), and the token must be one the API knows.
- *   The form is then read part by part, each photo to disk (lib/multipart.ts), and the answer
+ *   body declared over the job sheet's limit is refused, the sheet must be live (liveSheet), and
+ *   only then does the form count toward its address's few at once and 30 in 10 minutes
+ *   (lib/upload-gate.ts), so unknown or dead links use up nothing (M11 review). The form is then
+ *   read part by part, each photo to disk, within a deadline (lib/multipart.ts), and the answer
  *   carries the security headers itself.
  */
 export async function POST(
@@ -48,12 +49,13 @@ const refusesFiles = (code: string) => /MEDIA|UPLOAD/i.test(code);
 async function handle(request: Request, token: string): Promise<Response> {
   if (declaredOver(request, JOB_SHEET_MAX_BODY_BYTES))
     return backToJobSheet(token, { error: 'BODY_TOO_LARGE' }, '#act');
-  const admitted = admitUpload(clientFrom(request.headers).ip);
+  const client = clientFrom(request.headers);
+  // An unknown or dead link is refused before its form is counted or read (F2; M11 review).
+  const refused = await liveSheet(token, client);
+  if (refused) return refused;
+  const admitted = admitUpload(client.ip);
   if (!admitted.ok) return backToJobSheet(token, { error: 'RATE_LIMITED' }, '#act');
   try {
-    // A token the API doesn't know is refused before a byte of the form is read (F2).
-    const unknown = await knownSheet(token, clientFrom(request.headers));
-    if (unknown) return unknown;
     const read = await readMultipart(request, JOB_SHEET_FORM_LIMITS);
     if (!read.ok)
       return backToJobSheet(

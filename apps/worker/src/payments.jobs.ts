@@ -75,9 +75,11 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
         const outcome = await deps.webhooks.process(inboxId);
         ctx.logger.info({ outcome }, 'webhook processed');
       },
-      async onDeadLetter({ inboxId }, { error }) {
-        // M11 decision 9: the row keeps why its last try failed (a code, never a body).
-        if (error) await deps.webhooks.failed(inboxId, error);
+      async onDeadLetter({ inboxId }, { error, createdAt }) {
+        // M11 decision 9: the row keeps why its last try failed (a code, never a body); a row
+        // replayed since this job was queued waits for the replay's own job (M11 review).
+        if (createdAt) await deps.webhooks.failed(inboxId, error ?? null, createdAt);
+        else if (error) await deps.webhooks.failed(inboxId, error);
         else await deps.webhooks.failed(inboxId);
       },
     }),

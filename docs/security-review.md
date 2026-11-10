@@ -29,7 +29,7 @@ Every high and medium finding is fixed in M11. The two highs share one cause: th
 | --- | --- | --- | --- |
 | A1 | High | In production the API trusted every proxy hop, so `request.ip` was the client's own `X-Forwarded-For`. Every per-IP sign-in, TOTP, code and webhook limit could be bypassed. | **Fixed.** Fastify trusts only `TRUSTED_PROXIES`, and production refuses to start without it. Wrong passwords are also limited per account (an HMAC of the email). Tested (`apps/api/src/auth/request-origin.test.ts`, `m11-identity.int.test.ts`). |
 | A2 | Medium | The 5-attempt cap on phone codes could be raced: concurrent wrong guesses counted as one. | **Fixed.** The attempt is counted atomically before the compare. Daily caps per phone (10 sends, 15 wrong codes) are alerted once, with their own error codes. Tested with 20 parallel guesses. |
-| A3 | Medium | Invites attached unverified identifiers to the shared person record, so one company could pre-hijack access another company granted later. | **Fixed** (founder decision on invites): an existing person stays invited until they accept from a session that proves the role's identifier; caretakers never get an email; resets only for password roles. The first admin of a new company and a new platform admin follow the same rule. |
+| A3 | Medium | Invites attached unverified identifiers to the shared person record, so one company could pre-hijack access another company granted later. | **Fixed** (founder decision on invites): an existing person stays invited until they accept from a session that proves the role's identifier; caretakers never get an email; resets only for password roles. The first admin of a new company and a new platform admin follow the same rule. **Reopened** by the milestone's independent review: a typed phone could still be stored unverified on a new invitee. Fixed: see section 2a, R1. |
 | A4 | Medium | The step-up authenticator code for a single user's self-confirm had no attempt limit and could be replayed. | **Fixed.** 5 failures in 15 minutes lock it, audited (`approval.step_up_failed`) and alerted; an accepted time step is refused again. |
 | A5 | Medium | Authentication events after sign-in weren't audited, contrary to the M1 plan. | **Fixed.** Password set, reset and change, TOTP enrolment, backup codes, session revocation, sign-out, failed sign-in and step-up failures are audited without secrets; `auth.signed_in` carries a keyed IP hash and the user agent. |
 | A6 | Low | A tenant's device list went empty after 24 hours. | **Fixed** (`freshAge: 0`); the app shows an error with a retry instead of an empty list. |
@@ -82,19 +82,43 @@ Every high and medium finding is fixed in M11. The two highs share one cause: th
 - **The native tenant app never kept its session cookie** (since M3), because the sign-in client's cookie prefix didn't match ours. Fixed, with a test against the real client.
 - **CI now runs a dependency audit**, failing on high and critical advisories in production dependencies. One advisory is excepted, with the founder's approval: zod 3 inside Expo's build-time tools.
 
+### 2a. The milestone's independent review (re-check of the fixes, at `e312ac9`)
+
+The three reviewers who audited M11 checked the fixes above against the code rather than this document. Their security findings and outcomes:
+
+| # | Severity | Finding | Outcome |
+| --- | --- | --- | --- |
+| R1 | Medium (A3 reopened) | A new password-role invitee kept the phone the inviter typed, unverified, and matching ignored verification. Landlord X could attach a victim's later tenancy with landlord Z to the attacker's person, see the victim's sign-in audits and revoke their sessions. | **Fixed.** An invitee gets only its role's sign-in identifier. Tenant and caretaker matching attach only to a verified phone, or a phone-only person with no email or password, and otherwise release the phone (migration 0078). Tested end to end over HTTP. The sign-in code lookup still reaches such a record; no untrusted path can create one now, and there is no production data to clean. |
+| R2 | Low | The per-account wrong-password limit was read before the check, so it could be raced. | **Fixed:** counted atomically before the password is checked; tested with 20 parallel attempts. |
+| R3 | Low | Failed sign-in audits were awaited before the response, a timing hint about registered emails. | **Fixed:** written after the response. |
+| R4 | Low | Account recovery's audit was outside the reset's transaction. | **Fixed:** one transaction; a missing platform company is an error. |
+| R5 | Low | The recovery and ops commands accepted any platform admin's email as the operator. | **Fixed:** recovery needs the operator's current authenticator code; every ops command records the OS user and host. |
+| R6 | Low | Production guards switched off when `NODE_ENV` was unset. | **Fixed:** the API and worker refuse to start without it; production refuses the e2e owner URL. |
+| R7 | Low | A tenant's data export sat under the 6-year lock, and was built in memory. | **Fixed:** exports live 7 days in the ordinary bucket (founder), are capped at 100 MB, and split when larger, listing what was left out. A streamed export is M12. |
+| R8 | Low | An anonymised tenant could be refilled with personal data. | **Fixed:** the database refuses it (RA127); ID numbers can still be cleared, never set. |
+| R9 | Low | The approver-eligibility check was skipped when the set was null. | **Fixed:** refused on insert for staff, platform and tenant actors. |
+| R10 | Low | A dead letter could be retried twice. | **Fixed:** the second retry is refused, `already_retried`. |
+| R11 | Low | The job-sheet pre-check let dead links through, counted as an open, and the form read had no deadline. | **Fixed:** a separate live check that records nothing; unknown and dead links are refused before a byte is read or the address window counts; idle and total deadlines on the read. |
+| R12 | Low | The audit exception covered every zod version. | **Fixed:** a CI check fails unless the only zod below 4.6.6 is 3.25.76 through @expo/cli and chromium-bidi. |
+| R13 | Low | A nominated approver could approve their own promotion. | **Fixed:** the person a change is about is never among its approvers. |
+| R14 | Note | Smaller items. | **Fixed:** ClamAV bound to localhost, with limits above the largest upload; scan status follows property scope; `lastError` scrubbed before it is stored and shown; the `rent` guard resolves the database as node-postgres does; Better Auth hook bodies replaced, not merged. |
+
+Accepted by design: anyone can use up a phone's daily code and attempt caps, or lock a staff account for 15 minutes with wrong passwords. Those limits are what stops guessing.
+
 ## 3. Accepted risks and gaps
 
 | Item | Why it's accepted | Revisit |
 | --- | --- | --- |
 | SMS code as the only factor for tenants and caretakers (A15) | AD-06; the pilot's users sign in by phone. Codes are now limited per code, per day and per phone. | Optional caretaker TOTP, later |
 | Sign-in TOTP code reusable within its window (A9) | Guarding it now slows the web e2e suite by about 50 minutes; reuse also needs the password. | M12 |
+| A phone stored unverified beside an email still receives sign-in codes (R1) | No untrusted path can create such a record now; changing the lookup breaks a passed test. No production data exists. | M12, with the session-reuse e2e work |
 | Support under a grant sees an overview only | The grant text says support may read the company's records; the access built is narrower, which is safe. | When support needs more |
 
 ## 4. For M12 (first deployment)
 
 - Separate keys per purpose for what `BETTER_AUTH_SECRET` does today (cookies, TOTP secret encryption, code and IP HMACs, the signing hasher), with a rotation procedure. Rotating it today would lock out every staff authenticator.
 - The AWS KMS adapter; production refuses the local one.
-- `TRUSTED_PROXIES` and `CLIENT_IP_HEADER` from the real load balancer and edge.
+- `TRUSTED_PROXIES` and `CLIENT_IP_HEADER` from the real load balancer and edge. `CLIENT_IP_HEADER` names a header that carries one address, overwritten by the edge on every request and never appended to; links uses only the last entry of a list.
 - TLS at the edge, and HSTS `includeSubDomains` once the domains are known.
 - Edge logs drop query strings (the Hubtel webhook secret).
 - A lifecycle rule for discarded uploads; storage access logs; encrypted local dumps.

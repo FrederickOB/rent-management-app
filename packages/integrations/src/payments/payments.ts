@@ -239,6 +239,11 @@ export interface ChargeOutcome {
   readonly amountMinor?: number;
   /** The provider's fee, deducted at settlement. */
   readonly feesMinor?: number;
+  /**
+   * M11 (e2e test controls): false marks the charge paid without the provider sending its
+   * webhook, as when a webhook is lost; the caller then answers null. Absent: sent as usual.
+   */
+  readonly webhook?: boolean;
 }
 
 export interface PaymentWebhookRequest {
@@ -704,6 +709,7 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
     charge.amountMinor = amountMinor;
     charge.feesMinor = feesMinor;
     charge.paidAt = new Date().toISOString();
+    if (outcome.webhook === false) return null;
     return this.signed({ event: 'charge.success', data: this.paystackView(charge) });
   }
 

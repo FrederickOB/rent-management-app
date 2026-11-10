@@ -1,3 +1,9 @@
+import {
+  membershipApproverChangeSchema,
+  openingBalancesApprovalSchema,
+  type MembershipApproverChange,
+  type OpeningBalancesApproval,
+} from '@rent/contracts';
 import type { ApiClient } from '@rent/contracts/client';
 import { isOpen, type ApprovalStatus } from '@rent/domain/approvals';
 import {
@@ -10,8 +16,9 @@ import {
   type EvidenceKind,
 } from './billing-format';
 import { formatBusinessDate } from './business-dates';
-import { humanise } from './format';
+import { humanise, roleLabel } from './format';
 import { feeKindOf, graPayerOf, termsText } from './fee-terms';
+import { BATCH_KIND_LABELS } from './onboarding';
 import { DESTINATION_LABELS, nameCheck } from './settlement';
 import { formatMinor } from './tenancy-format';
 
@@ -47,7 +54,16 @@ const ACTION_LABELS: Record<string, string> = {
   'lease.move_out_settlement': 'Settle a move-out: the deposit, deductions and refund',
   // M9 (decision 1): an agency-managed owner's fee terms and who pays GRA, from a date.
   'management_fee_terms.change': 'Change an owner’s management fee',
+  // M11 (decision 3; review C2): a batch of opening balances, approved by a money approver.
+  opening_balances: 'Post opening balances',
+  // M11 (founder D1; review C2): an invite or change that adds someone who may approve.
+  'membership.approver_change': 'Change who may approve requests',
 };
+
+/** M11: the onboarding batch of opening balances or an adjustment (P25). */
+export const OPENING_BALANCES = 'opening_balances';
+/** M11: an invite or role change that adds an approver (founder D1). */
+export const APPROVER_CHANGE = 'membership.approver_change';
 
 const WITHHOLDING_WRITE_OFF = 'withholding.write_off';
 const LEASE_REFUND = 'lease.refund';
@@ -175,6 +191,8 @@ function pick<T extends string>(labels: Record<T, string>, value: unknown): stri
  * so a field the request lacks is left out rather than guessed. Other requests have no facts.
  */
 export function approvalFacts(actionType: string, payload: unknown): ApprovalFact[] {
+  if (actionType === OPENING_BALANCES) return openingBalancesFacts(payload);
+  if (actionType === APPROVER_CHANGE) return approverChangeFacts(payload);
   const data = asRecord(payload);
   if (!data || !MONEY_ACTIONS.includes(actionType)) return [];
   const str = (key: string): string | null => {
@@ -291,6 +309,102 @@ export function approvalFacts(actionType: string, payload: unknown): ApprovalFac
   add('Note', str('note'));
   return facts;
 }
+
+/**
+ * An opening balances request (M11 review C2), as the API stores it: the batch and its money per
+ * owner and in total. Null when the payload is not of that shape, so nothing is guessed.
+ */
+export function openingBalancesOf(payload: unknown): OpeningBalancesApproval | null {
+  const parsed = openingBalancesApprovalSchema.safeParse(payload);
+  return parsed.success ? parsed.data : null;
+}
+
+/** The money in an opening balances request, in the order of the onboarding preview. */
+export const OPENING_TOTAL_COLUMNS = [
+  { key: 'arrearsMinor', label: 'Arrears' },
+  { key: 'advancesMinor', label: 'Paid ahead' },
+  { key: 'depositsMinor', label: 'Deposits held' },
+  { key: 'withholdingMinor', label: 'Withholding to certify' },
+  { key: 'agentCashMinor', label: 'Agent-held cash' },
+  { key: 'rentTaxOutstandingMinor', label: 'Rent tax outstanding' },
+] as const satisfies readonly { key: keyof OpeningBalancesApproval['totals']; label: string }[];
+
+function openingBalancesFacts(payload: unknown): ApprovalFact[] {
+  const batch = openingBalancesOf(payload);
+  if (!batch) return [];
+  const facts: ApprovalFact[] = [
+    { label: 'What', value: BATCH_KIND_LABELS[batch.kind] },
+    { label: 'Cut-over', value: formatBusinessDate(batch.cutOverDate) },
+  ];
+  if (batch.fileName) facts.push({ label: 'Workbook', value: batch.fileName });
+  facts.push({ label: 'Leases', value: String(batch.leases) });
+  return facts;
+}
+
+/** An approver change (M11 review C2), as the API stores it, or null for another shape. */
+export function approverChangeOf(payload: unknown): MembershipApproverChange | null {
+  const parsed = membershipApproverChangeSchema.safeParse(payload);
+  return parsed.success ? parsed.data : null;
+}
+
+type MemberState = MembershipApproverChange['to'];
+
+/** `Property manager, nominated approver`. */
+const roleText = (state: MemberState): string =>
+  `${roleLabel(state.role)}${state.nominatedApprover ? ', nominated approver' : ''}`;
+
+/** `The whole company`, or `2 owners and 1 property`. */
+function scopeText(scope: MemberState['scope']): string {
+  const parts = [
+    scope.owners?.length
+      ? `${scope.owners.length} ${scope.owners.length === 1 ? 'owner' : 'owners'}`
+      : null,
+    scope.properties?.length
+      ? `${scope.properties.length} ${scope.properties.length === 1 ? 'property' : 'properties'}`
+      : null,
+  ].filter(Boolean);
+  return parts.length ? `Only ${parts.join(' and ')}` : 'The whole company';
+}
+
+const sameScope = (a: MemberState['scope'], b: MemberState['scope']): boolean =>
+  JSON.stringify([a.owners ?? [], a.properties ?? []]) ===
+  JSON.stringify([b.owners ?? [], b.properties ?? []]);
+
+function approverChangeFacts(payload: unknown): ApprovalFact[] {
+  const change = approverChangeOf(payload);
+  if (!change) return [];
+  const facts: ApprovalFact[] = [{ label: 'Person', value: change.personName }];
+  if (change.change === 'invite') {
+    facts.push({ label: 'Invited as', value: roleText(change.to) });
+    facts.push({ label: 'Can see', value: scopeText(change.to.scope) });
+    if (change.needsAcceptance)
+      facts.push({
+        label: 'Once approved',
+        value: 'They already have an account, so they join when they accept the invitation.',
+      });
+    return facts;
+  }
+  facts.push({ label: 'Role now', value: roleText(change.from) });
+  facts.push({ label: 'Role asked for', value: roleText(change.to) });
+  if (!sameScope(change.from.scope, change.to.scope)) {
+    facts.push({ label: 'Can see now', value: scopeText(change.from.scope) });
+    facts.push({ label: 'Would see', value: scopeText(change.to.scope) });
+  } else facts.push({ label: 'Can see', value: scopeText(change.to.scope) });
+  return facts;
+}
+
+/**
+ * Whether an M11 request's details could not be read (review C2): its payload fails the
+ * contract's schema, so the card says so rather than show half of it.
+ */
+export function approvalDetailsMissing(actionType: string, payload: unknown): boolean {
+  if (actionType === OPENING_BALANCES) return openingBalancesOf(payload) === null;
+  if (actionType === APPROVER_CHANGE) return approverChangeOf(payload) === null;
+  return false;
+}
+
+export const DETAILS_MISSING_TEXT =
+  'The details of this request could not be read. Check it on the linked page before deciding.';
 
 /** `Early exit fee, GH₵500.00; Paint, GH₵100.00`, or `None` for an empty list. */
 function amountList(value: unknown): string | null {
@@ -461,6 +575,12 @@ export function subjectHref(
       const leaseId = id('leaseId');
       return leaseId ? `/leases/${leaseId}/move-out` : null;
     }
+    // M11 (review C2): opening balances are checked on the onboarding page, people on Users and
+    // roles.
+    case 'onboarding_batch':
+      return '/onboarding';
+    case 'membership':
+      return '/settings/users';
     default: {
       const invoiceId = id('invoiceId');
       if (invoiceId) return `/invoices/${invoiceId}`;

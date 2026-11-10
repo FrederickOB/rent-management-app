@@ -20,28 +20,28 @@ const { resolveTrimmed, PHONE_CHECK } = require('../metro.trim') as {
 };
 
 describe('NFR-PERF AD-06 sign-in phone numbers with Ghana’s rules only', () => {
-  it('takes a Ghanaian number in its local or international form, as E.164', () => {
-    expect(signInPhone('024 412 3456')).toBe('+233244123456');
-    expect(signInPhone('0244123456')).toBe('+233244123456');
-    expect(signInPhone('+233 24 412 3456')).toBe('+233244123456');
-    expect(signInPhone('00233244123456')).toBe('+233244123456');
-    expect(signInPhone(' 0302 123 456 ')).toBe('+233302123456');
+  it('takes a Ghanaian number in its local or international form, as E.164', async () => {
+    await expect(signInPhone('024 412 3456')).resolves.toBe('+233244123456');
+    await expect(signInPhone('0244123456')).resolves.toBe('+233244123456');
+    await expect(signInPhone('+233 24 412 3456')).resolves.toBe('+233244123456');
+    await expect(signInPhone('00233244123456')).resolves.toBe('+233244123456');
+    await expect(signInPhone(' 0302 123 456 ')).resolves.toBe('+233302123456');
   });
 
-  it('refuses what is not a Ghanaian number, as libphonenumber’s full rules do', () => {
+  it('refuses what is not a Ghanaian number, as libphonenumber’s full rules do', async () => {
     for (const input of ['12345', '024 412', '0999 999 999', '+233 99 999 9999', 'abc', ''])
-      expect(signInPhone(input)).toBeNull();
+      await expect(signInPhone(input)).resolves.toBeNull();
   });
 
-  it('takes another country’s number in its international form, for the API to check', () => {
-    expect(signInPhone('+44 7400 123456')).toBe('+447400123456');
-    expect(signInPhone('0044 7400 123456')).toBe('+447400123456');
-    expect(signInPhone('+1 (202) 555-0143')).toBe('+12025550143');
-    expect(signInPhone('+234 803 123 4567')).toBe('+2348031234567');
+  it('takes another country’s number in its international form, for the API to check', async () => {
+    await expect(signInPhone('+44 7400 123456')).resolves.toBe('+447400123456');
+    await expect(signInPhone('0044 7400 123456')).resolves.toBe('+447400123456');
+    await expect(signInPhone('+1 (202) 555-0143')).resolves.toBe('+12025550143');
+    await expect(signInPhone('+234 803 123 4567')).resolves.toBe('+2348031234567');
     // Too short or too long for any E.164 number, or with no country code.
-    expect(signInPhone('+44 12')).toBeNull();
-    expect(signInPhone('+1234567890123456')).toBeNull();
-    expect(signInPhone('7400 123456')).toBeNull();
+    await expect(signInPhone('+44 12')).resolves.toBeNull();
+    await expect(signInPhone('+1234567890123456')).resolves.toBeNull();
+    await expect(signInPhone('7400 123456')).resolves.toBeNull();
   });
 
   it('the checked-in rules are Ghana’s, exactly as the installed libphonenumber-js has them', () => {

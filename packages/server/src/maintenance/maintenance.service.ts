@@ -179,6 +179,8 @@ export interface MaintenanceJobDetail extends MaintenanceJobView {
     readonly durationSeconds: number | null;
     readonly createdAt: Date;
     readonly addedByKind: 'staff' | 'artisan' | 'tenant' | 'message';
+    /** M11 founder decision: a re-encoded photo's original hash and size (F10). */
+    readonly original: { readonly sha256: string; readonly bytes: number } | null;
   }[];
   readonly events: readonly {
     readonly id: string;
@@ -2095,6 +2097,8 @@ export class MaintenanceService {
         durationSeconds: schema.maintenanceJobAttachment.durationSeconds,
         createdAt: schema.maintenanceJobAttachment.createdAt,
         addedByKind: schema.maintenanceJobAttachment.addedByKind,
+        originalSha256: schema.document.originalSha256,
+        originalBytes: schema.document.originalBytes,
       })
       .from(schema.maintenanceJobAttachment)
       .innerJoin(
@@ -2149,11 +2153,13 @@ export class MaintenanceService {
     const attend = this.policy.can(staff, 'maintenance.attend').allowed;
     return {
       ...view!,
-      attachments: attachments.map((a) => ({
+      attachments: attachments.map(({ originalSha256, originalBytes, ...a }) => ({
         ...a,
         kind: a.kind as MaintenanceAttachmentKind,
         stage: a.stage as MaintenanceAttachmentStage,
         addedByKind: a.addedByKind as 'staff' | 'artisan' | 'tenant' | 'message',
+        original:
+          originalSha256 && originalBytes ? { sha256: originalSha256, bytes: originalBytes } : null,
       })),
       events: events.map((e) => ({
         id: e.id,

@@ -86,7 +86,8 @@ describe('NFR-SEC scan states on the job sheet (MI-04, decision 6)', () => {
     );
   });
 
-  it('an infected or unknown file is not found', async () => {
+  // An infected file is the API's 410 DOCUMENT_QUARANTINED, in the next describe.
+  it('a file the API does not know (its 404) is not found', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => Response.json({ code: 'NOT_FOUND' }, { status: 404 })),

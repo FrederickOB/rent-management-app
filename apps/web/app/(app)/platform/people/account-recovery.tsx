@@ -11,6 +11,7 @@ import {
   recoveryMessage,
   recoveryReasonProblem,
   recoveryResultText,
+  RECOVERY_REASON_HINT,
   RECOVERY_REASON_MAX,
   RUNBOOK_PATH,
 } from '@/lib/account-recovery';
@@ -196,7 +197,7 @@ function RecoveryAction({
     <div className="w-full space-y-2 rounded-md border border-slate-200 p-3">
       <TextAreaField
         label={`Why: ${what.toLowerCase()}`}
-        hint="Say how you checked who they are. It is kept in the audit log."
+        hint={RECOVERY_REASON_HINT}
         rows={2}
         maxLength={RECOVERY_REASON_MAX}
         value={reason}

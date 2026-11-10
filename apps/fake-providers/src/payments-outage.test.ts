@@ -123,11 +123,14 @@ describe('NFR-AVAIL fake provider outage switch', () => {
   });
 
   it('timeout: the caller gives up first, yet the charge may exist afterwards', async () => {
-    const { app, sub } = await setup();
+    const { app, store, sub } = await setup();
     await app.listen({ port: 0, host: '127.0.0.1' });
     const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
-    await outage(app, { mode: 'timeout', delayMs: 400 });
-    // The client's own limit (10 s in the adapters) is shortened here to keep the test quick.
+    // The answer is held 3 s after the work. The caller gives up as soon as the charge exists,
+    // which is after the work and well before the answer, however slow the machine: a fixed
+    // client timeout could fire before the server had even read the request (CI, M11).
+    await outage(app, { mode: 'timeout', delayMs: 3_000 });
+    const caller = new AbortController();
     const call = fetch(`${base}/payments/charge`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
@@ -139,10 +142,21 @@ describe('NFR-AVAIL fake provider outage switch', () => {
         subaccount: sub,
         mobile_money: { phone: '+233200000003', provider: 'mtn' },
       }),
-      signal: AbortSignal.timeout(100),
+      signal: caller.signal,
     });
+    let answered = false;
+    void call.then(
+      () => (answered = true),
+      () => undefined,
+    );
+    const started = Date.now();
+    while (!store.transactions.has('out-timeout') && Date.now() - started < 10_000)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(store.transactions.has('out-timeout')).toBe(true);
+    // The work is done and the answer is still held: the caller gives up first.
+    expect(answered).toBe(false);
+    caller.abort();
     await expect(call).rejects.toThrow();
-    await new Promise((resolve) => setTimeout(resolve, 500));
     await outage(app, { mode: 'normal' });
     const found = await verify(app, 'out-timeout');
     expect(found.statusCode).toBe(200);

@@ -7,8 +7,10 @@ import {
   type Page,
   type TestInfo,
 } from '@playwright/test';
+import { approveMomoPrompt, firstInvoiceIssued } from './money-support';
 import {
   freshPhone,
+  issueLease,
   MANAGER,
   newRooms,
   newTenant,
@@ -35,6 +37,8 @@ let page: Page;
 let leaseId: string;
 let companyId: string;
 let phone: string;
+let tenantId: string;
+let secondRoom: Unit;
 
 async function expectAccessible(testInfo: TestInfo, state: string): Promise<void> {
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
@@ -67,8 +71,9 @@ test.beforeAll(async ({ browser }, testInfo) => {
   agency = await staffApi(MANAGER);
   companyId = (await ok<{ id: string }>(await agency.get('/company'), 'the company')).id;
   phone = freshPhone();
-  const [room] = (await newRooms(agency, 1, { ownerReference: 'OWN-01' })) as [Unit];
-  const tenantId = await newTenant(agency, TENANT, phone);
+  const [room, other] = (await newRooms(agency, 2, { ownerReference: 'OWN-01' })) as [Unit, Unit];
+  secondRoom = other;
+  tenantId = await newTenant(agency, TENANT, phone);
   leaseId = await recordPaperLease(agency, {
     unitId: room.id,
     tenantId,
@@ -126,6 +131,38 @@ test.describe('NFR-A11Y the tenant web app, WCAG 2.2 A and AA', () => {
     await expectAccessible(testInfo, 'payments and receipts');
   });
 
+  test('BC-04 BC-06 a payment made from Pay, and its receipt in Payments and receipts', async ({
+    browserName: _b,
+  }, testInfo) => {
+    test.setTimeout(150_000);
+    await firstInvoiceIssued(agency, leaseId);
+    await page.goto('/home');
+    const opened = page.waitForEvent('popup');
+    await page.getByTestId('pay').first().click();
+    const pay = await opened;
+    await pay.waitForURL(/\/p\/[A-Za-z0-9_-]{43}$/);
+    await pay.getByLabel('MTN MoMo', { exact: true }).check();
+    await pay.getByLabel('MoMo number to charge').fill(`0${phone.slice(4)}`);
+    await pay.getByRole('button', { name: 'Pay', exact: true }).click();
+    await expect(pay.getByRole('heading', { level: 1 })).toHaveText(
+      'Approve the payment on your phone',
+    );
+    await approveMomoPrompt(phone);
+    await expect(pay.getByRole('status').filter({ hasText: 'Thank you' })).toBeVisible({
+      timeout: 45_000,
+    });
+    await pay.close();
+
+    await page.goto('/payments');
+    const row = page.getByTestId('payment-row').first();
+    // The receipt is issued by a job just after the payment posts.
+    await expect(async () => {
+      await page.getByTestId('refresh').click();
+      await expect(row.getByTestId('receipt-number')).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 60_000 });
+    await expectAccessible(testInfo, 'payments and receipts: a payment with its receipt');
+  });
+
   test('CM-05 messages: the list and a conversation', async ({ browserName: _b }, testInfo) => {
     await page.goto('/messages');
     await expect(page.getByTestId('conversation-row').first()).toBeVisible();
@@ -150,10 +187,24 @@ test.describe('NFR-A11Y the tenant web app, WCAG 2.2 A and AA', () => {
     await expectAccessible(testInfo, 'new repair: a kind chosen, and a problem');
   });
 
-  test('TL-07 to sign, and the profile', async ({ browserName: _b }, testInfo) => {
+  test('TL-07 to sign, empty and with a lease to review and sign, and the profile', async ({
+    browserName: _b,
+  }, testInfo) => {
+    test.setTimeout(150_000);
     await page.goto('/to-sign');
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
     await expectAccessible(testInfo, 'to sign');
+    // A lease issued for e-signing: To sign offers to review and sign it.
+    await issueLease(agency, {
+      unitId: secondRoom.id,
+      tenantId,
+      witnessPhone: freshPhone(),
+      startDate: today(),
+      monthlyRentMinor: 150_000,
+    });
+    await page.goto('/to-sign');
+    await expect(page.getByTestId('review-and-sign')).toBeVisible({ timeout: 30_000 });
+    await expectAccessible(testInfo, 'to sign: a lease to review and sign');
     await page.goto('/profile');
     await expect(page.getByTestId('sign-out')).toBeVisible();
     await expectAccessible(testInfo, 'profile');

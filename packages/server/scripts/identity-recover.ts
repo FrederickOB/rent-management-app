@@ -8,7 +8,9 @@
  *   pnpm identity:recover revoke-sessions --person 0193... --operator ... --reason "..."
  *
  * - The operator (`--operator`, their own email) must be an active platform admin, as for the
- *   incident commands; they act as that platform admin would in the console.
+ *   incident commands, and proves it with their current authenticator code (RECOVER_OPERATOR_CODE
+ *   or a prompt; accepted once). They act as that platform admin would in the console. The OS user
+ *   and host it ran on are recorded with the event (M11 review B4).
  * - The person is named by id (`--person`) or by email. The email is read from RECOVER_EMAIL or
  *   asked for at a prompt, never taken from the command line, so it stays out of shell history.
  *   `--email` still works for scripts, with a warning.
@@ -17,6 +19,7 @@
  * - The reason and the operator are recorded in the platform's audit chain. Nothing personal is
  *   printed: ids and counts only.
  */
+import { hostname, userInfo } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { createDatabase, eq, schema, withSystem } from '@rent/db';
@@ -25,6 +28,7 @@ import { AuditService } from '../src/audit/audit.service';
 import { systemClock } from '../src/core/clock';
 import { loadConfig } from '../src/core/config';
 import { AccountRecoveryService } from '../src/identity/account-recovery';
+import { StepUpVerifier } from '../src/identity/step-up';
 import { ALLOW_RENT_FLAG, refusalFor } from '../src/ops/cli-guard';
 
 const { values, positionals } = parseArgs({
@@ -55,6 +59,15 @@ if (command !== 'reset-two-factor' && command !== 'revoke-sessions')
 if (!values.reason?.trim()) fail('--reason is required: the reason and the identity check made.');
 if (!values.operator?.trim()) fail('--operator is required: your platform admin email.');
 
+async function ask(question: string): Promise<string> {
+  const prompt = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await prompt.question(question);
+  } finally {
+    prompt.close();
+  }
+}
+
 /** The person's email, from the environment or a prompt; `--email` only with a warning. */
 async function targetEmail(): Promise<string> {
   if (values.email) {
@@ -64,12 +77,7 @@ async function targetEmail(): Promise<string> {
     return values.email;
   }
   if (process.env.RECOVER_EMAIL) return process.env.RECOVER_EMAIL;
-  const prompt = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return await prompt.question('Email of the person to recover: ');
-  } finally {
-    prompt.close();
-  }
+  return ask('Email of the person to recover: ');
 }
 
 const config = loadConfig();
@@ -91,12 +99,21 @@ try {
   }
   if (!personId) fail('No person with that id or email.');
   // The audit append writes no files; anchoring (which uses storage) is the nightly job's.
+  const audit = new AuditService(database, new InMemoryStorage(), systemClock);
   const recovery = new AccountRecoveryService(
     database,
-    new AuditService(database, new InMemoryStorage(), systemClock),
+    audit,
     systemClock,
+    new StepUpVerifier(database, config, audit, undefined, systemClock),
   );
-  const by = { kind: 'cli' as const, operatorEmail: values.operator! };
+  const operatorCode =
+    process.env.RECOVER_OPERATOR_CODE ?? (await ask('Your current authenticator code: '));
+  const by = {
+    kind: 'cli' as const,
+    operatorEmail: values.operator!,
+    operatorCode,
+    origin: { osUser: userInfo().username, host: hostname() },
+  };
   const result =
     command === 'reset-two-factor'
       ? await recovery.resetTwoFactor(by, personId!, values.reason!)
@@ -111,7 +128,9 @@ try {
   fail(
     code === 'not_a_platform_admin'
       ? 'Refused: --operator must be an active platform admin.'
-      : `Failed: ${(error as Error).message}`,
+      : code === 'operator_code'
+        ? 'Refused: that is not a current code from your authenticator app.'
+        : `Failed: ${(error as Error).message}`,
   );
 } finally {
   await database.close();

@@ -1,9 +1,11 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
+import { addDays, parseBusinessDate, toIsoDate } from '../dates';
 import {
   isOpeningAllocation,
   lineBalance,
   paymentCredit,
+  postingClassOf,
   type BillingLine,
 } from '../billing/lines';
 import { leaseArbitrary, operationsArbitrary, type Operation } from '../billing/testing/scenarios';
@@ -20,6 +22,7 @@ import {
   planOpeningLease,
   type OpeningItems,
   type OpeningLeaseFigures,
+  type OpeningLeasePlan,
   type OpeningLeaseState,
 } from './opening';
 import {
@@ -58,6 +61,67 @@ const figuresOf = (run: ImportedRunner): OpeningLeaseFigures =>
     asOf: run.model.today,
     lastDay: run.model.lastDay,
   });
+
+/** A model's figures from a state already brought up to date (its walk has run this step). */
+const figuresAt = (run: ImportedRunner, state: OpeningLeaseState): OpeningLeaseFigures =>
+  openingLeaseFigures({
+    state,
+    scheduled: run.model.scheduled,
+    asOf: run.model.today,
+    lastDay: run.model.lastDay,
+  });
+
+/** The figures with the imported lease's paid-until floor (founder decision 3). */
+const flooredFigures = (run: ImportedRunner): OpeningLeaseFigures =>
+  openingLeaseFigures({
+    state: run.state(),
+    scheduled: run.model.scheduled,
+    asOf: run.model.today,
+    lastDay: run.model.lastDay,
+    floor: { billingStart: run.billingStart },
+  });
+
+/**
+ * The floor worked out on its own: the day before the earliest opening line still owed (net above
+ * zero, something outstanding), or the day before billing starts; never past the last day.
+ */
+function floorOf(run: ImportedRunner): string {
+  let from = run.billingStart;
+  for (const line of run.model.lines) {
+    if (line.opening !== true || line.periodStart === null) continue;
+    const b = lineBalance(line, run.model.allocations);
+    if (b.netMinor > 0 && b.outstandingMinor > 0 && line.periodStart < from)
+      from = line.periodStart;
+  }
+  const day = toIsoDate(addDays(parseBusinessDate(from), -1));
+  return run.model.lastDay !== null && run.model.lastDay < day ? run.model.lastDay : day;
+}
+
+/** Ageing after a plan, from the ageing before it: what the plan raised, less what it settled. */
+function agedAfter(
+  run: ImportedRunner,
+  before: Readonly<Record<AgeBucket, number>>,
+  plan: OpeningLeasePlan,
+): Record<AgeBucket, number> {
+  run.model.walk();
+  const lines = new Map(run.model.lines.map((l) => [l.id, l]));
+  const bucketOf = (line: BillingLine) =>
+    line.kind !== 'deposit' &&
+    postingClassOf(line) === 'receivable' &&
+    line.dueDate <= run.model.today
+      ? ageBucket(line.dueDate, run.model.today)
+      : null;
+  const out = { ...before };
+  for (const line of plan.lines) {
+    const bucket = bucketOf(lines.get(line.id) as BillingLine);
+    if (bucket) out[bucket] += line.amountMinor;
+  }
+  for (const row of plan.allocations) {
+    const bucket = bucketOf(lines.get(row.lineId) as BillingLine);
+    if (bucket) out[bucket] -= row.amountMinor;
+  }
+  return out;
+}
 
 /** 1100 plus 2010 for the lease (2010 is a credit, so negative): the tenant's net position. */
 const netPosition = (run: ImportedRunner) =>
@@ -318,14 +382,21 @@ describe('P25 before and after the cut-over (AC-01, BC-07, TX-01, AC-02)', () =>
         const twin = platformTwin(run, items);
         const twinAdvance = twin.model.payments.at(-1)?.id;
         const same = () => {
-          const [a, b] = [run.model.walk(), twin.model.walk()];
+          // Each model's walk once per step: it also brings the model's accrued flags up to date.
+          const a = run.model.walk();
+          // M11 review M2 (founder ruling, 2026-11-10): an opening month lowered to nothing has left
+          // our walk. The twin is compared as rebuilt without that month: the same lease billed on
+          // the platform, never having had that line.
+          const zeroed = run.zeroedOpeningKeys();
+          const b = zeroed.size > 0 ? twin.walkWithout(zeroed) : twin.model.walk();
           expect({ ...a, lines: undefined }).toEqual({ ...b, lines: undefined });
+          const [ours, theirs] = [run.leaseBalances(), twin.leaseBalances()];
           for (const code of ['1100', '2010', '2100'] as const)
-            expect(run.model.balance(code, { leaseId: 'lease-1' })).toBe(
-              twin.model.balance(code, { leaseId: 'lease-1' }),
-            );
+            expect(ours[code]).toBe(theirs[code]);
           expect(run.balancesByKey()).toEqual(twin.balancesByKey());
-          expect(figuresOf(run)).toEqual(figuresOf(twin));
+          expect(figuresAt(run, run.stateNow())).toEqual(
+            figuresAt(twin, twin.stateNow(twin.linesWithout(zeroed))),
+          );
           // AC-02: the same money bears the same fees, but for the advance, which bore its fee
           // before the platform.
           const fees = (r: ImportedRunner, skip: string | undefined) => {
@@ -333,7 +404,7 @@ describe('P25 before and after the cut-over (AC-01, BC-07, TX-01, AC-02)', () =>
             const opening = r.openingPaymentIds();
             for (const a of r.model.allocations) {
               if (skip && a.paymentId === skip && total(items.advances) > 0) continue;
-              const line = r.model.lines.find((l) => l.id === a.lineId) as BillingLine;
+              const line = r.lineById(a.lineId);
               if (
                 !feeBearing({
                   lineKind: line.kind,
@@ -355,6 +426,94 @@ describe('P25 before and after the cut-over (AC-01, BC-07, TX-01, AC-02)', () =>
           twin.apply(op);
           same();
           run.model.checkInvariants();
+        }
+      }),
+      runs,
+    );
+  });
+});
+
+describe('AR-02 an imported lease’s paid-until (founder decision 3; M11 review M2 and S5)', () => {
+  it('is the walk’s, never before the day before the earliest opening month owed, or before billing starts', () => {
+    fc.assert(
+      fc.property(importedArbitrary(leaseArbitrary), operationsArbitrary(true), (imported, ops) => {
+        const run = runOf(imported);
+        commit(run, itemsOf(run, imported.workbook));
+        const check = () => {
+          const plain = figuresOf(run).paidUntil;
+          const floor = floorOf(run);
+          expect(flooredFigures(run).paidUntil).toBe(
+            plain === null || plain < floor ? floor : plain,
+          );
+          // The lease page's walk takes the same floor.
+          expect(
+            run.model.walk().paidUntil === null ||
+              (run.model.walk().paidUntil as string) <= (flooredFigures(run).paidUntil as string),
+          ).toBe(true);
+        };
+        check();
+        for (const op of ops) {
+          run.apply(op);
+          check();
+        }
+      }),
+      runs,
+    );
+  });
+});
+
+describe('AR-02 an opening month lowered to nothing (M11 review M2)', () => {
+  const later = fc.array(
+    fc.oneof(
+      fc.record({ kind: fc.constant('days' as const), days: fc.integer({ min: 1, max: 45 }) }),
+      fc.record({
+        kind: fc.constant('pay' as const),
+        amountMinor: fc.integer({ min: 1, max: 5_000_000 }),
+        cash: fc.constant('1050' as const),
+        daysBack: fc.integer({ min: 0, max: 5 }),
+      }),
+      fc.record({ kind: fc.constant('reverse' as const), pick: fc.nat() }),
+    ),
+    { maxLength: 20 },
+  );
+
+  it('leaves the lease exactly as if that month had never been brought in', () => {
+    fc.assert(
+      fc.property(importedArbitrary(leaseArbitrary), fc.nat(), later, (imported, pick, ops) => {
+        const run = runOf(imported);
+        const items = itemsOf(run, imported.workbook);
+        commit(run, items);
+        // A month the advance did not reach: still wholly owed, so it can be lowered to nothing.
+        const owed = (items.arrears ?? []).filter((a) => {
+          const line = run.model.lines.find((l) => l.id === a.lineId) as BillingLine;
+          return lineBalance(line, run.model.allocations).outstandingMinor === a.amountMinor;
+        });
+        const gone = owed[pick % Math.max(1, owed.length)];
+        if (!gone) return;
+        run.adopt(
+          planOpeningAdjustment({
+            ...run.context('adj'),
+            state: run.state(),
+            lower: {
+              arrears: [{ itemId: 'x', lineId: gone.lineId, amountMinor: gone.amountMinor }],
+            },
+          }),
+        );
+        const never = runOf(imported);
+        commit(never, { ...items, arrears: (items.arrears ?? []).filter((a) => a !== gone) });
+        const same = () => {
+          expect({ ...run.model.walk(), lines: undefined }).toEqual({
+            ...never.model.walk(),
+            lines: undefined,
+          });
+          expect(figuresOf(run)).toEqual(figuresOf(never));
+          expect(flooredFigures(run)).toEqual(flooredFigures(never));
+        };
+        same();
+        for (const op of ops) {
+          run.apply(op);
+          never.apply(op);
+          same();
         }
       }),
       runs,
@@ -419,6 +578,10 @@ describe('TX-01 the rent tax walk excludes opening money and taxes arrears paid 
       .reduce((s, id) => s + (book.bases.get(id) ?? 0), 0);
 
   it('each receipt after the cut-over is taxed as on the platform-billed lease, the advance never', () => {
+    // How often the premise of the equality holds (M11 review: a guard that rarely holds would
+    // make the equality vacuous). Among runs with an advance and a receipt, measured over 2,000
+    // runs: about 93% at their first receipt and 81% through their last.
+    const premise = { runs: 0, atFirstReceipt: 0, throughLast: 0 };
     fc.assert(
       fc.property(importedArbitrary(leaseArbitrary), later, (imported, ops) => {
         const run = runOf(imported);
@@ -437,6 +600,7 @@ describe('TX-01 the rent tax walk excludes opening money and taxes arrears paid 
         // Whether the twin's advance has covered, at every step since the commit, what it covered
         // when it was taxed (founder, 2026-11-10: the premise of the equality below).
         let still = true;
+        let receipts = 0;
         for (const op of ops) {
           const count = run.platformPayments.length;
           const was = reversed(run);
@@ -465,7 +629,13 @@ describe('TX-01 the rent tax walk excludes opening money and taxes arrears paid 
           // advance onto VAT or past the lease's end, the twin's cumulative walk shares pesewas
           // between its receipts differently: its advance was taxed on rent it no longer covers.)
           if (!advance || still) expect(base).toBe(twinBase);
+          receipts += 1;
+          if (advance && receipts === 1) {
+            premise.runs += 1;
+            if (still) premise.atFirstReceipt += 1;
+          }
         }
+        if (advance && receipts > 0 && still) premise.throughLast += 1;
         // Whatever happened: our platform money covers exactly the rent the twin's money covers,
         // less what the twin's advance covers now (the opening advance is never taxed).
         expect(covered(run, run.openingPaymentIds())).toBe(
@@ -479,13 +649,81 @@ describe('TX-01 the rent tax walk excludes opening money and taxes arrears paid 
       }),
       runs,
     );
+    expect(premise.runs).toBeGreaterThanOrEqual(40);
+    expect(premise.atFirstReceipt / premise.runs).toBeGreaterThanOrEqual(0.75);
+    expect(premise.throughLast / premise.runs).toBeGreaterThanOrEqual(0.6);
+  });
+  it('a month brought in as two opening lines is taxed exactly as one line of their total', () => {
+    fc.assert(
+      fc.property(
+        importedArbitrary(leaseArbitrary, { advance: false }).filter(
+          (i) => i.workbook.arrears.length > 0,
+        ),
+        fc.nat(),
+        fc.integer({ min: 1, max: 2_000_000 }),
+        later,
+        (imported, pick, extra, ops) => {
+          // Two lines: the month as first brought in, then raised (founder, 2026-11-10).
+          const two = runOf(imported);
+          const items = itemsOf(two, imported.workbook);
+          commit(two, items);
+          const arrears = items.arrears ?? [];
+          const raised = arrears[pick % arrears.length] as (typeof arrears)[number];
+          two.adopt(
+            planOpeningAdjustment({
+              ...two.context('adj'),
+              state: two.state(),
+              raise: {
+                arrears: [{ ...raised, itemId: 'raise', lineId: 'raise-line', amountMinor: extra }],
+              },
+            }),
+          );
+          two.model.checkInvariants();
+          // One line: the same month brought in once, for the total.
+          const one = runOf(imported);
+          commit(one, {
+            ...items,
+            arrears: arrears.map((a) =>
+              a === raised ? { ...a, amountMinor: a.amountMinor + extra } : a,
+            ),
+          });
+          const [taxTwo, taxOne] = [new TaxBook(true), new TaxBook(true)];
+          const reversed = (r: ImportedRunner) =>
+            r.platformPayments.map((id) => r.model.payments.find((p) => p.id === id)?.reversed);
+          expect(taxTwo.periods(two)).toEqual(taxOne.periods(one));
+          for (const op of ops) {
+            const count = two.platformPayments.length;
+            const was = reversed(two);
+            two.apply(op);
+            one.apply(op);
+            two.model.checkInvariants();
+            expect(figuresOf(two)).toEqual(figuresOf(one));
+            expect(flooredFigures(two)).toEqual(flooredFigures(one));
+            if (op.kind === 'reverse') {
+              const k = reversed(two).findIndex((r, n) => r && !was[n]);
+              if (k >= 0) {
+                taxTwo.reverse(two.platformPayments[k] as string);
+                taxOne.reverse(one.platformPayments[k] as string);
+              }
+              continue;
+            }
+            if (two.platformPayments.length === count) continue;
+            expect(taxTwo.receipt(two, two.platformPayments.at(-1) as string)).toBe(
+              taxOne.receipt(one, one.platformPayments.at(-1) as string),
+            );
+            expect(taxTwo.periods(two)).toEqual(taxOne.periods(one));
+          }
+        },
+      ),
+      runs,
+    );
   });
 });
 
 describe('P25 adjustments: no change goes below what is paid or drawn', () => {
   type Change =
     | {
-        readonly kind: 'lower_arrears' | 'lower_advance' | 'lower_deposit';
+        readonly kind: 'lower_arrears' | 'lower_arrears_month' | 'lower_advance' | 'lower_deposit';
         readonly pick: number;
         readonly percent: number;
       }
@@ -495,6 +733,7 @@ describe('P25 adjustments: no change goes below what is paid or drawn', () => {
     fc.record({
       kind: fc.constantFrom(
         'lower_arrears' as const,
+        'lower_arrears_month' as const,
         'lower_advance' as const,
         'lower_deposit' as const,
       ),
@@ -542,6 +781,7 @@ describe('P25 adjustments: no change goes below what is paid or drawn', () => {
             let limit = Number.POSITIVE_INFINITY;
             let amount = 0;
             let plan: () => ReturnType<typeof planOpeningAdjustment>;
+            let refusal: string | null = null;
             const held = run.model.balance('2100', { leaseId: 'lease-1' });
             switch (c.kind) {
               case 'lower_arrears': {
@@ -555,6 +795,30 @@ describe('P25 adjustments: no change goes below what is paid or drawn', () => {
                     ...ctx,
                     state,
                     lower: { arrears: [{ itemId: 'x', lineId: line.id, amountMinor: amount }] },
+                  });
+                break;
+              }
+              case 'lower_arrears_month': {
+                // A month, across its opening lines (latest first), as the workbook names it.
+                const months = [
+                  ...new Set(
+                    opening
+                      .filter((l) => l.kind !== 'deposit')
+                      .map((l) => `${l.kind}|${l.periodStart}`),
+                  ),
+                ].sort();
+                const month = months[c.pick % Math.max(1, months.length)];
+                if (!month) return;
+                const [kind, periodStart] = month.split('|') as ['rent' | 'service_charge', string];
+                limit = opening
+                  .filter((l) => l.kind === kind && l.periodStart === periodStart)
+                  .reduce((sum, l) => sum + lineBalance(l, state.allocations).outstandingMinor, 0);
+                amount = Math.max(1, Math.floor((limit * c.percent) / 100));
+                plan = () =>
+                  planOpeningAdjustment({
+                    ...ctx,
+                    state,
+                    lower: { arrears: [{ itemId: 'x', kind, periodStart, amountMinor: amount }] },
                   });
                 break;
               }
@@ -590,6 +854,7 @@ describe('P25 adjustments: no change goes below what is paid or drawn', () => {
                 const rows = run.openingRows();
                 const row = rows[c.pick % rows.length];
                 if (!row) return;
+                // A month already brought in takes a second opening line (founder, 2026-11-10).
                 amount = c.amountMinor;
                 plan = () =>
                   planOpeningAdjustment({
@@ -641,24 +906,57 @@ describe('P25 adjustments: no change goes below what is paid or drawn', () => {
                 break;
             }
             const lowering = c.kind.startsWith('lower');
-            if (lowering && amount > limit) {
+            if (lowering && amount > limit)
+              refusal = c.kind.startsWith('lower_arrears')
+                ? 'opening.below_paid'
+                : 'opening.below_drawn';
+            if (refusal !== null) {
               let code = '';
               try {
                 plan();
               } catch (error) {
                 code = error instanceof DomainError ? error.code : String(error);
               }
-              expect(code).toBe(
-                c.kind === 'lower_arrears' ? 'opening.below_paid' : 'opening.below_drawn',
-              );
+              expect(code).toBe(refusal);
             } else {
               const net = netPosition(run);
               const deposits = run.model.balance('2100', { leaseId: 'lease-1' });
+              const before = flooredFigures(run);
               const p = plan();
               run.adopt(p);
               run.model.checkInvariants();
+              const after = flooredFigures(run);
+              // Ageing (BC-08): as the dashboard counts it, and moved exactly by what the change
+              // raised or settled: a new opening line adds its amount to its bucket, and each new
+              // allocation (a credit note, a payment's or credit's draw) takes its amount off.
+              expect(after.arrearsByAge).toEqual(
+                ledgerArrears({
+                  lines: run.model.lines,
+                  allocations: run.model.allocations,
+                  asOf: run.model.today,
+                }).byBucket,
+              );
+              expect(after.arrearsByAge).toEqual(agedAfter(run, before.arrearsByAge, p));
+              // Paid-until (AR-02, founder decision 3): never before the imported lease's floor,
+              // and moved only the way the change can move it.
+              expect(after.paidUntil).not.toBeNull();
+              expect((after.paidUntil as string) >= floorOf(run)).toBe(true);
+              const [was, now] = [before.paidUntil as string, after.paidUntil as string];
+              if (c.kind === 'lower_deposit' || c.kind === 'raise_deposit') expect(now).toBe(was);
+              if (c.kind === 'lower_advance' || c.kind === 'raise_arrears')
+                expect(now <= was).toBe(true);
+              if (
+                c.kind === 'raise_advance' ||
+                c.kind === 'lower_arrears' ||
+                c.kind === 'lower_arrears_month'
+              )
+                expect(now >= was).toBe(true);
               const moved = netPosition(run) - net;
-              if (c.kind === 'lower_arrears' || c.kind === 'raise_advance')
+              if (
+                c.kind === 'lower_arrears' ||
+                c.kind === 'lower_arrears_month' ||
+                c.kind === 'raise_advance'
+              )
                 expect(moved).toBe(-Math.abs(amount));
               if (c.kind === 'lower_advance' || c.kind === 'raise_arrears')
                 expect(moved).toBe(Math.abs(amount));

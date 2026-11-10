@@ -34,7 +34,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { AuditService } from '../audit/audit.service';
 import { staffActor, type StaffActor } from '../companies/companies.service';
 import type { FieldCipher } from '../core/crypto/field-cipher';
-import { sqlStateOf } from '../core/db-errors';
+import { sqlStateOf, tenantAnonymised } from '../core/db-errors';
 import { conflict, invalid, notFound } from '../core/errors';
 import { DATABASE, FIELD_CIPHER } from '../core/tokens';
 import { PolicyService, staffContext } from '../policy/policy.service';
@@ -334,6 +334,7 @@ export class TenantsService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'tenant.manage');
     const current = await this.visibleRow(staff, tenantId);
+    if (current.anonymisedAt) throw tenantAnonymised();
     const values = checkTenant(
       { ...rowAsInput(current), ...patch, kind: current.kind as TenantKind },
       patch,
@@ -446,6 +447,7 @@ export class TenantsService {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'tenant.manage');
     const tenant = await this.visibleRow(staff, tenantId);
+    if (tenant.anonymisedAt) throw tenantAnonymised();
     const id = uuidv7();
     await withCompany(this.database, staffContext(staff), async (tx) => {
       await tx.insert(schema.tenantContact).values({
@@ -468,6 +470,7 @@ export class TenantsService {
   ): Promise<ContactView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'tenant.manage');
+    if ((await this.visibleRow(staff, tenantId)).anonymisedAt) throw tenantAnonymised();
     await withCompany(this.database, staffContext(staff), async (tx) => {
       const values = checkContact(
         { kind: 'guarantor', name: patch.name ?? 'unchanged', ...patch },

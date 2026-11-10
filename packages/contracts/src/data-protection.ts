@@ -39,6 +39,14 @@ export const dataProtectionExportSchema = z.object({
   status: z.enum(['preparing', 'ready', 'failed']),
   url: z.string().nullable(),
   expiresAt: iso.nullable(),
+  /**
+   * M11 review round: one export holds at most 100 MB of files. Over it, the largest photos and
+   * recordings (then the largest other files) are left out, largest first, and listed in the
+   * workbook's About sheet with the record each belongs to, where staff can download them.
+   * `split` once ready and something was left out; `leftOut` counts them (0 when nothing was).
+   */
+  split: z.boolean().optional(),
+  leftOut: minor.optional(),
 });
 
 export const dataProtectionRequestSchema = z.object({

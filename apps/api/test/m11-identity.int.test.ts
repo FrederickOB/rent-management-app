@@ -588,6 +588,8 @@ describe('AD-06 AD-07 founder D4: a platform admin resets lost two-factor and si
       password: PASSWORD,
     });
     const membershipId = await addMembership(api, platformId, admin.personId, 'platform_admin');
+    // Review B4: the CLI operator proves themselves with their own current TOTP code.
+    const { totpURI: adminTotp } = await enrolStaff(api, adminEmail, PASSWORD);
     const { email, personId } = await staff();
     await enrolStaff(api, email, PASSWORD);
     const recovery = api.app.get(AccountRecoveryService);
@@ -643,7 +645,12 @@ describe('AD-06 AD-07 founder D4: a platform admin resets lost two-factor and si
     expect((await again.call('/me')).json.state).toBe('enrolment_required');
 
     const out = await recovery.revokeAllSessions(
-      { kind: 'cli', operatorEmail: adminEmail },
+      {
+        kind: 'cli',
+        operatorEmail: adminEmail,
+        operatorCode: await totpFrom(adminTotp),
+        origin: { osUser: 'ops', host: 'ops-laptop' },
+      },
       personId,
       'Suspected stolen laptop, per runbook',
     );
@@ -744,10 +751,15 @@ describe('AD-06 founder D4: the recovery CLI acts only for an active platform ad
     const recovery = api.app.get(AccountRecoveryService);
     const target = await staff();
     const reason = 'Suspected stolen laptop, per the runbook';
+    const origin = { osUser: 'ops', host: 'ops-laptop' };
     const notAdmin = await staff('agency_admin');
     for (const operatorEmail of [notAdmin.email, nextEmail('nobody'), 'not-an-email'])
       await expect(
-        recovery.revokeAllSessions({ kind: 'cli', operatorEmail }, target.personId, reason),
+        recovery.revokeAllSessions(
+          { kind: 'cli', operatorEmail, operatorCode: '000000', origin },
+          target.personId,
+          reason,
+        ),
       ).rejects.toMatchObject({ status: 403, code: 'not_a_platform_admin' });
 
     // A platform admin whose membership is not active yet (an invitation) is refused too.
@@ -763,17 +775,27 @@ describe('AD-06 founder D4: the recovery CLI acts only for an active platform ad
     );
     await expect(
       recovery.revokeAllSessions(
-        { kind: 'cli', operatorEmail: pendingEmail },
+        { kind: 'cli', operatorEmail: pendingEmail, operatorCode: '000000', origin },
         target.personId,
         reason,
       ),
     ).rejects.toMatchObject({ code: 'not_a_platform_admin' });
 
     const activeEmail = nextEmail('active-pa');
-    const active = await createPerson(api, { name: 'Active PA', email: activeEmail });
+    const active = await createPerson(api, {
+      name: 'Active PA',
+      email: activeEmail,
+      password: PASSWORD,
+    });
     await addMembership(api, platformId, active.personId, 'platform_admin');
+    const { totpURI: activeTotp } = await enrolStaff(api, activeEmail, PASSWORD);
     const done = await recovery.revokeAllSessions(
-      { kind: 'cli', operatorEmail: ` ${activeEmail.toUpperCase()} ` },
+      {
+        kind: 'cli',
+        operatorEmail: ` ${activeEmail.toUpperCase()} `,
+        operatorCode: await totpFrom(activeTotp),
+        origin,
+      },
       target.personId,
       reason,
     );

@@ -158,7 +158,7 @@ describe('MI-06 job-sheet photo posts of up to ten 10 MB photos arrive whole (re
 
   it('two 6 MB photos (12 MB, over the old 10 MB cut) reach storage whole', async () => {
     const calls = stubNetwork({
-      '/job-sheets/open': () => Response.json(sheet()),
+      '/job-sheets/check': () => Response.json({ live: true }),
       '/job-sheets/complete': () => Response.json(sheet({ screen: 'done' })),
     });
     const photos = [jpeg('a.jpg', 6_000_000), jpeg('b.jpg', 6_000_000)];
@@ -245,7 +245,7 @@ describe('MI-06 completing the work: a wrong code costs no upload, a double tap 
   it('after a wrong code the photos are kept; the retry sends the code alone, with them', async () => {
     let answer: () => Response = wrongCode;
     const calls = stubNetwork({
-      '/job-sheets/open': () => Response.json(sheet()),
+      '/job-sheets/check': () => Response.json({ live: true }),
       '/job-sheets/complete': () => answer(),
     });
     const photos = [jpeg('a.jpg'), jpeg('b.jpg')];
@@ -282,7 +282,7 @@ describe('MI-06 completing the work: a wrong code costs no upload, a double tap 
     let answer: () => Response = () =>
       Response.json({ code: 'MEDIA_TYPE_MISMATCH', message: 'Not a photo' }, { status: 400 });
     const calls = stubNetwork({
-      '/job-sheets/open': () => Response.json(sheet()),
+      '/job-sheets/check': () => Response.json({ live: true }),
       '/job-sheets/complete': () => answer(),
     });
     await complete(post(`/j/${TOKEN}/complete`, completion([jpeg('new.jpg')])), params);
@@ -298,7 +298,7 @@ describe('MI-06 completing the work: a wrong code costs no upload, a double tap 
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
     const calls = stubNetwork({
-      '/job-sheets/open': () => Response.json(sheet()),
+      '/job-sheets/check': () => Response.json({ live: true }),
       '/job-sheets/complete': async () => {
         await held;
         return Response.json(sheet({ screen: 'done' }));
@@ -335,7 +335,7 @@ describe('MI-06 completing the work: a wrong code costs no upload, a double tap 
   it('a double tap on Start or on Send me a code acts once', async () => {
     const formId = '0193a7c0-0000-4000-8000-0000000f0002';
     const calls = stubNetwork({
-      '/job-sheets/open': () => Response.json(sheet()),
+      '/job-sheets/check': () => Response.json({ live: true }),
       '/job-sheets/start': () => Response.json(sheet()),
       '/job-sheets/code': () => Response.json(sheet()),
     });

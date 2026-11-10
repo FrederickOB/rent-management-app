@@ -36,7 +36,8 @@ export function LeasesView({ detailed }: { readonly detailed: boolean }) {
   const load = useCallback(async () => {
     const current = gate.begin();
     try {
-      const list = await api().leases.list({
+      // By POST (M11 decision 6, review): a name or phone never sits in a URL.
+      const list = await api().leases.search({
         search: query.trim() || undefined,
         ...(status ? { status } : {}),
       });

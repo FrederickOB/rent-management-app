@@ -1,4 +1,4 @@
-import { daysBetween, parseBusinessDate } from '../dates';
+import { addDays, daysBetween, parseBusinessDate, toIsoDate } from '../dates';
 import type { PaymentAmount } from '../ledger/posting';
 import {
   isRecurring,
@@ -51,8 +51,11 @@ export function walkLines(input: {
 }): WalkLine[] {
   const invoiced: WalkLine[] = input.lines
     .filter((l) => isRecurring(l.kind) && l.periodStart !== null && l.periodEnd !== null)
-    .map((l) => {
-      const b = lineBalance(l, input.allocations);
+    .map((l) => ({ l, b: lineBalance(l, input.allocations) }))
+    // M11 review M2: an opening line (P25) lowered to nothing is no longer owed: it leaves the
+    // walk, so it never ends the paid-until run as a cancelled platform month does (review 4).
+    .filter(({ l, b }) => !(l.opening === true && b.netMinor === 0))
+    .map(({ l, b }) => {
       return {
         key: l.id,
         lineId: l.id,
@@ -157,6 +160,14 @@ export function forwardWalk(
   options: {
     /** The lease's last billable day (a move-out or an end); paid-until never passes it. */
     readonly lastDay?: string | null;
+    /**
+     * A lease billed from a later period than its start, as every imported lease is (P25; M11
+     * founder decision 3): the months before `billingStart` were settled before the platform,
+     * except those the walk still holds as owed (opening arrears). Paid-until is then at least the
+     * day before the earliest of those months still owed, or, with none owed, the day before
+     * billing starts; it moves on as the walk covers later months.
+     */
+    readonly floor?: { readonly billingStart: string } | null;
   } = {},
 ): WalkResult {
   const credit = pools.map((p) => ({ ...p }));
@@ -208,6 +219,7 @@ export function forwardWalk(
     if (amount > 0) partial = { monthStart, amountMinor: amount };
     break;
   }
+  if (options.floor) paidUntil = flooredPaidUntil(paidUntil, months, options.floor, lastDay);
   return {
     lines: walked,
     paidUntil,
@@ -216,6 +228,32 @@ export function forwardWalk(
     unearnedServiceChargeMinor: unearnedService,
     creditLeftMinor: credit.slice(poolIndex).reduce((sum, p) => sum + p.amountMinor, 0) + taxCredit,
   };
+}
+
+/**
+ * Founder decision 3 (M11): the floor of an imported lease's paid-until. The walk's months before
+ * billing starts are what it still holds from before the platform (opening arrears); every other
+ * month before it was settled then. So the lease is paid at least to the day before the earliest of
+ * them still owed, or, with none owed, to the day before billing starts.
+ */
+function flooredPaidUntil(
+  paidUntil: string | null,
+  months: ReadonlyMap<string, readonly WalkedLine[]>,
+  floor: { readonly billingStart: string },
+  lastDay: string | null,
+): string | null {
+  const billingStart = toIsoDate(parseBusinessDate(floor.billingStart));
+  let owedFrom = billingStart;
+  for (const [monthStart, monthLines] of months) {
+    if (monthStart >= billingStart) break;
+    if (monthLines.some((l) => l.netMinor > 0 && l.remainingMinor > 0)) {
+      owedFrom = monthStart;
+      break;
+    }
+  }
+  let day = toIsoDate(addDays(parseBusinessDate(owedFrom), -1));
+  if (lastDay !== null && day > lastDay) day = lastDay;
+  return paidUntil === null || paidUntil < day ? day : paidUntil;
 }
 
 /** What a line still needs after the walk; recurring lines may be covered by credit to come. */

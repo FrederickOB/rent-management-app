@@ -37,9 +37,17 @@ The pay, receipt and card return pages were first checked by the e2e spec. Its r
 2. **Tenant web, the repair form:** the "Which home?" and "What kind of repair?" choices were radios with no `aria-checked` (axe `aria-required-attr`, critical). They are now radio groups, each choice says whether it is chosen, and each choice's name is its visible text with the landlord's name.
 3. **Tenant app, every button:** a button working on something showed only a spinner and lost its name. It now keeps its name while busy (`ui.tsx`).
 4. **Links, the job sheet:** the photo field no longer scrolls the page sideways at 200% zoom.
+5. **Tenant web, the sign-in code:** the field said `autocomplete="sms-otp"`, which is Android's own value and not valid HTML (axe `autocomplete-valid`, serious; WCAG 1.3.5). It now says `one-time-code`, the web's value. React Native turns that into `sms-otp` on Android, so SMS autofill stays, and iOS keeps `textContentType="oneTimeCode"`.
+6. **Links, the pages that wait:** the receipt while its PDF is made, the pay page waiting for MoMo or a card, and the card return page all reloaded themselves with `<meta http-equiv="refresh">`. axe fails that (`meta-refresh`, critical; WCAG 2.2.1, failure F41), because the page changes on a timer the person cannot stop.
+   - **The fix (founder decision, 2026-11-10):** a small script carrying the page's nonce checks the same address on the same timetable (`app/_components/recheck.tsx`).
+     - While the answer is still "waiting", it changes only the status text, in `role="status"`, and the "Check now" link, so nothing moves under the person's finger or focus.
+     - Once the answer changes, it puts the new content in place, with its title and address, and moves focus to its heading.
+   - **Without JavaScript,** nothing checks by itself: the status says to use "Check now", which every one of these pages shows.
+   - The CSP is unchanged, and the script is about 1.5 KB inline. The e2e spec now scans the waiting states too: waiting for MoMo, the card return page confirming, and the receipt while its PDF is made, when the run catches it.
 
 ## Results of the e2e runs
 
 | Date | Links (`a11y.spec.ts`) | Tenant web (`a11y.spec.ts`) | Notes |
 | --- | --- | --- | --- |
-| | | | |
+| 2026-11-10 | 6 of 6 pass | 5 of 5 pass | On the guarded stack (`rent_m6_e2e`), after fix 5 above and the spec's own signing link. |
+| 2026-11-10 (review round) | 7 of 7 pass | 6 of 6 pass | The main states added (wrong codes, signed and acknowledged, the job sheet's code and done, a receipt row, review and sign) and the waiting pages after fix 6, each scanned once it has arrived. |

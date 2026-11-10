@@ -11,7 +11,8 @@ import path from 'node:path';
  * folder is made in LINKS_UPLOAD_DIR, or the system's temporary folder.
  *
  * Refusals come as soon as they are certain, without reading the rest: the whole body over its
- * limit, a file over its own, or too many files.
+ * limit, a file over its own, or too many files. A body that stops arriving, or arrives too slowly
+ * to finish in time, is refused too (M11 review), so it cannot hold an upload place.
  */
 export interface MultipartLimits {
   /** The whole body. */
@@ -24,10 +25,29 @@ export interface MultipartLimits {
   readonly maxFieldBytes: number;
   /** Text fields and files together. */
   readonly maxParts: number;
+  /** The longest wait for the next piece of the body. */
+  readonly idleMs?: number;
+  /** The longest the whole body may take, however large it says it is. */
+  readonly deadlineMs?: number;
+  /**
+   * The slowest the body may arrive, on average: with its declared length, the deadline becomes the
+   * time that length takes at this rate, at least a minute and at most `deadlineMs`.
+   */
+  readonly minBytesPerSecond?: number;
+}
+
+const MIN_DEADLINE_MS = 60_000;
+
+/** How long `request`'s body may take to arrive within `limits`, in milliseconds. */
+export function readDeadline(request: Request, limits: MultipartLimits): number {
+  const cap = limits.deadlineMs ?? Number.POSITIVE_INFINITY;
+  const declared = Number(request.headers.get('content-length') ?? Number.NaN);
+  if (!limits.minBytesPerSecond || !Number.isFinite(declared) || declared < 0) return cap;
+  return Math.min(cap, Math.max(MIN_DEADLINE_MS, (declared / limits.minBytesPerSecond) * 1000));
 }
 
 export type MultipartRefusal =
-  'BODY_TOO_LARGE' | 'FORM_UNREADABLE' | 'PHOTO_TOO_LARGE' | 'PHOTO_TOO_MANY';
+  'BODY_TOO_LARGE' | 'FORM_UNREADABLE' | 'PHOTO_TOO_LARGE' | 'PHOTO_TOO_MANY' | 'UPLOAD_TOO_SLOW';
 
 export type MultipartForm =
   | { readonly ok: true; readonly form: FormData; readonly cleanup: () => Promise<void> }
@@ -97,11 +117,30 @@ export async function readMultipart(
   // in front, so the first delimiter looks like every later one.
   let window: Buffer = Buffer.from(CRLF);
   let total = 0;
+  const started = Date.now();
+  const deadline = readDeadline(request, limits);
+  /** The next piece of the body, within the idle wait and what is left of the deadline. */
+  const next = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    const left = deadline - (Date.now() - started);
+    const wait = Math.min(limits.idleMs ?? Number.POSITIVE_INFINITY, left);
+    if (wait <= 0) throw new Refusal('UPLOAD_TOO_SLOW');
+    if (!Number.isFinite(wait)) return reader.read();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Refusal('UPLOAD_TOO_SLOW')), wait);
+    });
+    try {
+      return await Promise.race([reader.read(), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const more = async (): Promise<boolean> => {
     let chunk: ReadableStreamReadResult<Uint8Array>;
     try {
-      chunk = await reader.read();
-    } catch {
+      chunk = await next();
+    } catch (error) {
+      if (error instanceof Refusal) throw error;
       throw new Refusal('FORM_UNREADABLE');
     }
     if (chunk.done) return false;
@@ -167,8 +206,9 @@ export async function readMultipart(
           folder ??= await mkdtemp(
             path.join(process.env.LINKS_UPLOAD_DIR || tmpdir(), 'rent-links-'),
           );
-          filePath = path.join(folder, `${files.length}`);
-          handle = await open(filePath, 'w');
+          // The folder is only known at run time: nothing here for the build to trace.
+          filePath = path.join(/*turbopackIgnore: true*/ folder, `${files.length}`);
+          handle = await open(/*turbopackIgnore: true*/ filePath, 'w');
         }
         await handle.write(bytes);
       };

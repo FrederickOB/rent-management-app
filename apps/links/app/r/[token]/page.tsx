@@ -2,12 +2,13 @@ import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { LandlordContact } from '../../_components/landlord-contact';
+import { Recheck } from '../../_components/recheck';
 import { clientFrom, isToken, openReceipt, type ReceiptPage } from '../../../lib/links-api';
 import { cedis, day, when } from '../../../lib/pay';
 
 export const metadata: Metadata = { title: 'Your receipt' };
 
-/** While the PDF is being made, the page looks again this often (seconds). */
+/** While the PDF is being made, the page checks again this often (seconds), in place (Recheck). */
 const PREPARING_RECHECK_SECONDS = 10;
 
 /**
@@ -47,7 +48,6 @@ export default async function ReceiptLinkPage({
   const preparing = page.screen === 'preparing' || !page.downloadable;
   return (
     <>
-      {preparing ? <meta httpEquiv="refresh" content={String(PREPARING_RECHECK_SECONDS)} /> : null}
       <h1>{credit ? 'Your credit receipt' : 'Your receipt'}</h1>
       {credit ? (
         <p className="panel notice">
@@ -92,10 +92,17 @@ export default async function ReceiptLinkPage({
         </p>
       ) : null}
       {preparing ? (
-        <p role="status">
-          The PDF is being prepared. This page looks again every {PREPARING_RECHECK_SECONDS}{' '}
-          seconds.
-        </p>
+        <>
+          <p role="status">
+            The PDF is being prepared.{' '}
+            <Recheck href={`/r/${token}`} seconds={PREPARING_RECHECK_SECONDS} />
+          </p>
+          <p>
+            <a className="button secondary" href={`/r/${token}`} data-recheck-link="">
+              Check now
+            </a>
+          </p>
+        </>
       ) : (
         <p>
           <a className="button" href={`/r/${token}/document`}>

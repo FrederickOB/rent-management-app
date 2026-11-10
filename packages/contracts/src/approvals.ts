@@ -30,6 +30,65 @@ export const approvalSchema = z.object({
   mayDecide: z.boolean().optional(),
 });
 
+const minor = z.number().int();
+const named = z.object({ id: z.string().uuid(), name: z.string() });
+const roleState = z.object({
+  role: z.string(),
+  nominatedApprover: z.boolean(),
+  scope: z.object({
+    owners: z.array(z.string().uuid()).optional(),
+    properties: z.array(z.string().uuid()).optional(),
+  }),
+});
+
+/**
+ * M11 review C2: the payload of an `opening_balances` request, so the second person sees what
+ * they approve: the batch, its money per owner and in total, and where to check it (`link`).
+ */
+export const openingBalancesApprovalSchema = z.object({
+  batchId: z.string().uuid(),
+  kind: z.enum(['balances', 'adjustment']),
+  cutOverDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  fileName: z.string().nullable(),
+  /** The screen to check it on: the onboarding page's balances step. */
+  link: z.literal('/onboarding'),
+  leases: minor,
+  owners: z.array(
+    z.object({
+      owner: named,
+      arrearsMinor: minor,
+      advancesMinor: minor,
+      depositsMinor: minor,
+      withholdingMinor: minor,
+      agentCashMinor: minor,
+      rentTaxOutstandingMinor: minor,
+    }),
+  ),
+  totals: z.object({
+    arrearsMinor: minor,
+    advancesMinor: minor,
+    depositsMinor: minor,
+    withholdingMinor: minor,
+    agentCashMinor: minor,
+    rentTaxOutstandingMinor: minor,
+  }),
+});
+export type OpeningBalancesApproval = z.infer<typeof openingBalancesApprovalSchema>;
+
+/**
+ * M11 review C2 (founder D1): the payload of a `membership.approver_change` request: whose
+ * membership (the name as the inviter typed it), and the role or nomination from and to.
+ */
+export const membershipApproverChangeSchema = z.object({
+  membershipId: z.string().uuid(),
+  personName: z.string(),
+  change: z.enum(['invite', 'update']),
+  from: roleState.extend({ status: z.enum(['invited', 'active']) }),
+  to: roleState,
+  needsAcceptance: z.boolean(),
+});
+export type MembershipApproverChange = z.infer<typeof membershipApproverChangeSchema>;
+
 export const approvalsContract = {
   list: oc
     .route({ method: 'GET', path: '/approvals' })

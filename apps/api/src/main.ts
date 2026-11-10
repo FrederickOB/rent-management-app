@@ -1,7 +1,7 @@
-import { loadConfig } from '@rent/server/core';
+import { loadProcessConfig } from '@rent/server/core';
 import { createApiApp } from './app';
 
-const config = loadConfig();
+const config = loadProcessConfig();
 const app = await createApiApp({ config, applicationName: 'rent-api' });
 app.enableShutdownHooks();
 const port = Number(new URL(config.API_BASE_URL).port || 3000);

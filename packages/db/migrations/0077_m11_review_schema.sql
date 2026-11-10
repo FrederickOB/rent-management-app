@@ -1,0 +1,4 @@
+ALTER TABLE "document" ADD COLUMN "original_sha256" text;--> statement-breakpoint
+ALTER TABLE "document" ADD COLUMN "original_bytes" bigint;--> statement-breakpoint
+ALTER TABLE "onboarding_batch" ADD CONSTRAINT "onboarding_batch_upload_fk" FOREIGN KEY ("company_id","upload_intent_id") REFERENCES "public"."upload_intent"("company_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "document" ADD CONSTRAINT "document_original_check" CHECK (("document"."original_sha256" is null) = ("document"."original_bytes" is null) and ("document"."original_sha256" is null or "document"."original_sha256" ~ '^[0-9a-f]{64}$') and ("document"."original_bytes" is null or "document"."original_bytes" > 0));

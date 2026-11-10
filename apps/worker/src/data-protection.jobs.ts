@@ -1,4 +1,5 @@
 import {
+  DATA_PROTECTION_EXPORT_CLEANUP_JOB,
   DATA_PROTECTION_EXPORT_JOB,
   RETENTION_REVIEW_JOB,
   type DataProtectionService,
@@ -23,6 +24,8 @@ const uuid = z.string().uuid();
  * - `retention.review` (daily at 03:15 Africa/Accra, keyed by the day): records past each
  *   verified retention period, across companies; counts only, nothing deleted. A second run the
  *   same day keeps the first day's row.
+ * - `data-protection.export-cleanup` (daily at 03:45): deletes exports older than 7 days (founder,
+ *   review round); an object already gone is skipped, so a second run deletes nothing more.
  */
 export function dataProtectionJobs(
   deps: WorkerDeps & {
@@ -42,6 +45,17 @@ export function dataProtectionJobs(
       },
       async onDeadLetter({ companyId, exportId }) {
         await deps.dataProtection.failExport(companyId, exportId, 'export_failed');
+      },
+    }),
+    defineJob({
+      name: DATA_PROTECTION_EXPORT_CLEANUP_JOB,
+      scope: 'system',
+      cron: '45 3 * * *',
+      schema: z.object({}).passthrough(),
+      retry: { limit: 3, delaySeconds: 300, backoff: true },
+      async handle(_payload, ctx) {
+        const done = await deps.dataProtection.cleanupExports();
+        ctx.logger.info({ deleted: done.deleted }, 'data protection exports cleaned up');
       },
     }),
     defineJob({

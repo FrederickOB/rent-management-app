@@ -184,7 +184,7 @@ export function taxPeriodsFromWalk(input: {
   readonly opening?: OpeningMoney | null;
 }): TaxPeriod[] {
   const opening = input.opening ?? null;
-  return input.walk.lines
+  const periods = input.walk.lines
     .filter((line) => !line.tax)
     .map((line) => {
       const key = input.periodKeyOf(line.key);
@@ -201,6 +201,22 @@ export function taxPeriodsFromWalk(input: {
         withheld: input.withheld.has(key),
       };
     });
+  // A month brought in twice (an opening line and its raise, founder 2026-11-10) is one period:
+  // its lines' amounts and coverage add up, and what is taxed on it counts once.
+  const merged = new Map<string, TaxPeriod>();
+  for (const p of periods) {
+    const was = merged.get(p.key);
+    if (!was) merged.set(p.key, p);
+    else if (was.kind !== p.kind)
+      throw new DomainError('tax.period_kinds', `Period ${p.key} is rent and service charge`);
+    else
+      merged.set(p.key, {
+        ...was,
+        amountMinor: was.amountMinor + p.amountMinor,
+        coveredMinor: was.coveredMinor + p.coveredMinor,
+      });
+  }
+  return [...merged.values()];
 }
 
 /** TX-02: due a set number of days after the value date, alerted on the alert days. */

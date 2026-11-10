@@ -37,6 +37,12 @@ export const opsJobSchema = z.object({
   attempts: minor,
   lastError: z.string().nullable(),
   retriedAt: iso.nullable(),
+  /**
+   * M11 review C7: where its retry stands: `queued` (asked for), then `sent` (back on its queue),
+   * `gone` (pg-boss had deleted the dead letter) or `done_already` (the retry ran before); null
+   * when it has not been retried.
+   */
+  retryOutcome: z.enum(['queued', 'sent', 'gone', 'done_already']).nullable(),
 });
 
 export const opsQueueSchema = z.object({
@@ -70,6 +76,15 @@ export const platformOpsContract = {
       }),
     )
     .output(z.array(opsWebhookSchema)),
+  /** M11 review C6: one stored webhook, to watch a replay until it is processed. */
+  webhook: oc
+    .route({
+      method: 'GET',
+      path: '/platform/ops/webhooks/{webhookId}',
+      summary: 'One stored webhook (no body), whatever its status: to follow a replay',
+    })
+    .input(z.object({ webhookId: uuid }))
+    .output(opsWebhookSchema),
   replayWebhook: oc
     .route({
       method: 'POST',

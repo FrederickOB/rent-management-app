@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { eq, schema, sql, withSystem, type Database, type PoolClient } from '@rent/db';
+import { and, eq, schema, sql, withSystem, type Database, type PoolClient } from '@rent/db';
 import type { AlertPort, WebhookHeaders } from '@rent/integrations';
 import type { Clock } from '../core/clock';
 import type { AppConfig } from '../core/config';
 import type { JobsService } from '../core/jobs/jobs.service';
 import type { AppLogger } from '../core/logging/logger';
+import { scrubString } from '../core/logging/redact';
 import type { PaymentProviders } from '../core/payment-providers';
 import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import { MESSAGING_INBOUND_JOB, MESSAGING_WEBHOOK_PREFIX } from '../core/messages';
@@ -212,7 +213,11 @@ export class WebhooksService {
    * Records that processing gave up (the job's dead letter), so the row does not look busy, and
    * why (M11 decision 9: a code and a short message, never a body).
    */
-  async failed(inboxId: string, lastError: string | null = null): Promise<void> {
+  async failed(
+    inboxId: string,
+    lastError: string | null = null,
+    jobCreatedAt: Date | null = null,
+  ): Promise<void> {
     await withSystem(this.database, {}, (tx) =>
       tx
         .update(schema.webhookInbox)
@@ -220,9 +225,19 @@ export class WebhooksService {
           status: 'failed',
           outcome: 'dead_lettered',
           processedAt: new Date(),
-          lastError: lastError?.slice(0, 200) ?? null,
+          // M11 review: scrubbed as logs are, so the console never shows personal data or tokens.
+          lastError: lastError ? scrubString(lastError).slice(0, 200) : null,
         })
-        .where(eq(schema.webhookInbox.id, inboxId)),
+        .where(
+          and(
+            eq(schema.webhookInbox.id, inboxId),
+            // M11 review: a row a platform admin replayed after this job was queued waits for the
+            // replay's own job; this job's giving up does not fail it.
+            jobCreatedAt
+              ? sql`(${schema.webhookInbox.lastReplayedAt} is null or ${schema.webhookInbox.lastReplayedAt} < ${jobCreatedAt.toISOString()}::timestamptz)`
+              : undefined,
+          ),
+        ),
     );
   }
 }

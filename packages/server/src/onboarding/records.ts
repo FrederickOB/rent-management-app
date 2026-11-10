@@ -33,12 +33,22 @@ export interface BalanceTotals {
  * wrong, not what was typed, so the report (and the audit log that records the batch) never copies
  * a phone, an ID number or a TIN.
  */
+/** One owner's share of a balances or adjustment batch (signed in an adjustment). */
+export interface OwnerSummary extends BalanceTotals {
+  readonly ownerId: string;
+}
+
 export interface BatchReport {
   readonly sha256: string;
   readonly counts: Record<string, SheetCounts>;
   readonly issues: ImportIssue[];
   readonly issueCount: number;
   readonly totals: BalanceTotals | null;
+  /**
+   * M11 review C2: balances and adjustments: how many leases it touches and each owner's share,
+   * for the approval card (`opening_balances`). Never a tenant's details.
+   */
+  readonly summary?: { readonly leases: number; readonly owners: readonly OwnerSummary[] };
 }
 
 export const MAX_REPORTED_ISSUES = 500;
@@ -58,6 +68,7 @@ export function reportOf(input: {
   readonly counts: Record<string, SheetCounts>;
   readonly issues: readonly ImportIssue[];
   readonly totals: BalanceTotals | null;
+  readonly summary?: BatchReport['summary'];
 }): BatchReport {
   const issues = [...input.issues].sort(
     (a, b) => a.sheet.localeCompare(b.sheet) || (a.row ?? 0) - (b.row ?? 0),
@@ -68,6 +79,7 @@ export function reportOf(input: {
     issues: issues.slice(0, MAX_REPORTED_ISSUES),
     issueCount: issues.length,
     totals: input.totals,
+    ...(input.summary ? { summary: input.summary } : {}),
   };
 }
 
@@ -172,6 +184,17 @@ export async function settleClosedApprovals(tx: Tx): Promise<void> {
           and b.status = 'awaiting_approval'
           and (r.status in ('rejected', 'cancelled', 'expired')
                or (r.status in ('pending', 'cooling_off') and r.expires_at <= now()))`,
+  );
+}
+
+/**
+ * M11 review S2: one onboarding write at a time per company (a tenancies commit, a posting of
+ * opening balances), so two batches can never both bring in the same item. Taken first in the
+ * transaction, before anything it reads; nothing else takes it, so it never waits in a circle.
+ */
+export async function lockOnboarding(tx: Tx, companyId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding:${companyId}`}, 0))`,
   );
 }
 

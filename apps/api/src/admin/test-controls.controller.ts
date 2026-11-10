@@ -1,19 +1,30 @@
-import { Body, Controller, HttpCode, Inject, Param, Post } from '@nestjs/common';
-import { createDatabase, sql, type Database } from '@rent/db';
+import { Body, Controller, Get, HttpCode, Inject, Param, Post, Query } from '@nestjs/common';
+import { createDatabase, sql, withSystem, type Database } from '@rent/db';
 import { platformAdminFor } from '@rent/server/admin';
+import { SubledgerCheckService } from '@rent/server/billing';
 import {
   CLOCK,
   CONFIG,
   conflict,
   DATABASE,
   invalid,
+  notFound,
   PAYMENT_PROVIDERS,
   type AppConfig,
   type Clock,
   type PaymentProviders,
 } from '@rent/server/core';
-import { QUEUE_AGE_JOB, storeDeadLetter, storeFailedWebhook } from '@rent/server/ops';
+import { AgentCashCheckService } from '@rent/server/ledger';
+import {
+  paymentsByReference,
+  QUEUE_AGE_JOB,
+  storeDeadLetter,
+  storeFailedChargeWebhook,
+  storeFailedWebhook,
+} from '@rent/server/ops';
+import { PayLinksService, PayPageService } from '@rent/server/payments';
 import { PolicyService } from '@rent/server/policy';
+import { ManagementFeesService } from '@rent/server/reporting';
 import { SubscriptionBillingService } from '@rent/server/subscription';
 import { z } from 'zod';
 import { Ctx, type RequestContext } from '../http/request-context';
@@ -24,6 +35,11 @@ const failedWebhookBody = z
   .object({
     provider: z.string().regex(/^[a-z][a-z0-9_.-]{1,39}$/),
     status: z.enum(['failed', 'dead_lettered']).default('dead_lettered'),
+    /** M11 review C6: a real pending charge for this open invoice, which a replay posts. */
+    charge: z.boolean().optional(),
+    companyId: z.string().regex(UUID).optional(),
+    invoiceId: z.string().regex(UUID).optional(),
+    amountMinor: z.number().int().min(100).max(100_000_000).optional(),
   })
   .strict();
 const deadJobBody = z
@@ -72,6 +88,11 @@ export class TestControlsController {
     @Inject(PAYMENT_PROVIDERS) private readonly providers: PaymentProviders,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(CONFIG) private readonly config: AppConfig,
+    @Inject(PayLinksService) private readonly links: PayLinksService,
+    @Inject(PayPageService) private readonly page: PayPageService,
+    @Inject(SubledgerCheckService) private readonly subledger: SubledgerCheckService,
+    @Inject(AgentCashCheckService) private readonly agentCash: AgentCashCheckService,
+    @Inject(ManagementFeesService) private readonly fees: ManagementFeesService,
   ) {}
 
   /**
@@ -170,7 +191,67 @@ export class TestControlsController {
     const { provider, status } = parsed.data;
     if (provider !== 'messaging.whatsapp' && !this.providers.has(provider))
       throw invalid('bad_provider', 'Use a configured payments provider or messaging.whatsapp');
+    if (parsed.data.charge) {
+      const { companyId, invoiceId, amountMinor } = parsed.data;
+      if (provider.startsWith('messaging.') || !companyId || !invoiceId)
+        throw invalid(
+          'bad_request',
+          'A charge needs a payments provider, the companyId and an open invoiceId of that company',
+        );
+      return storeFailedChargeWebhook(
+        {
+          database: this.database,
+          links: this.links,
+          page: this.page,
+          providers: this.providers,
+        },
+        { companyId, invoiceId, ...(amountMinor === undefined ? {} : { amountMinor }) },
+      );
+    }
     return { id: await storeFailedWebhook(this.database, { provider, status }) };
+  }
+
+  /** M11 review C6: the payments and receipts a charge reference has (`?reference=pi-…`). */
+  @Get('payments')
+  async payments(
+    @Ctx() ctx: RequestContext,
+    @Query('reference') reference: unknown,
+  ): Promise<{ payments: number; receipts: number }> {
+    platformAdminFor(this.policy, ctx.actor, 'health.read');
+    if (typeof reference !== 'string') throw invalid('bad_request', 'Give ?reference=');
+    return paymentsByReference(this.database, reference);
+  }
+
+  /**
+   * M11 review C8: the nightly ledger checks for one company, now, read only and without alerts:
+   * the sub-ledger check (every book balances; receivables, prepayments, deposits, cash, suspense
+   * against their records), the agency's cash per owner, and the management fee check. Answers
+   * every difference, labelled by its `source` check; none is `{ differences: [] }`.
+   */
+  @Post('ledger-checks/:companyId')
+  @HttpCode(200)
+  async ledgerChecks(
+    @Ctx() ctx: RequestContext,
+    @Param('companyId') companyId: string,
+  ): Promise<{ differences: Record<string, unknown>[] }> {
+    platformAdminFor(this.policy, ctx.actor, 'health.read');
+    if (!UUID.test(companyId)) throw invalid('bad_company', 'The company id is not a UUID');
+    const known = await withSystem(this.database, {}, (tx) =>
+      tx.execute<{ id: string }>(
+        sql`select id from app.company_ids() as id where id = ${companyId}::uuid`,
+      ),
+    );
+    if (known.rows.length === 0) throw notFound('Company');
+    const subledger = await this.subledger.check(companyId, { alert: false });
+    const agentCash = await this.agentCash.check(companyId, { alert: false });
+    const fees = await this.fees.check(companyId, { alert: false });
+    return {
+      differences: [
+        ...subledger.mismatches.map((m) => ({ source: 'subledger', ...m })),
+        ...agentCash.negative.map((n) => ({ source: 'agent_cash', ...n })),
+        ...fees.mismatches.map((m) => ({ source: 'fees', ...m })),
+      ],
+    };
   }
 
   /**

@@ -25,13 +25,17 @@ import { api } from '@/lib/api';
 import {
   APPROVAL_STATUS_LABELS,
   approvalActionLabel,
+  approvalDetailsMissing,
   approvalEvidence,
   approvalFacts,
   approvalMoves,
   approvalWarning,
   closeReasonLabel,
+  DETAILS_MISSING_TEXT,
   FEE_TERMS_CHANGE,
   MOVE_OUT_SETTLEMENT,
+  OPENING_BALANCES,
+  openingBalancesOf,
   payloadLeaseId,
   payloadReason,
   payloadSubject,
@@ -46,6 +50,7 @@ import { formatTime } from '@/lib/format';
 import { settlementBlock, type SettlementVerdict } from '@/lib/move-out';
 import { approveQuitText, noticeApprovalOutcome } from '@/lib/notices';
 import { useRequestGate } from '@/lib/request-gate';
+import { OpeningBalancesSummary } from './opening-balances-summary';
 
 type Which = 'open' | 'closed';
 
@@ -131,6 +136,9 @@ const RECORD_LINKS: Record<string, string> = {
   notice: 'Open the notice',
   // M8: the move-out, with its inspection and deductions.
   move_out: 'Open the move-out',
+  // M11 (review C2): each lease's figures are on the onboarding page; people on Users and roles.
+  onboarding_batch: 'Opening balances, on the onboarding page',
+  membership: 'Users and roles',
 };
 
 /** What the record link reads: M9's fee terms open the owner, not where their rent goes. */
@@ -302,6 +310,8 @@ function ApprovalItem({
   const label = approvalActionLabel(row.actionType);
   // M7 review item 1: a notice is read in full before it is approved.
   const noticeId = row.subjectType === 'notice' ? row.subjectId : null;
+  // M11 (review C2): opening balances show their money per owner and in total.
+  const opening = row.actionType === OPENING_BALANCES ? openingBalancesOf(row.payload) : null;
   // M8: a move-out's settlement is approved with its statement and every deduction's photos.
   const moveOutId =
     row.actionType === MOVE_OUT_SETTLEMENT && row.subjectType === 'move_out' ? row.subjectId : null;
@@ -415,6 +425,12 @@ function ApprovalItem({
         ) : null}
         {moveOutId ? (
           <MoveOutApprovalSummary moveOutId={moveOutId} onVerdict={setSettlement} />
+        ) : null}
+        {opening ? <OpeningBalancesSummary batch={opening} /> : null}
+        {approvalDetailsMissing(row.actionType, row.payload) ? (
+          <Alert tone="warning" live={false}>
+            {DETAILS_MISSING_TEXT}
+          </Alert>
         ) : null}
         {evidence || otherRecord ? (
           <div className="flex flex-wrap items-center gap-3">

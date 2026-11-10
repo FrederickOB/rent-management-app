@@ -304,10 +304,14 @@ export class RentTaxService implements TaxHooks {
     });
   }
 
+  /**
+   * The invoice line a period's rent tax line names. A month brought in at the cut-over and raised
+   * later has more than one opening line (founder 2026-11-10): the earliest, in invoice order.
+   */
   private lineOfPeriod(state: LeaseState): (periodId: string) => string | null {
-    const lines = new Map(
-      state.lines.flatMap((l) => (l.chargePeriodId ? [[l.chargePeriodId, l.id] as const] : [])),
-    );
+    const lines = new Map<string, string>();
+    for (const l of state.lines)
+      if (l.chargePeriodId && !lines.has(l.chargePeriodId)) lines.set(l.chargePeriodId, l.id);
     return (periodId) => lines.get(periodId) ?? null;
   }
 
@@ -812,9 +816,28 @@ export class RentTaxService implements TaxHooks {
    * Writes an item, its lines and its entry (P17 for tax accrued, P21 for tax taken back) in the
    * caller's transaction. A key posted before means the item exists: nothing new is written.
    */
-  private async writeItem(tx: Tx, state: LeaseState, item: NewItem): Promise<string | null> {
+  private async writeItem(tx: Tx, state: LeaseState, given: NewItem): Promise<string | null> {
     const book = requireBook(state.book);
     const id = uuidv7();
+    // One line per charge period (rent_tax_item_line_period_key): a month with two opening lines
+    // (an opening line and its raise, founder 2026-11-10) is one period, named by its first line.
+    const lineOf = this.lineOfPeriod(state);
+    const byPeriod = new Map<string, NewItem['lines'][number]>();
+    for (const l of given.lines) {
+      const was = byPeriod.get(l.chargePeriodId);
+      byPeriod.set(
+        l.chargePeriodId,
+        was
+          ? {
+              chargePeriodId: l.chargePeriodId,
+              invoiceLineId: lineOf(l.chargePeriodId) ?? was.invoiceLineId,
+              baseMinor: was.baseMinor + l.baseMinor,
+              taxMinor: was.taxMinor + l.taxMinor,
+            }
+          : l,
+      );
+    }
+    const item = { ...given, lines: [...byPeriod.values()] };
     const baseMinor = item.lines.reduce((s, l) => s + l.baseMinor, 0);
     const taxMinor = item.lines.reduce((s, l) => s + l.taxMinor, 0);
     if (await this.posting.findByKey(tx, state.company.id, item.key)) return null;

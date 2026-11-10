@@ -18,9 +18,16 @@ function harness() {
   const deps = {
     jobs: { send: vi.fn().mockResolvedValue(undefined) },
     deadLetters: {
-      requeue: vi.fn(
-        async (_tx: unknown, _id: string, send: (q: string, p: object) => Promise<void>) => {
-          await send('billing.accrue.company', { companyId: platformId });
+      // As DeadLetterService.runRetry does: once per ops action, sending in that transaction.
+      runRetry: vi.fn(
+        async (
+          once: (key: string, fn: (tx: never) => Promise<void>) => Promise<boolean>,
+          input: { opsActionId: string },
+          send: (q: string, p: object, tx: never) => Promise<void>,
+        ) => {
+          await once(`ops:job_retry:${input.opsActionId}`, (t) =>
+            send('billing.accrue.company', { companyId: platformId }, t),
+          );
           return 'sent' as const;
         },
       ),
@@ -66,9 +73,9 @@ describe('NFR-AVAIL the operations jobs (M11 decision 9; plan 4.14)', () => {
       ctx,
     );
     expect(keys).toEqual([`ops:job_retry:${opsActionId}`]);
-    expect(deps.deadLetters.requeue).toHaveBeenCalledWith(
-      tx,
-      deadLetterJobId,
+    expect(deps.deadLetters.runRetry).toHaveBeenCalledWith(
+      expect.any(Function),
+      { deadLetterJobId, opsActionId },
       expect.any(Function),
     );
     expect(deps.jobs.send).toHaveBeenCalledWith(
@@ -110,5 +117,30 @@ describe('NFR-AVAIL a dead-lettered webhook records why it failed (M11 decision 
     await (messaging as JobDefinition<unknown>).onDeadLetter!({ inboxId }, { logger, error });
     expect(webhooks.failed).toHaveBeenCalledWith(inboxId, error);
     expect(inbound.failed).toHaveBeenCalledWith(inboxId, error);
+  });
+});
+
+describe('NFR-AVAIL a webhook job’s dead letter hands on when it was queued (M11 review)', () => {
+  it('passes the queue time, so a row replayed since is not failed', async () => {
+    const inboxId = '019a3000-0000-7000-8000-0000000000cc';
+    const webhooks = { failed: vi.fn().mockResolvedValue(undefined) };
+    const inbound = { failed: vi.fn().mockResolvedValue(undefined) };
+    const payments = paymentsJobs({ webhooks } as never).find(
+      (j) => j.name === PROCESS_WEBHOOK_JOB,
+    )!;
+    const messaging = messagingJobs({ inbound } as never).find(
+      (j) => j.name === MESSAGING_INBOUND_JOB,
+    )!;
+    const createdAt = new Date('2026-11-10T09:00:00Z');
+    await (payments as JobDefinition<unknown>).onDeadLetter!(
+      { inboxId },
+      { logger, error: 'Error: down', createdAt },
+    );
+    await (messaging as JobDefinition<unknown>).onDeadLetter!(
+      { inboxId },
+      { logger, error: null, createdAt },
+    );
+    expect(webhooks.failed).toHaveBeenCalledWith(inboxId, 'Error: down', createdAt);
+    expect(inbound.failed).toHaveBeenCalledWith(inboxId, null, createdAt);
   });
 });

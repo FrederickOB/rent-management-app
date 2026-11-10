@@ -120,6 +120,23 @@ const configSchema = z.object({
 
 export type AppConfig = z.infer<typeof configSchema>;
 
+/**
+ * The configuration a running API or worker uses (M11 review B5): NODE_ENV must be set, so a
+ * deployment that forgets it fails at start rather than running with production's guards off
+ * (NODE_ENV defaults to development for unit tests that build configurations by hand). The dev
+ * scripts set it to development themselves.
+ */
+export function loadProcessConfig(
+  env: Record<string, string | undefined> = process.env,
+): AppConfig {
+  const mode = env.NODE_ENV;
+  if (mode !== 'development' && mode !== 'test' && mode !== 'production')
+    throw new Error(
+      'NODE_ENV must be set to development, test or production; a deployment sets production',
+    );
+  return loadConfig(env);
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   const result = configSchema.safeParse(env);
   if (!result.success) {
@@ -135,6 +152,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   if (config.NODE_ENV === 'production' && config.E2E_TEST_CONTROLS === 'on') {
     throw new Error('E2E_TEST_CONTROLS cannot be turned on in production');
+  }
+  // M11 review: the owner connection exists for one e2e test control; never in production.
+  if (config.NODE_ENV === 'production' && config.E2E_DATABASE_OWNER_URL) {
+    throw new Error('E2E_DATABASE_OWNER_URL must not be set in production');
   }
   // M11 security review R1 F11: the development secret is published in .env.example. (The API
   // refuses to start in production without TRUSTED_PROXIES: apps/api/src/auth/request-origin.ts.)

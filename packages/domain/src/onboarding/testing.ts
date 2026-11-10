@@ -7,7 +7,16 @@ import {
   invoiceLinesFor,
   type InvoiceCycle,
 } from '../billing/invoicing';
-import { isTax, lineBalance, postingClassOf, type BillingLine } from '../billing/lines';
+import {
+  creditPools,
+  isRecurring,
+  isTax,
+  lineBalance,
+  postingClassOf,
+  type AllocationRow,
+  type BillingLine,
+} from '../billing/lines';
+import { forwardWalk, walkLines, type WalkResult } from '../billing/walk';
 import { LeaseLedgerModel, type ModelPayment } from '../billing/testing/lease-ledger';
 import {
   moveOutDay,
@@ -123,12 +132,76 @@ export class ImportedRunner {
 
   state(): OpeningLeaseState {
     this.model.walk(); // brings the model's accrued flags up to date
+    return this.stateNow();
+  }
+
+  /** The state as the model holds it, when its accrued flags are already up to date (a walk ran). */
+  stateNow(lines: readonly BillingLine[] = this.model.lines): OpeningLeaseState {
     return {
-      lines: this.model.lines,
+      lines,
       allocations: this.model.allocations,
       payments: this.model.payments.filter((p) => !p.reversed),
       openingPaymentIds: this.openingPaymentIds(),
     };
+  }
+
+  /** The places of opening rent and service-charge lines lowered to nothing (M11 review M2). */
+  zeroedOpeningKeys(): Set<string> {
+    const byLine = this.allocationsByLine();
+    return new Set(
+      this.model.lines
+        .filter((l) => l.opening === true && isRecurring(l.kind))
+        .filter((l) => lineBalance(l, byLine.get(l.id) ?? []).netMinor === 0)
+        .map((l) => this.keyOf(l)),
+    );
+  }
+
+  /** The model's lines without those at the places given. */
+  linesWithout(keys: ReadonlySet<string>): BillingLine[] {
+    return keys.size === 0
+      ? this.model.lines
+      : this.model.lines.filter((l) => !keys.has(this.keyOf(l)));
+  }
+
+  /**
+   * The model's walk as if the lines at the places given had never been on the lease: the twin
+   * rebuilt without a month lowered to nothing (founder ruling, 2026-11-10). Such a line carries
+   * no money and takes no credit, so leaving it out changes nothing else.
+   */
+  walkWithout(keys: ReadonlySet<string>): WalkResult {
+    this.model.walk();
+    const live = this.model.payments.filter((p) => !p.reversed);
+    return forwardWalk(
+      walkLines({
+        lines: this.linesWithout(keys),
+        allocations: this.model.allocations,
+        scheduled: this.model.scheduled,
+      }),
+      creditPools(live, this.model.allocations),
+      { lastDay: this.model.lastDay },
+    );
+  }
+
+  /** 1100, 2010 and 2100 for the lease, in one pass over the journal. */
+  leaseBalances(): { readonly '1100': number; readonly '2010': number; readonly '2100': number } {
+    const out = { '1100': 0, '2010': 0, '2100': 0 };
+    for (const entry of this.model.entries)
+      for (const l of entry.lines)
+        if (l.bookId === this.model.book && l.leaseId === this.model.lease.leaseId)
+          if (l.accountCode === '1100' || l.accountCode === '2010' || l.accountCode === '2100')
+            out[l.accountCode] += l.amountMinor;
+    return out;
+  }
+
+  /** Each line's allocations, in the order written. */
+  allocationsByLine(): Map<string, AllocationRow[]> {
+    const byLine = new Map<string, AllocationRow[]>();
+    for (const a of this.model.allocations) {
+      const list = byLine.get(a.lineId);
+      if (list) list.push(a);
+      else byLine.set(a.lineId, [a]);
+    }
+    return byLine;
   }
 
   context(batchId: string): OpeningLeaseContext {
@@ -170,19 +243,30 @@ export class ImportedRunner {
   /** A line's place regardless of its id, so two models of one lease can be compared. */
   keyOf(line: BillingLine): string {
     if (line.baseLineId) {
-      const base = this.model.lines.find((l) => l.id === line.baseLineId) as BillingLine;
+      const base = this.lineById(line.baseLineId);
       return `${base.periodStart}|${base.kind}|${line.kind}`;
     }
     if (line.kind === 'deposit') return 'deposit';
     return `${line.periodStart ?? line.dueDate}|${line.kind}`;
   }
 
+  private lineIndex: { readonly size: number; readonly byId: Map<string, BillingLine> } | null =
+    null;
+
+  /** A line by its id (lines are only ever added, and a line's place never changes). */
+  lineById(id: string): BillingLine {
+    const lines = this.model.lines;
+    if (this.lineIndex === null || this.lineIndex.size !== lines.length)
+      this.lineIndex = { size: lines.length, byId: new Map(lines.map((l) => [l.id, l])) };
+    return this.lineIndex.byId.get(id) as BillingLine;
+  }
+
   /** Every line's balance by its place (deposits added up). */
   balancesByKey(): Record<string, { net: number; settled: number; writtenOff: number }> {
-    this.model.walk();
+    const byLine = this.allocationsByLine();
     const out: Record<string, { net: number; settled: number; writtenOff: number }> = {};
     for (const line of this.model.lines) {
-      const b = lineBalance(line, this.model.allocations);
+      const b = lineBalance(line, byLine.get(line.id) ?? []);
       const key = this.keyOf(line);
       const was = out[key] ?? { net: 0, settled: 0, writtenOff: 0 };
       out[key] = {

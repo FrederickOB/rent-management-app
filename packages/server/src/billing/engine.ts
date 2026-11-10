@@ -269,6 +269,19 @@ export function lastBillableDay(lease: BillingLease): string | null {
 }
 
 /**
+ * M11 founder decision 3 (P25): an imported lease billed from a later period than its start was
+ * settled before the platform up to its billing start, except the opening months still owed, so
+ * its paid-until never falls below that (the forward walk's `floor`). Null for any other lease.
+ */
+export function paidUntilFloor(lease: BillingLease): { readonly billingStart: string } | null {
+  return lease.importedBatchId !== null &&
+    lease.billingStartDate !== null &&
+    lease.billingStartDate > lease.startDate
+    ? { billingStart: lease.billingStartDate }
+    : null;
+}
+
+/**
  * The billing engine (M4a plan 4.4 to 4.11): each operation runs the domain's planning and posting
  * functions in the order of the reference model (packages/domain/src/billing/testing/
  * lease-ledger.ts) and writes the result in the caller's transaction, which holds the lease's
@@ -3119,6 +3132,8 @@ export class BillingEngine {
       .map((a) => {
         const entry = entryOfItem(a.itemId, a.lineId);
         return {
+          // M11 review M1: credit the lease already held, drawn onto opening debt (no item).
+          draw: a.itemId === null,
           companyId: company.id,
           propertyId: lease.propertyId,
           tenantId: lease.tenantId,
@@ -3134,9 +3149,28 @@ export class BillingEngine {
           entryId: entry.entryId,
         };
       });
-    if (rows.length > 0) {
-      const inserted = await tx.insert(schema.allocation).values(rows).returning();
+    // The opening items' own allocations: money received before the platform, no fee (OQ-64).
+    const items = rows.filter((r) => !r.draw).map(({ draw: _draw, ...r }) => r);
+    if (items.length > 0) {
+      const inserted = await tx.insert(schema.allocation).values(items).returning();
       state.allocations.push(...inserted.map(allocationRecord));
+    }
+    // M11 review M1: credit the lease already held drawn onto opening arrears (a P02 draw). Money
+    // a platform payment brought carries its fee as any credit drawn onto a month does; the fee
+    // hook leaves an opening payment's share out (`isOpeningAllocation`).
+    const draws = new Map<string, Omit<(typeof rows)[number], 'draw'>[]>();
+    for (const { draw, ...r } of rows)
+      if (draw) draws.set(r.entryId, [...(draws.get(r.entryId) ?? []), r]);
+    for (const [entryId, drawn] of draws) {
+      const inserted = await tx.insert(schema.allocation).values(drawn).returning();
+      state.allocations.push(...inserted.map(allocationRecord));
+      await this.feeHooks?.afterAllocations(tx, state, inserted, {
+        valueDate: drawn[0]!.valueDate,
+        recordType: 'opening',
+        recordId: meta.batchId,
+        entryId,
+        causedBy: meta.causedBy,
+      });
     }
     for (const l of plan.lines.filter((line) => line.accrued)) {
       const entry = entryOfItem(l.itemId);
@@ -3192,7 +3226,7 @@ export class BillingEngine {
         scheduled: this.scheduled(state),
       }),
       creditPools(state.payments, state.allocations),
-      { lastDay: lastBillableDay(state.lease) },
+      { lastDay: lastBillableDay(state.lease), floor: paidUntilFloor(state.lease) },
     );
   }
 

@@ -1,6 +1,7 @@
 import { schema, withCompany } from '@rent/db';
 import { addDays, addMonths, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { invoiceStatusOf, lineBalance, remainingAfterWalk } from '@rent/domain/billing';
 import { isoNow } from '../src/billing/records';
 import { startServerTest, type ServerTestContext } from './support';
 import {
@@ -97,23 +98,67 @@ describe('NFR-PERF BC-08 the invoice list reads every lease at once (M11 load sm
     );
   });
 
-  it('lists the same invoices with the same figures as each lease’s own view', async () => {
+  it('lists every invoice with the figures the old per-lease path gives (an independent oracle)', async () => {
     const list = await b.read.invoices(agency.manager, { limit: 100 });
-    expect(list.length).toBeGreaterThan(leaseIds.length);
-    for (const leaseId of leaseIds) {
-      const own = await b.read.invoices(agency.manager, { leaseId, limit: 100 });
-      expect(list.filter((r) => r.leaseId === leaseId)).toEqual(own);
-    }
-    // Every figure still comes from the ledger's sub-ledgers: settled plus outstanding never
-    // exceeds the total, and the overpaid lease's invoices are settled, never overdue.
-    for (const row of list) expect(row.settledMinor).toBeLessThanOrEqual(row.totalMinor);
-    const overpaid = list.filter((r) => r.leaseId === leaseIds[4]);
-    expect(overpaid.every((r) => !r.overdue)).toBe(true);
-    const [invoice] = await withCompany(
+    // The oracle: each lease loaded on its own with load(), then the domain's own functions over
+    // that lease's lines and allocations, as the list did before M11.
+    const expected = await withCompany(
       ctx.database,
       { companyId: agency.companyId, actorKind: 'system' },
-      (tx) => tx.select({ id: schema.invoice.id }).from(schema.invoice).limit(1),
+      async (tx) => {
+        const rows = await tx.select().from(schema.invoice);
+        const out = new Map<
+          string,
+          {
+            totalMinor: number;
+            settledMinor: number;
+            outstandingMinor: number;
+            status: string;
+            overdue: boolean;
+          }
+        >();
+        for (const leaseId of leaseIds) {
+          const state = await b.engine.load(tx, agency.companyId, leaseId);
+          const walk = b.engine.walk(state);
+          for (const r of rows.filter((x) => x.leaseId === leaseId)) {
+            const mine = state.lines.filter((l) => l.invoiceId === r.id);
+            const balances = mine.map((l) => lineBalance(l, state.allocations));
+            const outstanding = mine.reduce(
+              (sum, l) => sum + remainingAfterWalk(l, state.allocations, walk),
+              0,
+            );
+            out.set(r.id, {
+              totalMinor: mine.reduce((sum, l) => sum + l.amountMinor, 0),
+              settledMinor: balances.reduce((sum, x) => sum + x.settledMinor, 0),
+              outstandingMinor: outstanding,
+              status: invoiceStatusOf(balances),
+              overdue: r.dueDate < today && outstanding > 0,
+            });
+          }
+        }
+        return out;
+      },
     );
-    expect(invoice).toBeDefined();
+    expect(list.length).toBe(expected.size);
+    expect(list.length).toBeGreaterThan(leaseIds.length);
+    for (const row of list)
+      expect(
+        {
+          totalMinor: row.totalMinor,
+          settledMinor: row.settledMinor,
+          outstandingMinor: row.outstandingMinor,
+          status: row.status,
+          overdue: row.overdue,
+        },
+        row.number,
+      ).toEqual(expected.get(row.id));
+    // Exact figures the payments make: the partial payment of 50,000 is settled in full against
+    // its lease's debts (they exceed it); the overpaid lease owes nothing and nothing is overdue.
+    const settledOn = (leaseId: string) =>
+      list.filter((r) => r.leaseId === leaseId).reduce((sum, r) => sum + r.settledMinor, 0);
+    expect(settledOn(leaseIds[0]!)).toBe(50_000);
+    const overpaid = list.filter((r) => r.leaseId === leaseIds[4]);
+    expect(overpaid.length).toBeGreaterThan(0);
+    expect(overpaid.every((r) => r.outstandingMinor === 0 && !r.overdue)).toBe(true);
   });
 });

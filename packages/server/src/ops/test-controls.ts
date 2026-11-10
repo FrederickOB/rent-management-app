@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { schema, sql, withSystem, type Database } from '@rent/db';
-import { conflict, invalid } from '../core/errors';
+import { eq, schema, sql, withCompany, withSystem, type Database } from '@rent/db';
+import { conflict, invalid, notFound } from '../core/errors';
 import { DEAD_LETTER_QUEUE } from '../core/jobs/job';
 import { MESSAGING_WEBHOOK_PREFIX } from '../core/messages';
+import type { PaymentProviders } from '../core/payment-providers';
+import type { PayLinksService } from '../payments/pay-links.service';
+import type { PayPageService } from '../payments/pay-page.service';
 
 /**
  * The web e2e specs' operations controls (M11 decision 9), called only by the api's test controls
@@ -130,5 +133,117 @@ export async function storeDeadLetter(
           returning id::text as id`,
     );
     return inserted.rows[0]!.id;
+  });
+}
+
+/**
+ * M11 review C6: a failed webhook for a real payment, so the e2e spec can watch a replay post it.
+ * For an open invoice the caller names (the spec makes its own lease and invoice, as the links
+ * specs do), it starts a MoMo charge on the invoice's pay link (a real pending intent, at the
+ * company's provider), has the provider mark it paid without sending its webhook (as if the
+ * webhook were lost), and stores that webhook as dead-lettered. Nothing is posted until a replay:
+ * then the normal path verifies the charge and posts exactly one payment and one receipt; a
+ * second replay finds it posted. Answers the inbox id and the charge reference.
+ */
+export async function storeFailedChargeWebhook(
+  deps: {
+    readonly database: Database;
+    readonly links: PayLinksService;
+    readonly page: PayPageService;
+    readonly providers: PaymentProviders;
+  },
+  input: { readonly companyId: string; readonly invoiceId: string; readonly amountMinor?: number },
+): Promise<{ id: string; reference: string }> {
+  const { url } = await withCompany(
+    deps.database,
+    { companyId: input.companyId, actorKind: 'system' },
+    async (tx) => deps.links.mint(tx, await deps.links.invoice(tx, input.invoiceId)),
+  );
+  const token = url.split('/p/')[1] ?? '';
+  const client = { ip: '127.0.0.1', userAgent: 'e2e-test-control' };
+  const page = await deps.page.open(token, client);
+  const amountMinor = input.amountMinor ?? page.amounts.prefillMinor;
+  if (!Number.isSafeInteger(amountMinor) || amountMinor < 100)
+    throw conflict('nothing_due', 'The invoice has nothing to pay');
+  const intent = await deps.page.start(token, client, {
+    amountMinor,
+    method: 'momo',
+    momo: { phone: '024 000 0003', network: 'mtn' },
+    submissionId: randomUUID(),
+  });
+  const [row] = await withCompany(
+    deps.database,
+    { companyId: input.companyId, actorKind: 'system' },
+    (tx) =>
+      tx
+        .select({
+          reference: schema.paymentIntent.reference,
+          provider: schema.paymentIntent.provider,
+        })
+        .from(schema.paymentIntent)
+        .where(eq(schema.paymentIntent.id, intent.intentId)),
+  );
+  if (!row?.provider) throw conflict('charge_not_started', 'The provider did not take the charge');
+  const port = deps.providers.get(row.provider) as unknown as Partial<{
+    completeCharge(
+      reference: string,
+      outcome: { status: 'success'; webhook: false },
+    ): Promise<unknown>;
+  }>;
+  if (typeof port.completeCharge !== 'function')
+    throw conflict('no_test_provider', 'This provider has no test controls');
+  await port.completeCharge(row.reference, { status: 'success', webhook: false });
+  const body = JSON.stringify({
+    event: 'charge.success',
+    data: { reference: row.reference, status: 'success', amount: amountMinor, currency: 'GHS' },
+  });
+  const [stored] = await withSystem(deps.database, {}, (tx) =>
+    tx
+      .insert(schema.webhookInbox)
+      .values({
+        provider: row.provider!,
+        eventId: `charge.success:e2e-${randomUUID()}`,
+        eventType: 'charge.success',
+        reference: row.reference,
+        rawBody: body,
+        bodyBytes: Buffer.byteLength(body),
+        headers: { 'content-type': 'application/json', 'user-agent': 'e2e-test-control' },
+        signatureValid: true,
+        status: 'failed',
+        outcome: 'dead_lettered',
+        publishedAt: new Date(),
+        processedAt: new Date(),
+        lastError: 'ProviderError: provider unavailable (HTTP 503)',
+      })
+      .returning({ id: schema.webhookInbox.id }),
+  );
+  return { id: stored!.id, reference: row.reference };
+}
+
+/** M11 review C6: the payments and receipts a charge reference has, for the e2e spec's check. */
+export async function paymentsByReference(
+  database: Database,
+  reference: string,
+): Promise<{ payments: number; receipts: number }> {
+  if (!/^[A-Za-z0-9.=_-]{1,120}$/.test(reference))
+    throw invalid('bad_reference', 'Not a reference');
+  const found = await withSystem(database, {}, (tx) =>
+    tx.execute<{ company_id: string }>(
+      sql`select company_id from app.payment_intent_by_reference(${reference})`,
+    ),
+  );
+  const companyId = found.rows[0]?.company_id;
+  if (!companyId) throw notFound('Charge reference');
+  return withCompany(database, { companyId, actorKind: 'system' }, async (tx) => {
+    const counts = await tx.execute<{ payments: number; receipts: number }>(
+      sql`select count(distinct p.id)::int as payments, count(distinct r.id)::int as receipts
+          from payment p
+          left join receipt r on r.company_id = p.company_id and r.payment_id = p.id
+          where p.provider_reference = ${reference}`,
+    );
+    return {
+      payments: Number(counts.rows[0]?.payments ?? 0),
+      receipts: Number(counts.rows[0]?.receipts ?? 0),
+    };
   });
 }

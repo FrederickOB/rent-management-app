@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { databaseNameOf, refusalFor } from '../src/ops/cli-guard';
+import { databaseNameOf, refusalFor, resolveDatabase } from '../src/ops/cli-guard';
 
 /**
  * M11 decision 9: the incident commands (`pnpm ops:replay-webhooks`, `pnpm ops:redrive`) refuse a
@@ -100,5 +100,62 @@ describe('NFR-AVAIL ops:reconcile has the same guard (M11 follow-up)', () => {
     );
     expect(noReason.status).toBe(2);
     expect(noReason.stderr).toMatch(/--reason is required/);
+  }, 60_000);
+});
+
+describe('NFR-AVAIL the rent guard reads the database as node-postgres does (M11 review B, hardening)', () => {
+  const env = {};
+  it.each([
+    ['a socket host in the query', 'postgres:///rent?host=/var/run/postgresql'],
+    ['an encoded socket host', 'postgresql://%2Fvar%2Frun%2Fpostgresql/rent'],
+    ['a socket: URL', 'socket:/var/run/postgresql?db=rent'],
+    ['a bare socket path', '/var/run/postgresql rent'],
+    ['a percent-encoded name', 'postgres://u@h:5432/%72ent'],
+    ['an empty host', 'postgres://u@/rent'],
+    ['another case', 'postgres://u@h/Rent'],
+  ])('refuses rent named through %s', (_label, url) => {
+    expect(resolveDatabase(url, env)).toMatchObject({ database: expect.stringMatching(/^rent$/i) });
+    expect(refusalFor(url, false, env)).toMatch(/named rent/);
+    expect(refusalFor(url, true, env)).toBeNull();
+  });
+
+  it('refuses a database chosen in the query string, whatever the path says', () => {
+    for (const url of [
+      'postgres://u@h/scratch?dbname=rent',
+      'postgres://u@h/rent_scratch_ops?database=rent',
+      'postgres://u@h/?database=rent',
+      'postgres://u@h/rent_scratch_ops?service=prod',
+    ])
+      expect(refusalFor(url, true, env), url).toMatch(/query string/);
+  });
+
+  it('refuses a URL that names no database, which would fall back to PGDATABASE or the user', () => {
+    expect(resolveDatabase('postgres://rent@h/', {})).toMatchObject({
+      database: 'rent',
+      source: 'user',
+    });
+    expect(resolveDatabase('postgres://u@h/', { PGDATABASE: 'rent' })).toMatchObject({
+      database: 'rent',
+      source: 'PGDATABASE',
+    });
+    expect(refusalFor('postgres://u@h/', false, { PGDATABASE: 'rent' })).toMatch(
+      /fall back to PGDATABASE/,
+    );
+    expect(refusalFor('postgres://rent@h/', true, {})).toMatch(/fall back to user/);
+    expect(refusalFor('mysql://u@h/rent_scratch', false, {})).toMatch(/names no database/);
+    // PGDATABASE never overrides a database named in the path, as in pg.
+    expect(refusalFor('postgres://u@h/rent_scratch_ops', false, { PGDATABASE: 'rent' })).toBeNull();
+  });
+
+  it('refuses before anything loads, in well under a second of the command’s own time', () => {
+    const started = Date.now();
+    const refused = run(
+      'ops-redrive.ts',
+      [...ARGS, '--queue', 'q'],
+      'postgres://u@/%72ent?host=/tmp',
+    );
+    expect(refused.status, refused.stderr).toBe(2);
+    expect(refused.stderr).toMatch(/named rent/);
+    expect(Date.now() - started).toBeLessThan(15_000);
   }, 60_000);
 });

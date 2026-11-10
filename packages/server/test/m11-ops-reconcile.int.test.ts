@@ -5,6 +5,7 @@ import { chargeReference } from '@rent/domain/payments';
 import { ProviderError } from '@rent/integrations';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isoNow } from '../src/billing/records';
+import { cliIdentity } from '../src/ops/operator';
 import { ReconciliationRunService } from '../src/ops/reconcile.service';
 import { startServerTest, type ServerTestContext } from './support';
 import {
@@ -353,5 +354,38 @@ describe('BC-02 ops:reconcile runs a day again through the jobs’ services, ide
         data: { day: today, provider: 'second', error: 'ProviderError: second: HTTP 503' },
       },
     ]);
+  });
+});
+
+describe('NFR-AUDIT a reconciliation run from the incident command records its OS user and host (M11 review B4)', () => {
+  it('puts them in each of the run’s audit events', async () => {
+    const run = new ReconciliationRunService(
+      ctx.database,
+      p.providers,
+      p.reconciliation,
+      ctx.audit,
+      ctx.clock,
+    );
+    const cli = cliIdentity();
+    const result = await run.runAs(
+      { personId: admin.personId, via: 'cli', cli },
+      { day: today, provider: 'second' },
+      'Checking the operator is recorded',
+    );
+    const events = await withCompany(
+      ctx.database,
+      sys(admin.companyId),
+      async (tx) =>
+        (
+          await tx.execute<{ action: string; data: Record<string, unknown> }>(
+            sql`select action, data from audit_event where record_id = ${result.runId} order by seq`,
+          )
+        ).rows,
+    );
+    expect(events.map((e) => e.action)).toEqual([
+      'ops.reconciliation_started',
+      'ops.reconciliation_finished',
+    ]);
+    for (const e of events) expect(e.data).toMatchObject({ osUser: cli.osUser, host: cli.host });
   });
 });

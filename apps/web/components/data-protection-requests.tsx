@@ -15,9 +15,11 @@ import {
   dataProtectionMessage,
   dueText,
   erasureLines,
+  EXPORT_KEPT_TEXT,
   EXPORT_POLL_MS,
   EXPORT_POLL_TRIES,
   isClosed,
+  leftOutText,
   nextStatuses,
   receivedProblem,
   REQUEST_KIND_LABELS,
@@ -127,6 +129,8 @@ function NewRequest({
   const [errors, setErrors] = useState<{ tenant?: string; receivedOn?: string }>({});
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // One key per request recorded (M11 review): a retry on a slow connection records it once.
+  const keeper = useIdempotencyKeeper();
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -140,12 +144,14 @@ function NewRequest({
     if (!tenantId || next.receivedOn) return;
     setPending(true);
     try {
-      const created = await api().dataProtection.create({
-        tenantId,
-        kind,
-        receivedOn,
-        ...(notes.trim() ? { notes: notes.trim() } : {}),
-      });
+      const created = await sendOnce(keeper, (key) =>
+        keyedApi(key).dataProtection.create({
+          tenantId,
+          kind,
+          receivedOn,
+          ...(notes.trim() ? { notes: notes.trim() } : {}),
+        }),
+      );
       setOpen(false);
       setNotes('');
       setPicked(null);
@@ -155,7 +161,11 @@ function NewRequest({
           : `Recorded the request from ${created.tenant.name}.`,
       );
     } catch (failure) {
-      setProblem(problemText(failure));
+      setProblem(
+        isKeyReused(failure)
+          ? 'An earlier attempt may already have recorded this request. Check the list before recording it again.'
+          : problemText(failure),
+      );
     } finally {
       setPending(false);
     }
@@ -271,7 +281,9 @@ function RequestItem({
           ))}
         </ul>
       ) : null}
-      {request.kind === 'access' && canExport ? <ExportControl request={request} /> : null}
+      {request.kind === 'access' && canExport && !isClosed(request.status) ? (
+        <ExportControl request={request} />
+      ) : null}
       {request.kind === 'erasure' && !isClosed(request.status) ? (
         <EraseControl request={request} onDone={onChanged} />
       ) : null}
@@ -349,6 +361,9 @@ function StatusForm({
 function ExportControl({ request }: { readonly request: DataProtectionRequestView }) {
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  const [leftOut, setLeftOut] = useState<string | null>(() =>
+    request.export?.status === 'ready' ? leftOutText(request.export) : null,
+  );
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -361,10 +376,10 @@ function ExportControl({ request }: { readonly request: DataProtectionRequestVie
     setPending(true);
     setProblem(null);
     try {
-      let exported =
-        request.export && request.export.status !== 'failed'
-          ? request.export
-          : await api().dataProtection.exportCreate({ requestId: request.id });
+      // Asked every time (M11 review C3): the list never carries a link, and a link lasts minutes.
+      // The API answers with the live export (with a fresh link once it is ready), or prepares a
+      // new one when there is none: after a failure, or once a ready one is deleted.
+      let exported = await api().dataProtection.exportCreate({ requestId: request.id });
       for (
         let tries = 0;
         exported.status === 'preparing' && tries < EXPORT_POLL_TRIES;
@@ -376,6 +391,7 @@ function ExportControl({ request }: { readonly request: DataProtectionRequestVie
       }
       if (!mounted.current) return;
       if (exported.status === 'ready' && exported.url) {
+        setLeftOut(leftOutText(exported));
         startDownload(exported.url);
         return;
       }
@@ -403,8 +419,13 @@ function ExportControl({ request }: { readonly request: DataProtectionRequestVie
       </Button>
       <p className="text-xs text-slate-600">
         An Excel workbook of the tenant’s data, with their leases, receipts, notices and messages.
-        Only this tenant’s records are in it.
+        Only this tenant’s records are in it. {EXPORT_KEPT_TEXT}
       </p>
+      {leftOut ? (
+        <p className="text-sm text-slate-800" data-testid="export-left-out">
+          {leftOut}
+        </p>
+      ) : null}
       {problem ? (
         <p role="alert" className="text-sm font-medium text-red-700">
           {problem}

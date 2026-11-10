@@ -1,23 +1,25 @@
 // The parser alone: the web build takes it from its own module (metro.trim.js).
 import parsePhoneNumberFromString, { type MetadataJson } from 'libphonenumber-js/core';
+import { loadAnyCountryPhone } from './phone-any-load';
 import metadata from './phone-metadata.json';
 
 /**
- * The tenant's phone number for sign-in, in E.164 (CLAUDE.md section 11), checked here with
- * Ghana's rules only (M11 decision 8): the full rules for every country are 157 KB, a quarter of
- * the sign-in screen's download on 3G.
+ * The tenant's phone number for sign-in, in E.164 (CLAUDE.md section 11), exactly as
+ * libphonenumber's full rules read it with Ghana as the default country, as the API reads it.
  *
- * - **A Ghanaian number,** in its local form (`024 412 3456`) or with `+233`, is checked against
- *   libphonenumber's full rules for Ghana, as the API checks it.
- * - **Any other country's number** is taken in its international form (`+44 7400 123456`, or
- *   `0044…`) as long as it has the shape of one: a country code and 7 to 15 digits in all. The
- *   API, which has every country's rules, checks it, and sends a code only to a number on record.
+ * - **A Ghanaian number,** in its local form (`024 412 3456`) or with `+233`, is checked with
+ *   Ghana's rules alone (M11 decision 8): the full rules for every country are 157 KB, a quarter
+ *   of the sign-in screen's download on 3G. For Ghana they are the same rules.
+ * - **A number that names another country,** with `+` or Ghana's international prefix `00`, is
+ *   read by every country's rules (src/phone-any.ts), which the web build loads only then. So "+44 (0)7400 123456",
+ *   an extension or a `tel:` link reads as it did before M11 (M11 review).
  */
-export function signInPhone(input: string): string | null {
+export async function signInPhone(input: string): Promise<string | null> {
   const text = input.trim();
   const parsed = parsePhoneNumberFromString(text, 'GH', metadata as MetadataJson);
   if (parsed?.isValid()) return parsed.number;
-  const compact = text.replace(/[\s().-]/g, '').replace(/^00/, '+');
-  if (compact.startsWith('+233')) return null;
-  return /^\+[1-9]\d{6,14}$/.test(compact) ? compact : null;
+  // Ghana's rules are the full ones for Ghana: only another country's number reads differently.
+  if (parsed?.countryCallingCode === '233' || !/^[^0-9]*(?:[+\uFF0B]|00)/.test(text)) return null;
+  const anyCountryPhone = await loadAnyCountryPhone();
+  return anyCountryPhone(text);
 }

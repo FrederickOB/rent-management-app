@@ -7,19 +7,39 @@
  * - **per address:** 2 at once, so a double tap still reaches the form-id check that answers it
  *   once (lib/job-sheet-store.ts), and 30 in 10 minutes.
  *
- * In this server's memory, on `globalThis`, so every route shares it.
+ * In this server's memory, on `globalThis`, so every route shares it. An address that holds no
+ * place and has nothing left in its window is forgotten in a sweep, at most once a minute (M11
+ * review), so the map never grows with addresses seen once.
  */
 const PER_ADDRESS_AT_ONCE = 2;
 const PER_ADDRESS_WINDOW_MS = 10 * 60_000;
 const PER_ADDRESS_IN_WINDOW = 30;
+const SWEEP_EVERY_MS = 60_000;
 
 interface Gate {
   active: number;
+  lastSweep: number;
   readonly byAddress: Map<string, { active: number; admitted: number[] }>;
 }
 
 const holder = globalThis as typeof globalThis & { __rentUploadGate?: Gate };
-const gate: Gate = (holder.__rentUploadGate ??= { active: 0, byAddress: new Map() });
+const gate: Gate = (holder.__rentUploadGate ??= {
+  active: 0,
+  lastSweep: 0,
+  byAddress: new Map(),
+});
+
+const live = (at: number, now: number) => now - at < PER_ADDRESS_WINDOW_MS;
+
+/** Forgets every address that holds no place and has nothing left in its window. */
+function sweep(now: number): void {
+  if (now - gate.lastSweep < SWEEP_EVERY_MS) return;
+  gate.lastSweep = now;
+  for (const [address, own] of gate.byAddress) {
+    own.admitted = own.admitted.filter((at) => live(at, now));
+    if (own.active === 0 && own.admitted.length === 0) gate.byAddress.delete(address);
+  }
+}
 
 const perServer = (env: Readonly<Record<string, string | undefined>>): number => {
   const value = Number(env.JOB_SHEET_UPLOADS_PER_SERVER);
@@ -35,8 +55,9 @@ export function admitUpload(
   now = Date.now(),
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Admission {
+  sweep(now);
   const own = gate.byAddress.get(address) ?? { active: 0, admitted: [] };
-  own.admitted = own.admitted.filter((at) => now - at < PER_ADDRESS_WINDOW_MS);
+  own.admitted = own.admitted.filter((at) => live(at, now));
   if (
     gate.active >= perServer(env) ||
     own.active >= PER_ADDRESS_AT_ONCE ||
@@ -64,5 +85,9 @@ export function admitUpload(
 /** For tests: an empty gate. */
 export function resetUploadGate(): void {
   gate.active = 0;
+  gate.lastSweep = 0;
   gate.byAddress.clear();
 }
+
+/** For tests: how many addresses the gate remembers. */
+export const rememberedAddresses = (): number => gate.byAddress.size;

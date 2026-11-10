@@ -281,9 +281,20 @@ export const document = pgTable(
     originalFilename: text(),
     createdBy: uuid(),
     createdAt: tsNow(),
+    /**
+     * M11 review (founder): an upload re-encoded to drop its EXIF and location (F10) keeps the
+     * original's SHA-256 and byte count, so the original is shown to have arrived whole. Set at
+     * insert only; null when the stored bytes are the upload's own.
+     */
+    originalSha256: text(),
+    originalBytes: bigint({ mode: 'number' }),
   },
   (t) => [
     unique('document_company_id_id_key').on(t.companyId, t.id),
+    check(
+      'document_original_check',
+      sql`(${t.originalSha256} is null) = (${t.originalBytes} is null) and (${t.originalSha256} is null or ${t.originalSha256} ~ '^[0-9a-f]{64}$') and (${t.originalBytes} is null or ${t.originalBytes} > 0)`,
+    ),
     check('document_sha256_check', sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
 
     check(

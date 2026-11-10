@@ -37,7 +37,7 @@ const snapshot = (
 
 const dayAfter = (date: string, days: number) => toIsoDate(addDays(parseBusinessDate(date), days));
 
-describe('DA-05 Gate 1 targets (M11 decision 4)', () => {
+describe('DA-01 Gate 1 targets (M11 decision 4)', () => {
   it('sets both targets at 95%', () => {
     expect(GATE1_TARGET_BPS).toEqual({ collectionRate: 9_500, autoMatch: 9_500 });
   });
@@ -89,7 +89,7 @@ describe('DA-05 Gate 1 targets (M11 decision 4)', () => {
   });
 });
 
-describe('DA-05 Gate 1 arrears over 60 days (M11 decision 4)', () => {
+describe('DA-01 Gate 1 arrears over 60 days (M11 decision 4)', () => {
   it('counts what is more than 60 days overdue against the rent roll', () => {
     const result = arrearsOver60({
       month: '2026-12',
@@ -214,7 +214,7 @@ describe('DA-05 Gate 1 arrears over 60 days (M11 decision 4)', () => {
   });
 });
 
-describe('DA-05 Gate 1 weekly active managers (M11 decision 4)', () => {
+describe('DA-01 Gate 1 weekly active managers (M11 decision 4)', () => {
   const ama: StaffMember = { companyId: 'c1', personId: 'ama' };
   const kojo: StaffMember = { companyId: 'c1', personId: 'kojo' };
   const on = (member: StaffMember, ...days: string[]): StaffActiveDay[] =>
@@ -324,7 +324,7 @@ describe('DA-05 Gate 1 weekly active managers (M11 decision 4)', () => {
   });
 });
 
-describe('DA-05 Gate 1 tenant WhatsApp adoption (M11 decision 4)', () => {
+describe('DA-01 Gate 1 tenant WhatsApp adoption (M11 decision 4)', () => {
   const tenant = (
     tenantId: string,
     values: Partial<TenantForAdoption> = {},
@@ -431,7 +431,7 @@ describe('DA-05 Gate 1 tenant WhatsApp adoption (M11 decision 4)', () => {
   });
 });
 
-describe('DA-05 Gate 1 time to receipt delivered (M11 decision 4)', () => {
+describe('DA-01 Gate 1 time to receipt delivered (M11 decision 4)', () => {
   it('counts receipts delivered within a minute, a receipt never delivered as late', () => {
     expect(
       timeToReceiptDelivered([
@@ -476,7 +476,7 @@ describe('DA-05 Gate 1 time to receipt delivered (M11 decision 4)', () => {
   });
 });
 
-describe('DA-05 Gate 1 net revenue retention (M11 decision 4)', () => {
+describe('DA-01 Gate 1 net revenue retention (M11 decision 4)', () => {
   const invoice = (companyId: string, month: string, amountMinor: number): SubscriptionRevenue => ({
     companyId,
     month,

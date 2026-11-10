@@ -126,12 +126,15 @@ export class JobsService {
       return;
     }
     try {
-      // M11 decision 9: why the last try failed, from the dead letter's copy of its output.
-      const error = await this.boss
+      // M11 decision 9: why the last try failed, and when the failed job was queued, from the
+      // dead letter's copy of it.
+      const source = await this.boss
         .findJobs(DEAD_LETTER_QUEUE, { id: job.id })
-        .then(([found]) => jobErrorSummary(found?.sourceOutput ?? null))
+        .then(([found]) => found ?? null)
         .catch(() => null);
-      await definition.onDeadLetter(payload.data, { logger, error });
+      const error = jobErrorSummary(source?.sourceOutput ?? null);
+      const createdAt = source?.sourceCreatedOn ? new Date(source.sourceCreatedOn) : null;
+      await definition.onDeadLetter(payload.data, { logger, error, createdAt });
     } catch (error) {
       // The alert has gone out already; a person follows up from there.
       logger.error({ err: error }, 'recording the failure of a dead-lettered job failed');

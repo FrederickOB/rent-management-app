@@ -86,10 +86,25 @@ export const DATA_PROTECTION_MESSAGES: Record<string, string> = {
   REQUEST_CLOSED: 'The request is closed, so it can’t change any more.',
   NOT_ACCESS_REQUEST: 'Only an access request has an export.',
   NOT_ERASURE_REQUEST: 'Only an erasure request erases anything.',
+  // Founder decision 5 (review round): a ready export is deleted after 7 days.
+  EXPORT_EXPIRED: 'This export was deleted after 7 days. Prepare a new one.',
 };
 
 export const dataProtectionMessage = (error: unknown): string | null =>
   DATA_PROTECTION_MESSAGES[errorCode(error)] ?? null;
+
+/** Founder decision 5 in the M11 review round: an export is kept 7 days, then deleted. */
+export const EXPORT_KEPT_TEXT = 'Exports are deleted after 7 days; prepare a new one if needed.';
+
+/**
+ * An export holds at most 100 MB of files; over that, the largest are left out and listed in its
+ * workbook (review round, B7). The words for a ready export that left some out, or null.
+ */
+export function leftOutText(exported: { readonly split?: boolean; readonly leftOut?: number }) {
+  if (!exported.split) return null;
+  const count = exported.leftOut && exported.leftOut > 0 ? ` (${exported.leftOut})` : '';
+  return `Some large files weren’t included${count}. They’re listed in the export, and you can download them from their records.`;
+}
 
 export const EXPORT_POLL_MS = 3_000;
 export const EXPORT_POLL_TRIES = 40;

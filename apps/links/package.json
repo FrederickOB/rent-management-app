@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "next dev --port 3702",
-    "build": "next build",
-    "start": "next start --port 3702",
+    "build": "NODE_ENV=production next build",
+    "start": "NODE_ENV=production next start --port 3702",
     "lint": "eslint --max-warnings 0 .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests",

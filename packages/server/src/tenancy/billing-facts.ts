@@ -20,6 +20,8 @@ export interface BillingLease {
   readonly startDate: string;
   readonly endDate: string;
   readonly billingStartDate: string | null;
+  /** M11 decision 2: the onboarding batch that imported it (P25), or null for any other lease. */
+  readonly importedBatchId: string | null;
   readonly initialAdvanceMonths: number | null;
   readonly depositMinor: number | null;
   readonly renewsLeaseId: string | null;
@@ -69,6 +71,7 @@ export async function billingLeaseOf(tx: Tx, leaseId: string): Promise<BillingLe
     startDate: row.startDate,
     endDate: row.endDate,
     billingStartDate: row.billingStartDate,
+    importedBatchId: row.importedBatchId,
     initialAdvanceMonths: row.initialAdvanceMonths,
     depositMinor: row.depositMinor,
     renewsLeaseId: row.renewsLeaseId,
@@ -160,6 +163,7 @@ export async function billingLeasesOf(
       startDate: row.startDate,
       endDate: row.endDate,
       billingStartDate: row.billingStartDate,
+      importedBatchId: row.importedBatchId,
       initialAdvanceMonths: row.initialAdvanceMonths,
       depositMinor: row.depositMinor,
       renewsLeaseId: row.renewsLeaseId,

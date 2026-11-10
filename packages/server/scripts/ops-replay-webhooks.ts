@@ -5,7 +5,8 @@
  * processed already changes nothing. The worker runs the jobs (if it is down, they wait for it).
  * Each replay is an ops_action in the platform company with the reason, and an audit event in the
  * platform's chain naming the operator, who must be an active platform admin (by email, never
- * printed). Bodies, phones and emails are never printed: ids, providers and statuses only.
+ * printed), with the OS user and host the command ran as (review B4). Bodies, phones and emails are
+ * never printed: ids, providers and statuses only.
  *
  *   pnpm ops:replay-webhooks --operator ops@example.com --reason "Paystack outage 09:00-09:40, ticket 812" \
  *     --id <inbox id> [--id <inbox id> ...]
@@ -15,23 +16,13 @@
  *
  * Without --all, a time range selects failed and dead-lettered webhooks only; with it, every stored
  * webhook that can be replayed (signed, with a body). It refuses a database named `rent` unless
- * --allow-rent-database is given (an incident on that database itself).
+ * --allow-rent-database is given (an incident on that database itself). The arguments and that
+ * guard are checked before anything else is loaded, so a refusal is immediate.
  */
-import 'reflect-metadata';
 import { parseArgs } from 'node:util';
-import { Module } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
-import type { Database } from '@rent/db';
 import { OPS_REASON_MAX, OPS_REASON_MIN } from '@rent/domain/ops';
-import { AppError, CoreModule, DATABASE, loadConfig } from '../src/core';
-import {
-  ALLOW_RENT_FLAG,
-  OPS_CLI_MAX,
-  OpsModule,
-  operatorByEmail,
-  refusalFor,
-  WebhookReplayService,
-} from '../src/ops';
+import { ALLOW_RENT_FLAG, refusalFor } from '../src/ops/cli-guard';
+import { OPS_CLI_MAX } from '../src/ops/constants';
 
 const { values } = parseArgs({
   options: {
@@ -53,7 +44,7 @@ const fail = (message: string): never => {
   process.exit(2);
 };
 
-// The guard comes before anything reads the configuration or connects.
+// The guard comes before anything reads the configuration, connects or loads the services.
 const refusal = refusalFor(process.env.DATABASE_URL, values[ALLOW_RENT_FLAG] === true);
 if (refusal) fail(`ops:replay-webhooks refused: ${refusal}`);
 
@@ -82,6 +73,14 @@ if (ids.length > 0 && (from || to || values.provider || values.all))
 const limit = values.limit === undefined ? 1_000 : Number(values.limit);
 if (!Number.isSafeInteger(limit) || limit < 1 || limit > OPS_CLI_MAX)
   fail(`--limit is a whole number from 1 to ${OPS_CLI_MAX}.`);
+
+// Only now the application: Nest, the configuration and the services.
+await import('reflect-metadata');
+const { Module } = await import('@nestjs/common');
+const { NestFactory } = await import('@nestjs/core');
+const { AppError, CoreModule, DATABASE, loadConfig } = await import('../src/core');
+const { OpsModule, operatorByEmail, WebhookReplayService } = await import('../src/ops');
+type Database = import('@rent/db').Database;
 
 const config = loadConfig();
 const again = refusalFor(config.DATABASE_URL, values[ALLOW_RENT_FLAG] === true);

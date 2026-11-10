@@ -56,6 +56,7 @@ import type { Clock } from '../core/clock';
 import { messagingWebhookSecretOf, whatsappAppSecretOf, type AppConfig } from '../core/config';
 import { MESSAGING_INBOUND_JOB, queueMessage, type NewMessage } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
+import { scrubString } from '../core/logging/redact';
 import { consumeRateLimit } from '../core/rate-limit';
 import {
   ALERT_PORT,
@@ -488,7 +489,11 @@ export class InboundService {
   }
 
   /** The job's dead letter: the row is failed, with why (M11 decision 9: a code, never a body). */
-  async failed(inboxId: string, lastError: string | null = null): Promise<void> {
+  async failed(
+    inboxId: string,
+    lastError: string | null = null,
+    jobCreatedAt: Date | null = null,
+  ): Promise<void> {
     await withSystem(this.database, {}, (tx) =>
       tx
         .update(schema.webhookInbox)
@@ -496,9 +501,19 @@ export class InboundService {
           status: 'failed',
           outcome: 'dead_lettered',
           processedAt: new Date(),
-          lastError: lastError?.slice(0, 200) ?? null,
+          // M11 review: scrubbed as logs are, so the console never shows personal data or tokens.
+          lastError: lastError ? scrubString(lastError).slice(0, 200) : null,
         })
-        .where(eq(schema.webhookInbox.id, inboxId)),
+        .where(
+          and(
+            eq(schema.webhookInbox.id, inboxId),
+            // M11 review: a row a platform admin replayed after this job was queued waits for the
+            // replay's own job; this job's giving up does not fail it.
+            jobCreatedAt
+              ? sql`(${schema.webhookInbox.lastReplayedAt} is null or ${schema.webhookInbox.lastReplayedAt} < ${jobCreatedAt.toISOString()}::timestamptz)`
+              : undefined,
+          ),
+        ),
     );
   }
 
@@ -1482,13 +1497,14 @@ export class InboundService {
             : null;
     if (!reject && sniffed) contentType = sniffed;
     // M11 review R3 F10: a photo sent by WhatsApp or email is re-encoded before it is stored,
-    // which drops its EXIF and location; the audit event keeps the original's hash. A sticker
-    // (animated, and never a camera's) and a photo that does not decode are kept as they came.
-    let originalSha256: string | null = null;
+    // which drops its EXIF and location; the document and its audit event keep the original's
+    // hash and size (founder, review round). A sticker (animated, and never a camera's) and a
+    // photo that does not decode are kept as they came.
+    let original: { sha256: string; bytes: number } | null = null;
     if (!reject && kind === 'image' && job.kind !== 'sticker') {
       const cleaned = await reencodeImage(bytes, contentType);
       if (cleaned) {
-        originalSha256 = sha256(bytes);
+        original = { sha256: sha256(bytes), bytes: bytes.length };
         bytes = cleaned;
       }
     }
@@ -1524,7 +1540,7 @@ export class InboundService {
         ? await this.documents.recordWriteOnce(tx, file, {
             kind: 'message_media',
             origin: 'upload',
-            ...(originalSha256 ? { auditData: { originalSha256 } } : {}),
+            original,
           })
         : null;
       const [attachment] = await tx

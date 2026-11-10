@@ -49,6 +49,10 @@ export function heartbeatText(beat: {
 }
 
 /** A replay or retry's reason (decision 9): 5 to 500 characters, kept in the audit chain. */
+/** "Run again" is offered once per dead letter: the API refuses a second retry (M11 review). */
+export const mayRunAgain = (job: { readonly retriedAt: string | null }): boolean =>
+  job.retriedAt === null;
+
 export function opsReasonProblem(
   reason: string,
   min = OPS_REASON_MIN,

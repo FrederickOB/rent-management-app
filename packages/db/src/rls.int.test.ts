@@ -309,10 +309,17 @@ async function seedM11(
     `insert into company_onboarding (company_id, cut_over_date, set_by) values ($1, '2026-01-01', $2)`,
     [companyId, ids.initiator],
   );
+  // M11 review B10: a batch names an upload of its own company.
+  const uploadId = await one(
+    `insert into upload_intent (company_id, purpose, storage_key, content_type, max_bytes, created_by, expires_at)
+     values ($1, 'register_import', 'k-onboarding', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 1000, $2, now() + interval '1 hour')
+     returning id`,
+    [companyId, ids.initiator],
+  );
   const batchId = await one(
     `insert into onboarding_batch (company_id, kind, upload_intent_id, storage_key, created_by)
      values ($1, 'balances', $2, 'k', $3) returning id`,
-    [companyId, randomUUID(), ids.initiator],
+    [companyId, uploadId, ids.initiator],
   );
   // Opening items are written only while their batch posts, after a second person's approval.
   const approvalId = await one(

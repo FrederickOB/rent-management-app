@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import pg from 'pg';
-import { runMigrations } from '../migrate';
+import { MIGRATIONS_FOLDER, runMigrations, runMigrationsFrom } from '../migrate';
 
 /**
  * Integration-test databases (CLAUDE.md section 12: real PostgreSQL, RLS on, never mocked).
@@ -72,6 +75,44 @@ export async function createTemplateDatabase(
   await runMigrations(ownerUrl);
   if (afterMigrate) await afterMigrate(ownerUrl);
   return name;
+}
+
+/**
+ * A fresh database migrated only up to `lastTag` (for a test of what a later migration does to
+ * rows that existed before it). Call `migrateRest()` to apply the migrations after it.
+ */
+export async function createDatabaseMigratedTo(
+  label: string,
+  lastTag: string,
+): Promise<TestDatabase & { migrateRest(): Promise<void> }> {
+  const name = `rent_part_${label}_${randomUUID().replace(/-/g, '').slice(0, 8)}`
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_');
+  await admin((client) => createEmpty(client, name));
+  const ownerUrl = withDatabaseName(env('DATABASE_OWNER_URL'), name);
+  const folder = mkdtempSync(path.join(tmpdir(), 'rent-migrations-'));
+  try {
+    cpSync(MIGRATIONS_FOLDER, folder, { recursive: true });
+    const journalPath = path.join(folder, 'meta', '_journal.json');
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
+      entries: { idx: number; tag: string }[];
+    };
+    const last = journal.entries.findIndex((e) => e.tag === lastTag);
+    if (last < 0) throw new Error(`No migration ${lastTag}`);
+    journal.entries = journal.entries.slice(0, last + 1);
+    writeFileSync(journalPath, JSON.stringify(journal));
+    await runMigrationsFrom(ownerUrl, folder);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+  return {
+    name,
+    appUrl: withDatabaseName(env('DATABASE_URL'), name),
+    ownerUrl,
+    superuserUrl: withDatabaseName(env('TEST_DATABASE_ADMIN_URL'), name),
+    drop: () => dropDatabase(name),
+    migrateRest: () => runMigrations(ownerUrl),
+  };
 }
 
 export async function dropDatabase(name: string): Promise<void> {

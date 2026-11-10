@@ -30,6 +30,9 @@ import {
   type OpeningItems,
 } from './opening';
 import { ImportedRunner, platformTwin, TaxBook } from './testing';
+import { certificateLines } from '../ledger/tax-posting';
+import { openingWithholdingLines } from '../ledger/opening-posting';
+import { openingCertificateDebit } from '../tax/withholding';
 
 /** A lease from 15 January 2026 for 18 months at GH₵1,500, imported at a cut-over of 10 November. */
 function example(options: { serviceCharge?: number } = {}): ScenarioLease {
@@ -641,6 +644,91 @@ describe('P25 adjustments: signed changes, never below what is paid or drawn', (
     expect(figures(run)).toMatchObject({ arrearsMinor: 0, advanceMinor: 350_000 });
   });
 
+  it('raising arrears for a month already brought in adds a second opening line (founder, 2026-11-10)', () => {
+    // Imported as GH₵1,000 instead of GH₵1,500: the GH₵500 more is its own opening line on the
+    // same charge period, owed from its original due date, against opening balances.
+    const run = imported();
+    commit(run, { arrears: [arrears(0, '2026-10-15', 100_000)] });
+    const plan = planOpeningAdjustment({
+      ...run.context('adj-1'),
+      state: run.state(),
+      raise: { arrears: [arrears(1, '2026-10-15', 50_000)] },
+    });
+    expect(plan.lines.map((l) => [l.id, l.chargePeriodId, l.periodStart, l.dueDate])).toEqual([
+      ['opening-line-1', 'cp-rent-9', '2026-10-15', '2026-10-15'],
+    ]);
+    expect(plan.entries[0]?.lines.map((l) => [l.accountCode, l.amountMinor])).toEqual([
+      ['1100', 50_000],
+      ['3900', -50_000],
+    ]);
+    run.adopt(plan);
+    run.model.checkInvariants();
+    expect(figures(run)).toMatchObject({
+      arrearsMinor: 150_000,
+      arrearsByAge: { '0_30': 150_000, '31_60': 0, '61_90': 0, '90_plus': 0 },
+      paidUntil: null,
+    });
+    // Oldest debt first: within the month, the line brought in first is paid first.
+    run.pay(120_000);
+    const paid = (id: string) =>
+      run.model.allocations.filter((a) => a.lineId === id).reduce((s, a) => s + a.amountMinor, 0);
+    expect([paid('opening-line-0'), paid('opening-line-1')]).toEqual([100_000, 20_000]);
+    // Lowering by period works across the month's opening lines, latest first, capped at what
+    // is still unpaid of them.
+    const lower = (amountMinor: number) =>
+      planOpeningAdjustment({
+        ...run.context('adj-2'),
+        state: run.state(),
+        lower: { arrears: [{ itemId: 'a', kind: 'rent', periodStart: '2026-10-15', amountMinor }] },
+      });
+    expect(codeOf(() => lower(30_001))).toBe('opening.below_paid');
+    const lowered = lower(30_000);
+    expect(lowered.allocations.map((a) => [a.lineId, a.source, a.amountMinor])).toEqual([
+      ['opening-line-1', 'credit_note', 30_000],
+    ]);
+    run.adopt(lowered);
+    run.model.checkInvariants();
+    expect(figures(run).arrearsMinor).toBe(0);
+    expect(
+      codeOf(() =>
+        planOpeningAdjustment({
+          ...run.context('adj-3'),
+          state: run.state(),
+          lower: {
+            arrears: [{ itemId: 'b', kind: 'rent', periodStart: '2026-09-15', amountMinor: 1 }],
+          },
+        }),
+      ),
+    ).toBe('opening.not_opening_line');
+  });
+
+  it('TX-01 two opening lines for one month are one period to the rent tax walk', () => {
+    const run = imported();
+    commit(run, { arrears: [arrears(0, '2026-10-15', 100_000)] });
+    run.adopt(
+      planOpeningAdjustment({
+        ...run.context('adj-1'),
+        state: run.state(),
+        raise: { arrears: [arrears(1, '2026-10-15', 50_000)] },
+      }),
+    );
+    const tax = new TaxBook(true);
+    expect(tax.periods(run).filter((p) => p.key === 'cp-rent-9')).toEqual([
+      {
+        key: 'cp-rent-9',
+        kind: 'rent',
+        amountMinor: 150_000,
+        coveredMinor: 0,
+        taxedBaseMinor: 0,
+        taxMinor: 0,
+        withheld: false,
+      },
+    ]);
+    // Each receipt is taxed on the rent it adds, and the month's taxed base is counted once.
+    expect(tax.receipt(run, run.pay(120_000).id)).toBe(120_000);
+    expect(tax.receipt(run, run.pay(30_000).id)).toBe(30_000);
+  });
+
   it('withholding is lowered only within what is still outstanding', () => {
     const run = imported();
     const lower = (amountMinor: number, outstandingMinor: number) =>
@@ -656,6 +744,87 @@ describe('P25 adjustments: signed changes, never below what is paid or drawn', (
       ['3900', 5_000],
       ['1150', -5_000],
     ]);
+  });
+});
+
+describe('AR-02 paid-until for an imported lease (M11 review M2; founder decision 3)', () => {
+  const floored = (run: ImportedRunner) =>
+    openingLeaseFigures({
+      state: run.state(),
+      scheduled: run.model.scheduled,
+      asOf: run.model.today,
+      lastDay: run.model.lastDay,
+      floor: { billingStart: run.billingStart },
+    }).paidUntil;
+  const lowerAll = (run: ImportedRunner, lineId: string, amountMinor: number) =>
+    run.adopt(
+      planOpeningAdjustment({
+        ...run.context('adj'),
+        state: run.state(),
+        lower: { arrears: [{ itemId: 'lower', lineId, amountMinor }] },
+      }),
+    );
+
+  it('M2 an opening month lowered to nothing leaves the walk, so it never ends the run', () => {
+    const run = imported();
+    commit(run, { arrears: [arrears(0, '2026-10-15', 150_000)] });
+    lowerAll(run, 'opening-line-0', 150_000);
+    run.model.checkInvariants();
+    run.pay(150_000); // 15 November, invoiced on 1 November
+    expect(figures(run).paidUntil).toBe('2026-12-14');
+    expect(run.model.walk().paidUntil).toBe('2026-12-14');
+  });
+
+  it('owing nothing at the cut-over: the day before billing starts, then on as months are paid', () => {
+    const run = imported();
+    commit(run, {});
+    expect(figures(run).paidUntil).toBeNull(); // the walk alone
+    expect(floored(run)).toBe('2026-11-14');
+    run.pay(150_000);
+    expect(floored(run)).toBe('2026-12-14');
+  });
+
+  it('owing at the cut-over: the day before the earliest unpaid opening month', () => {
+    const run = imported();
+    commit(run, {
+      arrears: [arrears(0, '2026-08-15', 150_000), arrears(1, '2026-10-15', 150_000)],
+    });
+    expect(floored(run)).toBe('2026-08-14');
+    run.pay(150_000); // pays August: September was paid before the platform
+    expect(figures(run).paidUntil).toBe('2026-09-14'); // the walk alone stops at August's end
+    expect(floored(run)).toBe('2026-10-14');
+    run.pay(100_000); // part of October: still owed
+    expect(floored(run)).toBe('2026-10-14');
+    run.pay(50_000 + 150_000); // the rest of October, then 15 November
+    expect(floored(run)).toBe('2026-12-14');
+  });
+
+  it('a fully lowered opening month counts as owing nothing', () => {
+    const run = imported();
+    commit(run, { arrears: [arrears(0, '2026-10-15', 150_000)] });
+    expect(floored(run)).toBe('2026-10-14');
+    lowerAll(run, 'opening-line-0', 150_000);
+    expect(floored(run)).toBe('2026-11-14');
+  });
+});
+
+describe('TX-04 an opening withholding certificate (founder decision 4; OQ-64)', () => {
+  it('posts against 1160 for a letting-business owner and 3900 for any other owner', () => {
+    expect(openingCertificateDebit({ lettingBusiness: true })).toBe('1160');
+    expect(openingCertificateDebit({ lettingBusiness: false })).toBe('3900');
+    const lease = { propertyId: 'p', unitId: 'u', leaseId: 'l', tenantId: 't' };
+    const opening = openingWithholdingLines({ bookId: 'b', lease, amountMinor: 12_000 });
+    const certificate = certificateLines({
+      bookId: 'b',
+      lease,
+      paymentId: null,
+      debit: openingCertificateDebit({ lettingBusiness: false }),
+      amountMinor: 12_000,
+    });
+    // For an owner taxed per receipt the withholding settled tax owed before the platform: the
+    // opening item closes against opening balances, and nothing is left behind.
+    for (const code of ['1150', '3900', '1160', '2200'] as const)
+      expect(balanceOf([...opening, ...certificate], { accountCode: code })).toBe(0);
   });
 });
 

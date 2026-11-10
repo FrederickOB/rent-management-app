@@ -44,12 +44,12 @@ export function opsJobs(deps: OpsDeps): JobDefinition<never>[] {
       schema: z.object({ companyId: uuid, deadLetterJobId: uuid, opsActionId: uuid }).passthrough(),
       retry: { limit: 5, delaySeconds: 30, backoff: true },
       async handle({ deadLetterJobId, opsActionId }, ctx) {
-        let outcome: 'sent' | 'gone' | 'done_already' = 'done_already';
-        await ctx.once(`ops:job_retry:${opsActionId}`, async (tx) => {
-          outcome = await deps.deadLetters.requeue(tx, deadLetterJobId, (queue, payload) =>
-            deps.jobs.send(queue, payload, { tx }),
-          );
-        });
+        // Once per retry, with its outcome recorded beside it (M11 review C7).
+        const outcome = await deps.deadLetters.runRetry(
+          (key, fn) => ctx.once(key, fn),
+          { deadLetterJobId, opsActionId },
+          (queue, payload, tx) => deps.jobs.send(queue, payload, { tx }),
+        );
         ctx.logger.info({ outcome, deadLetterJobId }, 'dead-lettered job retried');
       },
     }),
