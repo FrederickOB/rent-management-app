@@ -142,3 +142,4 @@ Start these now; each can block a milestone.
 | Meta developer app with a test number | Founder | M6 (sandbox smoke test) | M6 decision 14 |
 | AWS account (organisation, billing, root MFA) | Founder | M12 | M11 decision 1 |
 | External penetration test | Founder | Before any live rent collection | PRD section 20 (annual security test); M11 decision 6 |
+| Data processing agreements with each processor (Paystack, Meta, Hubtel, Postmark, Expo push, the identity provider, AWS) | Founder with counsel | Pilot | Act 843; `docs/data-protection.md` (M11) |

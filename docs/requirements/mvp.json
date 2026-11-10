@@ -659,7 +659,14 @@
     {
       "tag": "NFR-PERF",
       "area": "Performance",
-      "requirement": "Key screens load in under 3 seconds on a 3G connection; tenant pages under 1 MB"
+      "requirement": "Key screens load in under 3 seconds on a 3G connection; tenant pages under 1 MB",
+      "evidence": [
+        {
+          "file": "apps/links/lighthouse/run.mjs",
+          "runBy": ".github/workflows/ci.yml, e2e job, step \"Lighthouse budgets\" (every pull request)",
+          "what": "Lighthouse budgets for every links page and the tenant web app over 3G: under 1 MB, LCP under 3 s, layout shift under 0.1 (decision 8)"
+        }
+      ]
     },
     {
       "tag": "NFR-AVAIL",
@@ -669,22 +676,50 @@
     {
       "tag": "NFR-DEV",
       "area": "Devices",
-      "requirement": "Android 8 and above, iOS 16.4 and above, modern browsers; tenant app usable on 5-inch screens"
+      "requirement": "Android 8 and above, iOS 16.4 and above, modern browsers; tenant app usable on 5-inch screens",
+      "evidence": [
+        {
+          "file": "docs/device-test.md",
+          "runBy": "people, by its written script: emulator and simulator runs, and two real phones (decision 11)",
+          "what": "Android 8 and iOS 16.4 runs of the tenant app, 5-inch screens"
+        }
+      ]
     },
     {
       "tag": "NFR-OFFLINE",
       "area": "Offline",
-      "requirement": "Offline tolerant tenant flows (the caretaker app's 7 days offline is Phase 2)"
+      "requirement": "Offline tolerant tenant flows (the caretaker app's 7 days offline is Phase 2)",
+      "evidence": [
+        {
+          "file": "docs/device-test.md",
+          "runBy": "people, by its written script (decision 11)",
+          "what": "the tenant app's offline cache, checked on devices"
+        }
+      ]
     },
     {
       "tag": "NFR-SEC",
       "area": "Security",
-      "requirement": "Encryption in transit and at rest; two-factor login for owners, managers and accountants; role-based access"
+      "requirement": "Encryption in transit and at rest; two-factor login for owners, managers and accountants; role-based access",
+      "evidence": [
+        {
+          "file": "docs/security-review.md",
+          "runBy": "three independent reviewers (plan 4.5)",
+          "what": "the ASVS level 2 review, with no high or medium finding open"
+        }
+      ]
     },
     {
       "tag": "NFR-DP",
       "area": "Data protection",
-      "requirement": "Act 843; consent for WhatsApp and SMS; defined retention; tenant data export and deletion on request"
+      "requirement": "Act 843; consent for WhatsApp and SMS; defined retention; tenant data export and deletion on request",
+      "evidence": [
+        {
+          "file": "docs/data-protection.md",
+          "runBy": "the lead, with counsel (decision 5)",
+          "what": "the Act 843 checklist and records of processing"
+        }
+      ]
     },
     {
       "tag": "NFR-AUDIT",
@@ -694,7 +729,24 @@
     {
       "tag": "NFR-SCALE",
       "area": "Scalability",
-      "requirement": "Agencies with 5,000+ units and 50+ staff without redesign"
+      "requirement": "Agencies with 5,000+ units and 50+ staff without redesign",
+      "evidence": [
+        {
+          "file": "load/run-month-end.sh",
+          "runBy": ".github/workflows/scheduled.yml, job load (weekly, and on demand)",
+          "what": "the month-end load test: 5,000 units, 50 staff, 2,500 payments in an hour, with the pass criteria of decision 7"
+        },
+        {
+          "file": "packages/server/test/dashboard-speed.int.test.ts",
+          "runBy": ".github/workflows/ci.yml, job speed (advisory, every pull request, RENT_SPEED=1)",
+          "what": "the dashboard and rollup at 5,000 units"
+        },
+        {
+          "file": "packages/server/test/statement-speed.int.test.ts",
+          "runBy": ".github/workflows/ci.yml, job speed (advisory, every pull request, RENT_SPEED=1)",
+          "what": "owner statements at 5,000 units"
+        }
+      ]
     },
     {
       "tag": "NFR-LOC",
@@ -704,12 +756,37 @@
     {
       "tag": "NFR-BACKUP",
       "area": "Backup",
-      "requirement": "Daily backups, point-in-time recovery for 30 days, tested restore every quarter"
+      "requirement": "Daily backups, point-in-time recovery for 30 days, tested restore every quarter",
+      "evidence": [
+        {
+          "file": "scripts/ci-restore-check.sh",
+          "runBy": ".github/workflows/ci.yml, job backup (every pull request)",
+          "what": "dump, restore and verify every audit chain in the copy"
+        },
+        {
+          "file": "scripts/drill-restore.sh",
+          "runBy": ".github/workflows/scheduled.yml, job drills (monthly, and on demand)",
+          "what": "restore drill: row counts and every nightly check on the copy"
+        },
+        {
+          "file": "scripts/drill-pitr.sh",
+          "runBy": ".github/workflows/scheduled.yml, job drills (monthly, and on demand)",
+          "what": "point-in-time recovery drill: base backup and WAL archive, recovery to a chosen moment, every nightly check"
+        }
+      ]
     },
     {
       "tag": "NFR-A11Y",
       "area": "Accessibility",
-      "requirement": "Tenant pages meet WCAG 2.2 AA where practical (M11 prompt)"
+      "requirement": "Tenant pages meet WCAG 2.2 AA where practical (M11 prompt)",
+      "evidence": [
+        {
+          "file": "docs/accessibility.md",
+          "runBy": "people, by its manual checklist (plan 4.9)",
+          "what": "the WCAG 2.2 AA checklist: keyboard, focus, targets, zoom, contrast, screen readers"
+        }
+      ]
     }
-  ]
+  ],
+  "evidenceRule": "An NFR tag with no passing test is covered by its evidence when every evidence file exists (scripts/traceability.mjs). Evidence never counts for an MVP requirement: each needs a passing test."
 }

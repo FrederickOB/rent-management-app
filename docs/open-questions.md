@@ -1,8 +1,8 @@
 # Open questions
 
-65 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
+66 questions block or shape the build. Each has a recommended default that the build uses until the person named answers. Answers go in the "Decision" column with a date. Legal and tax values stay `unverified` in the rules table until then (`CLAUDE.md` section 7).
 
-**Status on 10 Nov 2026:** 17 decided by the founder; 48 open. Those waiting on counsel, the tax adviser or providers have research findings with sources at the end of this file; OQ-35 and OQ-37 wait on pricing research.
+**Status on 10 Nov 2026:** 17 decided by the founder; 49 open. Those waiting on counsel, the tax adviser or providers have research findings with sources at the end of this file; OQ-35 and OQ-37 wait on pricing research.
 
 ## Payments and settlement
 
@@ -44,6 +44,7 @@
 | OQ-58 | Does Ghana restrict when SMS may be sent (an SMS provider's guide mentions a promotional window of 8 a.m. to 7 p.m. with no Sundays), and do rent reminders, receipts, broadcasts and notice reminders count as promotional? Which rule and regulator (NCA)? (M6 risk 6) | Counsel | M6, pilot | No sending window is applied in code: these messages are transactional. Notice-ladder messages to tenants wait for 07:00 to 20:00 company time as a product setting (M7 decision 11). | |
 | OQ-59 | Does Ghana law limit security deposits: their size, what a landlord may deduct at move-out, how deductions must be evidenced, or how soon the balance must be refunded? (TL-11, MI-11) | Counsel | M8 | No limit or deadline is built in. Deductions need inspection evidence, never exceed the deposit held, and pass two-person approval (M8 decision 12). | |
 | OQ-65 | A tenant asks for access, correction or erasure of their data (Act 843). How many days does the landlord have to respond? When erasure meets records the law requires us to keep (financial and notice records, OQ-14), is anonymising the other personal fields enough, and may the retained records keep the tenant's name? (M11 decision 5) | Counsel | Pilot | The response time stays a rules row with no value (`data_protection.request_response_days`, unverified) and the register shows no due date until it is set. Nothing is anonymised for a tenant who ever had a lease until the retention rules are verified; messaging stops at once. | |
+| OQ-66 | After a personal data breach, what does Act 843 require of the landlord (the controller) and of the platform (the processor): whom to notify (the Data Protection Commission, the people affected), by when, and with what content? May a breach notice go to a tenant who has opted out of every message channel? (M11 breach runbook) | Counsel | Pilot | `docs/runbooks/breach-response.md` records and contains first, then asks counsel before notifying; no deadline is assumed. A breach notice follows the tenant's consent until counsel answers. | |
 
 ## Tax (tax adviser)
 
