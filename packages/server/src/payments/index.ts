@@ -1,6 +1,7 @@
 export * from './pay-links.service';
 export * from './pay-page.service';
 export * from './payments.module';
+export * from './platform-charges';
 export * from './provider-payments.service';
 export * from './queue.service';
 export * from './receipts.service';

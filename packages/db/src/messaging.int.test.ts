@@ -420,7 +420,7 @@ describe('CM-05 interim plan (decision 9)', () => {
     expect(
       await sqlState(
         tx({ companyId: companyA }, () =>
-          app.query("update company set interim_plan = 'starter' where id = $1", [companyA]),
+          app.query("update company set plan = 'starter' where id = $1", [companyA]),
         ),
       ),
     ).toBe('42501');
@@ -438,11 +438,9 @@ describe('CM-05 interim plan (decision 9)', () => {
     );
     expect(set.rows[0]!.changed).toBe(true);
     const plan = await tx({ companyId: companyB }, () =>
-      app.query<{ interim_plan: string }>('select interim_plan from company where id = $1', [
-        companyB,
-      ]),
+      app.query<{ plan: string }>('select plan from company where id = $1', [companyB]),
     );
-    expect(plan.rows).toEqual([{ interim_plan: 'starter' }]);
+    expect(plan.rows).toEqual([{ plan: 'starter' }]);
     const audit = await runSql<{ actor_person_id: string }>(
       db.superuserUrl,
       "select actor_person_id from audit_event where company_id = $1 and action = 'company.update' order by seq desc limit 1",
@@ -450,11 +448,11 @@ describe('CM-05 interim plan (decision 9)', () => {
     );
     expect(audit[0]!.actor_person_id).toBe(admin);
     const plans = await tx({ personId: admin, actorKind: 'platform_admin' }, () =>
-      app.query<{ company_id: string; interim_plan: string }>(
-        'select company_id, interim_plan from app.company_plans()',
+      app.query<{ company_id: string; plan: string }>(
+        'select company_id, plan from app.company_plans()',
       ),
     );
-    expect(plans.rows).toContainEqual({ company_id: companyB, interim_plan: 'starter' });
+    expect(plans.rows).toContainEqual({ company_id: companyB, plan: 'starter' });
     expect(plans.rows.some((r) => r.company_id === platform)).toBe(false);
   });
 });

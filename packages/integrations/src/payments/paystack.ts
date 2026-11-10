@@ -3,6 +3,7 @@ import { ProviderError, requestJson } from '../http';
 import { unexpectedResponse } from '../validation';
 import {
   checkChargeRequest,
+  checkPlatformChargeRequest,
   listedReversals,
   namedId,
   namedReference,
@@ -25,6 +26,8 @@ import {
   type MomoNetwork,
   type PaymentsPort,
   type PaymentWebhookEvent,
+  type PlatformChargeRequest,
+  type PlatformMomoRequest,
   type ProviderReversal,
   type ProviderSettlement,
   type ProviderTransaction,
@@ -197,6 +200,66 @@ export class PaystackPayments implements PaymentsPort {
       authorizationUrl: response.data.authorization_url,
       status: 'pending',
     };
+  }
+
+  /**
+   * M10 decision 9: the platform's own revenue (the subscription), on checkout, with no subaccount
+   * and no bearer, so it settles to the platform's own Paystack balance. D1 governs rent, which
+   * never comes this way; the reference starts `SUB-`.
+   */
+  async initializePlatform(request: PlatformChargeRequest): Promise<ChargeInitialised> {
+    checkPlatformChargeRequest(this.provider, request);
+    const response = await this.call(
+      paystackEnvelope(
+        z.object({
+          authorization_url: z.url(),
+          access_code: z.string().min(1),
+          reference: z.string().min(1),
+        }),
+      ),
+      'POST',
+      '/transaction/initialize',
+      {
+        email: request.email,
+        amount: request.amountMinor,
+        currency: request.currency,
+        reference: request.reference,
+        metadata: { ...request.metadata },
+        channels: ['card'],
+        ...(request.callbackUrl ? { callback_url: request.callbackUrl } : {}),
+      },
+    );
+    return {
+      provider: this.provider,
+      providerReference: response.data.reference,
+      authorizationUrl: response.data.authorization_url,
+      status: 'pending',
+    };
+  }
+
+  /** As initializePlatform, by MoMo through the charge API: the prompt goes to the phone. */
+  async chargePlatformMomo(request: PlatformMomoRequest): Promise<ChargeInitialised> {
+    checkPlatformChargeRequest(this.provider, request);
+    const response = await this.call(
+      paystackEnvelope(
+        z.object({
+          reference: z.string().min(1),
+          status: z.string().min(1),
+          display_text: z.string().optional(),
+        }),
+      ),
+      'POST',
+      '/charge',
+      {
+        email: request.email,
+        amount: request.amountMinor,
+        currency: request.currency,
+        reference: request.reference,
+        metadata: { ...request.metadata },
+        mobile_money: { phone: request.phone, provider: PAYSTACK_MOMO_CODES[request.network] },
+      },
+    );
+    return momoInitialised(this.provider, response.data);
   }
 
   async verify(reference: string): Promise<VerifiedCharge> {
@@ -447,4 +510,24 @@ export class PaystackPayments implements PaymentsPort {
     if (!parsed.success) throw unexpectedResponse(this.provider);
     return parsed.data;
   }
+}
+
+/**
+ * A MoMo charge's first answer (as for rent): `pay_offline` and the like wait for the payer's
+ * approval on the phone; any other next step (a code, a PIN, a page) is not built yet (OQ-01).
+ */
+function momoInitialised(
+  provider: string,
+  data: { readonly reference: string; readonly status: string; readonly display_text?: string },
+): ChargeInitialised {
+  const status = data.status;
+  const waiting = ['pay_offline', 'pending', 'ongoing', 'processing'].includes(status);
+  const final = status === 'success' || status === 'failed' || status === 'abandoned';
+  return {
+    provider,
+    providerReference: data.reference,
+    status: final ? (status as 'success' | 'failed' | 'abandoned') : 'pending',
+    ...(data.display_text ? { displayText: data.display_text } : {}),
+    ...(!final && !waiting ? { unsupportedStep: status.slice(0, 40) } : {}),
+  };
 }

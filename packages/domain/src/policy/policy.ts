@@ -1,4 +1,13 @@
 import { DomainError } from '../errors';
+import type { CompanyAccess } from '../subscription/constants';
+import {
+  allowedWhileReadOnly,
+  SUBSCRIPTION_ENDED_MESSAGE,
+  SUBSCRIPTION_ENDED_REASON,
+  SUBSCRIPTION_READ_ONLY_CODE,
+  SUBSCRIPTION_READ_ONLY_MESSAGE,
+  SUBSCRIPTION_READ_ONLY_REASON,
+} from '../subscription/read-only';
 import type { AuthMethod, CompanyKind, StaffRole } from './roles';
 
 /** Scope inside a company (AD-02). Filled from M2 (owners, properties). */
@@ -18,6 +27,16 @@ export type Actor =
       readonly nominatedApprover: boolean;
       readonly scope: MembershipScope;
       readonly authMethod: AuthMethod;
+      /**
+       * The company's `access` (M10 decision 11; PB-11). 'read_only' refuses staff changes outside
+       * the allowlist in subscription/read-only.ts. Left out, access is full.
+       */
+      readonly subscriptionAccess?: CompanyAccess;
+      /**
+       * Set with 'read_only' when the subscription has ended (decision 12; review BE-27): the
+       * refusal then says so instead of "past due". Left out, a read-only refusal is past due.
+       */
+      readonly subscriptionEnded?: true;
     }
   | {
       readonly kind: 'platform_admin';
@@ -139,6 +158,18 @@ export const POLICY_ACTIONS = [
   'dashboard.read',
   'compliance.read',
   'metrics.platform.read',
+  // M10 (docs/plans/M10.md section 4.9): the subscription, support access, and the platform
+  // admin console.
+  'subscription.read',
+  'subscription.manage',
+  'support.grant',
+  'company.create',
+  'company.manage',
+  'pricing.manage',
+  'discount.manage',
+  'support.use',
+  'usage.read',
+  'health.read',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -155,6 +186,11 @@ export interface ApprovalResource {
   readonly propertyId?: string | null;
   /** The properties the deciding session covers (its resolved scope), or null when unscoped. */
   readonly scopeProperties?: readonly string[] | null;
+  /**
+   * The request records money received (a cash receipt), set by the approvals engine: its steps
+   * stay open while the company is read-only (M10 decision 11).
+   */
+  readonly recordsMoneyIn?: boolean;
 }
 
 /**
@@ -183,6 +219,8 @@ export interface Decision {
   readonly reason: string;
   /** Why, for people: a refusal that needs explaining carries it, and the API shows it. */
   readonly message?: string;
+  /** A stable code for a refusal the API maps to its own error (`subscription_read_only`). */
+  readonly code?: string;
 }
 
 const allow = (reason: string): Decision => ({ allowed: true, reason });
@@ -511,6 +549,18 @@ const STAFF_MATRIX: Record<
     'adviser',
   ],
   'metrics.platform.read': [],
+  // M10 section 4.9: the agency admin and the landlord read and manage the subscription and grant
+  // support access; the accountant reads it.
+  'subscription.read': ['owner:own_company', 'agency_admin', 'accountant'],
+  'subscription.manage': ['owner:own_company', 'agency_admin'],
+  'support.grant': ['owner:own_company', 'agency_admin'],
+  'company.create': [],
+  'company.manage': [],
+  'pricing.manage': [],
+  'discount.manage': [],
+  'support.use': [],
+  'usage.read': [],
+  'health.read': [],
 };
 
 /** Platform-level actions: platform admins only, never staff of a company (M6 decisions 3 and 9). */
@@ -522,6 +572,14 @@ const PLATFORM_ACTIONS: readonly PolicyAction[] = [
   'company.plan.manage',
   // M9 decision 13: Gate 1 across companies, through a system path.
   'metrics.platform.read',
+  // M10 section 4.9: the platform admin console.
+  'company.create',
+  'company.manage',
+  'pricing.manage',
+  'discount.manage',
+  'support.use',
+  'usage.read',
+  'health.read',
 ];
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
@@ -571,7 +629,38 @@ function certificateDecision(
   );
 }
 
+/** A staff change refused because the company's subscription is read-only (PB-11). */
+const READ_ONLY_REFUSAL: Decision = {
+  allowed: false,
+  reason: SUBSCRIPTION_READ_ONLY_REASON,
+  code: SUBSCRIPTION_READ_ONLY_CODE,
+  message: SUBSCRIPTION_READ_ONLY_MESSAGE,
+};
+
+/** The same once the subscription has ended (decision 12): same code, its own words. */
+const ENDED_REFUSAL: Decision = {
+  allowed: false,
+  reason: SUBSCRIPTION_ENDED_REASON,
+  code: SUBSCRIPTION_READ_ONLY_CODE,
+  message: SUBSCRIPTION_ENDED_MESSAGE,
+};
+
 export function can(actor: Actor, action: PolicyAction, resource?: PolicyResource): Decision {
+  const decision = decide(actor, action, resource);
+  // M10 decision 11: a read-only company's staff keep what the allowlist names; anything else the
+  // rules below would allow is refused. It never widens a refusal, and never reaches tenants,
+  // system jobs or platform admins.
+  if (
+    actor.kind === 'staff' &&
+    decision.allowed &&
+    actor.subscriptionAccess === 'read_only' &&
+    !allowedWhileReadOnly(action, resource)
+  )
+    return actor.subscriptionEnded ? ENDED_REFUSAL : READ_ONLY_REFUSAL;
+  return decision;
+}
+
+function decide(actor: Actor, action: PolicyAction, resource?: PolicyResource): Decision {
   switch (actor.kind) {
     case 'system':
       return deny('system actors act through jobs, not the policy layer');

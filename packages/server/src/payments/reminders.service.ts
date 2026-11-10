@@ -10,6 +10,7 @@ import { formatInvoiceNumber, leaseGroup, lockLeases } from '../billing/records'
 import { destinationForOwner } from '../companies/settlement-destinations';
 import { queueMessage } from '../core/messages';
 import { DATABASE, LOGGER } from '../core/tokens';
+import { subscriptionEnded } from '../core/subscription-ended';
 
 const BILLED = ['signed', 'active', 'ending', 'holding_over', 'ended', 'terminated'];
 
@@ -31,6 +32,8 @@ export class RemindersService {
 
   /** One company's run for a day. Returns the reminders queued. */
   async run(companyId: string, today: string): Promise<number> {
+    // M10 decision 12: no automatic tenant messages once the subscription has ended.
+    if (await subscriptionEnded(this.database, companyId)) return 0;
     const ctx = { companyId, actorKind: 'system' as const };
     // Invoices whose ladder can still have a step: due within the last step's reach, plus a week
     // for a run the job missed. Older arrears are not reminded late (the dashboard shows them).

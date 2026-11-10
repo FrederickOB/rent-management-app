@@ -29,7 +29,15 @@ import type { AppLogger } from '../core/logging/logger';
 import type { PaymentProviders } from '../core/payment-providers';
 import { ALERT_PORT, DATABASE, LOGGER, PAYMENT_PROVIDERS } from '../core/tokens';
 import { PostingService } from '../ledger/posting.service';
+import {
+  isPlatformReference,
+  isPlatformSettlement,
+  type PlatformCharges,
+} from './platform-charges';
 import { ProviderPaymentsService } from './provider-payments.service';
+
+/** The platform's own provider account has no subaccount (M10 decision 9; `isPlatformSettlement`). */
+const PLATFORM_ACCOUNT = '';
 
 /** Reconciliation days are Accra days (architecture section 10: jobs run on Accra time). */
 const RECONCILIATION_TIME_ZONE = 'Africa/Accra';
@@ -42,6 +50,16 @@ export interface TransactionRun {
 }
 
 /**
+ * The platform's own provider clearing (M10 review BE-26): the platform account is the one with
+ * no subaccount (`isPlatformSettlement`). Given what the provider holds unsettled for it, the
+ * subscription module compares the platform book's 1050 and raises any difference; true when it
+ * did.
+ */
+export interface PlatformClearing {
+  clearing(provider: string, providerMinor: number, day: string): Promise<boolean>;
+}
+
+/**
  * Daily reconciliation (CLAUDE.md section 8; M4b plan 4.8). Transactions first: each successful
  * charge the provider lists that we do not have goes through the normal path (verify, then post
  * or queue); each of ours the provider does not list, or lists differently, is flagged for a
@@ -50,6 +68,8 @@ export interface TransactionRun {
  */
 @Injectable()
 export class ReconciliationService {
+  private platform: (PlatformCharges & Partial<PlatformClearing>) | null = null;
+
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(PAYMENT_PROVIDERS) private readonly providers: PaymentProviders,
@@ -58,6 +78,14 @@ export class ReconciliationService {
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Inject(LOGGER) private readonly logger: AppLogger,
   ) {}
+
+  /**
+   * M10: the subscription module takes the platform's own charges (registered at start-up), and
+   * compares the platform's provider clearing when it can (review BE-26).
+   */
+  usePlatformCharges(handler: PlatformCharges & Partial<PlatformClearing>): void {
+    this.platform = handler;
+  }
 
   /** The instants of an Accra day: from its first instant to the next day's. */
   static dayRange(day: string): { from: string; to: string } {
@@ -72,7 +100,10 @@ export class ReconciliationService {
   async transactions(provider: string, day: string): Promise<TransactionRun> {
     const port = this.providers.get(provider);
     const range = ReconciliationService.dayRange(day);
-    const listed = await port.listTransactions(range);
+    const all = await port.listTransactions(range);
+    // M10 decision 9: the platform's own charges (`SUB-`) are reconciled by subscriptions and
+    // never matched to rent; everything below sees rent only.
+    const listed = all.filter((t) => !isPlatformReference(t.reference));
     const references = listed.map((t) => t.reference);
     const known = await withSystem(this.database, {}, async (tx) => {
       const byRef = await tx.execute<{
@@ -137,7 +168,14 @@ export class ReconciliationService {
     // Taken back at the provider and not reversed here: the chargeback path checks with the
     // provider, so a missed refund or dispute webhook is caught (review item 16). So are refunds
     // and disputes made today against charges paid on earlier days.
-    const listedReversals = await port.listReversals(range);
+    const everyReversal = await port.listReversals(range);
+    const platform = await this.platformTransactions(
+      provider,
+      range,
+      all.filter((t) => isPlatformReference(t.reference)),
+      everyReversal.filter((r) => isPlatformReference(r.reference)),
+    );
+    const listedReversals = everyReversal.filter((r) => !isPlatformReference(r.reference));
     const reversedRefs = [
       ...new Set([
         ...result.toReverse,
@@ -220,7 +258,34 @@ export class ReconciliationService {
       );
       exceptions += 1;
     }
-    return { listed: listed.length, matched: result.matched, processed, exceptions };
+    return {
+      listed: all.length,
+      matched: result.matched + platform.matched,
+      processed: processed + platform.processed,
+      exceptions: exceptions + platform.exceptions,
+    };
+  }
+
+  /** The platform's own transactions for the day, handed to subscriptions (M10 decision 9). */
+  private async platformTransactions(
+    provider: string,
+    range: { readonly from: string; readonly to: string },
+    transactions: Parameters<PlatformCharges['reconcile']>[2],
+    reversals: Parameters<PlatformCharges['reconcile']>[3],
+  ): Promise<{
+    readonly matched: number;
+    readonly processed: number;
+    readonly exceptions: number;
+  }> {
+    if (this.platform) return this.platform.reconcile(provider, range, transactions, reversals);
+    if (transactions.length > 0 || reversals.length > 0)
+      await this.alerts.raise({
+        severity: 'warning',
+        code: 'payments.platform_unreconciled',
+        message: 'Platform (subscription) transactions were not reconciled: nothing takes them',
+        context: { provider, transactions: transactions.length, reversals: reversals.length },
+      });
+    return { matched: 0, processed: 0, exceptions: transactions.length };
   }
 
   /** `payments.reconcile-settlements` for one provider and day (plan 4.12). */
@@ -230,6 +295,19 @@ export class ReconciliationService {
     let posted = 0;
     for (const settlement of listed) {
       if (settlement.status !== 'success') continue;
+      // M10 decision 9: a payout of the platform's own balance is the subscription's (P26).
+      if (isPlatformSettlement(settlement)) {
+        if (this.platform) {
+          if (await this.platform.settlement(provider, settlement)) posted += 1;
+        } else
+          await this.alerts.raise({
+            severity: 'warning',
+            code: 'payments.platform_unreconciled',
+            message: 'A payout of the platform balance was not reconciled: nothing takes it',
+            context: { provider },
+          });
+        continue;
+      }
       if (await this.settlement(provider, settlement)) posted += 1;
     }
     await this.clearing(provider, day);
@@ -556,7 +634,9 @@ export class ReconciliationService {
     const owed = new Map<string, number>();
     const add = (code: string, amount: number) => owed.set(code, (owed.get(code) ?? 0) + amount);
     const subaccountOf = new Map<string, string>();
-    // Every account the provider shows activity for is compared, even with nothing unsettled.
+    // Every account the provider shows activity for is compared, even with nothing unsettled;
+    // the platform's own account (no subaccount) always, when subscriptions compare it (BE-26).
+    if (this.platform?.clearing) add(PLATFORM_ACCOUNT, 0);
     for (const settlement of settlements) add(settlement.subaccountCode, 0);
     for (const c of charges) {
       add(c.subaccountCode, 0);
@@ -572,10 +652,16 @@ export class ReconciliationService {
     for (const [reference, amount] of taken) {
       const code = subaccountOf.get(reference);
       const left = amount - (deducted.get(reference) ?? 0);
-      if (code && left > 0) add(code, -left);
+      // The platform's account is the empty code (review BE-26), so test for a known charge.
+      if (code !== undefined && left > 0) add(code, -left);
     }
     let raised = 0;
     for (const [code, providerMinor] of owed) {
+      if (code === PLATFORM_ACCOUNT) {
+        if (this.platform?.clearing && (await this.platform.clearing(provider, providerMinor, day)))
+          raised += 1;
+        continue;
+      }
       const found = await withSystem(this.database, {}, (tx) =>
         tx.execute<{ company_id: string; settlement_account_id: string }>(
           sql`select company_id, settlement_account_id from app.settlement_by_subaccount(${provider}, ${code})`,

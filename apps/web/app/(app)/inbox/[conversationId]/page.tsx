@@ -45,7 +45,11 @@ export default async function ConversationPage({
     return (
       <>
         <PageHeader title="Conversation" />
-        <NotOnPlan feature="inbox" plan={company?.plan} />
+        <NotOnPlan
+          feature="inbox"
+          plan={company?.plan}
+          canChangePlan={allowed(me, 'subscription.manage')}
+        />
       </>
     );
   }

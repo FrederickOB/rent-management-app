@@ -8,6 +8,7 @@ import { companyRecord, staffActor } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
 import { queueMessage } from '../core/messages';
 import { CLOCK, DATABASE } from '../core/tokens';
+import { subscriptionEnded } from '../core/subscription-ended';
 import { membersWhoCan } from '../policy/members';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { leaseIdsIn } from '../tenancy/billing-facts';
@@ -181,6 +182,8 @@ export class AdvanceService {
 
   /** `billing.paid-until-prompt` for one company and day. Returns the prompts sent. */
   async runPaidUntilPrompts(companyId: string, today?: string): Promise<number> {
+    // M10 decision 12: no automatic tenant messages once the subscription has ended.
+    if (await subscriptionEnded(this.database, companyId)) return 0;
     const ctx = { companyId, actorKind: 'system' as const };
     const { ids, day, lead } = await withCompany(this.database, ctx, async (tx) => {
       const company = await companyRecord(tx, companyId);

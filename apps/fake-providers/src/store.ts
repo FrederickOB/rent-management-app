@@ -52,6 +52,7 @@ export interface FakeTransaction {
   readonly channel: 'mobile_money' | 'card' | 'bank';
   readonly email: string;
   readonly phone?: string;
+  /** Empty for a platform charge (M10 decision 9): it settles to the platform's own balance. */
   readonly subaccount: string;
   readonly metadata: Record<string, string>;
   readonly createdAt: string;

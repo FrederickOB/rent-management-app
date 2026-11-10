@@ -5,7 +5,7 @@ export class AppError extends Error {
     readonly code: string,
     message: string,
     /** Facts a client can act on, such as a free code to use instead. Never personal data. */
-    readonly details?: Readonly<Record<string, string>>,
+    readonly details?: Readonly<Record<string, string | number | boolean>>,
   ) {
     super(message);
     this.name = 'AppError';

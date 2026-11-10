@@ -1,3 +1,4 @@
+import { SUBSCRIPTION_REFERENCE_PREFIX } from '@rent/domain/subscription';
 import { z } from 'zod';
 import { hmacHex, signatureMatches } from '../hmac';
 import { ProviderError, requestJson } from '../http';
@@ -150,6 +151,38 @@ export interface SubaccountRequest {
   readonly accountNumber: string;
 }
 
+/**
+ * A charge for the platform's own revenue (M10 decision 9): the subscription. It names no
+ * subaccount, so it settles to the platform's own balance at the provider. D1 governs rent, and
+ * rent is never charged this way: every rent charge names the landlord's or agency's subaccount.
+ * The reference starts `SUB-`, so webhooks and reconciliation route it to subscriptions.
+ */
+export interface PlatformChargeRequest {
+  /** `SUB-…`, unique per charge, in the characters Paystack accepts. */
+  readonly reference: string;
+  /** Integer pesewas, more than zero. */
+  readonly amountMinor: number;
+  readonly currency: 'GHS';
+  /** The payer's email (Paystack requires one, OQ-06). Never logged. */
+  readonly email: string;
+  readonly metadata: Readonly<Record<string, string>>;
+  /** Where the provider's checkout returns the payer. */
+  readonly callbackUrl?: string;
+}
+
+/** A platform charge by MoMo: the approval prompt goes straight to the phone. */
+export interface PlatformMomoRequest extends Omit<PlatformChargeRequest, 'callbackUrl'> {
+  /** E.164. Never logged. */
+  readonly phone: string;
+  readonly network: MomoNetwork;
+}
+
+/** The prefix every platform charge's reference carries (M10 decision 9). */
+export const PLATFORM_REFERENCE_PREFIX = SUBSCRIPTION_REFERENCE_PREFIX;
+
+export const isPlatformReference = (reference: string): boolean =>
+  reference.startsWith(PLATFORM_REFERENCE_PREFIX);
+
 /** The only facts taken from a webhook body. Money is never posted from it (CLAUDE.md section 8). */
 export interface PaymentWebhookEvent {
   /** Unique per event, for `webhook_inbox`. */
@@ -163,6 +196,13 @@ export type WebhookHeaders = Readonly<Record<string, string | readonly string[] 
 export interface PaymentsPort {
   readonly provider: string;
   initialiseCharge(request: ChargeRequest): Promise<ChargeInitialised>;
+  /**
+   * M10 decision 9: a card charge for the platform's own revenue on the provider's checkout, with
+   * no subaccount (it settles to the platform's balance). Never used for rent (D1).
+   */
+  initializePlatform(request: PlatformChargeRequest): Promise<ChargeInitialised>;
+  /** As initializePlatform, by MoMo: the approval prompt goes to the phone. */
+  chargePlatformMomo(request: PlatformMomoRequest): Promise<ChargeInitialised>;
   /** A non-retryable 404 when the provider does not know the reference. */
   verify(reference: string): Promise<VerifiedCharge>;
   /** As verify, with the subaccount, the fee and the paying phone (M4b: money with no intent). */
@@ -262,6 +302,39 @@ export function checkChargeRequest(provider: string, request: ChargeRequest): vo
   if (request.subaccountCode.length === 0) throw invalidRequest(provider, 'subaccount required');
   if (request.momoNetwork !== undefined && !MOMO_NETWORK_NAMES.includes(request.momoNetwork)) {
     throw invalidRequest(provider, 'unknown MoMo network');
+  }
+  const values = Object.values(request.metadata);
+  if (values.length > 50 || values.some((v) => typeof v !== 'string' || v.length > 500)) {
+    throw invalidRequest(provider, 'metadata must be at most 50 strings of up to 500 characters');
+  }
+}
+
+/**
+ * Refuses what Paystack refuses for a platform charge, and any reference without the platform
+ * prefix: a charge with no subaccount is only ever the platform's own (M10 decision 9; D1).
+ */
+export function checkPlatformChargeRequest(
+  provider: string,
+  request: PlatformChargeRequest | PlatformMomoRequest,
+): void {
+  if (!REFERENCE.test(request.reference)) {
+    throw invalidRequest(provider, 'reference may hold 1 to 100 letters, digits, -, . and =');
+  }
+  if (!isPlatformReference(request.reference)) {
+    throw invalidRequest(
+      provider,
+      `a platform charge's reference starts ${PLATFORM_REFERENCE_PREFIX}`,
+    );
+  }
+  if (!isWholePesewas(request.amountMinor)) {
+    throw invalidRequest(provider, 'amount must be a positive whole number of pesewas');
+  }
+  if (request.currency !== 'GHS') throw invalidRequest(provider, 'currency must be GHS');
+  if (!isEmailAddress(request.email)) throw invalidRequest(provider, 'customer email required');
+  if ('phone' in request) {
+    if (!isE164(request.phone)) throw invalidRequest(provider, 'phone must be an E.164 number');
+    if (!MOMO_NETWORK_NAMES.includes(request.network))
+      throw invalidRequest(provider, 'unknown MoMo network');
   }
   const values = Object.values(request.metadata);
   if (values.length > 50 || values.some((v) => typeof v !== 'string' || v.length > 500)) {
@@ -421,6 +494,55 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
       providerReference: request.reference,
       status: 'pending',
       ...(prompt
+        ? { displayText: 'Approve the payment on your phone' }
+        : { authorizationUrl: `https://checkout.fake.invalid/${id}` }),
+    };
+  }
+
+  async initializePlatform(request: PlatformChargeRequest): Promise<ChargeInitialised> {
+    if (this.failCharges) throw new ProviderError(this.provider, 'HTTP 503', true, 503);
+    checkPlatformChargeRequest(this.provider, request);
+    return this.platformCharge(request, 'card');
+  }
+
+  async chargePlatformMomo(request: PlatformMomoRequest): Promise<ChargeInitialised> {
+    if (this.failCharges) throw new ProviderError(this.provider, 'HTTP 503', true, 503);
+    checkPlatformChargeRequest(this.provider, request);
+    return this.platformCharge(request, 'momo');
+  }
+
+  /** A platform charge: no subaccount, so it settles to the platform's own balance (decision 9). */
+  private platformCharge(
+    request: PlatformChargeRequest | PlatformMomoRequest,
+    channel: 'card' | 'momo',
+  ): ChargeInitialised {
+    if (this.charges.has(request.reference)) throw conflict(this.provider, 'duplicate reference');
+    const id = ++this.counter;
+    const phone = 'phone' in request ? request.phone : undefined;
+    this.charges.set(request.reference, {
+      id,
+      request: {
+        reference: request.reference,
+        amountMinor: request.amountMinor,
+        currency: request.currency,
+        channel,
+        customer: { email: request.email, ...(phone ? { phone } : {}) },
+        subaccountCode: '',
+        metadata: { ...request.metadata },
+        ...('network' in request ? { momoNetwork: request.network } : {}),
+      },
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+      amountMinor: request.amountMinor,
+      feesMinor: 0,
+      settled: false,
+      reversals: [],
+    });
+    return {
+      provider: this.provider,
+      providerReference: request.reference,
+      status: 'pending',
+      ...(channel === 'momo'
         ? { displayText: 'Approve the payment on your phone' }
         : { authorizationUrl: `https://checkout.fake.invalid/${id}` }),
     };
@@ -738,7 +860,10 @@ export class InMemoryPayments implements PaymentsPort, PaymentsTestControls {
       paid_at: charge.paidAt ?? null,
       created_at: charge.createdAt,
       metadata: charge.request.metadata,
-      subaccount: { subaccount_code: charge.request.subaccountCode },
+      // A platform charge names no subaccount (M10 decision 9), as Paystack shows it.
+      subaccount: charge.request.subaccountCode
+        ? { subaccount_code: charge.request.subaccountCode }
+        : {},
     };
   }
 }
@@ -1025,6 +1150,44 @@ export class FakeProvidersPayments implements PaymentsPort, PaymentsTestControls
       ...(response.data.display_text === undefined
         ? {}
         : { displayText: response.data.display_text }),
+    };
+  }
+
+  /** As Paystack: the same endpoints as rent, with no subaccount (M10 decision 9). */
+  async initializePlatform(request: PlatformChargeRequest): Promise<ChargeInitialised> {
+    checkPlatformChargeRequest(this.provider, request);
+    const response = await this.call(initializeResponse, '/transaction/initialize', {
+      reference: request.reference,
+      amount: request.amountMinor,
+      currency: request.currency,
+      email: request.email,
+      channels: [PAYSTACK_CHANNEL.card],
+      metadata: request.metadata,
+      ...(request.callbackUrl ? { callback_url: request.callbackUrl } : {}),
+    });
+    return this.initialised(response.data);
+  }
+
+  async chargePlatformMomo(request: PlatformMomoRequest): Promise<ChargeInitialised> {
+    checkPlatformChargeRequest(this.provider, request);
+    const response = await this.call(initializeResponse, '/charge', {
+      reference: request.reference,
+      amount: request.amountMinor,
+      currency: request.currency,
+      email: request.email,
+      metadata: request.metadata,
+      mobile_money: { phone: request.phone, provider: FAKE_NETWORK_CODES[request.network] },
+    });
+    return this.initialised(response.data);
+  }
+
+  private initialised(data: z.infer<typeof initializeResponse>['data']): ChargeInitialised {
+    return {
+      provider: this.provider,
+      providerReference: data.reference,
+      status: 'pending',
+      ...(data.authorization_url === undefined ? {} : { authorizationUrl: data.authorization_url }),
+      ...(data.display_text === undefined ? {} : { displayText: data.display_text }),
     };
   }
 

@@ -11,6 +11,11 @@ import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import { MESSAGING_INBOUND_JOB, MESSAGING_WEBHOOK_PREFIX } from '../core/messages';
 import { ALERT_PORT, CLOCK, CONFIG, DATABASE, PAYMENT_PROVIDERS } from '../core/tokens';
 import { SigningHasher } from '../esign/secrets';
+import {
+  isPlatformReference,
+  PlatformChargesUnavailable,
+  type PlatformCharges,
+} from './platform-charges';
 import { ProviderPaymentsService } from './provider-payments.service';
 import { QueueService } from './queue.service';
 
@@ -54,6 +59,7 @@ export type IntakeResult =
 @Injectable()
 export class WebhooksService {
   private readonly hasher: SigningHasher;
+  private platform: PlatformCharges | null = null;
 
   constructor(
     @Inject(DATABASE) private readonly database: Database,
@@ -158,7 +164,19 @@ export class WebhooksService {
       return 'skipped';
     let outcome: string;
     let status: 'processed' | 'ignored' = 'processed';
-    if (row.eventType && PAID_EVENTS.has(row.eventType))
+    // M10 decision 9: the platform's own charges (`SUB-`) go to subscriptions, never to rent. With
+    // nobody registered for them the job fails and retries, so nothing is lost or misposted.
+    if (isPlatformReference(row.reference)) {
+      if (!this.platform) throw new PlatformChargesUnavailable();
+      if (row.eventType && PAID_EVENTS.has(row.eventType))
+        outcome = await this.platform.paid(row.provider, row.reference);
+      else if (row.eventType && REVERSED_EVENTS.has(row.eventType))
+        outcome = await this.platform.reversed(row.provider, row.reference);
+      else {
+        outcome = 'not_handled';
+        status = 'ignored';
+      }
+    } else if (row.eventType && PAID_EVENTS.has(row.eventType))
       outcome = await this.payments.processReference(row.provider, row.reference);
     else if (row.eventType && REVERSED_EVENTS.has(row.eventType)) {
       // Our own refund of unmatched money is followed to its end (P31 posts only once the
@@ -178,6 +196,11 @@ export class WebhooksService {
         .where(eq(schema.webhookInbox.id, inboxId)),
     );
     return outcome;
+  }
+
+  /** M10: the subscription module takes the platform's own charges (registered at start-up). */
+  usePlatformCharges(handler: PlatformCharges): void {
+    this.platform = handler;
   }
 
   /** Records that processing gave up (the job's dead letter), so the row does not look busy. */

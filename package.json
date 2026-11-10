@@ -22,7 +22,8 @@
     "db:seed": "pnpm --filter @rent/server seed",
     "db:backup": "bash scripts/db-backup.sh",
     "db:restore": "bash scripts/db-restore.sh",
-    "rules:add": "pnpm --filter @rent/server rules:add"
+    "rules:add": "pnpm --filter @rent/server rules:add",
+    "platform:bootstrap": "pnpm --filter @rent/server platform:bootstrap"
   },
   "devDependencies": {
     "@rent/config": "workspace:*",

@@ -195,6 +195,7 @@ pnpm lint && pnpm typecheck
 pnpm format:check
 pnpm db:backup        # pg_dump to ./backups; pnpm db:restore <dump> [database]
 pnpm rules:add        # add a rules-table row (see packages/server/scripts/rules-add.ts)
+pnpm platform:bootstrap  # new deployment: platform company, its book, first platform admin's invite (M10)
 ```
 
 ## 14. Demo dataset (Accra)

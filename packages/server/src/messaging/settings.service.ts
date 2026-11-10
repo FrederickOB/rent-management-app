@@ -74,19 +74,30 @@ export class MessagingSettingsService {
       displayName: found.displayName,
       status: found.status,
     };
-    for (const companyId of [admin.companyId, ...(found.company ? [found.company.id] : [])])
-      await withCompany(
-        this.database,
-        { companyId, personId: admin.personId, actorKind: 'platform_admin' },
-        (tx) =>
-          this.audit!.append(tx, {
-            companyId,
-            action,
-            recordType: 'whatsapp_account',
-            recordId: numberId,
-            data,
-          }),
-      );
+    // M10 decision 13 (review BE-16): a platform admin's own context never enters a customer
+    // company without a grant. Both events go in one transaction in the platform company: its own
+    // chain as the admin, and the customer's chain through the narrow
+    // `app.append_subscriber_audit` (the platform's system path, with the admin as the person),
+    // once per number and action.
+    await withCompany(
+      this.database,
+      { companyId: admin.companyId, personId: admin.personId, actorKind: 'platform_admin' },
+      async (tx) => {
+        await this.audit!.append(tx, {
+          companyId: admin.companyId,
+          action,
+          recordType: 'whatsapp_account',
+          recordId: numberId,
+          data,
+        });
+        if (found.company)
+          await tx.execute(
+            sql`select app.append_subscriber_audit(${found.company.id}::uuid, ${action},
+                  'whatsapp_account', ${numberId}, ${JSON.stringify(data)}::jsonb,
+                  ${`${action}:${numberId}`})`,
+          );
+      },
+    );
   }
 
   async get(actor: Actor | null) {

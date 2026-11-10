@@ -17,6 +17,7 @@ import { addMonths, parseBusinessDate, toIsoDate } from '@rent/domain/dates';
 import type { Actor } from '@rent/domain/policy';
 import { XLSX_CONTENT_TYPE, type DisplayStatus } from '@rent/domain/portfolio';
 import { money, toDecimal } from '@rent/domain/money';
+import { keptStep } from '@rent/domain/subscription';
 import {
   collectionRateByPeriod,
   COLLECTION_METHODS,
@@ -520,7 +521,10 @@ export class DashboardService {
    */
   async refresh(actor: Actor | null): Promise<{ queued: boolean }> {
     const staff = this.reader(actor);
-    this.policy.assert(staff, 'lease.manage');
+    // M10 decision 11 (review BE-24): refreshing figures is reading, so it stays open while the
+    // subscription is read-only; who may start it is still `lease.manage`'s roles.
+    const refresh = keptStep(staff, 'dashboard.refresh');
+    this.policy.assert(refresh.actor, refresh.action);
     const minute = this.clock.now().toISOString().slice(0, 16);
     await withCompany(this.database, staffContext(staff), (tx) =>
       enqueueOutbox(tx, {

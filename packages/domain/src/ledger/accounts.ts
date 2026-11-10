@@ -34,7 +34,8 @@ export const ACCOUNTS = [
   account('2090', 'Unmatched receipts', 'liability', ['owner', 'company']),
   account('2100', 'Security deposits held', 'liability', ['owner']),
   account('2200', 'Rent tax payable', 'liability', ['owner']),
-  account('2210', 'VAT and levies payable', 'liability', ['owner']),
+  // M10 decision 10: VAT on subscription invoices, when charged, lands in the platform book.
+  account('2210', 'VAT and levies payable', 'liability', ['owner', 'platform']),
   account('2300', 'Due to managing agent', 'liability', ['owner']),
   account('2400', 'Refunds payable to tenants', 'liability', ['owner']),
   account('2500', 'Supplier payables', 'liability', ['owner']),

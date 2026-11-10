@@ -11,6 +11,7 @@ import {
   type Tx,
 } from '@rent/db';
 import { maskPhone, normalisePhone } from '@rent/domain/phone';
+import { keptStep } from '@rent/domain/subscription';
 import {
   checkMembershipScope,
   requiresPasswordAndTotp,
@@ -171,7 +172,10 @@ export class MembershipsService {
 
   async revoke(actor: Actor | null, membershipId: string): Promise<CompanyMember> {
     const staff = staffActor(actor);
-    this.policy.assert(staff, 'membership.manage');
+    // M10 review BE-18: removing someone stays open while the subscription is read-only (their
+    // sessions lose the company at once); who may is still `membership.manage`'s roles.
+    const removal = keptStep(staff, 'membership.revoke');
+    this.policy.assert(removal.actor, removal.action);
     if (membershipId === staff.membershipId)
       throw invalid('own_membership', 'You cannot remove yourself');
     await withCompany(this.database, context(staff), async (tx) => {

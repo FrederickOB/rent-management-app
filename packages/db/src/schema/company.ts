@@ -61,17 +61,20 @@ export const company = pgTable(
     settings: jsonb().notNull().default({}),
     status: text().notNull().default('active'),
     /**
-     * M6 decision 9: the interim plan until subscriptions (M10). Set only by a platform admin,
-     * through app.set_company_plan(): the application role has no UPDATE on this column.
+     * M10 decision 1: the tier (Starter, Growth or Portfolio), replacing `interim_plan`, and the
+     * access read-only gives (decision 11). Set only by the subscription engine and platform
+     * admins, through narrow functions: the application role has no UPDATE on either column.
      */
-    interimPlan: text().notNull().default('growth'),
+    plan: text().notNull().default('growth'),
+    access: text().notNull().default('full'),
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check('company_kind_check', sql`${t.kind} in ('landlord', 'agency', 'platform')`),
     check('company_status_check', sql`${t.status} in ('active', 'suspended', 'archived')`),
-    check('company_interim_plan_check', sql`${t.interimPlan} in ('starter', 'growth')`),
+    check('company_plan_check', sql`${t.plan} in ('starter', 'growth', 'portfolio')`),
+    check('company_access_check', sql`${t.access} in ('full', 'read_only')`),
   ],
 );
 

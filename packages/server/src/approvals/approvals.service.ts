@@ -46,6 +46,11 @@ export interface ApprovalActionHandler<P = unknown> {
   /** At most one open request per subject: another is refused while one waits for a decision. */
   readonly onePerSubject?: boolean;
   /**
+   * M10 decision 11: the request records money received (cash, a transfer, cash banked), so its
+   * decision stays open while the company's subscription is read-only.
+   */
+  readonly recordsMoneyIn?: boolean;
+  /**
    * Runs before a decision is recorded, in the deciding transaction: handlers that will write money
    * take their locks here, before anything in the transaction is audited, so every path locks in
    * the same order (M4a plan 8).
@@ -214,6 +219,7 @@ export class ApprovalsService {
           eligibleRoles: handler.eligibleRoles,
           propertyId: input.propertyId ?? null,
           scopeProperties: covered,
+          recordsMoneyIn: handler.recordsMoneyIn ?? false,
         }).allowed
       )
         eligible.push(m);
@@ -291,6 +297,7 @@ export class ApprovalsService {
         eligibleRoles: handler.eligibleRoles,
         propertyId: request.propertyId,
         scopeProperties: await scopeProperties(tx),
+        recordsMoneyIn: handler.recordsMoneyIn ?? false,
       });
       await unscope(tx);
       if (handler.prepare) await handler.prepare(tx, request);
@@ -647,6 +654,7 @@ export class ApprovalsService {
       eligibleRoles: handler.eligibleRoles,
       propertyId: request.propertyId,
       scopeProperties: scope,
+      recordsMoneyIn: handler.recordsMoneyIn ?? false,
     }).allowed;
   }
 

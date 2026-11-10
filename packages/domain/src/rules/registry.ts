@@ -28,7 +28,9 @@ const REGISTRY: readonly Entry[] = [
   entry(/^rent_tax\.includes_service_charge$/, z.boolean()),
   entry(/^withholding_tax\.rate\.[a-z_]+$/, bps),
   entry(
-    /^vat\.commercial_rent$/,
+    // M10 decision 10 (OQ-48): VAT and levies on the platform's subscription invoices, with the
+    // same breakdown, charged only while the platform records its VAT registration.
+    /^vat\.(commercial_rent|platform_subscription)$/,
     z
       .object({
         vatBps: z.number().int().min(0),

@@ -10,7 +10,7 @@ import {
   type PolicyResource,
   type ScopeIds,
 } from '@rent/domain/policy';
-import { forbidden } from '../core/errors';
+import { AppError, forbidden } from '../core/errors';
 
 type StaffActor = Extract<Actor, { kind: 'staff' }>;
 
@@ -46,7 +46,11 @@ export class PolicyService {
   /** Refuses with the policy's message for people when it gives one, else the plain refusal. */
   assert(actor: Actor, action: PolicyAction, resource?: PolicyResource): void {
     const decision = can(actor, action, resource);
-    if (!decision.allowed) throw forbidden(decision.message);
+    if (!decision.allowed) {
+      // M10 decision 11: 403 SUBSCRIPTION_READ_ONLY, so screens can say what it means.
+      if (decision.code) throw new AppError(403, decision.code, decision.message ?? 'Forbidden');
+      throw forbidden(decision.message);
+    }
   }
 
   /** The owners and properties an actor sees; null means the whole company (AD-02). */

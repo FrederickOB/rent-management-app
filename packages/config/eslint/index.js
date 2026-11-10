@@ -164,6 +164,36 @@ export const MODULE_MAP = {
     'portfolio',
     'identity',
   ],
+  // M10 (plan 4.1): the subscription engine and the platform admin console in layer 8. The
+  // subscription posts P26 through the ledger and takes its platform charges from payments (which
+  // never imports it: the handler is registered at start-up); the console builds on it.
+  subscription: [
+    'ledger',
+    'payments',
+    'billing',
+    'tenancy',
+    'portfolio',
+    'companies',
+    'documents',
+    'policy',
+    'rules',
+    'audit',
+    'identity',
+    'approvals',
+  ],
+  admin: [
+    'subscription',
+    'ledger',
+    'payments',
+    'companies',
+    'documents',
+    'policy',
+    'rules',
+    'audit',
+    'identity',
+    'portfolio',
+    'tenancy',
+  ],
 };
 
 const DB_DRIVERS = [

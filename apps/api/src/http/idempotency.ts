@@ -44,7 +44,15 @@ export async function idempotent<T, R = T>(
       'An Idempotency-Key is 8 to 128 letters, digits, dots, colons, dashes or underscores',
     );
   const actor = ctx.actor;
-  if (!actor || actor.kind !== 'staff') throw forbidden();
+  if (!actor) throw forbidden();
+  // Staff, and platform admins in the platform company (the console's keyed writes, M10 BE-20).
+  switch (actor.kind) {
+    case 'staff':
+    case 'platform_admin':
+      break;
+    default:
+      throw forbidden();
+  }
   return store.run(
     {
       companyId: actor.companyId,

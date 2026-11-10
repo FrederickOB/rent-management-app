@@ -16,6 +16,25 @@ export interface Database {
 export interface DatabaseOptions {
   readonly max?: number;
   readonly applicationName?: string;
+  /**
+   * Called when Postgres ends an idle pooled connection (a restart, a failover, an administrator,
+   * a dropped test database). The pool has already discarded that connection, and the next query
+   * opens a fresh one. Without a listener, node-postgres throws the error and the process dies.
+   */
+  readonly onError?: (error: Error) => void;
+}
+
+/** The default report: the error's code and message only, never the connection's details. */
+function reportEndedConnection(error: Error): void {
+  const code = (error as { code?: unknown }).code;
+  process.stderr.write(
+    `${JSON.stringify({
+      level: 'warn',
+      msg: 'database connection ended',
+      code: typeof code === 'string' ? code : undefined,
+      error: error.message,
+    })}\n`,
+  );
 }
 
 // Business dates are `date` columns; keep them as 'YYYY-MM-DD' strings, never JS Dates.
@@ -35,6 +54,7 @@ export function createDatabase(connectionString: string, options: DatabaseOption
     // Every session runs in UTC; business dates carry no time (CLAUDE.md section 11).
     options: '-c TimeZone=UTC',
   });
+  pool.on('error', (error) => (options.onError ?? reportEndedConnection)(error));
   const db = drizzle({ client: pool, schema, casing: 'snake_case' });
   return { pool, db, close: () => pool.end() };
 }

@@ -1,0 +1,91 @@
+'use client';
+
+import { useId, type KeyboardEvent, type ReactNode } from 'react';
+import { cn } from '@/lib/cn';
+import type { ConsoleTab } from '@/lib/platform-console';
+
+/**
+ * Tabs for a page with several parts (the console's billing page, a company's detail). The
+ * chosen tab is the caller's state; arrow keys move between tabs, as assistive technology expects.
+ */
+export function Tabs({
+  label,
+  tabs,
+  current,
+  onChange,
+  children,
+}: {
+  readonly label: string;
+  readonly tabs: readonly ConsoleTab[];
+  readonly current: string;
+  readonly onChange: (key: string) => void;
+  readonly children: ReactNode;
+}) {
+  const id = useId();
+  const index = Math.max(
+    0,
+    tabs.findIndex((tab) => tab.key === current),
+  );
+
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    // Arrows move to the next or previous tab, Home and End to the first and last (M10 review N6).
+    const target =
+      event.key === 'ArrowRight'
+        ? (index + 1) % tabs.length
+        : event.key === 'ArrowLeft'
+          ? (index - 1 + tabs.length) % tabs.length
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? tabs.length - 1
+              : null;
+    if (target === null) return;
+    event.preventDefault();
+    const next = tabs[target]!;
+    onChange(next.key);
+    document.getElementById(`${id}-${next.key}`)?.focus();
+  }
+
+  return (
+    <div className="space-y-4">
+      <div
+        role="tablist"
+        aria-label={label}
+        className="flex flex-wrap gap-1 border-b border-slate-200"
+      >
+        {tabs.map((tab) => {
+          const selected = tab.key === tabs[index]?.key;
+          return (
+            <button
+              key={tab.key}
+              id={`${id}-${tab.key}`}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`${id}-panel`}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onChange(tab.key)}
+              onKeyDown={onKeyDown}
+              className={cn(
+                '-mb-px min-h-11 rounded-t-md border-b-2 px-3 py-2 text-sm font-medium',
+                selected
+                  ? 'border-brand text-slate-900'
+                  : 'border-transparent text-slate-600 hover:text-slate-900',
+              )}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+      <div
+        id={`${id}-panel`}
+        role="tabpanel"
+        tabIndex={0}
+        aria-labelledby={tabs[index] ? `${id}-${tabs[index].key}` : undefined}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}

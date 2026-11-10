@@ -59,6 +59,7 @@ import {
   registerImportsContract,
 } from './register';
 import { rulesContract } from './rules';
+import { platformAdminContract, subscriptionContract, supportGrantsContract } from './subscription';
 import { rentTaxContract, vatContract, withholdingContract } from './tax';
 import {
   leasesContract,
@@ -83,6 +84,7 @@ export * from './memberships';
 export * from './register';
 export * from './reporting';
 export * from './rules';
+export * from './subscription';
 export * from './tax';
 export * from './tenancy';
 
@@ -151,6 +153,10 @@ export const contract = {
   dashboard: dashboardContract,
   platformMetrics: platformMetricsContract,
   compliance: complianceContract,
+  // M10: the subscription, support grants and the platform admin console.
+  subscription: subscriptionContract,
+  supportGrants: supportGrantsContract,
+  platformAdmin: platformAdminContract,
 };
 
 export type Contract = typeof contract;

@@ -159,6 +159,14 @@ export class IdentityService {
       nominatedApprover: m.nominatedApprover,
       scope: m.scope,
       authMethod,
+      // M10 decision 11: only when read-only, so a full-access actor is as before; decision 12
+      // (review BE-27): an ended subscription says so in its refusals.
+      ...(m.companyAccess === 'read_only'
+        ? {
+            subscriptionAccess: 'read_only' as const,
+            ...(m.companyEnded ? { subscriptionEnded: true as const } : {}),
+          }
+        : {}),
     };
   }
 }

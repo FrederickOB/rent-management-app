@@ -71,6 +71,21 @@ export const APPEND_ONLY_TABLES = [
   'deposit_deduction_withdrawal',
   'deposit_application',
   'move_out_refund_part',
+  // M10: the subscription's history, snapshots, invoice lines, allocations, discount codes and
+  // their redemptions, and the platform's price lists, terms, WhatsApp rates and stored alerts.
+  'subscription_event',
+  'billing_snapshot',
+  'billing_snapshot_unit',
+  'subscription_invoice_line',
+  'subscription_allocation',
+  'discount_code',
+  'discount_redemption',
+  'price_list',
+  'subscription_terms',
+  'whatsapp_rate',
+  'alert_event',
+  // M10 review BE-5: billing turned on, one row per change.
+  'billing_activation',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */
@@ -93,4 +108,11 @@ export const GLOBAL_TABLES = [
   'message_template',
   'whatsapp_template_status',
   'push_device',
+  // M10: the platform's price lists, subscription terms, WhatsApp rates and stored alerts
+  // (versioned or append-only, written through narrow functions).
+  'price_list',
+  'subscription_terms',
+  'whatsapp_rate',
+  'alert_event',
+  'billing_activation',
 ] as const;

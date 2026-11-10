@@ -563,11 +563,11 @@ Sign convention: debits positive, credits negative. Lines carry dimensions (leas
 | 1150 | Withholding tax receivable | Asset | Owner | Withheld by a corporate tenant, certificate pending |
 | 1160 | Withholding tax credits | Asset | Owner | Letting-business owners only, after the certificate |
 | 2010 | Tenant prepayments | Liability | Owner | Received for periods not yet started, plus unapplied surplus, per lease. Its rent share is AR-03's unearned rent |
-| 2020 | Deferred subscription revenue | Liability | Platform | Annual subscription prepayments |
+| 2020 | Prepaid subscription credit | Liability | Platform | Per subscriber: a year paid up front, any payment left over once the open invoices are settled, and the part of a credit note an already-paid invoice no longer owes. Drawn onto open invoices oldest first, so credit never sits beside debt (P26) |
 | 2090 | Unmatched receipts | Liability | Owner, company | Suspense in the book of whoever received the money, until a person confirms the match (BC-12) |
 | 2100 | Security deposits held | Liability | Owner | Per lease; never income (BC-11) |
 | 2200 | Rent tax payable | Liability | Owner | Per receipt and line; due 30 days after the value date (TX-02) |
-| 2210 | VAT and levies payable | Liability | Owner | VAT-registered commercial owners (P32, P33) |
+| 2210 | VAT and levies payable | Liability | Owner, platform | VAT-registered commercial owners (P32, P33); in the platform book, VAT and levies on subscription invoices while the platform's VAT registration is recorded in the subscription terms (P26; `vat.platform_subscription`, unverified, OQ-48) |
 | 2300 | Due to managing agent | Liability | Owner | Management fees not yet settled |
 | 2400 | Refunds payable to tenants | Liability | Owner | Approved, not yet paid |
 | 2500 | Supplier payables | Liability | Owner | Expenses incurred, not yet paid |
@@ -615,7 +615,7 @@ Sign convention: debits positive, credits negative. Lines carry dimensions (leas
 | P23 | Unmatched receipt, then matched (BC-12) | on receipt: 1050, or 1010 or 1070 for a direct transfer (P28)<br>on match: 2090 | on receipt: 2090<br>on match: as P03 | Suspense sits in the book of whoever received the money: the owner's book when the account is theirs, otherwise the company book. When a match moves money from the company book to an owner book, the company book credits the asset now holding it (1050, or net cash and 5200 if already settled) and the owner book debits the same, so each book balances. A person confirms every match. |
 | P24 | Write-off (AD-05) | 5900 | 1100 (allocation source: write-off), or 1150 for unrecoverable withholding | Two-person approval. |
 | P25 | Opening balances (pilot) | arrears: 1100<br>prepayments: 3900<br>deposits: 3900<br>agent-held cash: 1070<br>withholding outstanding: 1150<br>rent tax outstanding: 3900 | arrears: 3900<br>prepayments: 2010<br>deposits: 2100<br>agent-held cash: 3900<br>withholding outstanding: 3900<br>rent tax outstanding: 2200 | Dated the cut-over. Arrears arrive as opening invoice lines at their original due dates, so ageing works. Prepayments arrive as an opening payment, so surplus rules apply. Tax items keep their due dates. The import file's fingerprint is recorded. |
-| P26 | Platform subscription (M10, platform book) | invoice: 1100<br>payment: 1050<br>settlement: 1010 and 5200<br>annual release: 2020 | invoice: 4600, or 2020 when prepaid annually<br>payment: 1100<br>settlement: 1050<br>annual release: 4600 | Same mechanics as rent, in the platform's own book. |
+| P26 | Platform subscription (M10, platform book) | invoice: 1100, the total<br>payment: 1050, the verified amount<br>prepaid draw: 2020<br>credit note: 4600, its net; 2210, its VAT and levies<br>payment reversal: 1100 per invoice the payment still settles; 2020 for the credit it still holds<br>settlement: 1010 net, 5200 fees, 1050 chargebacks and refunds deducted | invoice: 4600, the net; 2210, VAT and levies when charged<br>payment: 1100 per open invoice, oldest first; 2020 the rest (all of an annual payment)<br>prepaid draw: 1100 on the invoice<br>credit note: 1100, what the invoice still owed; 2020, the rest when it was already paid<br>payment reversal: 1050<br>settlement: 1050, the gross of the payments paid out | The platform's own money, in the platform book only (D1: never rent). Keys: `P26:<invoice>`, `P26:<payment>`, `P26:<invoice>:prepaid` (a later draw on a reopened invoice adds its allocation id), `P26:<credit note>`, `P26:<payment>:reversal`, `P26:<settlement record>`. Dimensions: the subscription invoice id in `invoice_line_id`, the subscription payment id in `payment_id` (in the platform book they must name subscription records, checked at commit, migration 0061) and the provider on 1050. **Dates:** an invoice for a month is dated that month's last day, so its revenue falls in the month it covers; the accounting date follows the usual rules. Payments are dated the day the money arrived in the subscriber's time zone; draws, credit notes and reversals the day they happen. **Annual prepayment:** no release entry; the year sits in 2020 and each month's invoice, at the discounted rates while the term runs, is settled by a prepaid draw. **Credit notes** (founder answer Q2): a platform admin credits an invoice in full or in part, never beyond its total less earlier credits; VAT is taken back in the invoice's own proportion (largest remainder). **Reversal:** built from the payment's allocations as they stand, as P21 (b); refused for a person when the credit it left has been drawn since. Nightly, 1100 per invoice and 2020 per subscriber are checked against the sub-ledger, and the daily reconciliation compares the platform's 1050 with its provider. |
 | P27 | Credit note: void, correction or early-termination proration | 4000, 4100 or 4200 | 1100 if the line was accrued and unpaid<br>2010 if accrued and paid (its allocations return to surplus) | Approval required. A line not yet accrued is cancelled with no entry; any allocations released stay in 2010. A replacement line accrues under its own key. Allocation source: credit note. |
 | P28 | Direct receipt into an owner or agency account | 1010 or 1070 | as P03, or 2090 until matched (P23) | Bank transfers and MoMo sent straight to the landlord or agency, outside the provider. Recorded with proof and second-user approval; statement import comes in Phase 2. P17 and P14 follow. |
 | P29 | Balances carried to a renewal lease | 2010 (old lease)<br>2100 (old lease) | 2010 (new lease)<br>2100 (new lease) | A change of lease dimension within the owner book. Arrears stay on the old lease's invoices. Credit and the deposit move payment by payment. Credit that appears on the old lease after the renewal started (a late payment) moves at once under `P29:<renewal>:<payment>`; money a credit note releases returns to the lease the payment's credit sits on. A reversal takes a carried deposit back from the lease holding it (review 9, 11). |
@@ -899,23 +899,30 @@ The machine is `applyConversationEvent` in `packages/domain/src/messaging/inbox.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Trialing: company created
-    Trialing --> Active: first invoice paid
-    Trialing --> Expired: trial ends unpaid
-    Expired --> Active: pays
-    Active --> PastDue: invoice unpaid after due date
+    [*] --> Trialing: subscription started (onboarding or the first job run)
+    Trialing --> Active: trial ends, billing starts (nothing owed yet)
+    Trialing --> PastDue: an extended trial ends with an invoice past due
+    Active --> PastDue: invoice unpaid the day after its due date
+    Active --> ReadOnly: past due and the grace already over (missed days)
     PastDue --> Active: paid
-    PastDue --> ReadOnly: grace period ends, if the switch is on
-    ReadOnly --> Active: paid
+    PastDue --> ReadOnly: grace ends, if the switch is on
+    ReadOnly --> Active: paid in full, at once
+    ReadOnly --> PastDue: oldest paid, a newer one past due in its grace
+    Active --> Trialing: a platform admin extends an ended trial
+    Trialing --> CancelScheduled: landlord cancels
     Active --> CancelScheduled: landlord cancels
-    CancelScheduled --> Active: cancellation withdrawn
-    CancelScheduled --> Cancelled: end of paid cycle, export offered
-    Cancelled --> [*]
+    PastDue --> CancelScheduled: landlord cancels
+    ReadOnly --> CancelScheduled: landlord cancels
+    CancelScheduled --> Active: withdrawn (back to what the facts give)
+    CancelScheduled --> Cancelled: last day of service has passed
+    Cancelled --> [*]: final, a platform admin may start a new subscription
     note right of PastDue
         In every state, tenant pay links, receipts
         and notices keep working (PB-11).
     end note
 ```
+
+As built in M10 (`packages/domain/src/subscription/status.ts`, the full transition table is there): the status is derived from the facts on every run (the trial's last day, a scheduled cancellation, the oldest unpaid invoice's due date, the grace and the read-only switch) and recorded as an event when it changes, so a job that missed days goes straight to where the facts lead. There is **no Expired state**: billing is monthly in arrears, so nothing is owed when a trial ends and the subscription simply becomes Active (decision 5). While billing is off (founder answer Q1) a trial has no end yet. Read-only follows the arrears in any status, so scheduling a cancellation never lifts it; paying does. Cancelling ends service at the month's end; during a trial at the earlier of the trial's last day and the month's end; during a year paid ahead at the end of that year (founder answer Q3). After it, staff keep read-only access for the retention days in the terms (90), then the company is archived; a cancelled subscription is final, and reactivation is a new subscription record.
 
 ## 8. Payment flow
 
@@ -968,7 +975,7 @@ sequenceDiagram
 | Receipt send fails | Retried, then the next channel. The receipt stays available in the app and on the link. |
 | Chargeback or provider reversal | P21(b) payment reversal, built from the current state of its allocations, when the money taken back equals the payment (a part is an exception). A credit receipt is issued, and an alert goes to the people who see that property. It needs no approval: the provider has already taken the money back. The money sits in 1050 until the next settlement deducts it (M4b). |
 
-**Daily reconciliation** (02:00 Africa/Accra). List the provider's transactions for the previous day. Each one missing locally goes through the normal processing path. Each local payment the provider does not list is flagged. Charges listed as reversed, and the day's refunds and disputes, go through the chargeback path. Then match settlement reports to payments and post P22, and raise any difference as an exception on the manager dashboard. A payment posted after its settlement was reconciled is settled when it appears. Last, provider clearing (1050) per settlement account is compared with what the provider still holds unsettled (invariant 11).
+**Daily reconciliation** (02:00 Africa/Accra). List the provider's transactions for the previous day. Each one missing locally goes through the normal processing path. Each local payment the provider does not list is flagged. Charges listed as reversed, and the day's refunds and disputes, go through the chargeback path. Then match settlement reports to payments and post P22, and raise any difference as an exception on the manager dashboard. A payment posted after its settlement was reconciled is settled when it appears. Last, provider clearing (1050) per settlement account is compared with what the provider still holds unsettled (invariant 11). The platform's own provider account (no subaccount, M10 decision 9) is reconciled the same way by the subscription module: its `SUB-` transactions through the subscription payment path, its payouts as P26 settlements, and the platform book's 1050 for the provider against what the provider holds unsettled for the platform; a difference raises `subscription.clearing_difference` for a person (M10 review BE-26).
 
 **As built in M4b, after review:**
 - **Money:**
@@ -1088,8 +1095,8 @@ All jobs run in `apps/worker` on pg-boss. Each sets the company context from its
 | `reporting.fixed-fees` | 23:00 from the 28th to the 1st; posts on the company's last day of a month, and on the 1st for last month | owner + unit + month (`P14:<owner>:<unit>:<month>`) | 5 | M9 |
 | `reporting.fee-check` | daily 03:15 | company + date; read-only, alerts `reporting.fee_mismatch` | 3 | M9 |
 | `ledger.agent-cash-check` | daily 03:30; fans out per company | company + date; read-only, alerts `ledger.agent_cash_negative` (critical) when an owner book's 1070 is below zero (F3: payments out of it are refused beyond what is held, but a chargeback cannot be) | 3 | M9 |
-| `subscription.snapshot` | monthly, 1st at 00:30 | company + month | 5 | M10 |
-| `subscription.invoice` | monthly, 1st at 01:00 | company + month | 5 | M10 |
+| `subscription.snapshot` | daily 00:30; fans out per company; snapshots every month that has ended in the subscriber's own time zone, as of the job's date, since its last invoice (at most three months back; M10 review BE-13) | company + month | 5 | M10 |
+| `subscription.invoice` | daily 01:00; the same months, oldest first, each invoiced once (nothing for a month spent in a trial) | company + month | 5 | M10 |
 | `subscription.dunning` | daily 09:00 | invoice id + step | 3 | M10 |
 
 Sign-in codes are not a job: the auth request sends them straight to the SMS port, with no transaction open, so a plaintext code is never written to the outbox or the queue (M1). Times are Africa/Accra. Schedulers enumerate companies through a system function that returns company ids only (ADR-002), then enqueue one company-scoped job each.

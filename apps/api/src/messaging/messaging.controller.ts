@@ -2,6 +2,8 @@ import { Controller, Inject, UseGuards } from '@nestjs/common';
 import { Implement, implement } from '@orpc/nest';
 import { contract } from '@rent/contracts';
 import { EntitlementsService } from '@rent/server/companies';
+import { AppError } from '@rent/server/core';
+import { SubscriptionService } from '@rent/server/subscription';
 import {
   BroadcastsService,
   InboxService,
@@ -162,6 +164,7 @@ export class MessagingSettingsController {
     @Inject(TemplatesService) private readonly templates: TemplatesService,
     @Inject(MessagingSettingsService) private readonly settings: MessagingSettingsService,
     @Inject(EntitlementsService) private readonly entitlements: EntitlementsService,
+    @Inject(SubscriptionService) private readonly subscriptions: SubscriptionService,
   ) {}
 
   @Implement(contract.templates)
@@ -200,9 +203,26 @@ export class MessagingSettingsController {
       companyPlans: implement(contract.platformMessaging.companyPlans).handler(async () =>
         this.entitlements.companyPlans(ctx.actor),
       ),
+      // M10 review BE-11: the M6 route sets the subscription's tier and the company's plan
+      // together, as the console's setTier does, audited with a reason. A tier it already has
+      // changes nothing, as before.
       setCompanyPlan: implement(contract.platformMessaging.setCompanyPlan).handler(
-        async ({ input }) =>
-          this.entitlements.setCompanyPlan(ctx.actor, input.companyId, input.plan),
+        async ({ input }) => {
+          const find = async () =>
+            (await this.entitlements.companyPlans(ctx.actor)).find(
+              (c) => c.companyId === input.companyId,
+            );
+          const current = await find();
+          if (!current) throw new AppError(404, 'not_found', 'Company not found');
+          if (current.plan !== input.plan)
+            await this.subscriptions.setTierByAdmin(
+              ctx.actor,
+              input.companyId,
+              input.plan,
+              'Set on the company plans page',
+            );
+          return (await find())!;
+        },
       ),
     };
   }

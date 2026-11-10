@@ -619,9 +619,7 @@ describe('AC-02 fee terms through a second person (decision 1)', () => {
     await expect(
       r.money.requestFeeTerms(landlord.manager, ask({ ownerId: landlord.ownerId })),
     ).rejects.toMatchObject({ status: 409, code: 'not_an_agency' });
-    await asSuperuser(ctx, `update company set interim_plan = 'starter' where id = $1`, [
-      c.companyId,
-    ]);
+    await asSuperuser(ctx, `update company set plan = 'starter' where id = $1`, [c.companyId]);
     await expect(r.money.requestFeeTerms(c.manager, ask({}))).rejects.toMatchObject({
       code: 'not_on_plan',
     });
@@ -853,9 +851,7 @@ describe('AC-05 remittances, fees taken and owner funding (P16, P30)', () => {
         amountMinor: 1_000,
       }),
     ).rejects.toMatchObject({ status: 409, code: 'not_an_agency' });
-    await asSuperuser(ctx, `update company set interim_plan = 'starter' where id = $1`, [
-      c.companyId,
-    ]);
+    await asSuperuser(ctx, `update company set plan = 'starter' where id = $1`, [c.companyId]);
     await expect(r.money.list(c.accountant, {})).rejects.toMatchObject({ code: 'not_on_plan' });
   });
 });

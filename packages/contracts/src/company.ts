@@ -5,7 +5,8 @@ import {
   laddersMissingEscalation,
 } from '@rent/domain/notices';
 import { maintenanceTargetsSchema } from '@rent/domain/maintenance';
-import { inboxTag, INTERIM_PLANS, PLAN_FEATURES } from '@rent/domain/settings';
+import { inboxTag, SUBSCRIPTION_TIERS, TIER_FEATURES } from '@rent/domain/settings';
+import { COMPANY_ACCESS, SUBSCRIPTION_STATUSES } from '@rent/domain/subscription';
 import { z } from 'zod';
 
 const ladderHours = z
@@ -14,6 +15,7 @@ const ladderHours = z
   .min(1)
   .max(24 * 60);
 const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time such as 07:00');
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date such as 2026-11-01');
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Use a hex colour such as #0F766E');
 
 /** The bounds the domain's company settings use (packages/domain/src/settings). */
@@ -123,11 +125,34 @@ export const companyProfileSchema = z.object({
   }),
   settings: companySettingsSchema,
   /**
-   * M6 decision 9: the interim plan (set by a platform admin) and what it includes. Starter has no
-   * inbox, broadcasts, tenant groups or maintenance. Always sent; optional for older clients.
+   * The company's tier and what it includes (M6 decision 9; M10 decision 4: Starter, Growth or
+   * Portfolio). Starter has no inbox, broadcasts, tenant groups or maintenance. Always sent;
+   * optional for older clients.
    */
-  plan: z.enum(INTERIM_PLANS).optional(),
-  features: z.array(z.enum(PLAN_FEATURES)).optional(),
+  plan: z.enum(SUBSCRIPTION_TIERS).optional(),
+  features: z.array(z.enum(TIER_FEATURES)).optional(),
+  /**
+   * M10: what the past-due and read-only banner needs, for every staff member on every page.
+   * `null` for the platform company, which has no subscription. Always sent; optional for older
+   * clients.
+   */
+  subscription: z
+    .object({
+      status: z.enum(SUBSCRIPTION_STATUSES),
+      access: z.enum(COMPANY_ACCESS),
+      /** While trialing: the trial's last day. */
+      trialEndsOn: isoDate.nullable(),
+      /** The day read-only starts if the oldest past-due invoice stays unpaid (decision 11). */
+      readOnlyFrom: isoDate.nullable(),
+      /** The due date of the oldest unpaid invoice past its due date. */
+      oldestDueOn: isoDate.nullable(),
+      /** What is past due: only for people with `subscription.read`, otherwise null. */
+      pastDueMinor: z.number().int().nullable(),
+      /** Whether this person may pay (`subscription.manage`). */
+      canPay: z.boolean(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export type CompanyProfile = z.infer<typeof companyProfileSchema>;

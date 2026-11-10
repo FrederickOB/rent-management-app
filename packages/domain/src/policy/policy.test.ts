@@ -130,6 +130,17 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   'dashboard.read': '11111010',
   'compliance.read': '11111010',
   'metrics.platform.read': '00000001',
+  // M10 section 4.9.
+  'subscription.read': '10101000',
+  'subscription.manage': '10100000',
+  'support.grant': '10100000',
+  'company.create': '00000001',
+  'company.manage': '00000001',
+  'pricing.manage': '00000001',
+  'discount.manage': '00000001',
+  'support.use': '00000001',
+  'usage.read': '00000001',
+  'health.read': '00000001',
 };
 
 function actorFor(

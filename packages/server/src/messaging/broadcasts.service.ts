@@ -31,6 +31,7 @@ import { conflict, invalid, notFound } from '../core/errors';
 import { queueMessage, storedBody } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, CONFIG, DATABASE } from '../core/tokens';
+import { subscriptionEnded } from '../core/subscription-ended';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { TenantsService } from '../tenancy/tenants.service';
 import { sendingAccount, templateOnSendingNumber } from './store';
@@ -303,6 +304,8 @@ export class BroadcastsService {
    * so batches go one after another. Idempotent by broadcast and batch: message ids are fixed.
    */
   async fanout(companyId: string, broadcastId: string, batch: number): Promise<number> {
+    // M10 decision 12: a broadcast still to go stops once the subscription has ended.
+    if (await subscriptionEnded(this.database, companyId)) return 0;
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
       const [b] = await tx
         .select()

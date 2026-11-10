@@ -13,6 +13,7 @@ import { companyFeatures } from '@/lib/plan';
 import { AppProvider } from './app-context';
 import { navFor } from './nav';
 import { SignOutButton } from './sign-out-button';
+import { SubscriptionBanner } from './subscription-banner';
 
 const PLATFORM_PRIMARY = '#0F766E';
 const PLATFORM_ACCENT = '#F59E0B';
@@ -136,6 +137,7 @@ export function AppShell({ me, company, children }: AppShellProps) {
             </ul>
           </nav>
           <main id="main" className="min-w-0 flex-1 space-y-6">
+            <SubscriptionBanner company={company} timeZone={context.timeZone} />
             {children}
           </main>
         </div>

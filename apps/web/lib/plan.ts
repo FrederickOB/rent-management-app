@@ -1,12 +1,15 @@
 import type { CompanyProfile } from '@rent/contracts';
 import {
+  COMING_SOON_FEATURES,
   DEFAULT_INTERIM_PLAN,
   featuresOf,
   PLAN_FEATURE_NAMES,
-  type InterimPlan,
+  tierUnlocking,
   type PlanFeature,
+  type SubscriptionTier,
 } from '@rent/domain/settings';
 import { errorCode, statusOf } from './errors';
+import { tierLabel } from './subscription';
 
 // What the company's plan includes (M6 decision 9; prd-issues 28). The API decides and enforces
 // it (EntitlementsService); the screens only read `plan` and `features` from the company profile,
@@ -29,19 +32,31 @@ export function hasFeature(company: PlanFacts | null, feature: PlanFeature): boo
   return companyFeatures(company).includes(feature);
 }
 
-/** The plan's name for people. */
-export function planLabel(plan: InterimPlan | undefined): string {
-  return plan === 'starter' ? 'Starter' : 'Growth';
+/** The plan's name for people (M10: Portfolio too; no plan is Growth, as before M6). */
+export function planLabel(plan: SubscriptionTier | undefined): string {
+  return tierLabel(plan);
 }
 
 /** Why a page is missing: "The inbox is not on the Starter plan." */
-export function notOnPlanText(feature: PlanFeature, plan: InterimPlan | undefined): string {
+export function notOnPlanText(feature: PlanFeature, plan: SubscriptionTier | undefined): string {
   const plural =
     feature === 'broadcasts' ||
     feature === 'tenant_groups' ||
     feature === 'notices' ||
-    feature === 'owner_reporting';
+    feature === 'owner_reporting' ||
+    feature === 'accounting_export';
   return `${PLAN_FEATURE_NAMES[feature]} ${plural ? 'are' : 'is'} not on the ${planLabel(plan)} plan.`;
+}
+
+/**
+ * The plan that unlocks a feature (PB-04, M10 decision 4): "Growth includes it.", or for one of
+ * Portfolio's P2 modules, "It is coming soon on Portfolio."
+ */
+export function unlockSentence(feature: PlanFeature): string {
+  const tier = planLabel(tierUnlocking(feature));
+  return COMING_SOON_FEATURES.includes(feature)
+    ? `It is coming soon on ${tier}.`
+    : `${tier} includes it.`;
 }
 
 /** The API's refusal for a feature the plan leaves out (403 `not_on_plan`). */

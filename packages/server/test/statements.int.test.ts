@@ -557,7 +557,7 @@ describe('AC-04 issuing a statement', () => {
 
   it('is for Growth only: a Starter company is refused', async () => {
     const starter = await moneyCompany(ctx, s, 'agency', 'Starter Statements');
-    await asSuperuser(ctx, `update company set interim_plan = 'starter' where id = $1`, [
+    await asSuperuser(ctx, `update company set plan = 'starter' where id = $1`, [
       starter.companyId,
     ]);
     await expect(r.statements.list(starter.admin)).rejects.toMatchObject({
