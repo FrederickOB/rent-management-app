@@ -1,4 +1,5 @@
 import { MESSAGE_PHOTO_CONTENT_TYPES, MESSAGE_PHOTO_MAX_BYTES } from './message-rules';
+import { uploadPart } from './upload-part';
 
 /** A photo's bytes as fetch can post them: a browser File or Blob, or a file on the phone. */
 export type UploadPart =
@@ -59,8 +60,9 @@ export async function uploadToStorage(
 ): Promise<void> {
   const form = new FormData();
   for (const [key, value] of Object.entries(slot.fields)) form.append(key, value);
-  // React Native's FormData takes a { uri, name, type } file; the browser's takes the Blob.
-  form.append('file', photo.part as Blob, photo.name);
+  // A file on the phone is a { uri, name, type } part that Expo's fetch can read; the browser's
+  // is the Blob (src/upload-part.ts).
+  form.append('file', uploadPart(photo.part) as Blob, photo.name);
   let response: Response;
   try {
     response = await post(slot.url, { method: 'POST', body: form, credentials: 'omit' });

@@ -21,13 +21,17 @@ jest.mock('expo-linking', () => ({ createURL: (path: string) => `rentplatform://
  * in place before the client is loaded, and each test sets what it answers. */
 let answer: (path: string) => Response = () => new Response(null, { status: 500 });
 let sent: { path: string; cookie: string | null }[] = [];
+/** The device each call named, in its User-Agent header. */
+let agents: (string | null)[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const path = new URL(typeof input === 'string' ? input : String(input)).pathname;
   sent.push({ path, cookie: new Headers(init?.headers).get('cookie') });
+  agents.push(new Headers(init?.headers).get('user-agent'));
   return answer(path);
 }) as typeof fetch;
-// eslint-disable-next-line @typescript-eslint/no-require-imports -- loaded after the fake fetch
-const { authClient, sessionCookieHeader } = require('../src/auth-client') as typeof AuthClient;
+const { authClient, deviceLabel, sessionCookieHeader } =
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- loaded after the fake fetch
+  require('../src/auth-client') as typeof AuthClient;
 
 const user = { id: 'u1', name: 'Ama', phoneNumber: '+233244123456', phoneNumberVerified: true };
 const session = { id: 's1', userId: 'u1', expiresAt: '2099-01-01T00:00:00.000Z', token: 't' };
@@ -48,6 +52,7 @@ function signInSets(setCookie: string) {
 beforeEach(() => {
   mockSecureStore.clear();
   sent = [];
+  agents = [];
 });
 
 describe('AD-06 the tenant app keeps its session on iOS and Android, under our cookie names', () => {
@@ -68,6 +73,15 @@ describe('AD-06 the tenant app keeps its session on iOS and Android, under our c
       expect(sent.at(-1)).toEqual({ path: '/api/auth/get-session', cookie: `${name}=abc.def` });
     },
   );
+
+  it('the sign-in names this device as Profile will list it, not as okhttp', async () => {
+    signInSets('rent.session_token=abc.def; Max-Age=604800; Path=/');
+    await authClient.phoneNumber.verify({ phoneNumber: '+233244123456', code: '123456' });
+    expect(agents[0]).toMatch(/^(iPhone|iPad) \(iOS .+\)$/);
+    expect(deviceLabel('android', 34, { Release: '14' }, false)).toBe('Android phone (Android 14)');
+    expect(deviceLabel('ios', '17.0', {}, true)).toBe('iPad (iOS 17.0)');
+    expect(deviceLabel('web', '', {}, false)).toBeNull();
+  });
 
   it('a cookie that is not ours is not kept', async () => {
     signInSets('tracker=1; Max-Age=604800; Path=/');

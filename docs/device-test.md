@@ -33,6 +33,17 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 - Never commit `android/` or `ios/`.
 - **Record the APK's size** for the app-size budget (decision 11): `ls -l app/build/outputs/apk/release/`.
 
+**On this Mac's simulators** (M11, 2026-11-10): what the run above needed.
+- **Tools:** CocoaPods for the iOS build, and Maestro (mobile.dev) to drive the iOS simulator, both from Homebrew, approved by the founder on 2026-11-10. Android is driven with `adb` alone.
+  - Install: `brew install cocoapods`, and `brew install mobile-dev-inc/tap/maestro` (plain `brew install maestro` installs an unrelated app, "AI agent command center").
+  - Uninstall: `brew uninstall cocoapods`, `brew uninstall mobile-dev-inc/tap/maestro` and `brew untap mobile-dev-inc/tap`; then `brew autoremove` for what they brought (Homebrew's Ruby, for CocoaPods).
+  - **Watch out:** installing Maestro upgraded the Mac's existing Homebrew `openjdk` (23.0.2 to 27.0.1) and `little-cms2` as its dependencies. Homebrew keeps no old version; `brew install openjdk@23` is the way back if a project needs 23.
+- **iOS needs Xcode's iOS platform.** Xcode 26.6 offers no simulator to build for until its iOS 26.5 platform is installed (`xcodebuild -downloadPlatform iOS`, several GB), even with the iOS 17.0 simulator runtime present.
+- **Android:** the AVDs `Pixel_5_API_34` and `Pixel_3a_API_34` on this Mac have no `.avd` folder. The run used `rent_m11_pixel5_api34`, made from the installed `android-34/google_apis/arm64-v8a` image. Start the emulator with `ANDROID_SDK_ROOT` set, and with `-no-audio`: recording from the Mac's microphone froze the emulator.
+  - `npx expo run:android --port 8092` (port 8081 is another project's). The API is `EXPO_PUBLIC_API_URL=http://10.0.2.2:3700`.
+  - The links pages, the fake provider and storage that the API's links name are on `localhost`, so forward them: `adb reverse tcp:3702 tcp:3702`, `tcp:4010`, `tcp:8333`.
+  - A debug build loads its JavaScript from Metro over the network, so start it online, then turn airplane mode on (`adb shell cmd connectivity airplane-mode enable`).
+
 **iPhone:**
 - A local release build needs an Apple developer account for signing: `npx expo run:ios --configuration Release --device`.
 - Or use an EAS internal-distribution build: `eas build --profile preview --platform ios`.
@@ -166,12 +177,32 @@ Each step has an expected result. Mark it **pass**, **fail** (with what happened
 | 3.12 VoiceOver | | |
 | 3.13 Sign out | | |
 
-### Emulator and simulator runs
+### Emulator and simulator runs (M11, 2026-11-10)
 
-| Run | Date | Result | Notes |
-| --- | --- | --- | --- |
-| Android 8 emulator | | | |
-| iOS 16.4 simulator | | | |
+The founder's choice: the native app on this Mac's Android 14 emulator and iOS 17 simulator, against the guarded e2e stack (`rent_m6_e2e`), signed in as the seeded tenant +233 20 000 0021. Android 8 and iOS 16.4 stay with the real-phone script above. Push needs an EAS project, so it was not tested on either.
+
+**Android 14 emulator** (`rent_m11_pixel5_api34`: Pixel 5 screen, Google APIs image, debug build, Metro on 8092):
+
+| Step | Result | Notes |
+| --- | --- | --- |
+| 3.2 Sign-in | pass | Code from the fake SMS provider; Home shows both landlords' tenancies. |
+| 3.2 Kill the app and reopen it | pass | Still signed in after a force-stop, and again after the emulator crashed and cold-booted: the cookie-prefix fix works on a phone. |
+| 3.3 Home and tenancy figures | pass | Due now, paid until, next payment and the payment reference per tenancy; the tenancy shows its terms, signing and documents. |
+| 3.3 Pay | pass, start only | Pay opens the pay page in Chrome's custom tab with the amount due. Not paid, to keep the seeded figures. |
+| 3.4 Payments and receipts | pass | Rows per landlord with receipt numbers. The receipt downloads as a PDF; it is named by its storage id, not its receipt number (minor). |
+| 3.5 A notice to acknowledge | pass | A notice issued for the test; To sign opens it on the links page, the SMS code signs it, To sign then shows nothing waiting. |
+| 3.6 A repair with a photo and a voice note | **fail, fixed** | Nothing uploaded: Expo's fetch refused the app's file parts. Fixed in `src/upload-part.ts` (section 5); then MT-0019 arrived with its photo and voice note. Camera and library photos both work. The emulator crashed recording from the Mac's microphone, so the voice note was recorded with `-no-audio` (silence). |
+| 3.7 Offline, then a queued repair arriving once | **fail, fixed** | Offline was never recognised: Expo's fetch fails with a FetchError, not a TypeError. Fixed in `src/problems.ts`; then the form offered the cached homes, the request was saved on the phone, and back online it arrived once (MT-0020). The Repairs list kept its "offline" banner until it was opened again (minor). |
+| 3.13 Profile's device list | **fail, fixed** | Each session listed with "Sign out this device", but this phone showed as "okhttp/4.12.0". The app now names itself on sign-in ("Android phone (Android 14)"; section 5); after signing in again Profile showed that name. "Sign out this device" ended another session (the API then refused it with 401). The current device is not marked (minor). |
+| 3.12 TalkBack | n/a, spot check | TalkBack is not on the Google APIs image (no Play Store). The accessibility tree gives every control used a role and a name ("Phone number", "Send code", the repair kinds and homes as radio buttons, the emergency switch). |
+| 3.10 A 5-inch screen | pass | At 360 × 640 dp (`wm size 720x1280`, `wm density 320`): Home, tenancy, payments, a new repair and Profile fit, with nothing past the edge. |
+| 3.9 Push | n/a | Needs an EAS project. |
+
+**iOS 17.0 simulator** (iPhone 15, development build): see the rows below once run.
+
+| Step | Result | Notes |
+| --- | --- | --- |
+| (to be filled by the iOS run) | | |
 
 ## 5. Known before the test (from the build, 2026-11-10)
 
@@ -193,4 +224,9 @@ Each step has an expected result. Mark it **pass**, **fail** (with what happened
     - `app-release.apk` is 32,789,911 bytes (32.8 MB). That is close to what one phone downloads from a store's per-architecture split; store sizes need an EAS build.
     - Its manifest has neither `SYSTEM_ALERT_WINDOW` nor `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, nor `FOREGROUND_SERVICE` or expo-audio's playback service.
   - **`prebuild` without `--clean`** also wrote `android/` afresh and deleted the earlier build's outputs.
+- **Found on the Android emulator, 2026-11-10, and fixed in the app:**
+  - **No photo, video or voice note uploaded from a phone.** On iOS and Android the app's `fetch` is Expo's (Expo SDK 58 installs it over React Native's), and it refused React Native's `{ uri, name, type }` form parts ("Unsupported FormDataPart implementation"). Each such part now carries a way to read its bytes, which Expo's fetch uses (`src/upload-part.ts`).
+  - **Offline was never noticed on a phone.** Expo's fetch fails with an error whose message starts "fetch failed: ", not the TypeError a browser gives, so the app never showed what it had cached. It now knows both (`src/problems.ts`).
+  - **Profile named this phone "okhttp/4.12.0".** The API keeps a session's User-Agent header as its device. The app now sends "Android phone (Android 14)", "iPhone (iOS 17.0)" or "iPad (…)" on sign-in; a browser still names itself.
+- **Found, minor, not changed:** a receipt downloads named by its storage id rather than its receipt number; Repairs keeps its "offline" banner after the connection is back until it is opened again; the files of a request being written when the app is killed stay on the phone until sign-out; the device list does not mark the current device; a development build's warning "configured linking in multiple places" (Expo Router) shows in its toast.
 - **Minimum versions:** React Native 0.88 supports Android 7 (API 24) and up, which covers Android 8. iOS 16.4 is the app's minimum (ADR-010).

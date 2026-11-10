@@ -21,13 +21,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * A request that never reached the API. A browser's fetch fails with a TypeError. On iOS and
+ * Android the app's fetch is Expo's, which fails with a FetchError, an Error whose message starts
+ * "fetch failed: " (M11 device test: offline, the app kept nothing it had cached). An abort is not
+ * a lost connection.
+ */
+function unreachable(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  return (
+    error instanceof Error &&
+    error.message.startsWith('fetch failed: ') &&
+    !/aborted/i.test(error.message)
+  );
+}
+
+/**
  * Normalises errors from the typed API client (oRPC). Handler errors carry a status, an upper-case
  * code and a message meant for people; refusals from the API's guards (401, 403) arrive with
- * their `{ code, message }` body under `data.body`. A failed fetch is a TypeError.
+ * their `{ code, message }` body under `data.body`. A failed fetch is a lost connection.
  */
 export function toProblem(error: unknown): Problem {
-  if (error instanceof TypeError)
-    return { status: null, code: 'network', message: NETWORK_MESSAGE };
+  if (unreachable(error)) return { status: null, code: 'network', message: NETWORK_MESSAGE };
   if (!isRecord(error)) return { status: null, code: null, message: GENERIC_MESSAGE };
   const status = typeof error.status === 'number' ? error.status : null;
   const body = isRecord(error.data) && isRecord(error.data.body) ? error.data.body : null;
