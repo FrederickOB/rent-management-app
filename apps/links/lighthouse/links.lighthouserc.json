@@ -1,0 +1,11 @@
+{
+  "ci": {
+    "assert": {
+      "assertions": {
+        "total-byte-weight": ["error", { "maxNumericValue": 1000000 }],
+        "largest-contentful-paint": ["error", { "maxNumericValue": 3000 }],
+        "cumulative-layout-shift": ["error", { "maxNumericValue": 0.1 }]
+      }
+    }
+  }
+}

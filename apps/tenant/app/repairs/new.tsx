@@ -289,16 +289,18 @@ export default function ReportRepair() {
       {choices.length > 1 ? (
         <Card label="Which home?">
           <Heading>Which home?</Heading>
-          {choices.map((choice) => (
-            <Choose
-              key={choice.leaseId}
-              label={`${choice.unitCode}, ${choice.propertyName}`}
-              hint={`With ${choice.landlordName}`}
-              selected={chosen?.leaseId === choice.leaseId}
-              testID="choose-tenancy"
-              onPress={() => setLeaseId(choice.leaseId)}
-            />
-          ))}
+          <View role="radiogroup" aria-label="Which home?" style={styles.homes}>
+            {choices.map((choice) => (
+              <Choose
+                key={choice.leaseId}
+                label={`${choice.unitCode}, ${choice.propertyName}`}
+                hint={`With ${choice.landlordName}`}
+                selected={chosen?.leaseId === choice.leaseId}
+                testID="choose-tenancy"
+                onPress={() => setLeaseId(choice.leaseId)}
+              />
+            ))}
+          </View>
         </Card>
       ) : chosen ? (
         <Small testID="tenancy">
@@ -308,7 +310,7 @@ export default function ReportRepair() {
 
       <Card label="What kind of repair?">
         <Heading>What kind of repair?</Heading>
-        <View style={styles.chips}>
+        <View role="radiogroup" aria-label="What kind of repair?" style={styles.chips}>
           {CATEGORY_CHOICES.map((choice) => (
             <Choose
               key={choice.value}
@@ -451,9 +453,10 @@ function Choose({
 }) {
   return (
     <Pressable
-      accessibilityRole="radio"
-      accessibilityState={{ selected, checked: selected }}
-      accessibilityLabel={label}
+      // M11 (NFR-A11Y): a radio says whether it is chosen, on the web as aria-checked; its name
+      // is its visible text, the hint included (WCAG 2.5.3).
+      role="radio"
+      aria-checked={selected}
       testID={testID}
       onPress={onPress}
       style={({ pressed }) => [
@@ -500,6 +503,7 @@ function Sent({ outcome, onDone }: { outcome: Outcome; onDone: () => void }) {
 
 const styles = StyleSheet.create({
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  homes: { gap: 8 },
   chip: {
     borderWidth: 1,
     borderColor: colours.line,

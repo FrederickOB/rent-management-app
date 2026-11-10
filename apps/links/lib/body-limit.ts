@@ -8,6 +8,24 @@ import { MEDIA_MAX_FILES_PER_REQUEST, MEDIA_RULES } from '@rent/domain/maintenan
 export const JOB_SHEET_MAX_BODY_BYTES =
   MEDIA_MAX_FILES_PER_REQUEST * MEDIA_RULES.image.maxBytes + 1_000_000;
 
+/**
+ * The job sheet's photo forms, read part by part (lib/multipart.ts): each photo at most 10 MB and
+ * at most 10 of them, as photosFrom checks, and the whole body within JOB_SHEET_MAX_BODY_BYTES.
+ */
+export const JOB_SHEET_FORM_LIMITS = {
+  maxBytes: JOB_SHEET_MAX_BODY_BYTES,
+  maxFileBytes: MEDIA_RULES.image.maxBytes,
+  maxFiles: MEDIA_MAX_FILES_PER_REQUEST,
+  maxFieldBytes: 16 * 1024,
+  maxParts: 32,
+} as const;
+
+/** Whether a request says, in its Content-Length, that it is over `limit`. */
+export function declaredOver(request: Request, limit: number): boolean {
+  const declared = Number(request.headers.get('content-length') ?? Number.NaN);
+  return Number.isFinite(declared) && declared > limit;
+}
+
 export type FormRead =
   | { readonly ok: true; readonly form: FormData }
   | { readonly ok: false; readonly error: 'BODY_TOO_LARGE' | 'FORM_UNREADABLE' };

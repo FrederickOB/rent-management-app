@@ -8,6 +8,11 @@ import { API_URL, APP_SCHEME } from './config';
 /**
  * Better Auth client (ADR-011). On iOS and Android the session token lives in SecureStore and
  * is sent as a cookie header; on the web build the browser keeps it as an httpOnly cookie.
+ *
+ * The Expo plugin keeps only cookies whose names start with `cookiePrefix`, after it strips a
+ * `__Host-` or `__Secure-` prefix. The API names them `rent.*` in development and e2e, and
+ * `__Host-rent.*` in production (packages/server/src/identity/auth.ts), so `rent` covers both.
+ * The plugin's default, `better-auth`, matched neither, so a phone never kept its session (M11).
  */
 export const authClient = createAuthClient({
   baseURL: `${API_URL}/api/auth`,
@@ -16,7 +21,14 @@ export const authClient = createAuthClient({
     phoneNumberClient(),
     ...(Platform.OS === 'web'
       ? []
-      : [expoClient({ scheme: APP_SCHEME, storagePrefix: 'rent', storage: SecureStore })]),
+      : [
+          expoClient({
+            scheme: APP_SCHEME,
+            storagePrefix: 'rent',
+            cookiePrefix: 'rent',
+            storage: SecureStore,
+          }),
+        ]),
   ],
 });
 

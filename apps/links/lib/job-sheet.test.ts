@@ -242,6 +242,7 @@ describe('MI-04 and MI-06 the job sheet’s steps', () => {
 
   it('start: the before photo goes to storage, then the start names its upload', async () => {
     const calls = stubNetwork({
+      '/job-sheets/open': () => Response.json(sheet()),
       '/job-sheets/uploads': () =>
         Response.json({
           uploadId: UPLOAD,
@@ -268,13 +269,16 @@ describe('MI-04 and MI-06 the job sheet’s steps', () => {
   });
 
   it('start: with no photo and no reason, nothing is sent', async () => {
-    const calls = stubNetwork({});
+    const calls = stubNetwork({ '/job-sheets/open': () => Response.json(sheet()) });
     const response = await start(post(`/j/${TOKEN}/start`, new FormData()), params);
     expect(response.headers.get('location')).toBe(`/j/${TOKEN}?error=BEFORE_REQUIRED#act`);
-    expect(calls).toEqual([]);
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual(['/job-sheets/open']);
     const reason = new FormData();
     reason.set('beforePhotoReason', 'Emergency: no time for a photo');
-    const answered = stubNetwork({ '/job-sheets/start': () => Response.json(sheet()) });
+    const answered = stubNetwork({
+      '/job-sheets/open': () => Response.json(sheet()),
+      '/job-sheets/start': () => Response.json(sheet()),
+    });
     await start(post(`/j/${TOKEN}/start`, reason), params);
     expect(apiBody(answered, '/job-sheets/start')[0]).toMatchObject({
       uploadIds: [],
@@ -283,7 +287,7 @@ describe('MI-04 and MI-06 the job sheet’s steps', () => {
   });
 
   it('complete: needs an after photo and a note before anything is sent', async () => {
-    const calls = stubNetwork({});
+    const calls = stubNetwork({ '/job-sheets/open': () => Response.json(sheet()) });
     const noPhoto = new FormData();
     noPhoto.set('completionNote', 'Replaced the trap');
     noPhoto.set('code', '123456');
@@ -296,12 +300,16 @@ describe('MI-04 and MI-06 the job sheet’s steps', () => {
     expect(
       (await complete(post(`/j/${TOKEN}/complete`, noNote), params)).headers.get('location'),
     ).toBe(`/j/${TOKEN}?error=NOTE_REQUIRED#act`);
-    expect(calls).toEqual([]);
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/job-sheets/open',
+      '/job-sheets/open',
+    ]);
   });
 
   it('complete: the photos, the note and the code go together; a wrong code says how many tries are left', async () => {
     let answer = () => Response.json(sheet({ screen: 'done' }));
     const calls = stubNetwork({
+      '/job-sheets/open': () => Response.json(sheet()),
       '/job-sheets/uploads': () =>
         Response.json({ uploadId: UPLOAD, url: STORAGE, fields: {}, expiresAt: 'x' }),
       '/job-sheets/complete': () => answer(),

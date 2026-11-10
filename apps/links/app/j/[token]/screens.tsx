@@ -4,7 +4,7 @@ import {
   MEDIA_MAX_FILES_PER_REQUEST,
   MEDIA_RULES,
 } from '@rent/domain/maintenance';
-import { attachmentLabel, jobSheetProblem } from '../../../lib/job-sheet';
+import { attachmentLabel, jobSheetProblem, scanOf } from '../../../lib/job-sheet';
 import { newFormId } from '../../../lib/job-sheet-store';
 import type { JobSheetView } from '../../../lib/links-api';
 import { when } from '../../../lib/pay';
@@ -82,8 +82,13 @@ const fromWhom = (sheet: JobSheetView) => sheet.contact?.name ?? sheet.property.
 
 /** F1: the tenant's photos and videos from the report; never voice notes or later files. */
 function Files({ token, sheet }: { token: string; sheet: JobSheetView }) {
+  // M11 decision 6: a file whose malware scan is still running shows as being checked, with no
+  // link; one found infected is never listed (lib/job-sheet.ts scanOf).
   const reported = sheet.attachments.filter(
-    (a) => a.stage === 'report' && (a.kind === 'image' || a.kind === 'video'),
+    (a) =>
+      a.stage === 'report' &&
+      (a.kind === 'image' || a.kind === 'video') &&
+      scanOf(a) !== 'infected',
   );
   if (reported.length === 0) return null;
   return (
@@ -92,9 +97,16 @@ function Files({ token, sheet }: { token: string; sheet: JobSheetView }) {
       <ul>
         {reported.map((attachment, index) => (
           <li key={attachment.id}>
-            <a href={`/j/${token}/attachment/${attachment.id}`}>
-              {attachmentLabel(attachment, index)}
-            </a>
+            {scanOf(attachment) === 'pending' ? (
+              <span className="small">
+                {attachmentLabel(attachment, index)}: being checked for viruses. Open this page
+                again in a minute to see it.
+              </span>
+            ) : (
+              <a href={`/j/${token}/attachment/${attachment.id}`}>
+                {attachmentLabel(attachment, index)}
+              </a>
+            )}
           </li>
         ))}
       </ul>

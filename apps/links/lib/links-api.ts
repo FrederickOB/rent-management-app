@@ -9,6 +9,7 @@ import {
   type SigningPage,
   type UnsubscribePage,
 } from '@rent/contracts';
+import { PEER_ADDRESS_HEADER } from './peer-address';
 
 /**
  * The links API (M3 plan 4.15; M4b plan 4.3 and 4.6), called server to server: the browser never talks to the API,
@@ -117,18 +118,34 @@ export const payStatus = (token: string, client: Client, intentId: string) =>
   call<PayIntent>('/links/pay/status', { token, client, intentId });
 
 /**
- * The browser's address: the last X-Forwarded-For entry, which is the one the nearest proxy (the
- * load balancer in front of apps/links, or Next.js itself from the socket) saw. Its device: the
- * User-Agent. Both are evidence on the signature.
+ * The browser's address and device: evidence on the signature, and the key for rate limits.
+ *
+ * - **Behind the edge** (production): only the header the edge overwrites with the address it saw,
+ *   named by CLIENT_IP_HEADER. Production refuses to start without it (instrumentation.ts).
+ * - **With no edge** (development, CI): the connection's own address, which this server stamps on
+ *   every request (lib/peer-address.ts).
+ *
+ * X-Forwarded-For is never trusted in a running server: Next.js fills it from the socket only when
+ * the request has none, so otherwise it is whatever the client wrote (M11 security review F8).
+ * Code that runs outside the server, unit tests calling a route, has neither header, and gets the
+ * last X-Forwarded-For entry as before.
  */
-export function clientFrom(headers: Headers): Client {
-  const forwarded = headers
-    .get('x-forwarded-for')
-    ?.split(',')
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .at(-1);
-  const ip = forwarded ?? headers.get('x-real-ip') ?? 'unknown';
+export function clientFrom(
+  headers: Headers,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Client {
+  const configured = env.CLIENT_IP_HEADER?.trim().toLowerCase();
+  const ip =
+    (configured ? headers.get(configured) : headers.get(PEER_ADDRESS_HEADER))?.trim() ||
+    (configured
+      ? null
+      : headers
+          .get('x-forwarded-for')
+          ?.split(',')
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .at(-1)) ||
+    'unknown';
   return {
     ip: ip.slice(0, 64),
     userAgent: (headers.get('user-agent') ?? 'unknown').slice(0, 500),

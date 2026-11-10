@@ -131,6 +131,8 @@ export function Button({
   return (
     <Pressable
       accessibilityRole="button"
+      // Its name stays while it works and shows a spinner instead of its words (NFR-A11Y).
+      accessibilityLabel={label}
       accessibilityState={{ busy: Boolean(busy), disabled: Boolean(busy) }}
       disabled={busy}
       onPress={onPress}

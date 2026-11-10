@@ -28,18 +28,34 @@ interface DeviceSession {
   readonly createdAt: string | Date;
 }
 
+/** The devices signed in. A list that failed to load says so, and is never shown as empty. */
+type Devices =
+  | { readonly status: 'loading' }
+  | { readonly status: 'ready'; readonly list: readonly DeviceSession[] }
+  | { readonly status: 'error'; readonly message: string };
+
 const loadPushConsent = async () => api.tenantMessaging.pushConsent();
 
 /** Profile: notifications (M6 decision 5), devices signed in, remote sign-out and sign-out (AD-06). */
 export default function Profile() {
   const router = useRouter();
-  const { me, loading, signOut } = useSession();
-  const [devices, setDevices] = useState<DeviceSession[]>([]);
+  const { me, loading, signOut, expire } = useSession();
+  const [devices, setDevices] = useState<Devices>({ status: 'loading' });
 
   const load = useCallback(async () => {
-    const result = await authClient.listSessions();
-    setDevices((result.data ?? []) as DeviceSession[]);
-  }, []);
+    const failed = (error: unknown) => {
+      const problem = toProblem(error);
+      if (problem.status === 401) return expire();
+      setDevices({ status: 'error', message: problem.message });
+    };
+    try {
+      const result = await authClient.listSessions();
+      if (result.error) return failed(result.error);
+      setDevices({ status: 'ready', list: (result.data ?? []) as DeviceSession[] });
+    } catch (error) {
+      failed(error);
+    }
+  }, [expire]);
 
   useEffect(() => {
     void load();
@@ -52,7 +68,23 @@ export default function Profile() {
       <Notifications />
       <Heading>Devices</Heading>
       <Body>Devices signed in to your account. Sign out any you do not recognise.</Body>
-      {devices.map((device) => (
+      {devices.status === 'error' ? (
+        <View style={styles.stack}>
+          <ErrorText testID="devices-error">
+            We could not load the devices signed in to your account. {devices.message}
+          </ErrorText>
+          <Button
+            label="Load devices again"
+            variant="quiet"
+            testID="retry-devices"
+            onPress={() => {
+              setDevices({ status: 'loading' });
+              void load();
+            }}
+          />
+        </View>
+      ) : null}
+      {(devices.status === 'ready' ? devices.list : []).map((device) => (
         <View key={device.id} style={styles.device}>
           <Text style={{ fontSize: 15, color: colours.ink }}>
             {device.userAgent || 'Unknown device'}
