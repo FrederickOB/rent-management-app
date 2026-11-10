@@ -104,7 +104,46 @@ export interface WebhookDelivery {
   readonly url: string;
   readonly status?: number;
   readonly error?: string;
+  /** How long the receiver took to answer, in milliseconds (M11: the load test's webhook intake). */
+  readonly ms?: number;
 }
+
+/**
+ * The payments outage switch (M11 decision 9; the NFR-AVAIL drills). One mode at a time:
+ * - `normal`: as Paystack answers;
+ * - `down`: every keyed payments API call answers 503 before doing anything;
+ * - `slow`: every keyed payments API call waits `delayMs` (3 s by default), then answers;
+ * - `timeout`: every keyed payments API call waits `delayMs` (15 s by default, past the client's
+ *   10 s), then does its work and answers to nobody, so a charge may exist that the caller never
+ *   heard about;
+ * - `withhold`: payment webhooks are queued, not sent; switching back to `normal` sends them;
+ * - `drop`: payment webhooks are discarded.
+ * The test controls and the checkout page keep working in every mode: they stand for the payer.
+ */
+export type PaymentsOutageMode = 'normal' | 'down' | 'slow' | 'timeout' | 'withhold' | 'drop';
+
+export interface PaymentsOutage {
+  mode: PaymentsOutageMode;
+  delayMs: number;
+}
+
+export interface WithheldWebhook {
+  readonly event: string;
+  readonly rawBody: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly at: string;
+}
+
+export interface DroppedWebhook {
+  readonly event: string;
+  readonly at: string;
+}
+
+export const NORMAL_PAYMENTS: Readonly<PaymentsOutage> = { mode: 'normal', delayMs: 0 };
+
+/** The payments outage in force: `normal` when none is set. */
+export const paymentsOutageOf = (store: FakeStore): PaymentsOutage =>
+  store.outages.get('payments') ?? { ...NORMAL_PAYMENTS };
 
 export interface FakeStore {
   messages: Captured[];
@@ -117,6 +156,12 @@ export interface FakeStore {
   settlements: FakeSettlement[];
   identityChecks: Map<string, FakeIdentityCheck>;
   webhooks: WebhookDelivery[];
+  /** Outages switched on, by provider kind (`payments` only, M11). None means normal. */
+  outages: Map<'payments', PaymentsOutage>;
+  /** Payment webhooks held back under `withhold`, oldest first. */
+  withheldWebhooks: WithheldWebhook[];
+  /** Payment webhooks discarded under `drop` since the last reset. */
+  droppedWebhooks: DroppedWebhook[];
 }
 
 export function createStore(): FakeStore {
@@ -131,7 +176,17 @@ export function createStore(): FakeStore {
     settlements: [],
     identityChecks: new Map(),
     webhooks: [],
+    outages: new Map(),
+    withheldWebhooks: [],
+    droppedWebhooks: [],
   };
+}
+
+/** Back to normal, discarding anything withheld (nothing is sent). */
+export function resetPaymentsOutage(store: FakeStore): void {
+  store.outages.delete('payments');
+  store.withheldWebhooks.length = 0;
+  store.droppedWebhooks.length = 0;
 }
 
 export function resetStore(store: FakeStore): void {
@@ -145,4 +200,5 @@ export function resetStore(store: FakeStore): void {
   store.settlements.length = 0;
   store.identityChecks.clear();
   store.webhooks.length = 0;
+  resetPaymentsOutage(store);
 }

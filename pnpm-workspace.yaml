@@ -91,3 +91,15 @@ minimumReleaseAgeExclude:
   - expo-router@58.0.28
   - expo@58.0.21
   - jest-expo@58.0.13
+
+auditConfig:
+  ignoreGhsas:
+    - GHSA-mrhx-c7xc-m3w5
+
+# @nestjs/platform-fastify imports rxjs without declaring it, so pnpm resolved it through the
+# hidden hoist, which picked rxjs 6 once @lhci/cli brought one in (M11). Declaring the peer makes it
+# resolve rxjs from the app that uses it (rxjs 7, catalog).
+packageExtensions:
+  '@nestjs/platform-fastify':
+    peerDependencies:
+      rxjs: '*'

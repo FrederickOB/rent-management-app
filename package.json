@@ -18,12 +18,21 @@
     "test": "pnpm services:up && turbo run test",
     "test:unit": "turbo run test:unit",
     "test:e2e": "docker compose up -d --wait --no-recreate && turbo run test:e2e --concurrency=1 --continue",
+    "test:lighthouse": "pnpm --filter @rent/links test:lighthouse",
     "db:migrate": "pnpm --filter @rent/db migrate && pnpm --filter @rent/server jobs:migrate",
     "db:seed": "pnpm --filter @rent/server seed",
     "db:backup": "bash scripts/db-backup.sh",
     "db:restore": "bash scripts/db-restore.sh",
+    "drill:restore": "bash scripts/drill-restore.sh",
+    "drill:pitr": "bash scripts/drill-pitr.sh",
+    "load:month-end": "bash load/run-month-end.sh",
+    "traceability": "node scripts/traceability.mjs",
     "rules:add": "pnpm --filter @rent/server rules:add",
-    "platform:bootstrap": "pnpm --filter @rent/server platform:bootstrap"
+    "platform:bootstrap": "pnpm --filter @rent/server platform:bootstrap",
+    "identity:recover": "pnpm --filter @rent/server identity:recover",
+    "ops:replay-webhooks": "pnpm --filter @rent/server ops:replay-webhooks",
+    "ops:redrive": "pnpm --filter @rent/server ops:redrive",
+    "ops:reconcile": "pnpm --filter @rent/server ops:reconcile"
   },
   "devDependencies": {
     "@rent/config": "workspace:*",

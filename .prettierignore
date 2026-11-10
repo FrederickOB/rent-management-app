@@ -8,6 +8,9 @@ web-build/
 coverage/
 playwright-report/
 test-results/
+# M11: Lighthouse reports (apps/links/lighthouse/run.mjs)
+.lighthouseci/
+apps/links/lighthouse/.results/
 packages/db/migrations/meta/
 docs/
 BUILD_PLAYBOOK.md

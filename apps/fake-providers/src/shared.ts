@@ -46,6 +46,7 @@ export async function deliverWebhook(
 ): Promise<WebhookDelivery | null> {
   if (!url) return null;
   const at = new Date().toISOString();
+  const started = performance.now();
   let delivery: WebhookDelivery;
   try {
     const response = await fetch(url, {
@@ -54,9 +55,23 @@ export async function deliverWebhook(
       body: rawBody,
       signal: AbortSignal.timeout(5_000),
     });
-    delivery = { at, kind, event, url, status: response.status };
+    delivery = {
+      at,
+      kind,
+      event,
+      url,
+      status: response.status,
+      ms: Math.ceil(performance.now() - started),
+    };
   } catch (error) {
-    delivery = { at, kind, event, url, error: (error as Error).name };
+    delivery = {
+      at,
+      kind,
+      event,
+      url,
+      error: (error as Error).name,
+      ms: Math.ceil(performance.now() - started),
+    };
   }
   store.webhooks.unshift(delivery);
   return delivery;

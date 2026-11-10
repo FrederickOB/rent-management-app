@@ -51,7 +51,7 @@ fi
 psql_as_postgres <<'SQL'
 CREATE DATABASE :"target" OWNER rent_owner;
 REVOKE ALL ON DATABASE :"target" FROM PUBLIC;
-GRANT CONNECT, TEMPORARY ON DATABASE :"target" TO rent_app;
+GRANT CONNECT ON DATABASE :"target" TO rent_app;
 SQL
 
 # One transaction: a failed restore leaves an empty database, never a partial one.

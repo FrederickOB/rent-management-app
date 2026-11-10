@@ -1,0 +1,3 @@
+# Load test results stay local; CI keeps them as artifacts.
+*
+!.gitignore
