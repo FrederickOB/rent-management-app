@@ -1,7 +1,8 @@
 /**
  * The Better Auth endpoints the platform exposes. Everything else (sign-up, phone-number
  * changes, phone-based password reset, disabling two-factor, account deletion) is refused
- * before it reaches Better Auth.
+ * before it reaches Better Auth. M11 review R1 F9: `get-totp-uri` is not offered: enrolment gets
+ * the URI from `two-factor/enable`, and nothing else needs the secret again.
  */
 const ALLOWED = new Set([
   '/sign-in/email',
@@ -14,7 +15,6 @@ const ALLOWED = new Set([
   '/request-password-reset',
   '/reset-password',
   '/two-factor/enable',
-  '/two-factor/get-totp-uri',
   '/two-factor/verify-totp',
   '/two-factor/verify-backup-code',
   '/two-factor/generate-backup-codes',

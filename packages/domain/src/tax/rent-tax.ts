@@ -1,6 +1,7 @@
 import { addDays, parseBusinessDate, toIsoDate } from '../dates';
 import { DomainError } from '../errors';
 import { allocate, money, multiplyBps } from '../money/money';
+import { isOpeningAllocation, type AllocationRow } from '../billing/lines';
 import type { WalkResult } from '../billing/walk';
 
 /**
@@ -144,8 +145,35 @@ export function receiptTax(
 }
 
 /**
+ * P25 (M11 decision 3; OQ-64): money received before the platform is not rent received through it.
+ * The lease's opening payments (payments of source `opening_balance`) and its allocations, so the
+ * walk's coverage by that money, paid onto a month or still credit applied forward, is left out.
+ */
+export interface OpeningMoney {
+  readonly paymentIds: ReadonlySet<string>;
+  readonly allocations: readonly AllocationRow[];
+}
+
+/** What opening money covers of one walk line: its allocations, and the credit the walk applies. */
+function openingCover(line: WalkResult['lines'][number], opening: OpeningMoney): number {
+  let cover = 0;
+  if (line.lineId !== null)
+    for (const a of opening.allocations)
+      if (a.lineId === line.lineId && isOpeningAllocation(a, opening.paymentIds))
+        cover += a.amountMinor;
+  for (const d of line.draws) if (opening.paymentIds.has(d.paymentId)) cover += d.amountMinor;
+  return cover;
+}
+
+/**
  * The periods as the walk covers them, with what live tax items already pin to each. The walk's
  * VAT and levy lines (M4a review 10) are never rent: they are left out, so VAT is never taxed.
+ *
+ * With `opening` (P25), what opening money covers of a period is out of it altogether: out of its
+ * amount and out of its coverage. So an opening payment, or its credit drawn onto later months, is
+ * never taxed (it was received before the platform), while a receipt after the cut-over that pays
+ * opening arrears, or months the opening credit does not reach, is taxed on the rent it covers as
+ * any other. Without `opening`, the periods are as before.
  */
 export function taxPeriodsFromWalk(input: {
   readonly walk: WalkResult;
@@ -153,16 +181,20 @@ export function taxPeriodsFromWalk(input: {
   readonly periodKeyOf: (walkKey: string) => string;
   readonly taxed: ReadonlyMap<string, { readonly baseMinor: number; readonly taxMinor: number }>;
   readonly withheld: ReadonlySet<string>;
+  readonly opening?: OpeningMoney | null;
 }): TaxPeriod[] {
+  const opening = input.opening ?? null;
   return input.walk.lines
     .filter((line) => !line.tax)
     .map((line) => {
       const key = input.periodKeyOf(line.key);
-      const covered = Math.min(line.netMinor, line.settledMinor + line.creditMinor);
+      const all = Math.min(line.netMinor, line.settledMinor + line.creditMinor);
+      const before = opening === null ? 0 : Math.min(all, Math.max(0, openingCover(line, opening)));
+      const covered = all - before;
       return {
         key,
         kind: line.chargeType,
-        amountMinor: line.netMinor,
+        amountMinor: line.netMinor - before,
         coveredMinor: covered,
         taxedBaseMinor: input.taxed.get(key)?.baseMinor ?? 0,
         taxMinor: input.taxed.get(key)?.taxMinor ?? 0,

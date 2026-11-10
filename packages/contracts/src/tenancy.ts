@@ -190,6 +190,22 @@ export const tenantsContract = {
       }),
     )
     .output(z.array(tenantAnySchema)),
+  /**
+   * M11 decision 6: the same search by POST, so a phone number or a name never sits in a URL (and
+   * so in no access log or browser history). `list` keeps working for filters without `search`.
+   */
+  search: oc
+    .route({ method: 'POST', path: '/tenants/search', summary: 'Search tenants (TL-01)' })
+    .input(
+      z.object({
+        search: z.string().max(80).optional(),
+        kind: z.enum(TENANT_KINDS).optional(),
+        withActiveLease: z.boolean().optional(),
+        idStatus: z.enum(ID_STATUSES).optional(),
+        includeArchived: z.boolean().optional(),
+      }),
+    )
+    .output(z.array(tenantAnySchema)),
   get: oc
     .route({ method: 'GET', path: '/tenants/{tenantId}' })
     .input(z.object({ tenantId: uuid }))

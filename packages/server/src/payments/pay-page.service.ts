@@ -25,7 +25,7 @@ import { customerEmailDomainOf, type AppConfig } from '../core/config';
 import type { FieldCipher } from '../core/crypto/field-cipher';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
 import type { PaymentProviders } from '../core/payment-providers';
-import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
+import { consumeAlertWindow, consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import {
   ALERT_PORT,
   CLOCK,
@@ -41,6 +41,9 @@ import { RulesService } from '../rules/rules.service';
 import { landlordContact } from './landlord-contact';
 import { facts, PayLinksService } from './pay-links.service';
 import { ProviderPaymentsService } from './provider-payments.service';
+
+/** One provider-unavailable incident per company and providers tried per window (M11 drill). */
+export const PROVIDER_UNAVAILABLE_ALERTS: RateLimit = { count: 1, windowMinutes: 15 };
 
 export type PayScreen = 'pay' | 'paid' | 'settled' | 'expired' | 'revoked' | 'unavailable';
 export type IntentStatus = 'initiated' | 'pending' | 'confirmed' | 'failed' | 'abandoned';
@@ -192,9 +195,47 @@ export class PayPageService {
           openCount: link.openCount + 1,
         })
         .where(eq(schema.secureLink.id, link.id));
+      // M11 review R3 F9: a closed link reads nothing of the tenancy.
+      if (link.revokedAt || link.expiresAt.getTime() <= now.getTime())
+        return this.closedPage(tx, companyId, link);
       const { advanceRuleId: _rule, ...page } = await this.page(tx, companyId, link);
       return page;
     });
+  }
+
+  /**
+   * M11 review R3 F9: what a revoked or expired link answers: the closed screen and the landlord's
+   * contact, and nothing about the tenancy (no name, unit, amounts, reference or payments). The
+   * contract's other fields are present and empty, so apps/links needs no change.
+   */
+  private async closedPage(tx: Tx, companyId: string, link: LinkRow): Promise<PayPageView> {
+    const [company] = await tx
+      .select({ timeZone: schema.company.timeZone, settings: schema.company.settings })
+      .from(schema.company)
+      .where(eq(schema.company.id, companyId));
+    const landlord = await landlordContact(tx, this.policy, companyId);
+    return {
+      screen: link.revokedAt ? 'revoked' : 'expired',
+      landlord: {
+        ...landlord,
+        manualInstructions: paymentSettingsOf(parseCompanySettings(company?.settings))
+          .manualPaymentInstructions,
+      },
+      timeZone: company?.timeZone ?? 'Africa/Accra',
+      linkExpiresAt: link.expiresAt,
+      tenantName: '',
+      unitCode: '',
+      propertyName: '',
+      paymentReference: '',
+      invoiceNumber: '',
+      dueNowMinor: 0,
+      paidUntil: null,
+      partial: null,
+      amounts: { prefillMinor: 0, minMinor: 0, maxMinor: 0 },
+      methods: [],
+      advance: null,
+      latest: null,
+    };
   }
 
   /** A 5-minute link to the link's invoice PDF (the first reminder carries the invoice, BC-09). */
@@ -533,14 +574,29 @@ export class PayPageService {
     const instructions = paymentSettingsOf(
       parseCompanySettings(company[0]?.settings),
     ).manualPaymentInstructions;
-    if (!refusal)
-      await this.alerts.raise({
-        severity: 'critical',
-        code: 'payments.provider_unavailable',
-        message:
-          'No payment provider could take a charge; the tenant was shown manual instructions',
-        context: { companyId, intentId: intent.id, tried: options.order.join(',') },
-      });
+    if (!refusal) {
+      // M11 drill: one incident per company and providers tried in 15 minutes, not one per tenant.
+      const tried = options.order.join(',');
+      const window = await consumeAlertWindow(
+        this.database,
+        `alert:payments.provider_unavailable:${companyId}:${tried}`,
+        PROVIDER_UNAVAILABLE_ALERTS,
+        this.clock.now().getTime(),
+      );
+      if (window.raise)
+        await this.alerts.raise({
+          severity: 'critical',
+          code: 'payments.provider_unavailable',
+          message:
+            'No payment provider could take a charge; the tenant was shown manual instructions. Further failures for this company in the next 15 minutes are not alerted again.',
+          context: {
+            companyId,
+            intentId: intent.id,
+            tried,
+            suppressedInLastWindow: window.suppressedBefore,
+          },
+        });
+    }
     return this.record(companyId, intent.id, {
       status: 'failed',
       failureReason: refusal ? 'provider_refused' : 'providers_unavailable',

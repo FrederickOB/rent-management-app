@@ -786,7 +786,11 @@ export class OwnerMoneyService implements OnModuleInit {
       return f ?? null;
     });
     if (!found) throw notFound('Proof');
-    const url = found.doc ? await this.documents.downloadUrl(staff.companyId, found.doc) : null;
+    const url = found.doc
+      ? await this.documents.downloadUrl(staff.companyId, found.doc, undefined, {
+          viewer: staff.personId,
+        })
+      : null;
     if (!url) throw notFound('Proof');
     return { url, expiresAt: new Date(this.clock.now().getTime() + 300_000) };
   }

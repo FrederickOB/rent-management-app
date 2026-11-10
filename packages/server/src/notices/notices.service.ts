@@ -1335,7 +1335,9 @@ export class NoticesService implements OnModuleInit {
       }
     });
     if (!found.id) throw notFound('Document');
-    const url = await this.documents.downloadUrl(staff.companyId, found.id, found.name);
+    const url = await this.documents.downloadUrl(staff.companyId, found.id, found.name, {
+      viewer: staff.personId,
+    });
     if (!url) throw notFound('Document');
     return url;
   }

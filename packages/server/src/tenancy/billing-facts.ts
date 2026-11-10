@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, schema, sql, type Tx } from '@rent/db';
 import type { ScheduleRow } from '@rent/domain/billing';
 import type { LeaseStatus, LeaseTerms, LeaseUse, RentCycle } from '@rent/domain/tenancy';
 import { notFound } from '../core/errors';
-import { leaseRow, termsOf } from './lease-records';
+import { leaseRow, termsFrom, termsOf, type LeaseRow } from './lease-records';
 
 /**
  * What billing needs to know about a lease (M4a plan 4.1): tenancy owns leases, tenants and the
@@ -81,6 +81,130 @@ export async function billingLeaseOf(tx: Tx, leaseId: string): Promise<BillingLe
     tenantName: tenant.legalName ?? tenant.displayName,
     tenantTinMasked: tenant.tinMasked,
   };
+}
+
+/**
+ * billingLeaseOf for many leases at once, in a fixed number of queries (M11: the invoice list read
+ * one lease at a time). The same facts, keyed by lease id; a lease that is not found is left out.
+ */
+export async function billingLeasesOf(
+  tx: Tx,
+  leaseIds: readonly string[],
+): Promise<Map<string, BillingLease>> {
+  const out = new Map<string, BillingLease>();
+  if (leaseIds.length === 0) return out;
+  const ids = [...new Set(leaseIds)];
+  const rows: LeaseRow[] = await tx
+    .select()
+    .from(schema.lease)
+    .where(inArray(schema.lease.id, ids));
+  if (rows.length === 0) return out;
+  const places = await tx
+    .select({
+      unitId: schema.unit.id,
+      unitCode: schema.unit.code,
+      propertyName: schema.property.name,
+    })
+    .from(schema.unit)
+    .innerJoin(
+      schema.property,
+      and(
+        eq(schema.property.companyId, schema.unit.companyId),
+        eq(schema.property.id, schema.unit.propertyId),
+      ),
+    )
+    .where(inArray(schema.unit.id, [...new Set(rows.map((r) => r.unitId))]));
+  const tenants = await tx
+    .select({
+      id: schema.tenant.id,
+      displayName: schema.tenant.displayName,
+      legalName: schema.tenant.legalName,
+      tinMasked: schema.tenant.tinMasked,
+    })
+    .from(schema.tenant)
+    .where(inArray(schema.tenant.id, [...new Set(rows.map((r) => r.tenantId))]));
+  const steps = await tx
+    .select({
+      leaseId: schema.rentStep.leaseId,
+      effectiveFrom: schema.rentStep.effectiveFrom,
+      monthlyRentMinor: schema.rentStep.monthlyRentMinor,
+    })
+    .from(schema.rentStep)
+    .where(inArray(schema.rentStep.leaseId, ids))
+    .orderBy(asc(schema.rentStep.effectiveFrom));
+  const charges = await tx
+    .select({ leaseId: schema.leaseCharge.leaseId, monthly: schema.leaseCharge.monthlyAmountMinor })
+    .from(schema.leaseCharge)
+    .where(
+      and(
+        inArray(schema.leaseCharge.leaseId, ids),
+        eq(schema.leaseCharge.chargeType, 'service_charge'),
+      ),
+    );
+  const placeOf = new Map(places.map((p) => [p.unitId, p]));
+  const tenantOf = new Map(tenants.map((t) => [t.id, t]));
+  for (const row of rows) {
+    const place = placeOf.get(row.unitId);
+    const tenant = tenantOf.get(row.tenantId);
+    if (!place || !tenant) continue;
+    const charge = charges.find((c) => c.leaseId === row.id);
+    out.set(row.id, {
+      id: row.id,
+      companyId: row.companyId,
+      propertyId: row.propertyId,
+      unitId: row.unitId,
+      tenantId: row.tenantId,
+      status: row.status as LeaseStatus,
+      use: row.use as LeaseUse,
+      cycle: row.rentCycle as RentCycle,
+      startDate: row.startDate,
+      endDate: row.endDate,
+      billingStartDate: row.billingStartDate,
+      initialAdvanceMonths: row.initialAdvanceMonths,
+      depositMinor: row.depositMinor,
+      renewsLeaseId: row.renewsLeaseId,
+      moveOutDate: row.moveOutDate,
+      endedOn: row.endedOn,
+      signingMethod: row.signingMethod as BillingLease['signingMethod'],
+      terms: termsFrom(
+        row,
+        steps
+          .filter((s) => s.leaseId === row.id)
+          .map(({ effectiveFrom, monthlyRentMinor }) => ({ effectiveFrom, monthlyRentMinor })),
+        charge?.monthly ?? null,
+      ),
+      unitCode: place.unitCode,
+      propertyName: place.propertyName,
+      tenantName: tenant.legalName ?? tenant.displayName,
+      tenantTinMasked: tenant.tinMasked,
+    });
+  }
+  return out;
+}
+
+/** scheduleRowsOf for many leases at once, each in its own order. */
+export async function scheduleRowsOfMany(
+  tx: Tx,
+  leaseIds: readonly string[],
+): Promise<Map<string, ScheduleRow[]>> {
+  const out = new Map<string, ScheduleRow[]>(leaseIds.map((id) => [id, []]));
+  if (leaseIds.length === 0) return out;
+  const rows = await tx
+    .select()
+    .from(schema.chargePeriod)
+    .where(inArray(schema.chargePeriod.leaseId, [...new Set(leaseIds)]))
+    .orderBy(asc(schema.chargePeriod.periodStart), asc(schema.chargePeriod.chargeType));
+  for (const r of rows)
+    out.get(r.leaseId)?.push({
+      id: r.id,
+      sequence: r.sequence,
+      chargeType: r.chargeType as ScheduleRow['chargeType'],
+      periodStart: r.periodStart,
+      periodEnd: r.periodEnd,
+      amountMinor: r.amountMinor,
+      source: r.source as ScheduleRow['source'],
+    });
+  return out;
 }
 
 /** The lease's rent schedule (TL-06), in sequence order: what billing invoices. */

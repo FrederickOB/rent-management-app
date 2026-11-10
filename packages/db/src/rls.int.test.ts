@@ -275,7 +275,90 @@ async function seedCompany(companyId: string) {
       unitId: units[0]!.id,
       leaseId: leases[0]!.id,
     });
+    await seedM11(companyId, {
+      initiator,
+      initiatorMembership,
+      approver,
+      approverMembership,
+      documentId: docs[0]!.id,
+      tenantId,
+      leaseId: leases[0]!.id,
+    });
   });
+}
+
+/**
+ * Onboarding, data protection, operations and scan results (M11): one row in each of their
+ * company tables.
+ */
+async function seedM11(
+  companyId: string,
+  ids: {
+    initiator: string;
+    initiatorMembership: string;
+    approver: string;
+    approverMembership: string;
+    documentId: string;
+    tenantId: string;
+    leaseId: string;
+  },
+) {
+  const one = async (query: string, values: unknown[]) =>
+    (await app.query<{ id: string }>(query, values)).rows[0]?.id;
+  await app.query(
+    `insert into company_onboarding (company_id, cut_over_date, set_by) values ($1, '2026-01-01', $2)`,
+    [companyId, ids.initiator],
+  );
+  const batchId = await one(
+    `insert into onboarding_batch (company_id, kind, upload_intent_id, storage_key, created_by)
+     values ($1, 'balances', $2, 'k', $3) returning id`,
+    [companyId, randomUUID(), ids.initiator],
+  );
+  // Opening items are written only while their batch posts, after a second person's approval.
+  const approvalId = await one(
+    `insert into approval_request (company_id, action_type, subject_type, subject_id, payload, payload_hash, initiated_by,
+       initiator_membership_id, mode, status, expires_at)
+     values ($1, 'opening_balances', 'onboarding_batch', $2, '{}', 'h', $3, $4, 'two_person', 'pending',
+       now() + interval '1 day') returning id`,
+    [companyId, batchId, ids.initiator, ids.initiatorMembership],
+  );
+  await app.query(
+    `insert into approval_decision (company_id, request_id, decided_by, decided_by_membership_id, kind, payload_hash)
+     values ($1, $2, $3, $4, 'approve', 'h')`,
+    [companyId, approvalId, ids.approver, ids.approverMembership],
+  );
+  for (const status of ['validating', 'validated', 'awaiting_approval', 'posting'])
+    await app.query(
+      `update onboarding_batch set status = $2, approval_request_id = $3 where id = $1`,
+      [batchId, status, approvalId],
+    );
+  await app.query(
+    `insert into onboarding_item (company_id, batch_id, item_key, kind, lease_id, amount_minor, value_date, accounting_date)
+     values ($1, $2, $3, 'arrears', $4, 1000, '2026-01-01', '2026-01-01')`,
+    [companyId, batchId, `P25:${batchId}:fixture`, ids.leaseId],
+  );
+  await app.query(
+    `insert into staff_active_day (company_id, person_id, day) values ($1, $2, '2026-01-01')`,
+    [companyId, ids.initiator],
+  );
+  const requestId = await one(
+    `insert into data_protection_request (company_id, tenant_id, kind, received_on, created_by)
+     values ($1, $2, 'access', '2026-01-01', $3) returning id`,
+    [companyId, ids.tenantId, ids.initiator],
+  );
+  await app.query(
+    `insert into data_protection_export (company_id, request_id, requested_by) values ($1, $2, $3)`,
+    [companyId, requestId, ids.initiator],
+  );
+  await app.query(
+    `insert into ops_action (company_id, kind, target_id, reason, person_id)
+     values ($1, 'webhook_replay', 'fixture', 'Fixture reason', $2)`,
+    [companyId, ids.initiator],
+  );
+  await app.query(
+    `insert into document_scan (company_id, document_id, status, engine) values ($1, $2, 'clean', 'fake')`,
+    [companyId, ids.documentId],
+  );
 }
 
 /**

@@ -76,6 +76,25 @@ services:
       timeout: 3s
       retries: 30
 
+  # M11 decision 6: ClamAV for malware scanning of uploads, only with `--profile scan` (it needs
+  # about 1.5 GB of memory). The worker and API use it with MALWARE_SCANNER=clamav; the fake
+  # scanner is the default otherwise. The debian variant is the multi-architecture image (arm64
+  # too). The first start downloads the signatures, which takes a few minutes.
+  clamav:
+    image: clamav/clamav:1.5.4-debian
+    profiles: ['scan']
+    ports:
+      - '3310:3310'
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ['CMD-SHELL', 'clamdcheck.sh || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 300s
+
 volumes:
   postgres-data:
   seaweedfs-data:
+  clamav-data:

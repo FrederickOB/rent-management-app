@@ -227,6 +227,22 @@ export type OwnerStatementView = z.infer<typeof ownerStatementSchema>;
 
 export const ownerStatementDetailSchema = ownerStatementSchema.extend({
   figures: ownerStatementFiguresSchema,
+  /**
+   * M11 (P25): the opening balances brought in at the cut-over and reported in the month, in
+   * their own section on the first statement; null on every other.
+   */
+  opening: z
+    .object({
+      cutOver: isoDate,
+      arrearsMinor: minor,
+      advancesMinor: minor,
+      depositsMinor: minor,
+      withholdingMinor: minor,
+      agentCashMinor: minor,
+      rentTaxOutstandingMinor: minor,
+    })
+    .nullable()
+    .optional(),
   /** Property names for the pages. */
   properties: z.array(named),
   /** Expenses of the month, each with its receipt flag (M8 F3: "No receipt"). */
@@ -482,8 +498,60 @@ export const gate1Schema = z.object({
   repairResponse: z.object({ met: minor, missed: minor, pending: minor, rate: ratioSchema }),
   /** When these were worked out (the rollup at 04:00, or a refresh); for a total, the oldest. */
   computedAt: iso,
+  // M11 decision 4: the targets and the added metrics. Optional: months rolled up before M11
+  // have none. The M9 definitions above stay as they were.
+  /** The Gate 1 targets (95% collection, 95% auto-matched), met or not; null while not measurable. */
+  targets: z
+    .object({
+      collectionRate: z.object({ targetBps: minor, met: z.boolean().nullable() }),
+      autoMatch: z.object({ targetBps: minor, met: z.boolean().nullable() }),
+    })
+    .optional(),
+  /**
+   * Arrears over 60 days as a share of the rent roll, from the daily lease snapshot. The baseline
+   * is the first full month after the company's cut-over.
+   */
+  arrearsOver60: z
+    .object({
+      arrearsMinor: minor,
+      rentRollMinor: minor,
+      share: ratioSchema,
+      baselineMonth: month.nullable(),
+      baselineShare: ratioSchema.nullable(),
+    })
+    .optional(),
+  /** Staff active on 3 days or more in a week, week by week (weeks starting in the month). */
+  weeklyActiveManagers: z
+    .object({
+      staff: minor,
+      weeks: z.array(z.object({ weekStart: isoDate, active: minor })),
+      /** Staff-weeks active out of staff × weeks. */
+      share: ratioSchema,
+    })
+    .optional(),
+  /** Tenants with WhatsApp consent who sent or read a WhatsApp message in the month. */
+  whatsappAdoption: z
+    .object({ tenantsWithActiveLease: minor, adopted: minor, share: ratioSchema })
+    .optional(),
+  /** Time to receipt until delivered, beside `timeToReceipt` (until sent). */
+  timeToReceiptDelivered: z
+    .object({
+      receipts: minor,
+      delivered: minor,
+      withinTarget: minor,
+      share: ratioSchema,
+      medianMs: minor.nullable(),
+      p95Ms: minor.nullable(),
+    })
+    .optional(),
+  /** Net revenue retention: shown once 12 months of subscription invoices exist (platform only). */
+  netRevenueRetention: z
+    .object({ available: z.boolean(), monthsOfHistory: minor, share: ratioSchema.nullable() })
+    .optional(),
 });
 export type Gate1View = z.infer<typeof gate1Schema>;
+
+const gate1Range = z.object({ from: month.optional(), to: month.optional() });
 
 export const dashboardSchema = z.object({
   /** The snapshot the money figures come from; null before the first rollup. */
@@ -592,6 +660,15 @@ export const dashboardContract = {
     })
     .input(z.object({ month: month.optional() }))
     .output(gate1Schema.nullable()),
+  gate1Trend: oc
+    .route({
+      method: 'GET',
+      path: '/metrics/gate1/trend',
+      summary:
+        'The company’s Gate 1 metrics month by month (default: from its cut-over or first month to this one), with the targets met or not',
+    })
+    .input(gate1Range)
+    .output(z.object({ months: z.array(z.object({ month, gate1: gate1Schema.nullable() })) })),
 };
 
 export const platformMetricsContract = {
@@ -610,6 +687,32 @@ export const platformMetricsContract = {
         total: gate1Schema.nullable(),
       }),
     ),
+  gate1Trend: oc
+    .route({
+      method: 'GET',
+      path: '/platform/metrics/gate1/trend',
+      summary: 'Gate 1 month by month, per pilot company and platform-wide, with the targets',
+    })
+    .input(gate1Range)
+    .output(
+      z.object({
+        months: z.array(
+          z.object({
+            month,
+            companies: z.array(z.object({ company: named, gate1: gate1Schema.nullable() })),
+            total: gate1Schema.nullable(),
+          }),
+        ),
+      }),
+    ),
+  gate1Export: oc
+    .route({
+      method: 'POST',
+      path: '/platform/metrics/gate1/export',
+      summary: 'The trend as an Excel workbook: a 5-minute link',
+    })
+    .input(gate1Range)
+    .output(z.object({ url: z.string(), expiresAt: iso })),
 };
 
 // The compliance list (decision 14) --------------------------------------------------------------

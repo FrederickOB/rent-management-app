@@ -56,6 +56,9 @@ const REGISTRY: readonly Entry[] = [
   entry(/^notice_to_quit\.assessment_bar_months$/, months),
   entry(/^data_retention\.financial_and_notices$/, years, true),
   entry(/^data_retention\.other\.[a-z_]+$/, years, true),
+  // M11 decision 5 (OQ-65): days a landlord has to answer a data protection request. No value
+  // until counsel supplies one.
+  entry(/^data_protection\.request_response_days$/, days, true),
 ];
 
 export const RULE_KEY_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;

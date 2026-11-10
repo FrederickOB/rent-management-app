@@ -35,9 +35,14 @@ const PASSWORD_ROLES: ReadonlySet<MembershipRole> = new Set([
 
 export const requiresPasswordAndTotp = (role: MembershipRole): boolean => PASSWORD_ROLES.has(role);
 
-/** A session may carry a membership only if it was authenticated strongly enough for that role. */
+/**
+ * A session carries a membership only if it was authenticated the way that role signs in: a
+ * phone-code session never acts with a password role, and (M11 security review R1 F3) a password
+ * session never acts as a caretaker, so a password set on a shared person record cannot reach a
+ * caretaker membership granted to that phone's owner.
+ */
 export function roleUsableWith(role: MembershipRole, method: AuthMethod): boolean {
-  return method === 'password_totp' ? true : !PASSWORD_ROLES.has(role);
+  return method === 'password_totp' ? PASSWORD_ROLES.has(role) : !PASSWORD_ROLES.has(role);
 }
 
 export const isMembershipRole = (value: string): value is MembershipRole =>

@@ -21,18 +21,31 @@ import {
   type ApprovalStatus,
   type DecisionKind,
 } from '@rent/domain/approvals';
-import { can, scopeOf, type Actor, type StaffRole } from '@rent/domain/policy';
+import {
+  can,
+  scopeOf,
+  TWO_PERSON_APPROVER_ROLES,
+  type Actor,
+  type StaffRole,
+} from '@rent/domain/policy';
 import { parseCompanySettings } from '@rent/domain/settings';
 import type { z } from 'zod';
 import type { Clock } from '../core/clock';
 import { AppError, conflict, forbidden, invalid, notFound } from '../core/errors';
+import { queueMessage } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { AuditService } from '../audit/audit.service';
 import { StepUpVerifier } from '../identity/step-up';
+import { memberActors } from '../policy/members';
 import { PolicyService, staffContext } from '../policy/policy.service';
 
 type RequestRow = typeof schema.approvalRequest.$inferSelect;
+
+/** The audit action recorded when someone leaves the approver set (founder D1). */
+export const APPROVER_REMOVED_ACTION = 'membership.approver_removed';
+/** How long a removed approver is told about single-user requests (founder D1). */
+const REMOVED_APPROVER_ALERT_DAYS = 30;
 
 /**
  * One action type that needs two people (AD-05): notices to quit, refunds, write-offs, cash
@@ -132,6 +145,13 @@ export class ApprovalsService {
   register<P>(handler: ApprovalActionHandler<P>): void {
     if (this.handlers.has(handler.actionType))
       throw new Error(`Approval handler ${handler.actionType} is already registered`);
+    // Founder D1: the approver set is TWO_PERSON_APPROVER_ROLES plus nominated approvers, so a
+    // handler may not name a role outside it (membership changes judge the set from that list).
+    const outside = handler.eligibleRoles.filter((r) => !TWO_PERSON_APPROVER_ROLES.includes(r));
+    if (outside.length > 0)
+      throw new Error(
+        `Approval handler ${handler.actionType} names roles outside TWO_PERSON_APPROVER_ROLES: ${outside.join(', ')}`,
+      );
     this.handlers.set(handler.actionType, handler as ApprovalActionHandler);
   }
 
@@ -226,7 +246,7 @@ export class ApprovalsService {
     }
     const mode: ApprovalMode = chooseMode(eligible.length);
     const [company] = await tx
-      .select({ settings: schema.company.settings })
+      .select({ settings: schema.company.settings, kind: schema.company.kind })
       .from(schema.company)
       .where(eq(schema.company.id, staff.companyId));
     const settings = parseCompanySettings(company?.settings);
@@ -243,6 +263,8 @@ export class ApprovalsService {
         payloadHash: payloadHash(payload),
         initiatedBy: staff.personId,
         initiatorMembershipId: staff.membershipId,
+        // M11 review R2 F2 (founder D1): only these people may decide it, whatever changes later.
+        eligibleApprovers: eligible.map((m) => m.personId),
         mode,
         status: initialStatus(mode),
         coolingOffUntil:
@@ -258,7 +280,43 @@ export class ApprovalsService {
       payload: { requestId: row!.id, actionType: input.actionType, mode },
       idempotencyKey: `approval.requested:${row!.id}`,
     });
+    if (mode === 'single_user')
+      await this.alertSingleUser(tx, staff, company?.kind ?? 'landlord', row!.id, input.actionType);
     return row!.id;
+  }
+
+  /**
+   * Founder D1 (M11 review R2 F2): a request nobody else can decide is told to the company's other
+   * admins, and to every approver removed in the last 30 days, so a person who removed the other
+   * approvers cannot self-confirm unseen.
+   */
+  private async alertSingleUser(
+    tx: Tx,
+    staff: Staff,
+    companyKind: string,
+    requestId: string,
+    actionType: string,
+  ): Promise<void> {
+    const admins = (await memberActors(tx, { id: staff.companyId, kind: companyKind }))
+      .filter((m) => m.personId !== staff.personId)
+      .filter((m) => this.policy.can({ ...m }, 'membership.manage').allowed)
+      .map((m) => m.personId);
+    const since = new Date(this.clock.now().getTime() - REMOVED_APPROVER_ALERT_DAYS * 86_400_000);
+    const removed = await tx.execute<{ person_id: string }>(sql`
+      select distinct record_id::uuid as person_id from audit_event
+      where company_id = ${staff.companyId} and action = ${APPROVER_REMOVED_ACTION}
+        and occurred_at >= ${since}`);
+    const recipients = new Set([...admins, ...removed.rows.map((r) => r.person_id)]);
+    recipients.delete(staff.personId);
+    for (const personId of recipients)
+      await queueMessage(tx, staff.companyId, {
+        recipient: { type: 'staff', personId },
+        purpose: 'staff_notice',
+        channels: ['email', 'sms'],
+        subject: 'A request nobody else can approve',
+        body: `Someone in your company asked for "${actionType.replaceAll('_', ' ')}" with nobody else able to approve it. They can confirm it themselves after the cooling-off period. If you did not expect this, contact them or the platform's support at once.`,
+        related: { type: 'approval_request', id: requestId },
+      });
   }
 
   /**
@@ -272,16 +330,8 @@ export class ApprovalsService {
   ): Promise<ApprovalView> {
     const staff = asStaff(actor);
     let stepUpVerified = false;
-    if (input.decision === 'self_confirm') {
-      if (!input.code || !(await this.stepUp.verifyTotp(staff.personId, input.code))) {
-        throw new AppError(
-          403,
-          'step_up_failed',
-          'Enter a current code from your authenticator app',
-        );
-      }
-      stepUpVerified = true;
-    }
+    if (input.decision === 'self_confirm' && !input.code)
+      throw new AppError(403, 'step_up_failed', 'Enter a current code from your authenticator app');
     await withCompany(this.database, ctxOf(staff), async (tx) => {
       const [request] = await tx
         .select()
@@ -299,6 +349,41 @@ export class ApprovalsService {
         scopeProperties: await scopeProperties(tx),
         recordsMoneyIn: handler.recordsMoneyIn ?? false,
       });
+      // Founder D1: a second person must have been eligible when the request was made, so people
+      // added or promoted since cannot decide it (the database checks it too).
+      if (
+        input.decision !== 'self_confirm' &&
+        request.eligibleApprovers &&
+        !request.eligibleApprovers.includes(staff.personId)
+      )
+        throw forbidden('Only people who could approve this when it was asked for can decide it');
+      if (input.decision === 'self_confirm') {
+        // The request's state is checked before the code, so a code tried too early is not spent.
+        nextStatus(
+          {
+            status: request.status as ApprovalStatus,
+            mode: request.mode as ApprovalMode,
+            coolingOffUntil: request.coolingOffUntil,
+            expiresAt: request.expiresAt,
+          },
+          { type: 'decision', kind: 'self_confirm', approvalsAfter: 0, required: 1 },
+          this.clock.now(),
+        );
+        const outcome = await this.stepUp.check(staff.personId, input.code ?? '', staff.companyId);
+        if (outcome === 'locked')
+          throw new AppError(
+            429,
+            'step_up_locked',
+            'Too many wrong codes. Try again in 15 minutes.',
+          );
+        if (outcome !== 'verified')
+          throw new AppError(
+            403,
+            'step_up_failed',
+            'Enter a current code from your authenticator app',
+          );
+        stepUpVerified = true;
+      }
       await unscope(tx);
       if (handler.prepare) await handler.prepare(tx, request);
 
@@ -649,6 +734,9 @@ export class ApprovalsService {
     if (!handler || request.mode !== 'two_person' || request.status !== 'pending') return false;
     if (request.expiresAt.getTime() <= this.clock.now().getTime()) return false;
     if (decisions.some((d) => d.decidedBy === staff.personId)) return false;
+    // Null only for requests made before M11 (founder D1): judged as before.
+    if (request.eligibleApprovers && !request.eligibleApprovers.includes(staff.personId))
+      return false;
     return this.policy.can(staff, 'approval.decide', {
       initiatorPersonId: request.initiatedBy,
       eligibleRoles: handler.eligibleRoles,

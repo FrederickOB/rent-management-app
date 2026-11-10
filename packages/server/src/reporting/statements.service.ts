@@ -29,9 +29,11 @@ import { PolicyService, staffContext } from '../policy/policy.service';
 import { ownersVisibleTo } from './visibility';
 import {
   computeOwnerStatement,
+  openingFigureRows,
   statementDates,
   type StatementComputation,
   type StatementExpenseRow,
+  type StatementOpening,
 } from './statement-queries';
 
 type StaffActor = Extract<Actor, { kind: 'staff' }>;
@@ -90,6 +92,8 @@ export type EmailNotSentReason = (typeof EMAIL_NOT_SENT_REASONS)[number];
 
 export interface OwnerStatementDetailView extends OwnerStatementView {
   readonly figures: OwnerStatementFigures;
+  /** M11 (P25): the opening balances reported in the month, in their own section; else null. */
+  readonly opening: StatementOpening | null;
   readonly properties: readonly { readonly id: string; readonly name: string }[];
   readonly expenses: readonly StatementExpenseRow[];
   /** Issued: whether working the month out again gives the issued figures (AC-04 ★). */
@@ -427,6 +431,7 @@ export class OwnerStatementsService {
             // Worked out again on this read (contract: generatedAt).
             generatedAt: this.clock.now(),
             figures: fresh.figures,
+            opening: fresh.opening,
             properties: await this.propertyNames(tx, fresh.figures),
             expenses: fresh.expenses,
             matchesIssued: null,
@@ -448,14 +453,15 @@ export class OwnerStatementsService {
         return {
           ...this.view(row, company),
           figures,
+          opening: (data?.opening as StatementOpening | null | undefined) ?? null,
           properties: await this.propertyNames(tx, figures),
           expenses: data?.expenses ?? [],
           matchesIssued:
             fresh !== null &&
-            diffStatementFigures(
-              await this.issuedRows(tx, row.id),
-              flattenStatementFigures(fresh.figures),
-            ).length === 0,
+            diffStatementFigures(await this.issuedRows(tx, row.id), [
+              ...flattenStatementFigures(fresh.figures),
+              ...openingFigureRows(fresh.opening),
+            ]).length === 0,
           actions: { issue: false, regenerate: false },
         };
       },
@@ -664,7 +670,10 @@ export class OwnerStatementsService {
               render_request_id = ${renderRequestId}::uuid, updated_at = ${now}
             where id = ${row.id}::uuid`,
       );
-      const figures = flattenStatementFigures(computed.figures);
+      const figures = [
+        ...flattenStatementFigures(computed.figures),
+        ...openingFigureRows(computed.opening),
+      ];
       for (let i = 0; i < figures.length; i += FIGURE_BATCH) {
         const part = figures.slice(i, i + FIGURE_BATCH);
         await tx.execute(
@@ -695,6 +704,7 @@ export class OwnerStatementsService {
     return {
       ...this.view(issued.row, company),
       figures: done.computed.figures,
+      opening: done.computed.opening,
       properties: done.properties,
       expenses: done.computed.expenses,
       matchesIssued: true,
@@ -727,6 +737,8 @@ export class OwnerStatementsService {
       issuedByName: input.issuedByName,
       propertyNames: properties.map((p) => ({ id: p.id, name: p.name })),
       figures: computed.figures as unknown as OwnerStatementDocumentData['figures'],
+      // M11 (P25): the first statement's opening balances, in their own section.
+      ...(computed.opening ? { opening: computed.opening } : {}),
       payments: computed.payments.map((p) => ({
         propertyId: p.propertyId,
         unitCode: p.unitCode,

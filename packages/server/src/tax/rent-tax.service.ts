@@ -17,7 +17,13 @@ import {
 import type { AlertPort } from '@rent/integrations';
 import { v7 as uuidv7 } from 'uuid';
 import { BillingEngine, type LeaseState, type TaxHooks } from '../billing/engine';
-import { dimsOf, paymentsByIds, requireBook, type PaymentRecord } from '../billing/records';
+import {
+  dimsOf,
+  openingPaymentIds,
+  paymentsByIds,
+  requireBook,
+  type PaymentRecord,
+} from '../billing/records';
 import { ownerFacts } from '../companies/owners.service';
 import { ALERT_PORT } from '../core/tokens';
 import { PostingService } from '../ledger/posting.service';
@@ -281,11 +287,20 @@ export class RentTaxService implements TaxHooks {
         .reduce((s, a) => s + a.amountMinor, 0);
       if (net > 0) withheld.add(line.chargePeriodId);
     }
+    // M11 (P25; OQ-64): money received before the platform (opening payments, and the deposit held
+    // at the cut-over) is not rent received through it: what it covers is left out of every period,
+    // paid onto a month or still credit the walk applies forward. Opening payments whose credit
+    // moved to a renewal still paid this lease's lines, so they are found from the allocations too.
+    const opening = await openingPaymentIds(tx, [
+      ...state.payments.map((p) => p.id),
+      ...state.allocations.map((a) => a.paymentId),
+    ]);
     return taxPeriodsFromWalk({
       walk: this.engine.walk(state),
       periodKeyOf: (key) => keyOf.get(key) ?? key,
       taxed: await taxedByPeriod(tx, state.lease.id),
       withheld,
+      opening: { paymentIds: opening, allocations: state.allocations },
     });
   }
 

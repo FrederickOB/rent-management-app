@@ -27,6 +27,9 @@
     "./moveout": "./src/moveout/index.ts",
     "./reporting": "./src/reporting/index.ts",
     "./subscription": "./src/subscription/index.ts",
+    "./onboarding": "./src/onboarding/index.ts",
+    "./data-protection": "./src/data-protection/index.ts",
+    "./ops": "./src/ops/index.ts",
     "./errors": "./src/errors.ts"
   },
   "scripts": {

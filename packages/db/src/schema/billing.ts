@@ -163,7 +163,8 @@ export const invoice = pgTable(
     index('invoice_due_idx').on(t.companyId, t.dueDate),
     index('invoice_tenant_idx').on(t.companyId, t.tenantId),
     index('invoice_property_idx').on(t.companyId, t.propertyId),
-    check('invoice_kind_check', sql`${t.kind} in ('cycle', 'deposit', 'one_off')`),
+    // M11 (P25): `opening` holds the arrears and deposit a company brings at its cut-over.
+    check('invoice_kind_check', sql`${t.kind} in ('cycle', 'deposit', 'one_off', 'opening')`),
     check('invoice_number_check', sql`${t.number} >= 1`),
     check(
       'invoice_period_check',
@@ -372,11 +373,20 @@ export const payment = pgTable(
     index('payment_received_idx').on(t.companyId, t.receivedOn),
     check(
       'payment_method_check',
-      sql`${t.method} in ('cash', 'cheque', 'bank_transfer', 'momo', 'card', 'test')`,
+      // M11 (P25): `opening` is an advance brought in at the cut-over, received before the platform.
+      sql`${t.method} in ('cash', 'cheque', 'bank_transfer', 'momo', 'card', 'test', 'opening')`,
     ),
     check('payment_amount_check', sql`${t.amountMinor} > 0`),
     check('payment_currency_check', sql`${t.currency} = 'GHS'`),
-    check('payment_cash_account_check', sql`${t.cashAccount} in ('1050', '1060', '1010', '1070')`),
+    // M11 (P25): an opening payment's other side is opening balances (3900), never cash.
+    check(
+      'payment_cash_account_check',
+      sql`${t.cashAccount} in ('1050', '1060', '1010', '1070', '3900')`,
+    ),
+    check(
+      'payment_opening_check',
+      sql`(${t.sourceType} = 'opening_balance') = (${t.cashAccount} = '3900') and (${t.sourceType} = 'opening_balance') = (${t.method} = 'opening')`,
+    ),
     check(
       'payment_collector_check',
       sql`(${t.cashAccount} = '1060') = (${t.collectorPersonId} is not null)`,
@@ -388,7 +398,7 @@ export const payment = pgTable(
     ),
     check(
       'payment_source_type_check',
-      sql`${t.sourceType} in ('cash_record', 'direct_receipt', 'provider_test', 'payment_intent', 'provider_charge')`,
+      sql`${t.sourceType} in ('cash_record', 'direct_receipt', 'provider_test', 'payment_intent', 'provider_charge', 'opening_balance')`,
     ),
     check('payment_dates_check', sql`${t.accountingDate} >= ${t.receivedOn}`),
   ],
@@ -963,7 +973,8 @@ export const allocation = pgTable(
     index('allocation_payment_idx').on(t.companyId, t.paymentId),
     check(
       'allocation_source_check',
-      sql`${t.source} in ('payment', 'deposit', 'withholding', 'credit_note', 'write_off')`,
+      // M11 (P25): `opening_balance` settles an opening deposit line, with no payment behind it.
+      sql`${t.source} in ('payment', 'deposit', 'withholding', 'credit_note', 'write_off', 'opening_balance')`,
     ),
     check('allocation_amount_check', sql`${t.amountMinor} <> 0`),
     check(
@@ -974,7 +985,8 @@ export const allocation = pgTable(
       'allocation_record_check',
       // M5: withholding pinned to its lines (P19) and credit applied at an early end (P13). M8:
       // credit and the deposit applied at a move-out (P13, P11).
-      sql`${t.recordType} in ('payment', 'match', 'accrual', 'reversal', 'credit_note', 'write_off', 'withholding', 'termination', 'move_out')`,
+      // M11: an opening balance's allocations (P25), written by the onboarding commit.
+      sql`${t.recordType} in ('payment', 'match', 'accrual', 'reversal', 'credit_note', 'write_off', 'withholding', 'termination', 'move_out', 'opening')`,
     ),
     check('allocation_dates_check', sql`${t.accountingDate} >= ${t.valueDate}`),
   ],

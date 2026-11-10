@@ -441,6 +441,9 @@ describe('TX-04 a sole landlord’s certificate never gets stuck (M5 review 4)',
     expect(
       (await t.withholding.get(owner, withholdingId)).certificate?.mayRequestSelfDecision,
     ).toBe(true);
+    // M11 (founder-approved, 2026-11-10): each self-confirm uses a fresh code, the next 30-second
+    // step's, because a TOTP step-up is accepted once per step (security review R1 F4).
+    let selfDecisions = 0;
     const selfDecide = async (approvalId: string) => {
       await asSuperuser(
         ctx,
@@ -451,7 +454,10 @@ describe('TX-04 a sole landlord’s certificate never gets stuck (M5 review 4)',
       try {
         await s.approvals.decide(owner, approvalId, {
           decision: 'self_confirm',
-          code: await generate({ secret: base32(TOTP_SECRET) }),
+          code: await generate({
+            secret: base32(TOTP_SECRET),
+            epoch: Math.floor(Date.now() / 1000) + 30 * selfDecisions++,
+          }),
         });
       } finally {
         ctx.clock.advance(-(24 * 3_600_000 + 60_000));

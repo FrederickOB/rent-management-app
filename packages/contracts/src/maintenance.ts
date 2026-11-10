@@ -525,13 +525,19 @@ export const jobSheetSchema = z.object({
   contact: z.object({ name: z.string(), phone: z.string().nullable() }).nullable(),
   artisan: z.object({ name: z.string(), response: z.enum(['accepted', 'declined']).nullable() }),
   visitAt: iso.nullable(),
-  /** F1: the report's photos and videos only. Empty on a dead link. */
+  /**
+   * F1: the report's photos and videos only. Empty on a dead link. M11 decision 6: `pending` until
+   * the malware scan is done (opening it answers 409 DOCUMENT_SCAN_PENDING); an infected file is
+   * never listed.
+   */
   attachments: z.array(
     z.object({
       id: uuid,
       kind: z.enum(['image', 'video']),
       stage: z.literal('report'),
       contentType: z.string(),
+      /** Always sent by the API; optional so a page built before M11 still parses. */
+      scan: z.enum(['pending', 'clean']).optional(),
     }),
   ),
   timeZone: z.string(),

@@ -17,7 +17,8 @@ export const MODULE_MAP = {
   documents: ['audit', 'rules'],
   policy: ['identity'],
   approvals: ['policy', 'audit', 'identity'],
-  companies: ['policy', 'audit', 'documents', 'identity', 'rules'],
+  // M11 (founder D1): approver-widening membership changes go through the approvals engine.
+  companies: ['policy', 'audit', 'documents', 'identity', 'rules', 'approvals'],
   portfolio: ['companies', 'documents', 'rules', 'audit', 'policy'],
   // M3 (plan 4.1): e-signing in layer 2, tenancy in layer 4, the messaging core in layer 7.
   esign: ['documents', 'audit'],
@@ -193,6 +194,29 @@ export const MODULE_MAP = {
     'identity',
     'portfolio',
     'tenancy',
+  ],
+  // M11 (decision 9): operations above the console: webhook replay and job retry for platform
+  // admins, queue alerts and the worker heartbeat; it names the webhook job from payments.
+  ops: ['admin', 'subscription', 'payments', 'policy', 'audit'],
+  // M11 decision 5: data protection requests in layer 8. The export reads the tenant's records
+  // and stored PDFs; erasure withdraws consent and anonymises the tenant in place.
+  'data-protection': ['tenancy', 'documents', 'rules', 'policy', 'audit', 'companies', 'identity'],
+  // M11 decisions 2 and 3 (P25): pilot onboarding in layer 8, above billing and tax. It writes
+  // tenants and paper leases through tenancy, opening balances through billing's engine and the
+  // ledger's posting service, and asks a second person through the approvals engine.
+  onboarding: [
+    'billing',
+    'tax',
+    'tenancy',
+    'ledger',
+    'approvals',
+    'documents',
+    'rules',
+    'policy',
+    'audit',
+    'companies',
+    'portfolio',
+    'identity',
   ],
 };
 

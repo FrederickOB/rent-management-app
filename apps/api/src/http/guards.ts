@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  Optional,
   SetMetadata,
   type CanActivate,
   type ExecutionContext,
@@ -10,8 +11,10 @@ import type { PolicyAction } from '@rent/domain/policy';
 import { AppError, forbidden, notAuthenticated } from '@rent/server/core';
 import { IdentityService, type SessionState } from '@rent/server/identity';
 import { PolicyService } from '@rent/server/policy';
+import { StaffActivityService } from '@rent/server/reporting';
 import type { FastifyRequest } from 'fastify';
 import { headersOf } from './request-context';
+import { noteStaffActivity } from './staff-activity';
 
 const PUBLIC = 'rent:public';
 const STATES = 'rent:session-states';
@@ -38,6 +41,10 @@ export class ActorGuard implements CanActivate {
   constructor(
     @Inject(Reflector) private readonly reflector: Reflector,
     @Inject(IdentityService) private readonly identity: IdentityService,
+    /** M11 decision 4: staff active days for Gate 1, recorded once a day in the background. */
+    @Optional()
+    @Inject(StaffActivityService)
+    private readonly activity: StaffActivityService | null = null,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -50,6 +57,7 @@ export class ActorGuard implements CanActivate {
     const allowed = this.reflector.getAllAndOverride<SessionState[]>(STATES, targets) ?? ['ready'];
     if (!allowed.includes(session.state))
       throw new AppError(403, session.state, STATE_MESSAGES[session.state]);
+    noteStaffActivity(this.activity, session.actor);
     return true;
   }
 }

@@ -40,6 +40,11 @@ export class TenancyController {
       list: implement(contract.tenants.list).handler(async ({ input }) =>
         serialize(await this.tenants.list(ctx.actor, input)),
       ),
+      // M11 decision 6: the same service and filters as `list`, by POST, so a searched phone
+      // number or name never sits in a URL.
+      search: implement(contract.tenants.search).handler(async ({ input }) =>
+        serialize(await this.tenants.list(ctx.actor, input)),
+      ),
       get: implement(contract.tenants.get).handler(async ({ input }) =>
         serialize(await this.tenants.get(ctx.actor, input.tenantId)),
       ),

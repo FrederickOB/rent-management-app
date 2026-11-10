@@ -434,8 +434,11 @@ export function creditNoteLines(input: {
   readonly bookId: string;
   readonly lease: LeaseDimensions;
   readonly invoiceLineId: string;
-  /** The account the line was charged to: 4000, 4100, 4200 or 2210; null if never charged. */
-  readonly chargedTo: '4000' | '4100' | '4200' | '2210' | null;
+  /**
+   * The account the line was charged to: 4000, 4100, 4200 or 2210; 3900 for an opening line (P25),
+   * whose credit reverses opening balances, never income; null if never charged.
+   */
+  readonly chargedTo: '4000' | '4100' | '4200' | '2210' | '3900' | null;
   readonly unpaidMinor: number;
   readonly released: readonly PaymentAmount[];
   /** The lease a payment's credit sits on, when it moved to a renewal (P29; review 11). */

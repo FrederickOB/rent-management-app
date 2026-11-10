@@ -253,7 +253,12 @@ export class ProviderPaymentsService {
         severity: 'warning',
         code: 'payments.unknown_subaccount',
         message: 'A provider payment arrived for a subaccount we do not know',
-        context: { provider },
+        // M11: what a person needs to find it at the provider (ids and codes, no payer details).
+        context: {
+          provider,
+          reference: verified.reference,
+          subaccountCode: verified.subaccountCode,
+        },
       });
       return 'unknown_subaccount';
     }

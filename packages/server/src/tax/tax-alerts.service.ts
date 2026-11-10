@@ -67,14 +67,17 @@ export class TaxAlertsService {
             recorded += inserted.length;
           }
         const owner = (await ownerFacts(tx, [ownerId])).get(ownerId);
-        const lines = alerts.map(
-          ({ item }) =>
-            `${item.receiptNumber ?? 'Credit carried'} (${item.unitCode}): ${format(money(item.outstandingMinor))} due ${formatBusinessDate(item.dueDate ?? item.valueDate)}${item.dueDays === null ? '' : `, ${daysText(item.dueDays)} after it was received`}`,
+        const lines = alerts.map(({ item }) =>
+          // M11 (P25): rent tax the owner still owed at the cut-over keeps its own due date.
+          item.kind === 'opening'
+            ? `Rent tax owed at the cut-over: ${format(money(item.outstandingMinor))} due ${formatBusinessDate(item.dueDate ?? item.valueDate)}`
+            : `${item.receiptNumber ?? 'Credit carried'} (${item.unitCode}): ${format(money(item.outstandingMinor))} due ${formatBusinessDate(item.dueDate ?? item.valueDate)}${item.dueDays === null ? '' : `, ${daysText(item.dueDays)} after it was received`}`,
         );
         // Review 8: the days come from the rules rows the items used, never from this code.
         const days = [...new Set(alerts.map(({ item }) => item.dueDays))];
+        const opening = alerts.some(({ item }) => item.kind === 'opening');
         const within =
-          days.length === 1 && days[0] !== null && days[0] !== undefined
+          !opening && days.length === 1 && days[0] !== null && days[0] !== undefined
             ? `within ${daysText(days[0])} of the rent being received`
             : 'by the due date shown';
         for (const personId of recipients)

@@ -172,6 +172,21 @@ const ownerStatementSchema = z.strictObject({
       }),
     )
     .max(20_000),
+  /**
+   * M11 (P25; plan 4.2): the opening balances brought in at the company's cut-over and reported in
+   * the month, shown in their own section on the first statement. Absent on every other.
+   */
+  opening: z
+    .strictObject({
+      cutOver: isoDate,
+      arrearsMinor: minor,
+      advancesMinor: minor,
+      depositsMinor: minor,
+      withholdingMinor: minor,
+      agentCashMinor: minor,
+      rentTaxOutstandingMinor: minor,
+    })
+    .optional(),
 });
 export type OwnerStatementDocumentData = z.infer<typeof ownerStatementSchema>;
 
@@ -385,6 +400,34 @@ function OwnerStatement({ data, branding }: TemplateProps<OwnerStatementDocument
         recorded after this statement was issued is reported in a later month, so this statement
         never changes. Times are shown in {data.ownerTimeZone}.
       </p>
+
+      {data.opening ? (
+        <section>
+          <h2>Opening balances brought in</h2>
+          <p className="small">
+            Balances at the cut-over, {formatBusinessDate(data.opening.cutOver)}, brought in from
+            before the platform. They are opening balances, never income: no rent tax and no
+            management fee is charged on them. Rent tax still owed is in the rent tax payable at the
+            start of the month below.
+          </p>
+          <table className="lines">
+            <tbody>
+              <Row label="Arrears owed by tenants" amount={data.opening.arrearsMinor} />
+              <Row label="Rent paid in advance" amount={data.opening.advancesMinor} />
+              <Row label="Deposits held" amount={data.opening.depositsMinor} />
+              <Row
+                label="Withholding tax awaiting certificates"
+                amount={data.opening.withholdingMinor}
+              />
+              <Row label="Cash held by the agent" amount={data.opening.agentCashMinor} />
+              <Row
+                label="Rent tax still owed to GRA"
+                amount={data.opening.rentTaxOutstandingMinor}
+              />
+            </tbody>
+          </table>
+        </section>
+      ) : null}
 
       {f.properties.map((page, index) => {
         const id = page.propertyId as string;

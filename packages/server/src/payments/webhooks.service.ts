@@ -157,8 +157,13 @@ export class WebhooksService {
    * the reference (its intent) or the verified subaccount, never from the body.
    */
   async process(inboxId: string): Promise<string> {
+    // M11 decision 9: read under the row's lock, so a replay still committing is waited for.
     const [row] = await withSystem(this.database, {}, (tx) =>
-      tx.select().from(schema.webhookInbox).where(eq(schema.webhookInbox.id, inboxId)),
+      tx
+        .select()
+        .from(schema.webhookInbox)
+        .where(eq(schema.webhookInbox.id, inboxId))
+        .for('update'),
     );
     if (!row || row.status !== 'received' || !row.signatureValid || !row.reference)
       return 'skipped';
@@ -203,12 +208,20 @@ export class WebhooksService {
     this.platform = handler;
   }
 
-  /** Records that processing gave up (the job's dead letter), so the row does not look busy. */
-  async failed(inboxId: string): Promise<void> {
+  /**
+   * Records that processing gave up (the job's dead letter), so the row does not look busy, and
+   * why (M11 decision 9: a code and a short message, never a body).
+   */
+  async failed(inboxId: string, lastError: string | null = null): Promise<void> {
     await withSystem(this.database, {}, (tx) =>
       tx
         .update(schema.webhookInbox)
-        .set({ status: 'failed', outcome: 'dead_lettered', processedAt: new Date() })
+        .set({
+          status: 'failed',
+          outcome: 'dead_lettered',
+          processedAt: new Date(),
+          lastError: lastError?.slice(0, 200) ?? null,
+        })
         .where(eq(schema.webhookInbox.id, inboxId)),
     );
   }

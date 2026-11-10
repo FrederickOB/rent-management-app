@@ -549,6 +549,68 @@ export class LeasesService {
   }
 
   /**
+   * M11 decision 2 (TL-06): a lease signed on paper, imported by an onboarding batch, in the
+   * caller's transaction (the batch's commit). It is recorded as a paper lease from a draft, with
+   * the batch named at insert, so its scan may follow (RA023, RA122); its schedule is generated
+   * and it starts at once if its start has come, as `recordPaper` does. Billing starts at
+   * `billingStartDate` (the first period on or after the cut-over). The signer is the tenant, on
+   * the signing date. Nothing is sent: the lease events only make billing issue what is due.
+   */
+  async recordImportedInTx(
+    tx: Tx,
+    who: { readonly companyId: string; readonly personId: string },
+    input: Omit<LeaseDraftInput, 'parties' | 'templateId'> & {
+      readonly signedOn: string;
+      readonly billingStartDate: string;
+      readonly signerName: string;
+    },
+    batchId: string,
+  ): Promise<string> {
+    const company = await companyFacts(tx, who.companyId);
+    const signedOn = parseBusinessDate(input.signedOn);
+    const leaseId = await this.insertDraft(
+      tx,
+      who,
+      {
+        ...input,
+        templateId: null,
+        parties: [{ role: 'tenant', name: input.signerName, paperSignedOn: input.signedOn }],
+      },
+      { paper: true, importedBatchId: batchId },
+    );
+    try {
+      await this.lifecycle.markSigned(tx, {
+        leaseId,
+        signedAt: instantToDate(startOfDay(signedOn, company.timeZone)),
+        source: 'paper',
+        signedDocumentId: null,
+        billingStartDate: input.billingStartDate,
+      });
+    } catch (error) {
+      throw leaseWriteError(error);
+    }
+    return leaseId;
+  }
+
+  /**
+   * M11 decision 2: why the company's advance rent policy would refuse these terms (AR-05, under
+   * `block`), as recording the lease would; null when it would not. For the import's dry run.
+   */
+  async advanceRefusal(tx: Tx, companyId: string, input: LeaseTermsInput): Promise<string | null> {
+    const company = await companyFacts(tx, companyId);
+    try {
+      await this.advanceCheck(
+        company,
+        checkLeaseTerms({ ...input, use: input.use ?? 'residential' }),
+      );
+      return null;
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'advance_over_limit') return error.message;
+      throw error;
+    }
+  }
+
+  /**
    * Offers a renewal (TL-09, plan 4.10): a draft copied from the lease, linked to it, starting
    * the day after it ends, at the last rate. Staff set the new terms; the signing link that the
    * e-signing phase sends is the offer. Steps and the break clause belong to the old term.
@@ -753,7 +815,9 @@ export class LeasesService {
           ? row.stampedDocumentId
           : row.formalWetSignedDocumentId;
     if (!documentId) throw notFound('Document');
-    const url = await this.documents.downloadUrl(staff.companyId, documentId);
+    const url = await this.documents.downloadUrl(staff.companyId, documentId, undefined, {
+      viewer: staff.personId,
+    });
     if (!url) throw notFound('Document');
     return url;
   }
@@ -819,9 +883,14 @@ export class LeasesService {
 
   private async insertDraft(
     tx: Tx,
-    staff: StaffActor,
+    staff: Pick<StaffActor, 'companyId' | 'personId'>,
     input: LeaseDraftInput,
-    options: { readonly paper?: boolean; readonly renewsLeaseId?: string } = {},
+    options: {
+      readonly paper?: boolean;
+      readonly renewsLeaseId?: string;
+      /** M11 decision 2: the onboarding batch importing it, set once, at insert. */
+      readonly importedBatchId?: string;
+    } = {},
   ): Promise<string> {
     const company = await companyFacts(tx, staff.companyId);
     const unit = await unitPlace(tx, input.unitId);
@@ -866,6 +935,7 @@ export class LeasesService {
           serviceEmails,
           witnessRequired: input.witnessRequired ?? company.settings.witnessRequired,
           renewsLeaseId: options.renewsLeaseId ?? null,
+          importedBatchId: options.importedBatchId ?? null,
           createdBy: staff.personId,
         })
         .returning();
@@ -950,7 +1020,7 @@ export class LeasesService {
    */
   private async defaultParties(
     tx: Tx,
-    staff: StaffActor,
+    staff: Pick<StaffActor, 'companyId' | 'personId'>,
     tenant: typeof schema.tenant.$inferSelect,
   ): Promise<PartyInput[]> {
     const contacts = await tx

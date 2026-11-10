@@ -95,6 +95,16 @@ export class IdentityService {
     if (authMethod === 'password') {
       return { ...base, state: 'enrolment_required', memberships: [], actor: null };
     }
+    // Founder D2 (M11 review R2 F3): the tenant app's sessions act as the tenant, whatever staff
+    // memberships the person holds elsewhere (a caretaker who rents is a tenant in the app).
+    if (authMethod === 'phone_otp' && (session as { client?: string }).client === 'tenant_app') {
+      return {
+        ...base,
+        state: 'ready',
+        memberships: [],
+        actor: { kind: 'tenant', personId: user.id, authMethod },
+      };
+    }
     const usable = all.filter((m) => roleUsableWith(m.role, authMethod));
     const activeCompanyId =
       (session as { activeCompanyId?: string | null }).activeCompanyId ?? null;

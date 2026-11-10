@@ -53,7 +53,9 @@ async function createEmpty(client: pg.Client, name: string, template?: string): 
     await client.query('select pg_advisory_unlock(424242)');
   }
   await client.query(`revoke all on database ${quote(name)} from public`);
-  await client.query(`grant connect, temporary on database ${quote(name)} to rent_app`);
+  // M11 review R2 F4: rent_app creates no temporary tables, so it may not (none can shadow a table
+  // a check reads).
+  await client.query(`grant connect on database ${quote(name)} to rent_app`);
 }
 
 /** Creates and migrates a template database. `afterMigrate` runs extra setup as the owner. */

@@ -16,6 +16,7 @@ import {
 } from '@rent/db';
 import {
   consentText,
+  consentTextVersion,
   CURRENT_CONSENT_TEXT,
   MESSAGE_CHANNELS,
   type MessageChannel,
@@ -810,7 +811,9 @@ export class TenantsService {
         | 'start_keyword'
         | 'tenant_app'
         | 'email_unsubscribe'
-        | 'staff';
+        | 'staff'
+        // M11 decision 2: a grant from the onboarding workbook.
+        | 'import';
       readonly textVersion: string;
       readonly recordedBy?: string | null;
       /** M6 review S3: the pipeline's clock, so consent and the reply window compare alike. */
@@ -893,6 +896,165 @@ export class TenantsService {
       await this.cipher.decrypt(this.field(companyId, tenantId, 'id_number'), row.encrypted),
     ) as { number: string };
     return { idType: row.idType as IdType, idNumber: sealed.number };
+  }
+
+  // Onboarding import (M11 decision 2) --------------------------------------------------------
+
+  /**
+   * M11: makes sure the company's field key exists before a transaction that seals in bulk (the
+   * onboarding commit). Creating the key is audited in its own transaction, so it must never wait
+   * on the audit chain a transaction that has already written holds.
+   */
+  async ensureFieldKey(companyId: string): Promise<void> {
+    await this.cipher.encrypt(this.field(companyId, companyId, 'tin'), 'field-key-check');
+  }
+
+  /** M11: the keyed hash a company tenant's TIN is matched by (never the TIN itself). */
+  tinIndexFor(companyId: string, tin: string): string {
+    return this.tinIndex(companyId, checkTin(tin));
+  }
+
+  /** M11: the keyed hash an ID number is matched by, as the tenant form stores it. */
+  idIndexFor(companyId: string, type: IdType, number: string, country?: string | null): string {
+    return this.idIndex(companyId, type, number, country);
+  }
+
+  /**
+   * M11 decision 2 (TL-01, CM-09): a tenant from the onboarding workbook, in the caller's
+   * transaction (the commit's): created, or brought up to date with the fields the row changes
+   * (`fields`, from the domain's `tenantFieldsAfterImport`, so a blank cell keeps what is there).
+   * The ID number and TIN are encrypted on write, as the tenant form does; a TIN or ID number
+   * already on record is kept unless the row gives another. Consent per channel is recorded as
+   * consent events with source `import` only where it differs from what is on record, and a
+   * changed address loses its channel's consent first (OQ-54). Nothing is ever sent.
+   */
+  async importInTx(
+    tx: Tx,
+    who: { readonly companyId: string; readonly personId: string },
+    input: Omit<TenantInput, 'consent' | 'contacts'> & {
+      readonly consent: Readonly<Record<'whatsapp' | 'sms' | 'email', boolean | null>>;
+    },
+    existingId: string | null,
+  ): Promise<string> {
+    const staffish = { companyId: who.companyId, personId: who.personId } as StaffActor;
+    let tenantId: string;
+    if (!existingId) {
+      tenantId = uuidv7();
+      const values = checkTenant({ ...input, consent: undefined });
+      const sealed = await this.seal(who.companyId, tenantId, input);
+      await tx.insert(schema.tenant).values({
+        id: tenantId,
+        companyId: who.companyId,
+        kind: input.kind,
+        ...values,
+        ...sealed,
+        personId:
+          input.kind === 'individual' && values.phone
+            ? await this.personFor(tx, values.phone, values.displayName, false)
+            : null,
+        isTestContact: false,
+        createdBy: who.personId,
+      });
+    } else {
+      tenantId = existingId;
+      const [row] = await tx
+        .select()
+        .from(schema.tenant)
+        .where(and(eq(schema.tenant.id, existingId), isNull(schema.tenant.archivedAt)))
+        .for('update');
+      if (!row) throw notFound('Tenant');
+      const values = checkTenant({ ...input, kind: row.kind as TenantKind, consent: undefined });
+      const idGiven = Boolean(input.idType && input.idNumber);
+      const idSame =
+        idGiven &&
+        row.idNumberIndex ===
+          this.idIndex(who.companyId, input.idType!, input.idNumber!, input.idCountry);
+      const tinSame =
+        Boolean(input.tin) && row.tinIndex === this.tinIndex(who.companyId, checkTin(input.tin!));
+      const sealed = await this.seal(
+        who.companyId,
+        existingId,
+        {
+          kind: row.kind as TenantKind,
+          idType: idGiven && !idSame ? input.idType : undefined,
+          idNumber: idGiven && !idSame ? input.idNumber : undefined,
+          idCountry: input.idCountry,
+          tin: input.tin && !tinSame ? input.tin : undefined,
+        },
+        { partial: true },
+      );
+      const phoneChanged = (values.phone ?? null) !== row.phone;
+      const whatsappChanged = (values.whatsappPhone ?? null) !== row.whatsappPhone;
+      const emailChanged = (values.email ?? null) !== row.email;
+      const phoneServesWhatsApp = !row.whatsappPhone && !values.whatsappPhone;
+      await this.withdrawForChangedAddress(tx, staffish, existingId, null, [
+        ...(phoneChanged ? (['sms'] as const) : []),
+        ...(whatsappChanged || (phoneChanged && phoneServesWhatsApp)
+          ? (['whatsapp'] as const)
+          : []),
+        ...(emailChanged ? (['email'] as const) : []),
+      ]);
+      const changed =
+        Object.keys(sealed).length > 0 ||
+        (Object.keys(values) as (keyof typeof values)[]).some(
+          (k) => (values[k] ?? null) !== ((row as Record<string, unknown>)[k] ?? null),
+        );
+      if (changed)
+        await tx
+          .update(schema.tenant)
+          .set({
+            ...values,
+            ...sealed,
+            ...(phoneChanged && row.kind === 'individual'
+              ? {
+                  personId: values.phone
+                    ? await this.personFor(tx, values.phone, values.displayName, row.isTestContact)
+                    : null,
+                }
+              : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.tenant.id, existingId));
+    }
+    // The import only grants (CM-09; `sourceAllows('import', 'withdraw')` is false): a Yes where
+    // no consent is on record is recorded with the import's own text; a No records nothing.
+    const state = (await this.importConsent(tx, [tenantId])).get(tenantId);
+    const version = consentTextVersion('import', 'grant');
+    for (const channel of ['whatsapp', 'sms', 'email'] as const) {
+      if (input.consent[channel] !== true || (state?.[channel] ?? false)) continue;
+      await this.recordSystemConsent(tx, who.companyId, {
+        tenantId,
+        contactId: null,
+        channel,
+        action: 'grant',
+        source: 'import',
+        textVersion: version,
+        recordedBy: who.personId,
+      });
+    }
+    return tenantId;
+  }
+
+  /**
+   * M11: the consent on record for these tenants themselves (not their contacts) on the channels
+   * the onboarding workbook records, from the append-only events (the import's dry run).
+   */
+  async importConsent(
+    tx: Tx,
+    tenantIds: readonly string[],
+  ): Promise<Map<string, Record<'whatsapp' | 'sms' | 'email', boolean>>> {
+    const out = new Map<string, Record<'whatsapp' | 'sms' | 'email', boolean>>();
+    if (tenantIds.length === 0) return out;
+    const rows = await tx.execute<{ tenant_id: string; channel: string; action: string }>(
+      sql`select distinct on (tenant_id, channel) tenant_id, channel, action from consent_event
+          where tenant_id = any(${uuidArray(tenantIds)}::uuid[]) and tenant_contact_id is null
+            and channel in ('whatsapp', 'sms', 'email')
+          order by tenant_id, channel, recorded_at desc, id desc`,
+    );
+    for (const id of tenantIds) out.set(id, { whatsapp: false, sms: false, email: false });
+    for (const r of rows.rows)
+      out.get(r.tenant_id)![r.channel as 'whatsapp' | 'sms' | 'email'] = r.action === 'grant';
+    return out;
   }
 
   // Internals ----------------------------------------------------------------------------------

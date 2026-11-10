@@ -34,6 +34,12 @@ export const membershipSchema = z.object({
    */
   whatsappConsent: z.boolean().optional(),
   createdAt: z.string().datetime(),
+  /**
+   * Founder D1 (M11): the approval request this change waits for. Set when an invite, promotion or
+   * nomination adds someone to the people who can approve two-person actions; the membership is
+   * unchanged (or `invited`) until a second person approves it.
+   */
+  approvalRequestId: z.string().uuid().optional(),
 });
 
 export type MembershipRow = z.infer<typeof membershipSchema>;

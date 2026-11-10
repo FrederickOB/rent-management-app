@@ -8,6 +8,8 @@ import {
   paymentsContract,
 } from './billing';
 import { companyContract } from './company';
+import { dataProtectionContract, platformRetentionContract } from './data-protection';
+import { documentsContract } from './documents';
 import { linksContract } from './links';
 import {
   artisansContract,
@@ -38,6 +40,8 @@ import {
   unsubscribeLinksContract,
 } from './messaging';
 import { meContract } from './me';
+import { onboardingContract } from './onboarding';
+import { platformOpsContract } from './ops';
 import {
   noticesContract,
   quitAcknowledgementContract,
@@ -73,12 +77,16 @@ export * from './approvals';
 export * from './audit';
 export * from './billing';
 export * from './company';
+export * from './data-protection';
+export * from './documents';
 export * from './links';
 export * from './maintenance';
 export * from './moveout';
 export * from './messaging';
 export * from './me';
 export * from './notices';
+export * from './onboarding';
+export * from './ops';
 export * from './payments';
 export * from './memberships';
 export * from './register';
@@ -157,6 +165,12 @@ export const contract = {
   subscription: subscriptionContract,
   supportGrants: supportGrantsContract,
   platformAdmin: platformAdminContract,
+  // M11: pilot onboarding, data protection requests, operations, and the scan status of uploads.
+  onboarding: onboardingContract,
+  dataProtection: dataProtectionContract,
+  platformRetention: platformRetentionContract,
+  platformOps: platformOpsContract,
+  documents: documentsContract,
 };
 
 export type Contract = typeof contract;

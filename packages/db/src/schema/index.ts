@@ -14,3 +14,5 @@ export * from './notices';
 export * from './moveout';
 export * from './reporting';
 export * from './subscription';
+export * from './onboarding';
+export * from './privacy';

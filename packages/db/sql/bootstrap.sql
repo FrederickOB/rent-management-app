@@ -36,4 +36,6 @@ SELECT 'CREATE DATABASE rent OWNER rent_owner'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'rent') \gexec
 
 REVOKE ALL ON DATABASE rent FROM PUBLIC;
-GRANT CONNECT, TEMPORARY ON DATABASE rent TO rent_app;
+-- M11 review R2 F4: no TEMPORARY, so no temporary table can shadow one a database check reads.
+GRANT CONNECT ON DATABASE rent TO rent_app;
+REVOKE TEMPORARY ON DATABASE rent FROM rent_app;

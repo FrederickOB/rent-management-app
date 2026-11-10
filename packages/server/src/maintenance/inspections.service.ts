@@ -479,7 +479,11 @@ export class InspectionsService {
         );
       return row?.documentId ?? null;
     });
-    const url = documentId ? await this.documents.downloadUrl(staff.companyId, documentId) : null;
+    const url = documentId
+      ? await this.documents.downloadUrl(staff.companyId, documentId, undefined, {
+          viewer: staff.personId,
+        })
+      : null;
     if (!url) throw notFound('Photo');
     return { url, expiresAt: new Date(this.clock.now().getTime() + 300_000) };
   }

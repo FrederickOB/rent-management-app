@@ -7,6 +7,7 @@ import { staffActor } from '../companies/companies.service';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
 import { DATABASE } from '../core/tokens';
 import { PolicyService, staffContext } from '../policy/policy.service';
+import { withPlatform } from '../subscription/platform';
 import { platformAdminFor, platformSystemContext, type PlatformAdmin } from './platform-admin';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -290,6 +291,94 @@ export class SupportAccessService {
     return withCompany(this.database, context, (tx) => fn(tx, grantId), {
       accessMode: 'read only',
     });
+  }
+
+  /**
+   * `platformAdmin.endSupport` (M11): a platform admin ends the company's active grant before its
+   * time: the platform's own access, the grant it works under, and nothing else (only the
+   * company's admins grant). With a reason, in both chains: `support.ended_by_platform` (and the
+   * row's change) in the company's, `support.ended` in the platform's, which commits first; if it
+   * fails, the grant stands.
+   *
+   * The grant and its sessions are read under the grant, as the platform admin. The revocation
+   * runs as the platform's system path in the company, with the platform admin as the person:
+   * the row's audit trigger writes to the company's chain, which a platform admin can no longer
+   * reach once its grant has ended (app.current_company_id() follows the grant), so the change
+   * could not be audited in the admin's own context.
+   */
+  async endGrant(
+    actor: Actor | null,
+    companyId: string,
+    reason: string,
+    requestId?: string | null,
+  ): Promise<SupportGrantView> {
+    const admin = platformAdminFor(this.policy, actor, 'support.use');
+    const why = reason.trim();
+    if (why.length < 5 || why.length > 500)
+      throw invalid('support_reason', 'Say why the access ends, in 5 to 500 characters');
+    if (!UUID.test(companyId)) throw supportNoGrant();
+    const before = await withCompany(
+      this.database,
+      {
+        companyId,
+        personId: admin.personId,
+        actorKind: 'platform_admin',
+        requestId: requestId ?? null,
+      },
+      async (tx) => {
+        const found = await tx.execute<{ id: string | null }>(
+          sql`select app.active_support_grant(${companyId}::uuid) as id`,
+        );
+        const id = found.rows[0]?.id ?? null;
+        if (!id) return null;
+        const [row] = await this.grantRows(tx, id);
+        const sessions = (await this.sessionsIn(tx, [id])).get(id) ?? [];
+        const name = await tx.execute<{ name: string }>(
+          sql`select name from person where id = ${admin.personId}::uuid`,
+        );
+        return row ? { id, row, sessions, adminName: name.rows[0]?.name ?? null } : null;
+      },
+    );
+    if (!before) throw supportNoGrant();
+    const endedAt = await withCompany(
+      this.database,
+      { companyId, personId: admin.personId, actorKind: 'system', requestId: requestId ?? null },
+      async (tx) => {
+        const updated = await tx.execute<{ revoked_at: Date | string }>(
+          sql`update support_grant set revoked_at = now(), revoked_by = ${admin.personId}::uuid
+              where id = ${before.id}::uuid and revoked_at is null and ends_at > now()
+              returning revoked_at`,
+        );
+        const at = updated.rows[0]?.revoked_at ?? null;
+        if (at === null) return null;
+        await this.audit.append(tx, {
+          companyId,
+          action: 'support.ended_by_platform',
+          recordType: 'support_grant',
+          recordId: before.id,
+          data: { reason: why, by: 'platform_admin' },
+        });
+        await withPlatform(
+          this.database,
+          { personId: admin.personId, requestId: requestId ?? null, actorKind: 'platform_admin' },
+          (ptx, platformId) =>
+            this.audit.append(ptx, {
+              companyId: platformId,
+              action: 'support.ended',
+              recordType: 'support_grant',
+              recordId: before.id,
+              data: { companyId, reason: why },
+            }),
+        );
+        return at;
+      },
+    );
+    if (endedAt === null)
+      throw conflict('support_grant_revoked', 'This support access has ended already');
+    return grantView(
+      { ...before.row, revoked_at: endedAt, revoked_by_name: before.adminName, active: false },
+      before.sessions,
+    );
   }
 
   /** `platformAdmin.supportOverview`: a company opened read-only under its grant. */

@@ -241,6 +241,36 @@ export class ReceiptsService {
         .select()
         .from(schema.payment)
         .where(eq(schema.payment.id, receipt!.paymentId));
+      // M11 review R3 F9: a closed link answers the closed screen, the receipt's number (which
+      // the page tells the tenant to quote) and the landlord's contact, nothing about the tenancy
+      // or the money. The contract's other fields are present and empty; the date stays, as the
+      // contract requires one.
+      const closed: ReceiptScreen | null = link.revokedAt
+        ? 'revoked'
+        : link.expiresAt.getTime() <= now.getTime()
+          ? 'expired'
+          : null;
+      if (closed) {
+        const [company] = await tx
+          .select({ timeZone: schema.company.timeZone })
+          .from(schema.company)
+          .where(eq(schema.company.id, companyId));
+        return {
+          screen: closed,
+          landlord: await landlordContact(tx, this.policy, companyId),
+          timeZone: company?.timeZone ?? 'Africa/Accra',
+          linkExpiresAt: link.expiresAt,
+          receiptNumber: formatReceiptNumber(receipt!.number),
+          kind: receipt!.kind as 'receipt' | 'credit_receipt',
+          amountMinor: 0,
+          receivedOn: payment!.receivedOn,
+          tenantName: '',
+          unitCode: '',
+          propertyName: '',
+          paidUntil: null,
+          downloadable: false,
+        };
+      }
       const state = await this.engine.load(tx, companyId, receipt!.leaseId);
       const documentId = await this.documentOf(tx, receipt!.renderRequestId);
       const company = state.company;

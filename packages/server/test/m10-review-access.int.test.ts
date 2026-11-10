@@ -141,6 +141,7 @@ beforeAll(async () => {
     ctx.audit,
     auth,
     ctx.config,
+    s.approvals,
   );
   await company(ctx, 'platform', 'Rent Platform');
   today = isoNow(ctx.clock, 'Africa/Accra');

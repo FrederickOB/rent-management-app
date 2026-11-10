@@ -2,12 +2,14 @@ import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ORPCModule } from '@orpc/nest';
 import { AdminModule } from '@rent/server/admin';
+import { OnboardingModule } from '@rent/server/onboarding';
 import { SubscriptionModule } from '@rent/server/subscription';
 import { ApprovalsModule } from '@rent/server/approvals';
 import { BillingModule } from '@rent/server/billing';
 import { AuditModule } from '@rent/server/audit';
 import { CompaniesModule } from '@rent/server/companies';
 import { CoreModule, loadConfig, testControlsEnabled, type CoreOptions } from '@rent/server/core';
+import { DataProtectionModule } from '@rent/server/data-protection';
 import { DocumentsModule } from '@rent/server/documents';
 import { EsignModule } from '@rent/server/esign';
 import { IdentityModule } from '@rent/server/identity';
@@ -16,6 +18,7 @@ import { MaintenanceModule } from '@rent/server/maintenance';
 import { MessagingModule } from '@rent/server/messaging';
 import { MoveOutModule } from '@rent/server/moveout';
 import { NoticesModule } from '@rent/server/notices';
+import { OpsModule } from '@rent/server/ops';
 import { PaymentsModule } from '@rent/server/payments';
 import { PolicyModule } from '@rent/server/policy';
 import { PortfolioModule } from '@rent/server/portfolio';
@@ -28,6 +31,7 @@ import { RulesModule } from '@rent/server/rules';
 import { TasksModule } from '@rent/server/tasks';
 import { TaxModule } from '@rent/server/tax';
 import { TenancyModule } from '@rent/server/tenancy';
+import { OpsController } from './admin/ops.controller';
 import { PlatformAdminController } from './admin/platform-admin.controller';
 import { SupportGrantsController } from './admin/support-grants.controller';
 import { TestControlsModule } from './admin/test-controls.module';
@@ -35,6 +39,11 @@ import { SubscriptionController } from './subscription/subscription.controller';
 import { AdvanceController } from './billing/advance.controller';
 import { BillingController } from './billing/billing.controller';
 import { CompanyController } from './company/company.controller';
+import {
+  DataProtectionController,
+  PlatformRetentionController,
+} from './data-protection/data-protection.controller';
+import { DocumentsController } from './documents/documents.controller';
 import { GovernanceController } from './governance/governance.controller';
 import { toORPCError } from './http/errors';
 import { ActorGuard, PermissionGuard } from './http/guards';
@@ -51,6 +60,7 @@ import {
   TenantRepairsController,
 } from './maintenance/maintenance.controller';
 import { MeController } from './me/me.controller';
+import { OnboardingController } from './onboarding/onboarding.controller';
 import { InboxStreamController } from './messaging/inbox-stream.controller';
 import {
   BroadcastsController,
@@ -124,6 +134,12 @@ export class AppModule {
         SubscriptionModule,
         // M10: the platform admin console and support access (AD-10).
         AdminModule,
+        // M11: pilot onboarding (decisions 2 and 3; P25).
+        OnboardingModule,
+        // M11 decision 5: data protection requests and the retention review (NFR-DP).
+        DataProtectionModule,
+        // M11 (decision 9): replay, retry, queue ages and the worker heartbeat for the console.
+        OpsModule,
         // M10: the web e2e specs' test controls, only with E2E_TEST_CONTROLS=on outside production.
         ...(testControlsEnabled(config) ? [TestControlsModule] : []),
         ORPCModule.forRoot({
@@ -143,6 +159,8 @@ export class AppModule {
         OpenApiController,
         MeController,
         CompanyController,
+        // M11 (decision 6): an upload's malware scan status.
+        DocumentsController,
         GovernanceController,
         RegisterController,
         TenancyController,
@@ -183,11 +201,18 @@ export class AppModule {
         ComplianceController,
         // M9: owner statements (AC-04).
         OwnerStatementsController,
+        // M11: pilot onboarding (decisions 2 and 3; P25).
+        OnboardingController,
         OwnerMoneyController,
         // M10: support access (the company's side) and the platform admin console.
         SupportGrantsController,
         PlatformAdminController,
         SubscriptionController,
+        // M11 decision 5: data protection requests and the retention review.
+        DataProtectionController,
+        PlatformRetentionController,
+        // M11 (decision 9): operations in the console.
+        OpsController,
       ],
       providers: [
         { provide: APP_GUARD, useClass: ActorGuard },

@@ -314,6 +314,32 @@ export class OwnersService {
       .limit(2);
   }
 
+  /**
+   * M11 (onboarding step 1): the TIN columns the register import writes for an owner from its
+   * Owners sheet, encrypted, indexed and masked as everywhere else. Undefined leaves them as they
+   * are. Also the keyed hash an imported TIN is compared by, never the TIN itself.
+   */
+  importTin(companyId: string, ownerId: string, value: string | undefined) {
+    return this.sealTin(companyId, ownerId, value);
+  }
+
+  /**
+   * M11: makes sure the company's field key exists before a transaction that seals owners' TINs
+   * in bulk (the register import's commit): creating the key is audited in its own transaction,
+   * so it must never wait on the audit chain that transaction holds. Nothing without the cipher.
+   */
+  async ensureFieldKey(companyId: string): Promise<void> {
+    if (!this.cipher) return;
+    await this.cipher.encrypt(
+      { companyId, table: 'owner', column: 'tin', rowId: companyId },
+      'field-key-check',
+    );
+  }
+
+  tinIndexFor(companyId: string, tin: string): string {
+    return this.taxDependencies().cipher.blindIndex(companyId, `tin:${checkTin(tin)}`);
+  }
+
   /** The TIN columns for a value: encrypted, indexed and masked, or all null to remove it. */
   private async sealTin(
     companyId: string,

@@ -9,3 +9,4 @@ export * from './tax-posting';
 export * from './moveout-posting';
 export * from './allocation-fees';
 export * from './subscription-posting';
+export * from './opening-posting';

@@ -68,6 +68,8 @@ export function noticesJobs(
     }),
     defineJob({
       name: NOTICE_DELIVERY_STATUS_JOB,
+      // M11 drill: a burst (decision 7's peak) must clear without a 1 s pause after every job.
+      drain: true,
       scope: 'company',
       schema: z
         .object({

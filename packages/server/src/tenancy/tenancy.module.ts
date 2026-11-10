@@ -5,6 +5,7 @@ import { DocumentsModule } from '../documents/documents.module';
 import { EsignModule } from '../esign/esign.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RulesModule } from '../rules/rules.module';
+import { DocumentScansService } from './document-scans.service';
 import { IdChecksService } from './id-checks.service';
 import { LeaseDocumentsService } from './lease-documents.service';
 import { LeaseLifecycleService } from './lease-lifecycle.service';
@@ -25,6 +26,8 @@ const SERVICES = [
   LeaseSigningService,
   TenancyRemindersService,
   TenantAppService,
+  // M11 (decision 6): an upload's scan status, for staff and the tenant app.
+  DocumentScansService,
 ];
 
 /**

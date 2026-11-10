@@ -10,3 +10,4 @@ export * from './leases.service';
 export * from './lease-signing.service';
 export * from './tenancy-reminders.service';
 export * from './tenant-app.service';
+export * from './document-scans.service';

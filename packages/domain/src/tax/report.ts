@@ -15,6 +15,9 @@ export const TAX_ITEM_KINDS = [
   'withholding',
   'reversal',
   'withholding_offset',
+  // M11 (P25): rent tax an owner still owed GRA at the company's cut-over, brought in with its
+  // due date; owner-level (no lease). A lowering is a `reversal` naming it.
+  'opening',
 ] as const;
 export type TaxItemKind = (typeof TAX_ITEM_KINDS)[number];
 
@@ -45,6 +48,7 @@ export const isPayableKind = (kind: TaxItemKind, withholdingWrittenOff = false):
   kind === 'receipt' ||
   kind === 'carry_over' ||
   kind === 'deposit_applied' ||
+  kind === 'opening' ||
   (kind === 'withholding' && withholdingWrittenOff);
 
 /**
@@ -157,15 +161,30 @@ export function checkChosenSettlement(
 }
 
 /**
+ * A text field a spreadsheet would run as a formula (M11 review R3 F11; OWASP CSV injection):
+ * one starting with =, +, -, @, a tab or a carriage return, unless it is a plain number such as
+ * an amount (-0.07). Such a field is prefixed with a single quote, which spreadsheets show as text.
+ */
+const FORMULA_START = /^[=+\-@\t\r]/;
+const PLAIN_NUMBER = /^[+-]?\d+(\.\d+)?$/;
+export function csvText(value: string): string {
+  return FORMULA_START.test(value) && !PLAIN_NUMBER.test(value) ? `'${value}` : value;
+}
+
+/**
  * CSV as RFC 4180 writes it: every field quoted, quotes doubled, records ended by CRLF. The same
- * rows always give the same bytes, so a report regenerated for a locked month is identical.
+ * rows always give the same bytes, so a report regenerated for a locked month is identical. Text
+ * that would run as a formula (a tenant's name, a unit code) is neutralised by csvText.
  */
 export function toCsv(rows: readonly (readonly (string | number | null)[])[]): string {
   return rows
     .map(
       (row) =>
         row
-          .map((field) => `"${(field === null ? '' : String(field)).replace(/"/g, '""')}"`)
+          .map(
+            (field) =>
+              `"${(field === null ? '' : typeof field === 'number' ? String(field) : csvText(field)).replace(/"/g, '""')}"`,
+          )
           .join(',') + '\r\n',
     )
     .join('');

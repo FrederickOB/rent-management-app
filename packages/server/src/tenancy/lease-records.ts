@@ -91,6 +91,15 @@ export async function termsOf(tx: Tx, row: LeaseRow): Promise<LeaseTerms> {
         eq(schema.leaseCharge.chargeType, 'service_charge'),
       ),
     );
+  return termsFrom(row, steps, charge?.monthly ?? null);
+}
+
+/** The same terms from rows already read (a batch of leases, M11 invoice list). */
+export function termsFrom(
+  row: LeaseRow,
+  steps: readonly { effectiveFrom: string; monthlyRentMinor: number }[],
+  serviceChargeMonthlyMinor: number | null,
+): LeaseTerms {
   return checkLeaseTerms({
     startDate: row.startDate,
     endDate: row.endDate,
@@ -98,8 +107,8 @@ export async function termsOf(tx: Tx, row: LeaseRow): Promise<LeaseTerms> {
     cycle: row.rentCycle as RentCycle,
     initialAdvanceMonths: row.initialAdvanceMonths,
     depositMinor: row.depositMinor,
-    serviceChargeMonthlyMinor: charge?.monthly ?? null,
-    steps,
+    serviceChargeMonthlyMinor,
+    steps: [...steps],
     breakClause: row.breakFromDate
       ? {
           fromDate: row.breakFromDate,

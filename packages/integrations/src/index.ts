@@ -11,3 +11,4 @@ export * from './address-lookup/address-lookup';
 export * from './alert/alert';
 export * from './kms/kms';
 export * from './storage/storage';
+export * from './malware/malware';

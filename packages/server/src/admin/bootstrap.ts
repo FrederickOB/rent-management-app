@@ -1,7 +1,7 @@
 import { sql, withCompany, withSystem, type Database } from '@rent/db';
 import type { AuditService } from '../audit/audit.service';
 import type { PersonAccounts } from '../identity/person-accounts';
-import { hasPassword, personForEmail } from './invitations';
+import { firstAdminStatus, hasPassword, personForEmail } from './invitations';
 
 export interface PlatformBootstrapInput {
   /** The platform's display and sender name. */
@@ -122,9 +122,12 @@ export async function bootstrapPlatform(
               and status in ('invited', 'active')`,
       );
       if (existing.rows.length > 0) return false;
+      // M11 founder D2: someone already on the platform is pending until they accept, signed in
+      // with their password and authenticator; a new person is active, as before.
+      const status = firstAdminStatus(person);
       const inserted = await tx.execute<{ id: string }>(
-        sql`insert into membership (company_id, person_id, role)
-            values (${platformCompanyId}::uuid, ${person.personId}::uuid, 'platform_admin')
+        sql`insert into membership (company_id, person_id, role, status)
+            values (${platformCompanyId}::uuid, ${person.personId}::uuid, 'platform_admin', ${status})
             returning id`,
       );
       const membershipId = inserted.rows[0]!.id;
@@ -133,7 +136,11 @@ export async function bootstrapPlatform(
         action: 'membership.invited',
         recordType: 'membership',
         recordId: membershipId,
-        data: { role: 'platform_admin', via: 'platform.bootstrap' },
+        data: {
+          role: 'platform_admin',
+          via: 'platform.bootstrap',
+          ...(status === 'invited' ? { status } : {}),
+        },
       });
       if (companyCreated)
         await deps.audit.append(tx, {

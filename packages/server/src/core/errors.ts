@@ -23,3 +23,18 @@ export const conflict = (
   details?: Readonly<Record<string, string>>,
 ) => new AppError(409, code, message, details);
 export const invalid = (code: string, message: string) => new AppError(400, code, message);
+
+/** M11 decision 6: an upload whose malware scan has not finished (contracts' DOCUMENT_SCAN_ERRORS). */
+export const documentScanPending = () =>
+  new AppError(
+    409,
+    'document_scan_pending',
+    'This file is still being checked for viruses. Try again in a minute.',
+  );
+/** M11 decision 6: an upload the scan found malware in; quarantined and never served. */
+export const documentQuarantined = () =>
+  new AppError(
+    410,
+    'document_quarantined',
+    'This file was found to contain a virus and has been quarantined. Ask for it to be sent again.',
+  );

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { InMemoryAddressLookup, InMemoryEmail, InMemorySms } from '@rent/integrations';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ApprovalsService } from '../src/approvals/approvals.service';
 import { CompaniesService } from '../src/companies/companies.service';
 import { MembershipsService } from '../src/companies/memberships.service';
 import { OwnersService } from '../src/companies/owners.service';
@@ -10,6 +11,7 @@ import { DocumentsService, LOGO_UPLOAD } from '../src/documents/documents.servic
 import { createAuth } from '../src/identity/auth';
 import { MembershipDirectory } from '../src/identity/memberships';
 import { PersonAccounts } from '../src/identity/person-accounts';
+import { StepUpVerifier } from '../src/identity/step-up';
 import { PolicyService } from '../src/policy/policy.service';
 import { RegisterService } from '../src/portfolio/register.service';
 import { RulesService } from '../src/rules/rules.service';
@@ -18,6 +20,7 @@ import { company, member, person, staff, startServerTest, type ServerTestContext
 let ctx: ServerTestContext;
 let companies: CompaniesService;
 let memberships: MembershipsService;
+let approvals: ApprovalsService;
 let documents: DocumentsService;
 const email = new InMemoryEmail();
 
@@ -47,6 +50,14 @@ beforeAll(async () => {
     new RulesService(ctx.database),
   );
   companies = new CompaniesService(ctx.database, policy, documents);
+  // M11 founder D1: approver-widening membership changes go to the approvals engine.
+  approvals = new ApprovalsService(
+    ctx.database,
+    policy,
+    ctx.audit,
+    new StepUpVerifier(ctx.database, ctx.config),
+    ctx.clock,
+  );
   memberships = new MembershipsService(
     ctx.database,
     policy,
@@ -54,6 +65,7 @@ beforeAll(async () => {
     ctx.audit,
     auth,
     ctx.config,
+    approvals,
   );
 
   agencyId = await company(ctx, 'agency', 'Branding Agency');
@@ -185,6 +197,15 @@ describe('AD-03 users and roles', () => {
   });
 
   it('invites staff by email with a set-password link, and caretakers by phone', async () => {
+    // M11 founder D1: a manager approves two-person actions, so a second admin approves the invite.
+    const secondId = await person(ctx, 'Second Admin');
+    const second = staff(
+      agencyId,
+      'agency',
+      secondId,
+      await member(ctx, agencyId, secondId, 'agency_admin'),
+      'agency_admin',
+    );
     const invited = await memberships.invite(admin, {
       name: 'New Manager',
       email: 'new.manager@test.invalid',
@@ -192,9 +213,14 @@ describe('AD-03 users and roles', () => {
     });
     expect(invited).toMatchObject({
       role: 'property_manager',
-      status: 'active',
+      status: 'invited',
       email: 'new.manager@test.invalid',
+      approvalRequestId: expect.any(String),
     });
+    await approvals.decide(second, invited.approvalRequestId!, { decision: 'approve' });
+    expect(
+      (await memberships.list(admin)).find((m) => m.membershipId === invited.membershipId),
+    ).toMatchObject({ status: 'active' });
     const message = email.sent.find((m) => m.to === 'new.manager@test.invalid');
     expect(message?.text).toMatch(/reset-password/);
 
@@ -224,14 +250,28 @@ describe('AD-03 users and roles', () => {
   });
 
   it('records a role change with who, when, before and after (AD-07 acceptance)', async () => {
+    // M11 founder D1: both the invite and the role change wait for a second admin's approval.
+    const secondId = await person(ctx, 'Approving Admin');
+    const second = staff(
+      agencyId,
+      'agency',
+      secondId,
+      await member(ctx, agencyId, secondId, 'agency_admin'),
+      'agency_admin',
+    );
     const invited = await memberships.invite(admin, {
       name: 'Role Change',
       email: 'role.change@test.invalid',
       role: 'accountant',
     });
-    const updated = await memberships.update(admin, invited.membershipId, {
+    await approvals.decide(second, invited.approvalRequestId!, { decision: 'approve' });
+    const asked = await memberships.update(admin, invited.membershipId, {
       role: 'property_manager',
     });
+    await approvals.decide(second, asked.approvalRequestId!, { decision: 'approve' });
+    const updated = (await memberships.list(admin)).find(
+      (m) => m.membershipId === invited.membershipId,
+    )!;
     expect(updated.role).toBe('property_manager');
     const events = await ctx.audit.search(agencyId, admin.personId, {
       recordType: 'membership',
@@ -241,7 +281,8 @@ describe('AD-03 users and roles', () => {
     });
     const event = events.events[0]!;
     const data = event.data as { before: { role: string }; after: { role: string } };
-    expect(event.actorPersonId).toBe(admin.personId);
+    // The change is made when the second admin approves it, in their transaction.
+    expect(event.actorPersonId).toBe(second.personId);
     expect(event.occurredAt).toBeInstanceOf(Date);
     expect([data.before.role, data.after.role]).toEqual(['accountant', 'property_manager']);
   });

@@ -470,6 +470,76 @@
       "when": 1794236184411,
       "tag": "0066_subscription_review_money",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1794305985945,
+      "tag": "0067_m11_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1794305992247,
+      "tag": "0068_m11_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1794305993676,
+      "tag": "0069_m11_ops",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1794305995184,
+      "tag": "0070_m11_onboarding",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1794305996610,
+      "tag": "0071_m11_data_protection",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1794305998221,
+      "tag": "0072_m11_uploads",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1794312533888,
+      "tag": "0073_m11_rent_tax_opening",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1794312565502,
+      "tag": "0074_m11_followups",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1794313010016,
+      "tag": "0075_m11_rent_tax_alert_owner",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1794314225190,
+      "tag": "0076_m11_ops_reconcile",
+      "breakpoints": true
     }
   ]
 }

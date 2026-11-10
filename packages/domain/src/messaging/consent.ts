@@ -8,7 +8,12 @@ import { REPLY_PURPOSES, STAFF_PURPOSES, type MessagePurpose } from './messaging
  * their message there, needs none; STOP still stops it, apart from one confirmation.
  */
 
-/** Where a consent event came from (plan 4.2). `staff` is M3's; the rest are M6's. */
+/**
+ * Where a consent event came from (plan 4.2). `staff` is M3's; the next five are M6's. M11 adds
+ * two: `data_protection`, an erasure request withdrawing consent on every channel at once
+ * (decision 5); and `import`, consent granted from the onboarding workbook's per-channel columns,
+ * recorded like the new-tenant form's ticks (decision 2).
+ */
 export const CONSENT_SOURCES = [
   'staff',
   'tenant_reply',
@@ -16,6 +21,8 @@ export const CONSENT_SOURCES = [
   'start_keyword',
   'tenant_app',
   'email_unsubscribe',
+  'data_protection',
+  'import',
 ] as const;
 export type ConsentSource = (typeof CONSENT_SOURCES)[number];
 
@@ -34,6 +41,10 @@ export function consentTextVersion(source: ConsentSource, action: 'grant' | 'wit
       return action === 'grant' ? 'app_toggle.v1' : 'app_toggle_off.v1';
     case 'email_unsubscribe':
       return 'email_unsubscribe.v1';
+    case 'data_protection':
+      return 'data_protection_withdraw.v1';
+    case 'import':
+      return 'import.v1';
   }
 }
 
@@ -45,9 +56,11 @@ export function sourceAllows(source: ConsentSource, action: 'grant' | 'withdraw'
       return true;
     case 'tenant_reply':
     case 'start_keyword':
+    case 'import':
       return action === 'grant';
     case 'stop_keyword':
     case 'email_unsubscribe':
+    case 'data_protection':
       return action === 'withdraw';
   }
 }
@@ -62,8 +75,11 @@ export function sourceChannels(source: ConsentSource): readonly ConsentChannel[]
     // STOP ALL withdraws every channel, push included (decision 7); START comes in on a channel
     // a tenant can write on, and grants that one.
     case 'stop_keyword':
+    case 'data_protection':
       return ['push', 'whatsapp', 'sms', 'email'];
+    // The onboarding workbook's columns, like START: push is granted in the app only (decision 5).
     case 'start_keyword':
+    case 'import':
       return ['whatsapp', 'sms', 'email'];
     case 'tenant_app':
       return ['push'];

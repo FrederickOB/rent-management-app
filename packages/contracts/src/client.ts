@@ -1,19 +1,12 @@
 import { createORPCClient } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
+import type { ApiClientOptions } from './client-options';
 import { contract, type Contract } from './index';
 
 export type ApiClient = ContractRouterClient<Contract>;
 
-export interface ApiClientOptions {
-  /** API origin, for example http://localhost:3000. */
-  readonly baseUrl: string;
-  /** Extra headers per request (the Expo app sends its session cookie this way). */
-  readonly headers?: () => Record<string, string> | Promise<Record<string, string>>;
-  /** Browser clients send cookies. */
-  readonly credentials?: RequestCredentials;
-  readonly fetch?: typeof fetch;
-}
+export type { ApiClientOptions } from './client-options';
 
 /** Typed client shared by web, links and the tenant app. */
 export function createApiClient(options: ApiClientOptions): ApiClient {

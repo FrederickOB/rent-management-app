@@ -65,6 +65,8 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
   return [
     defineJob({
       name: PROCESS_WEBHOOK_JOB,
+      // M11 drill: a burst (decision 7's peak) must clear without a 1 s pause after every job.
+      drain: true,
       scope: 'system',
       schema: z.object({ inboxId: uuid }).passthrough(),
       // 10 tries, 1 minute rising to an hour, then the dead letter and an alert.
@@ -73,8 +75,10 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
         const outcome = await deps.webhooks.process(inboxId);
         ctx.logger.info({ outcome }, 'webhook processed');
       },
-      async onDeadLetter({ inboxId }) {
-        await deps.webhooks.failed(inboxId);
+      async onDeadLetter({ inboxId }, { error }) {
+        // M11 decision 9: the row keeps why its last try failed (a code, never a body).
+        if (error) await deps.webhooks.failed(inboxId, error);
+        else await deps.webhooks.failed(inboxId);
       },
     }),
     defineJob({
@@ -99,6 +103,8 @@ export function paymentsJobs(deps: PaymentsDeps): JobDefinition<never>[] {
     }),
     defineJob({
       name: `${VERIFY_PENDING_JOB}.company`,
+      // M11 drill: a burst (decision 7's peak) must clear without a 1 s pause after every job.
+      drain: true,
       scope: 'company',
       schema: z.object({ companyId: uuid }).passthrough(),
       retry: { limit: 3, delaySeconds: 30, backoff: true },

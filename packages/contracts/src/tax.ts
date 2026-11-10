@@ -40,10 +40,14 @@ export const rentTaxItemSchema = z.object({
    */
   kind: z.enum(TAX_ITEM_KINDS),
   status: z.enum(TAX_ITEM_STATUSES),
-  leaseId: uuid,
-  propertyId: uuid,
-  unitId: uuid,
-  tenantId: uuid,
+  /**
+   * M11 (P25): null on an owner-level item, rent tax the owner still owed GRA at the cut-over
+   * (kind `opening`, with its own due date), and on a reversal that lowers one.
+   */
+  leaseId: uuid.nullable(),
+  propertyId: uuid.nullable(),
+  unitId: uuid.nullable(),
+  tenantId: uuid.nullable(),
   ownerId: uuid,
   paymentId: uuid.nullable(),
   withholdingId: uuid.nullable(),
@@ -57,9 +61,10 @@ export const rentTaxItemSchema = z.object({
   baseMinor: minor,
   rateBps: z.number().int(),
   taxMinor: minor,
-  leaseUse: z.enum(['residential', 'commercial']),
-  unitCode: z.string(),
-  tenantName: z.string(),
+  /** Null on an owner-level item (see `leaseId`). */
+  leaseUse: z.enum(['residential', 'commercial']).nullable(),
+  unitCode: z.string().nullable(),
+  tenantName: z.string().nullable(),
   receiptNumber: z.string().nullable(),
   /** Corrections so far (negative), GRA payments settled, and what is still to pay GRA. */
   correctedMinor: minor,
@@ -123,7 +128,8 @@ export const graPaymentSchema = z.object({
     z.object({
       itemId: uuid,
       receiptNumber: z.string().nullable(),
-      unitCode: z.string(),
+      /** Null for rent tax brought in at the cut-over (M11, P25): an owner-level item. */
+      unitCode: z.string().nullable(),
       valueDate: isoDate,
       amountMinor: minor,
     }),

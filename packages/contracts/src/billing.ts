@@ -119,7 +119,8 @@ export const allocationSchema = z.object({
 export const invoiceRowSchema = z.object({
   id: uuid,
   number: z.string(),
-  kind: z.enum(['cycle', 'deposit', 'one_off']),
+  /** M11 (P25): `opening` holds the arrears and deposit a company brings at its cut-over. */
+  kind: z.enum(['cycle', 'deposit', 'one_off', 'opening']),
   leaseId: uuid,
   tenantId: uuid,
   tenantName: z.string(),

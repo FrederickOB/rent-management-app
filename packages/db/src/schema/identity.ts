@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  check,
   index,
   integer,
   pgTable,
@@ -53,8 +54,16 @@ export const session = pgTable(
     authMethod: text().notNull().default('password_totp'),
     /** The company the person is working in; checked against an active membership on every request. */
     activeCompanyId: uuid(),
+    /**
+     * M11 (founder D2): which app the session belongs to. A tenant-app session acts as the tenant,
+     * whatever staff memberships the person holds elsewhere.
+     */
+    client: text().notNull().default('web'),
   },
-  (t) => [index().on(t.userId)],
+  (t) => [
+    index().on(t.userId),
+    check('session_client_check', sql`${t.client} in ('web', 'tenant_app')`),
+  ],
 );
 
 export const account = pgTable(
@@ -104,6 +113,8 @@ export const twoFactor = pgTable(
     verified: boolean().default(true),
     failedVerificationCount: integer().default(0),
     lockedUntil: timestamp({ withTimezone: true }),
+    /** M11 review (TOTP replay): the last time step accepted for this person, sign-in and step-up. */
+    lastTotpStep: bigint({ mode: 'number' }),
   },
   (t) => [index().on(t.userId), index().on(t.secret)],
 );

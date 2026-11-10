@@ -19,18 +19,32 @@ import {
   autoMatchRate,
   collectionRateByPeriod,
   COLLECTION_METHODS,
+  combineArrearsOver60,
+  combineWeeklyActiveManagers,
+  combineWhatsappAdoption,
   digitalPaymentShare,
+  gate1Targets,
   isCollectionMethod,
+  netRevenueRetention,
   noticeAcknowledgement,
   ratioOf,
   repairResponse,
   reportMonth,
   timeToReceipt,
+  timeToReceiptDelivered,
+  type ArrearsOver60,
+  type ArrearsSnapshotRow,
   type CollectionMethod,
+  type Gate1Targets,
+  type NetRevenueRetention,
   type NoticeForMetric,
   type PeriodCollectionLine,
   type Ratio,
   type RepairJobForMetric,
+  type SubscriptionRevenue,
+  type TimeToReceiptDelivered,
+  type WeeklyActiveManagers,
+  type WhatsappAdoption,
   type WindowedShare,
 } from '@rent/domain/reporting';
 import { parseCompanySettings } from '@rent/domain/settings';
@@ -40,6 +54,13 @@ import { forbidden, invalid } from '../core/errors';
 import { CLOCK, DATABASE } from '../core/tokens';
 import { partyKeyOf } from '../notices/records';
 import { PolicyService, staffContext } from '../policy/policy.service';
+import {
+  arrearsOver60In,
+  cutOverDateIn,
+  receiptDeliveredLatenciesIn,
+  weeklyActiveManagersIn,
+  whatsappAdoptionIn,
+} from './gate1-m11';
 
 /**
  * The Gate 1 metrics (PRD section 19; M9 plan decisions 9, 10 and 13) for a company and a month,
@@ -87,6 +108,12 @@ export interface Gate1Figures {
   };
   readonly noticeAcknowledgement: WindowedShare;
   readonly repairResponse: WindowedShare;
+  // M11 decision 4: stored from M11 on; months rolled up before have none. The M9 figures above
+  // stay as they were.
+  readonly arrearsOver60?: ArrearsOver60;
+  readonly weeklyActiveManagers?: WeeklyActiveManagers;
+  readonly whatsappAdoption?: WhatsappAdoption;
+  readonly timeToReceiptDelivered?: TimeToReceiptDelivered;
 }
 
 /** What the figures were worked out from, kept beside them so a total across companies is exact. */
@@ -106,6 +133,10 @@ export interface Gate1Inputs {
   readonly receiptLatenciesMs: readonly (number | null)[];
   readonly notices: number;
   readonly emergencyJobs: number;
+  /** M11: each receipt's time to be delivered; null for one never delivered. */
+  readonly receiptDeliveredLatenciesMs?: readonly (number | null)[];
+  /** M11: the company's cut-over date when the figures were worked out (decision 3). */
+  readonly cutOverDate?: string | null;
 }
 
 /** A `metric_daily.figures` document. */
@@ -122,6 +153,10 @@ export interface Gate1View extends Gate1Figures {
   readonly status: 'final' | 'provisional';
   readonly finalisedAt: Date | null;
   readonly computedAt: Date;
+  /** M11 decision 4: the two Gate 1 targets, met or not, from the figures above. */
+  readonly targets: Gate1Targets;
+  /** M11 decision 4: platform-wide only, once 12 months of subscription invoices exist. */
+  readonly netRevenueRetention?: NetRevenueRetention;
 }
 
 /** Whether a stored month still has a notice or repair window open at its last working out. */
@@ -156,6 +191,10 @@ function monthWindow(month: string, timeZone: string): { from: Date; to: Date } 
 
 const asDate = (value: Date | string): Date => (value instanceof Date ? value : new Date(value));
 
+/** M11 decision 4: the Gate 1 targets from a month's figures (any month, M9's included). */
+export const targetsOf = (g: Gate1Figures): Gate1Targets =>
+  gate1Targets({ collectionRate: g.collectionRate.rate, autoMatch: g.autoMatch.provider.rate });
+
 /** A stored row as read back, for the view. */
 function viewOf(row: {
   figures: StoredGate1;
@@ -167,7 +206,42 @@ function viewOf(row: {
     status: row.finalised_at === null ? 'provisional' : 'final',
     finalisedAt: row.finalised_at === null ? null : asDate(row.finalised_at),
     computedAt: asDate(row.computed_at),
+    targets: targetsOf(row.figures.gate1),
   };
+}
+
+/** Each part's figure, or null unless every part has it (an M11 measure covers every company). */
+function everyPart<T>(
+  all: readonly StoredGate1[],
+  pick: (x: StoredGate1) => T | undefined,
+): T[] | null {
+  const parts: T[] = [];
+  for (const x of all) {
+    const part = pick(x);
+    if (part === undefined) return null;
+    parts.push(part);
+  }
+  return parts;
+}
+
+/**
+ * M11 decision 4: net revenue retention from the platform's subscription invoices (PB-07), each
+ * invoice net of VAT and of its credit notes, by the month it bills. Read in the platform
+ * company's context.
+ */
+export async function subscriptionRevenueIn(tx: Tx): Promise<SubscriptionRevenue[]> {
+  const rows = await tx.execute<{ company_id: string; month: string; amount_minor: number }>(
+    sql`select i.subscriber_company_id as company_id, i.month,
+          greatest(0, i.net_minor - coalesce((select sum(c.net_minor) from subscription_credit_note c
+                                               where c.company_id = i.company_id and c.invoice_id = i.id), 0))::bigint
+            as amount_minor
+        from subscription_invoice i where i.status <> 'void'`,
+  );
+  return rows.rows.map((r) => ({
+    companyId: r.company_id,
+    month: r.month,
+    amountMinor: Number(r.amount_minor),
+  }));
 }
 
 /** Adds windowed shares (notices, repairs) across companies. */
@@ -223,7 +297,37 @@ export function combineGate1(month: string, all: readonly StoredGate1[]): Gate1F
     timeToReceipt: receipts,
     noticeAcknowledgement: addWindowed(all.map((x) => x.gate1.noticeAcknowledgement)),
     repairResponse: addWindowed(all.map((x) => x.gate1.repairResponse)),
+    ...combineM11(all),
   };
+}
+
+/**
+ * M11 decision 4 across companies: each measure added up exactly by the domain's `combine…`, and
+ * time to receipt delivered from every receipt's latency, as time to receipt is. A measure some
+ * company's month lacks (rolled up before M11) is left out of the total.
+ */
+function combineM11(all: readonly StoredGate1[]): Partial<Gate1Figures> {
+  const out: {
+    arrearsOver60?: ArrearsOver60;
+    weeklyActiveManagers?: WeeklyActiveManagers;
+    whatsappAdoption?: WhatsappAdoption;
+    timeToReceiptDelivered?: TimeToReceiptDelivered;
+  } = {};
+  const arrears = everyPart(all, (x) => x.gate1.arrearsOver60);
+  const combinedArrears = arrears && combineArrearsOver60(arrears);
+  if (combinedArrears) out.arrearsOver60 = combinedArrears;
+  const weekly = everyPart(all, (x) => x.gate1.weeklyActiveManagers);
+  const combinedWeekly = weekly && combineWeeklyActiveManagers(weekly);
+  if (combinedWeekly) out.weeklyActiveManagers = combinedWeekly;
+  const whatsapp = everyPart(all, (x) => x.gate1.whatsappAdoption);
+  const combinedWhatsapp = whatsapp && combineWhatsappAdoption(whatsapp);
+  if (combinedWhatsapp) out.whatsappAdoption = combinedWhatsapp;
+  const delivered = everyPart(all, (x) => x.inputs.receiptDeliveredLatenciesMs);
+  if (delivered)
+    out.timeToReceiptDelivered = timeToReceiptDelivered(
+      delivered.flat().map((latencyMs) => ({ latencyMs })),
+    );
+  return out;
 }
 
 @Injectable()
@@ -244,6 +348,8 @@ export class Gate1Service {
     month: string,
     asOf: Date,
     timeZone: string,
+    /** M11: the rollup's own snapshot of today (not stored yet), for this month's arrears. */
+    extra: { readonly arrearsRows?: readonly ArrearsSnapshotRow[] } = {},
   ): Promise<StoredGate1> {
     const range = reportMonth(month);
     const window = monthWindow(month, timeZone);
@@ -261,7 +367,10 @@ export class Gate1Service {
       sql`select l.id, l.kind, l.period_start::text as period_start, l.amount_minor, l.created_at
           from invoice_line l
           where l.kind in ('rent', 'service_charge')
-            and l.period_start between ${range.firstDay}::date and ${range.lastDay}::date`,
+            and l.period_start between ${range.firstDay}::date and ${range.lastDay}::date
+            -- M11 (P25): arrears brought in at the cut-over are from before the platform.
+            and not exists (select 1 from invoice i where i.company_id = l.company_id
+                             and i.id = l.invoice_id and i.kind = 'opening')`,
     );
     const allocationRows = await tx.execute<{
       invoice_line_id: string;
@@ -269,16 +378,29 @@ export class Gate1Service {
       amount_minor: number;
       value_date: string;
       created_at: Date | string;
+      opening: boolean;
     }>(
       sql`select a.invoice_line_id, a.source, a.amount_minor, a.value_date::text as value_date,
-            a.created_at
+            a.created_at,
+            exists (select 1 from payment p where p.company_id = a.company_id and p.id = a.payment_id
+                    and p.source_type = 'opening_balance') as opening
           from allocation a
           join invoice_line l on l.company_id = a.company_id and l.id = a.invoice_line_id
           where l.kind in ('rent', 'service_charge')
             and l.period_start between ${range.firstDay}::date and ${range.lastDay}::date`,
     );
     const byLine = new Map<string, PeriodCollectionLine['allocations'][number][]>();
+    // M11 (P25): what an opening payment (money received before the platform) pays of a month is
+    // neither due through the platform nor collected by it: it is left out of the month altogether.
+    const openingPaid = new Map<string, number>();
     for (const a of allocationRows.rows) {
+      if (a.opening) {
+        openingPaid.set(
+          a.invoice_line_id,
+          (openingPaid.get(a.invoice_line_id) ?? 0) + Number(a.amount_minor),
+        );
+        continue;
+      }
       const list = byLine.get(a.invoice_line_id) ?? [];
       list.push({
         source: a.source,
@@ -294,7 +416,7 @@ export class Gate1Service {
         lineId: l.id,
         kind: l.kind,
         periodStart: l.period_start,
-        amountMinor: Number(l.amount_minor),
+        amountMinor: Math.max(0, Number(l.amount_minor) - (openingPaid.get(l.id) ?? 0)),
         recordedAt: asDate(l.created_at),
         allocations: byLine.get(l.id) ?? [],
       })),
@@ -351,6 +473,27 @@ export class Gate1Service {
     // Notice acknowledgement and repair response (decision 10, choices 21 and 22).
     const windows = await this.windowsIn(tx, companyId, month, asOf, timeZone);
 
+    // M11 decision 4: arrears over 60 days, weekly active managers, WhatsApp adoption and time to
+    // receipt delivered.
+    const asOfDate = toIsoDate(businessDateOf(instantFrom(asOf), timeZone));
+    const cutOverDate = await cutOverDateIn(tx);
+    const arrears = await arrearsOver60In(tx, {
+      month,
+      asOfDate,
+      cutOverDate,
+      ...(extra.arrearsRows ? { rows: extra.arrearsRows } : {}),
+    });
+    const weekly = await weeklyActiveManagersIn(tx, this.policy, companyId, month, asOfDate);
+    const whatsapp = await whatsappAdoptionIn(
+      tx,
+      companyId,
+      month,
+      window,
+      await this.inDatabaseClock(tx, asOf),
+      timeZone,
+    );
+    const delivered = await receiptDeliveredLatenciesIn(tx, window);
+
     return {
       gate1: {
         month,
@@ -364,6 +507,12 @@ export class Gate1Service {
         timeToReceipt: receipts,
         noticeAcknowledgement: windows.noticeAcknowledgement,
         repairResponse: windows.repairResponse,
+        arrearsOver60: arrears,
+        weeklyActiveManagers: weekly,
+        whatsappAdoption: whatsapp,
+        timeToReceiptDelivered: timeToReceiptDelivered(
+          delivered.map((latencyMs) => ({ latencyMs })),
+        ),
       },
       inputs: {
         asOf: asOf.toISOString(),
@@ -374,6 +523,8 @@ export class Gate1Service {
         receiptLatenciesMs: latencies,
         notices: windows.notices,
         emergencyJobs: windows.emergencyJobs,
+        receiptDeliveredLatenciesMs: delivered,
+        cutOverDate,
       },
     };
   }
@@ -607,60 +758,200 @@ export class Gate1Service {
   }
 
   /**
+   * M11 decision 4: the company's Gate 1 figures month by month, from `from` (default: the month
+   * of its cut-over, or its first rolled-up month) to `to` (default: this month), each the month's
+   * latest stored figures with the targets met or not. A person limited to some owners or
+   * properties gets no months, as `gate1` gives them none (decision 15).
+   */
+  async gate1Trend(
+    actor: Actor | null,
+    range: { readonly from?: string; readonly to?: string } = {},
+  ): Promise<{ months: { month: string; gate1: Gate1View | null }[] }> {
+    const staff = staffActor(actor);
+    this.policy.assert(staff, 'dashboard.read');
+    checkRange(range);
+    if (this.policy.scopeFor(staff) !== null) return { months: [] };
+    return withCompany(
+      this.database,
+      staffContext(staff),
+      async (tx) => {
+        const company = await companyRecord(tx, staff.companyId);
+        const to = range.to ?? this.thisMonth(company?.timeZone ?? DEFAULT_TIME_ZONE);
+        let from = range.from;
+        if (from === undefined) {
+          const cutOver = await cutOverDateIn(tx);
+          const first = await tx.execute<{ month: string | null }>(
+            sql`select min(month) as month from metric_daily`,
+          );
+          from = cutOver?.slice(0, 7) ?? first.rows[0]?.month ?? to;
+          if (from > to) from = to;
+          // The default never asks for more than the longest range allowed.
+          const earliest = shiftMonth(to, 1 - MAX_TREND_MONTHS);
+          if (from < earliest) from = earliest;
+        }
+        checkSpan(from, to);
+        const months = monthsBetween(from, to);
+        const rows = await tx.execute<{
+          month: string;
+          figures: StoredGate1;
+          computed_at: Date | string;
+          finalised_at: Date | string | null;
+        }>(
+          sql`select distinct on (month) month, figures, computed_at, finalised_at from metric_daily
+              where month between ${from} and ${to} order by month, metric_date desc`,
+        );
+        const byMonth = new Map(rows.rows.map((r) => [r.month, viewOf(r)]));
+        return { months: months.map((month) => ({ month, gate1: byMonth.get(month) ?? null })) };
+      },
+      { accessMode: 'read only' },
+    );
+  }
+
+  /**
    * Gate 1 across companies for platform admins (`metrics.platform.read`; decision 13). The caller
    * is checked first, then the figures come through `app.platform_gate1`, which checks again that
-   * the session is a platform admin's (ADR-002).
+   * the session is a platform admin's (ADR-002). M11: the total carries the targets and net
+   * revenue retention, from the platform's own subscription invoices.
    */
   async platformGate1(actor: Actor | null, month?: string): Promise<PlatformGate1View> {
-    if (!actor) throw forbidden();
-    this.policy.assert(actor, 'metrics.platform.read');
-    let personId: string;
-    switch (actor.kind) {
-      case 'platform_admin':
-        personId = actor.personId;
-        break;
-      default:
-        throw forbidden();
-    }
+    const admin = this.platformAdmin(actor);
     if (month !== undefined && !MONTH.test(month))
       throw invalid('bad_month', 'Use a month such as 2026-10');
     const wanted = month ?? this.thisMonth(DEFAULT_TIME_ZONE);
-    const rows = await withSystem(this.database, { personId, actorKind: 'platform_admin' }, (tx) =>
-      tx.execute<{
-        company_id: string;
-        display_name: string;
-        figures: StoredGate1 | null;
-        computed_at: Date | string | null;
-        finalised_at: Date | string | null;
-      }>(
-        sql`select company_id, display_name, figures, computed_at, finalised_at
-            from app.platform_gate1(${wanted})`,
-      ),
-    );
-    const companies = rows.rows.map((r) => ({
-      company: { id: r.company_id, name: r.display_name },
-      gate1:
-        r.figures && r.computed_at
-          ? viewOf({ figures: r.figures, computed_at: r.computed_at, finalised_at: r.finalised_at })
-          : null,
-    }));
-    const views = companies.flatMap((c) => (c.gate1 ? [c.gate1] : []));
-    const stored = rows.rows.flatMap((r) => (r.figures ? [r.figures] : []));
-    const total = combineGate1(wanted, stored);
-    if (!total) return { month: wanted, companies, total: null };
-    // The total is only as fresh as its stalest part, and final only once every part is.
-    const oldest = Math.min(...views.map((v) => v.computedAt.getTime()));
-    const final = views.every((v) => v.status === 'final');
-    const lastFinalised = Math.max(...views.map((v) => v.finalisedAt?.getTime() ?? 0));
-    return {
-      month: wanted,
-      companies,
-      total: {
-        ...total,
-        status: final ? 'final' : 'provisional',
-        finalisedAt: final ? new Date(lastFinalised) : null,
-        computedAt: new Date(oldest),
-      },
-    };
+    const [view] = await this.platformMonths(admin, [wanted]);
+    return view!;
   }
+
+  /**
+   * M11 decision 4: Gate 1 month by month, per pilot company and platform-wide, with the targets.
+   * Default: the 12 months to this one, less the leading months no company has figures for.
+   */
+  async platformGate1Trend(
+    actor: Actor | null,
+    range: { readonly from?: string; readonly to?: string } = {},
+  ): Promise<{ months: PlatformGate1View[] }> {
+    const admin = this.platformAdmin(actor);
+    checkRange(range);
+    const to = range.to ?? this.thisMonth(DEFAULT_TIME_ZONE);
+    const from = range.from ?? shiftMonth(to, -11);
+    checkSpan(from, to);
+    const views = await this.platformMonths(admin, monthsBetween(from, to));
+    if (range.from !== undefined) return { months: views };
+    const first = views.findIndex((v) => v.total !== null);
+    return { months: first < 0 ? views.slice(-1) : views.slice(first) };
+  }
+
+  private platformAdmin(actor: Actor | null): Extract<Actor, { kind: 'platform_admin' }> {
+    if (!actor) throw forbidden();
+    this.policy.assert(actor, 'metrics.platform.read');
+    switch (actor.kind) {
+      case 'platform_admin':
+        return actor;
+      default:
+        throw forbidden();
+    }
+  }
+
+  /** Each month across companies, through `app.platform_gate1`, with net revenue retention. */
+  private async platformMonths(
+    admin: Extract<Actor, { kind: 'platform_admin' }>,
+    months: readonly string[],
+  ): Promise<PlatformGate1View[]> {
+    const perMonth = await withSystem(
+      this.database,
+      { personId: admin.personId, actorKind: 'platform_admin' },
+      async (tx) => {
+        const out: PlatformRow[][] = [];
+        for (const month of months)
+          out.push(
+            (
+              await tx.execute<PlatformRow>(
+                sql`select company_id, display_name, figures, computed_at, finalised_at
+                    from app.platform_gate1(${month})`,
+              )
+            ).rows,
+          );
+        return out;
+      },
+    );
+    // Net revenue retention reads the platform's own invoices, in the platform company (decision 4).
+    const invoices = await withCompany(
+      this.database,
+      { companyId: admin.companyId, personId: admin.personId, actorKind: 'platform_admin' },
+      (tx) => subscriptionRevenueIn(tx),
+      { accessMode: 'read only' },
+    );
+    return months.map((month, i) =>
+      platformViewOf(month, perMonth[i]!, netRevenueRetention({ month, invoices })),
+    );
+  }
+}
+
+type PlatformRow = {
+  company_id: string;
+  display_name: string;
+  figures: StoredGate1 | null;
+  computed_at: Date | string | null;
+  finalised_at: Date | string | null;
+};
+
+/** One month across companies: each company's stored view, and the total added up exactly. */
+function platformViewOf(
+  month: string,
+  rows: readonly PlatformRow[],
+  nrr: NetRevenueRetention,
+): PlatformGate1View {
+  const companies = rows.map((r) => ({
+    company: { id: r.company_id, name: r.display_name },
+    gate1:
+      r.figures && r.computed_at
+        ? viewOf({ figures: r.figures, computed_at: r.computed_at, finalised_at: r.finalised_at })
+        : null,
+  }));
+  const views = companies.flatMap((c) => (c.gate1 ? [c.gate1] : []));
+  const stored = rows.flatMap((r) => (r.figures ? [r.figures] : []));
+  const total = combineGate1(month, stored);
+  if (!total) return { month, companies, total: null };
+  // The total is only as fresh as its stalest part, and final only once every part is.
+  const oldest = Math.min(...views.map((v) => v.computedAt.getTime()));
+  const final = views.every((v) => v.status === 'final');
+  const lastFinalised = Math.max(...views.map((v) => v.finalisedAt?.getTime() ?? 0));
+  return {
+    month,
+    companies,
+    total: {
+      ...total,
+      status: final ? 'final' : 'provisional',
+      finalisedAt: final ? new Date(lastFinalised) : null,
+      computedAt: new Date(oldest),
+      targets: targetsOf(total),
+      netRevenueRetention: nrr,
+    },
+  };
+}
+
+/** The longest trend one request may ask for. */
+export const MAX_TREND_MONTHS = 36;
+
+const shiftMonth = (month: string, by: number): string =>
+  toIsoDate(addMonths(parseBusinessDate(`${month}-01`), by)).slice(0, 7);
+
+/** Every month from `from` to `to`, both included. */
+function monthsBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let m = from; m <= to; m = shiftMonth(m, 1)) out.push(m);
+  return out;
+}
+
+function checkRange(range: { readonly from?: string; readonly to?: string }): void {
+  for (const m of [range.from, range.to])
+    if (m !== undefined && !MONTH.test(m))
+      throw invalid('bad_month', 'Use a month such as 2026-10');
+}
+
+/** A range asked for: in order, and no longer than `MAX_TREND_MONTHS`. */
+function checkSpan(from: string, to: string): void {
+  if (from > to) throw invalid('bad_range', 'The first month comes before the last one');
+  if (shiftMonth(from, MAX_TREND_MONTHS - 1) < to)
+    throw invalid('bad_range', `Choose ${MAX_TREND_MONTHS} months or fewer`);
 }

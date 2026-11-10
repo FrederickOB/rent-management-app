@@ -54,20 +54,47 @@ export interface BillingLine {
   readonly sequence: number;
   /**
    * One-off and tax lines: the day they were charged (P01, P32: the invoice's tax point). Money
-   * that arrived before it waits in prepayments and is drawn on that day (review A).
+   * that arrived before it waits in prepayments and is drawn on that day (review A). An opening
+   * line: the cut-over, the day P25 made it owed in the ledger.
    */
   readonly chargedOn?: string | null;
+  /**
+   * P25 (M11 decision 3): a line on an invoice of kind `opening`, brought in at the cut-over. Rent
+   * or service charge owed from before the platform, at its original period and due date, accrued
+   * at commit against opening balances (Dr 1100, Cr 3900), never income and never accrued again;
+   * or a deposit held, settled at commit (allocation source `opening_balance`).
+   */
+  readonly opening?: boolean;
 }
 
-/** Where an allocation comes from (CLAUDE.md section 4). Corrections are negative rows. */
+/**
+ * Where an allocation comes from (CLAUDE.md section 4). Corrections are negative rows. Money a
+ * payment pays is `payment`, whatever kind of payment it is (provider, cash, direct transfer, or
+ * an opening payment of P25). `opening_balance` (M11, P25) settles a deposit held at the cut-over:
+ * money received before the platform, with no payment behind it.
+ */
 export const ALLOCATION_SOURCES = [
   'payment',
   'deposit',
   'withholding',
   'credit_note',
   'write_off',
+  'opening_balance',
 ] as const;
 export type AllocationSource = (typeof ALLOCATION_SOURCES)[number];
+
+/**
+ * P25: money that came in before the platform (OQ-64): a row of source `opening_balance`, or a row
+ * paid by an opening payment (`openingPaymentIds`, the payments of source `opening_balance`). It
+ * posts no rent tax (P17) and carries no management fee (P14).
+ */
+export function isOpeningAllocation(
+  row: Pick<AllocationRow, 'source' | 'paymentId'>,
+  openingPaymentIds: ReadonlySet<string>,
+): boolean {
+  if (row.source === 'opening_balance') return true;
+  return row.source === 'payment' && row.paymentId !== null && openingPaymentIds.has(row.paymentId);
+}
 
 export interface AllocationRow {
   readonly lineId: string;
@@ -181,21 +208,38 @@ export function postingClassOf(line: BillingLine): PostingClass {
  */
 export function postingClassAt(line: BillingLine, valueDate: string): PostingClass {
   if (line.kind === 'deposit') return 'deposit';
-  const chargedFrom = isRecurring(line.kind) ? line.periodStart : (line.chargedOn ?? null);
+  const chargedFrom = isRecurring(line.kind)
+    ? (openingChargedOn(line) ?? line.periodStart)
+    : (line.chargedOn ?? null);
   if (isRecurring(line.kind) && chargedFrom === null) return 'prepayment';
   if (chargedFrom !== null && chargedFrom > valueDate) return 'prepayment';
   return 'receivable';
 }
 
-/** The day a line became owed (1100): its period start once accrued, or its charge date. */
+/** P25: an opening line is owed in the ledger from the cut-over (its `chargedOn`), when given. */
+const openingChargedOn = (line: BillingLine): string | null =>
+  line.opening === true ? (line.chargedOn ?? null) : null;
+
+/**
+ * The day a line became owed (1100): its period start once accrued, or its charge date. An opening
+ * line (P25) became owed at the cut-over, its `chargedOn`, when it is given.
+ */
 export function chargedFrom(line: BillingLine): string | null {
   if (line.kind === 'deposit') return null;
-  if (isRecurring(line.kind)) return line.accrued ? line.periodStart : null;
+  if (isRecurring(line.kind))
+    return line.accrued ? (openingChargedOn(line) ?? line.periodStart) : null;
   return line.chargedOn ?? null;
 }
 
-/** The account a line was charged to, or null if it has not been charged (P01, P02, P32). */
-export function chargedAccountOf(line: BillingLine): '4000' | '4100' | '4200' | '2210' | null {
+/**
+ * The account a line was charged to, or null if it has not been charged (P01, P02, P32). An
+ * opening line's rent or service charge was charged to opening balances (P25: Dr 1100, Cr 3900),
+ * so a credit note on it (P27) reverses against 3900, never income.
+ */
+export function chargedAccountOf(
+  line: BillingLine,
+): '4000' | '4100' | '4200' | '2210' | '3900' | null {
+  if (line.opening === true && isRecurring(line.kind)) return line.accrued ? '3900' : null;
   switch (line.kind) {
     case 'deposit':
       return null;
@@ -304,10 +348,15 @@ export function inAccrualOrder<T extends Pick<BillingLine, 'kind' | 'periodStart
     );
 }
 
-/** Recurring lines whose period has started by `date` and have not been accrued. */
+/**
+ * Recurring lines whose period has started by `date` and have not been accrued. Opening lines
+ * (P25) are never among them: they were accrued at commit, against opening balances.
+ */
 export function linesToAccrue(lines: readonly BillingLine[], date: string): BillingLine[] {
   return inAccrualOrder(
-    lines.filter((l) => !l.accrued && l.periodStart !== null && l.periodStart <= date),
+    lines.filter(
+      (l) => !l.accrued && l.opening !== true && l.periodStart !== null && l.periodStart <= date,
+    ),
   );
 }
 

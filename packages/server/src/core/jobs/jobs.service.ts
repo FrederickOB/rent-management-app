@@ -4,6 +4,7 @@ import { fromDrizzle, PgBoss, type Job } from 'pg-boss';
 import { z } from 'zod';
 import type { AppLogger } from '../logging/logger';
 import { DEAD_LETTER_QUEUE, SCHEDULE_TIME_ZONE, type JobContext, type JobDefinition } from './job';
+import { jobErrorSummary } from './job-error';
 
 const companyPayload = z.object({ companyId: z.string().uuid() }).passthrough();
 
@@ -125,7 +126,12 @@ export class JobsService {
       return;
     }
     try {
-      await definition.onDeadLetter(payload.data, { logger });
+      // M11 decision 9: why the last try failed, from the dead letter's copy of its output.
+      const error = await this.boss
+        .findJobs(DEAD_LETTER_QUEUE, { id: job.id })
+        .then(([found]) => jobErrorSummary(found?.sourceOutput ?? null))
+        .catch(() => null);
+      await definition.onDeadLetter(payload.data, { logger, error });
     } catch (error) {
       // The alert has gone out already; a person follows up from there.
       logger.error({ err: error }, 'recording the failure of a dead-lettered job failed');

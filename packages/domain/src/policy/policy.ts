@@ -170,6 +170,19 @@ export const POLICY_ACTIONS = [
   'support.use',
   'usage.read',
   'health.read',
+  // M11 (docs/plans/M11.md section 4.13): pilot onboarding, data protection requests, and the
+  // operations console. Approving opening balances goes through the approvals engine
+  // (`opening_balances`), never a role check here.
+  'onboarding.import',
+  'data_protection.manage',
+  'data_protection.export',
+  'platform.ops.replay',
+  'platform.ops.redrive',
+  // M11 security review (identity): the company's own settlement account, refused to scoped
+  // people (R2 F1); and a platform admin's recovery actions for a person (founder D4).
+  'settlement_account.change_agency',
+  'person.two_factor.reset',
+  'person.sessions.revoke',
 ] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
@@ -561,7 +574,41 @@ const STAFF_MATRIX: Record<
   'support.use': [],
   'usage.read': [],
   'health.read': [],
+  // M11 section 4.13: company admins and unscoped managers import; company admins handle data
+  // protection requests. Scoped people are refused below (WHOLE_COMPANY_ACTIONS). Caretakers and
+  // advisers get none of these.
+  'onboarding.import': ['owner:own_company', 'agency_admin', 'property_manager'],
+  'data_protection.manage': ['owner:own_company', 'agency_admin'],
+  'data_protection.export': ['owner:own_company', 'agency_admin'],
+  'platform.ops.replay': [],
+  'platform.ops.redrive': [],
+  // M11 review R2 F1: the company's own account (holder `agency`), as settlement_account.change,
+  // and refused to scoped people below.
+  'settlement_account.change_agency': ['owner:own_company', 'agency_admin'],
+  'person.two_factor.reset': [],
+  'person.sessions.revoke': [],
 };
+
+/**
+ * M11 section 4.13: actions on the whole company, refused to a person limited to some owners or
+ * properties, as the audit log is. Onboarding writes the whole register and every lease's opening
+ * balance; the data protection register covers every tenant.
+ */
+const WHOLE_COMPANY_ACTIONS: readonly PolicyAction[] = [
+  'onboarding.import',
+  'data_protection.manage',
+  'data_protection.export',
+  // M11 security review R2 F1: company-wide admin, refused to scoped people as the audit log is.
+  'company.update',
+  'support.grant',
+  'subscription.manage',
+  'notices.quit.acknowledge',
+  'settlement_account.change_agency',
+];
+
+/** Why a scoped person is refused an M11 whole-company action. */
+export const NEEDS_WHOLE_COMPANY =
+  'This covers the whole company, so it is not open to people limited to some owners or properties';
 
 /** Platform-level actions: platform admins only, never staff of a company (M6 decisions 3 and 9). */
 const PLATFORM_ACTIONS: readonly PolicyAction[] = [
@@ -580,11 +627,69 @@ const PLATFORM_ACTIONS: readonly PolicyAction[] = [
   'support.use',
   'usage.read',
   'health.read',
+  // M11 decision 9: replaying webhooks and retrying dead-lettered jobs.
+  'platform.ops.replay',
+  'platform.ops.redrive',
+  // M11 founder D4: resetting a person's two-factor after the runbook's identity check, and
+  // signing a person out everywhere.
+  'person.two_factor.reset',
+  'person.sessions.revoke',
 ];
 
 function staffKey(role: StaffRole, companyKind: CompanyKind): StaffRole | `owner:${Grant}` {
   if (role !== 'owner') return role;
   return companyKind === 'agency' ? 'owner:agency_client' : 'owner:own_company';
+}
+
+/**
+ * M11 founder D1 (security review R2 F2): every role a two-person action may name as its
+ * approvers. The approvals engine refuses a handler naming any other role, so this list, with the
+ * nominated flag, is the whole approver set, whichever handlers a process has registered.
+ */
+export const TWO_PERSON_APPROVER_ROLES: readonly StaffRole[] = [
+  'owner',
+  'agency_admin',
+  'property_manager',
+  'accountant',
+];
+
+/** A membership's shape, for the approver-set rules below. */
+export interface ApproverShape {
+  readonly role: StaffRole;
+  readonly nominatedApprover: boolean;
+  readonly companyKind: CompanyKind;
+}
+
+/** Whether a membership of this shape could approve some two-person action (D1's approver set). */
+export function approvesTwoPersonActions(m: ApproverShape): boolean {
+  if (m.nominatedApprover) return true;
+  // An agency's client owner approves nothing in the agency (as eligibleToApprove).
+  if (m.role === 'owner' && m.companyKind === 'agency') return false;
+  return TWO_PERSON_APPROVER_ROLES.includes(m.role);
+}
+
+/**
+ * D1: a change that widens the approver set, which needs a second person: an invite into an
+ * approver role (`before` null), a promotion into one, a nomination, or a role change into another
+ * approver role.
+ */
+export function widensApproverSet(before: ApproverShape | null, after: ApproverShape): boolean {
+  if (!approvesTwoPersonActions(after)) return false;
+  if (!before || !approvesTwoPersonActions(before)) return true;
+  return before.role !== after.role || (after.nominatedApprover && !before.nominatedApprover);
+}
+
+/**
+ * D1: a change that narrows it, which takes effect at once and is alerted: removing an approver
+ * (`after` null), demoting one out of the approver roles, or un-nominating one.
+ */
+export function narrowsApproverSet(before: ApproverShape, after: ApproverShape | null): boolean {
+  if (!approvesTwoPersonActions(before)) return false;
+  return (
+    !after ||
+    !approvesTwoPersonActions(after) ||
+    (before.nominatedApprover && !after.nominatedApprover)
+  );
 }
 
 function eligibleToApprove(
@@ -719,6 +824,8 @@ function decide(actor: Actor, action: PolicyAction, resource?: PolicyResource): 
         return deny(`${actor.role} may not ${action}`);
       if (action === 'audit.search' && scopeOf(actor) !== null)
         return deny('the audit log needs access to the whole company', AUDIT_NEEDS_WHOLE_COMPANY);
+      if (WHOLE_COMPANY_ACTIONS.includes(action) && scopeOf(actor) !== null)
+        return deny(`${action} needs access to the whole company`, NEEDS_WHOLE_COMPANY);
       if (action === 'withholding.confirm' && resource?.kind === 'certificate')
         return certificateDecision(actor, resource);
       if (

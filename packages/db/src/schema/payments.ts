@@ -311,8 +311,20 @@ export const webhookInbox = pgTable(
     receivedAt: tsNow(),
     publishedAt: ts(),
     processedAt: ts(),
+    /** M11 decision 9: why processing last failed, as a code and a short message (never a body). */
+    lastError: text(),
+    /** M11 decision 9: replays by a platform admin, each with a reason audited in the platform chain. */
+    replayCount: integer().notNull().default(0),
+    lastReplayedAt: ts(),
+    lastReplayedBy: uuid().references(() => person.id),
   },
   (t) => [
+    index('webhook_inbox_failed_idx')
+      .on(t.receivedAt)
+      .where(sql`${t.status} = 'failed'`),
+    index('webhook_inbox_rejected_idx')
+      .on(t.receivedAt)
+      .where(sql`not ${t.signatureValid}`),
     uniqueIndex('webhook_inbox_event_key')
       .on(t.provider, t.eventId)
       .where(sql`${t.signatureValid}`),

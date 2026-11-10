@@ -66,6 +66,10 @@ export const READ_ONLY_ALLOWED: readonly PolicyAction[] = [
   // Paying the subscription, the export, and granting support access always work.
   'subscription.manage',
   'support.grant',
+  // M11 decision 5: a tenant's rights under Act 843 (access, correction, erasure, objection) do
+  // not wait on the landlord's subscription, so the request register and the export stay open.
+  'data_protection.manage',
+  'data_protection.export',
 ];
 
 /**

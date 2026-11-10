@@ -101,7 +101,11 @@ export class CompaniesService {
     });
     if (!company) throw notFound('Company');
     const logoUrl = company.logoDocumentId
-      ? await this.documents.downloadUrl(staff.companyId, company.logoDocumentId)
+      ? // M11 decision 6: no logo link while it is being scanned (but for its uploader).
+        await this.documents.downloadUrl(staff.companyId, company.logoDocumentId, undefined, {
+          viewer: staff.personId,
+          unscanned: 'omit',
+        })
       : null;
     return {
       id: company.id,

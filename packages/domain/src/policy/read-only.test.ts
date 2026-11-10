@@ -115,6 +115,14 @@ const EXPECTED: Record<PolicyAction, 'allowed' | 'refused' | 'money_in'> = {
   'support.use': 'refused',
   'usage.read': 'allowed',
   'health.read': 'allowed',
+  'onboarding.import': 'refused',
+  'data_protection.manage': 'allowed',
+  'data_protection.export': 'allowed',
+  'platform.ops.replay': 'refused',
+  'platform.ops.redrive': 'refused',
+  'settlement_account.change_agency': 'refused',
+  'person.two_factor.reset': 'refused',
+  'person.sessions.revoke': 'refused',
 };
 
 type Staff = Extract<Actor, { kind: 'staff' }>;

@@ -159,7 +159,8 @@ export class MetaWhatsApp implements WhatsAppPort {
         mime_type: z.string().min(1),
         file_size: z.coerce.number().int().nonnegative().optional(),
       })
-      .safeParse(await this.request(`${this.base}/${mediaId}`));
+      // M11 review R3 (informational): neither media request follows a redirect.
+      .safeParse(await this.request(`${this.base}/${mediaId}`, undefined, 'error'));
     if (!info.success) throw unexpectedResponse(PROVIDER);
     // M6 review S-4: a file over the limit is refused on Meta's word, before any of it is read.
     const max = options.maxBytes;
@@ -172,7 +173,7 @@ export class MetaWhatsApp implements WhatsAppPort {
       !/(^|\.)(fbsbx|facebook|whatsapp)\.(com|net)$/.test(url.hostname)
     )
       throw unexpectedResponse(PROVIDER);
-    const response = await this.raw(info.data.url, { method: 'GET' });
+    const response = await this.raw(info.data.url, { method: 'GET', redirect: 'error' });
     return {
       contentType: response.headers.get('content-type') ?? info.data.mime_type,
       bytes: await readCapped(response, max),
@@ -191,10 +192,11 @@ export class MetaWhatsApp implements WhatsAppPort {
     return { provider: PROVIDER, providerMessageId: first.id };
   }
 
-  private async request(url: string, body?: unknown): Promise<unknown> {
+  private async request(url: string, body?: unknown, redirect?: RequestRedirect): Promise<unknown> {
     const response = await this.raw(url, {
       method: body === undefined ? 'GET' : 'POST',
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(redirect ? { redirect } : {}),
     });
     try {
       return await response.json();
@@ -204,7 +206,10 @@ export class MetaWhatsApp implements WhatsAppPort {
   }
 
   /** One request with the token; Meta's error codes decide whether a failure is worth retrying. */
-  private async raw(url: string, init: { method: string; body?: string }): Promise<Response> {
+  private async raw(
+    url: string,
+    init: { method: string; body?: string; redirect?: RequestRedirect },
+  ): Promise<Response> {
     let response: Response;
     try {
       response = await (this.options.fetch ?? fetch)(url, {
@@ -215,6 +220,7 @@ export class MetaWhatsApp implements WhatsAppPort {
           ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         body: init.body,
+        ...(init.redirect ? { redirect: init.redirect } : {}),
         signal: AbortSignal.timeout(this.options.timeoutMs ?? 15_000),
       });
     } catch (error) {

@@ -155,6 +155,11 @@ export const approvalRequest = pgTable(
     expiresAt: timestamp({ withTimezone: true }).notNull(),
     closedAt: timestamp({ withTimezone: true }),
     closeReason: text(),
+    /**
+     * M11 review (founder D1; AD-05): who may decide the request, fixed when it is made. Null for
+     * a request made before M11. The database refuses a decision by anyone else (RA018).
+     */
+    eligibleApprovers: uuid().array(),
     createdAt: tsNow(),
     updatedAt: tsNow(),
   },
@@ -280,9 +285,49 @@ export const document = pgTable(
   (t) => [
     unique('document_company_id_id_key').on(t.companyId, t.id),
     check('document_sha256_check', sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
+
     check(
       'document_retention_check',
       sql`${t.retentionMode} is null or ${t.retentionMode} in ('GOVERNANCE', 'COMPLIANCE')`,
+    ),
+  ],
+);
+
+/**
+ * A document's malware scan (M11 decision 6), one row per document, append-only so the document
+ * row itself never changes. No row means the scan hasn't finished (`pending`): only the uploader
+ * may open it, so a path that forgets to scan fails closed. A document we render ourselves gets a
+ * `clean` row from `generated` as it is stored. `infected` is quarantined: kept, never served.
+ */
+export const documentScan = pgTable(
+  'document_scan',
+  {
+    companyId: uuid()
+      .notNull()
+      .references(() => company.id),
+    documentId: uuid().notNull(),
+    status: text().notNull(),
+    /** `clamav`, `fake` (development and unit tests), `generated` (ours) or `pre_m11`. */
+    engine: text().notNull(),
+    /** What the scanner found (a signature name), for infected files only. */
+    finding: text(),
+    scannedAt: tsNow(),
+  },
+  (t) => [
+    primaryKey({ name: 'document_scan_pkey', columns: [t.companyId, t.documentId] }),
+    foreignKey({
+      name: 'document_scan_document_fk',
+      columns: [t.companyId, t.documentId],
+      foreignColumns: [document.companyId, document.id],
+    }),
+    check('document_scan_status_check', sql`${t.status} in ('clean', 'infected')`),
+    check(
+      'document_scan_engine_check',
+      sql`${t.engine} in ('clamav', 'fake', 'generated', 'pre_m11')`,
+    ),
+    check(
+      'document_scan_finding_check',
+      sql`(${t.finding} is not null) = (${t.status} = 'infected')`,
     ),
   ],
 );
