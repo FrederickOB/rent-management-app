@@ -38,11 +38,20 @@ adb install -r app/build/outputs/apk/release/app-release.apk
   - Install: `brew install cocoapods`, and `brew install mobile-dev-inc/tap/maestro` (plain `brew install maestro` installs an unrelated app, "AI agent command center").
   - Uninstall: `brew uninstall cocoapods`, `brew uninstall mobile-dev-inc/tap/maestro` and `brew untap mobile-dev-inc/tap`; then `brew autoremove` for what they brought (Homebrew's Ruby, for CocoaPods).
   - **Watch out:** installing Maestro upgraded the Mac's existing Homebrew `openjdk` (23.0.2 to 27.0.1) and `little-cms2` as its dependencies. Homebrew keeps no old version; `brew install openjdk@23` is the way back if a project needs 23.
-- **iOS needs Xcode's iOS platform.** Xcode 26.6 offers no simulator to build for until its iOS 26.5 platform is installed (`xcodebuild -downloadPlatform iOS`, several GB), even with the iOS 17.0 simulator runtime present.
+- **iOS needs Xcode's iOS platform.** Xcode 26.6 offers no simulator to build for until its iOS 26.5 platform is installed, even with the iOS 17.0 simulator runtime present.
+  - `xcodebuild -downloadPlatform iOS -architectureVariant arm64` downloaded 8.52 GB (16 GB on disk), approved by the founder on 2026-11-10. It changed no other runtime or Xcode component.
+  - It also created 11 iOS 26.5 simulators (the iPhone 17 family and iPads), none used. `xcrun simctl delete <udid>` removes one; `xcrun simctl runtime delete 23F77` removes the runtime, and with it the build destinations.
 - **Android:** the AVDs `Pixel_5_API_34` and `Pixel_3a_API_34` on this Mac have no `.avd` folder. The run used `rent_m11_pixel5_api34`, made from the installed `android-34/google_apis/arm64-v8a` image. Start the emulator with `ANDROID_SDK_ROOT` set, and with `-no-audio`: recording from the Mac's microphone froze the emulator.
   - `npx expo run:android --port 8092` (port 8081 is another project's). The API is `EXPO_PUBLIC_API_URL=http://10.0.2.2:3700`.
   - The links pages, the fake provider and storage that the API's links name are on `localhost`, so forward them: `adb reverse tcp:3702 tcp:3702`, `tcp:4010`, `tcp:8333`.
   - A debug build loads its JavaScript from Metro over the network, so start it online, then turn airplane mode on (`adb shell cmd connectivity airplane-mode enable`).
+  - The AVD made for the run was deleted afterwards.
+- **iOS:** the iPhone 15 simulator on the iOS 17.0 runtime (it reports 17.0.1), a development build.
+  - `EXPO_PUBLIC_API_URL=http://localhost:3710 npx expo run:ios --port 8092 --device <udid>`. The simulator shares the Mac's network, so `localhost` reaches the stack and nothing needs forwarding.
+  - **Offline:** the simulator has no airplane mode and cuts off with the Mac. The app reached the API (3700) through a small TCP pass-through on 3710; stopping it took the app offline, starting it again brought it back.
+  - **Maestro:** set `MAESTRO_DRIVER_STARTUP_TIMEOUT=240000`, as its driver took longer than the default to start the first time. Maestro's launch grants the app every permission. Type into a field only once it is scrolled fully into view: text typed into a half-visible field is lost.
+  - **Metro** (without watchman on this Mac) missed an edit once and kept serving the old screen; `npx expo start --port 8092 --clear` fixed it.
+  - **The microphone:** recording never started on the simulator (section 4).
 
 **iPhone:**
 - A local release build needs an Apple developer account for signing: `npx expo run:ios --configuration Release --device`.
@@ -198,11 +207,22 @@ The founder's choice: the native app on this Mac's Android 14 emulator and iOS 1
 | 3.10 A 5-inch screen | pass | At 360 × 640 dp (`wm size 720x1280`, `wm density 320`): Home, tenancy, payments, a new repair and Profile fit, with nothing past the edge. |
 | 3.9 Push | n/a | Needs an EAS project. |
 
-**iOS 17.0 simulator** (iPhone 15, development build): see the rows below once run.
+**iOS 17.0 simulator** (iPhone 15 on iOS 17.0.1, development build, Metro on 8092, driven with Maestro, 2026-11-10 and 11):
 
 | Step | Result | Notes |
 | --- | --- | --- |
-| (to be filled by the iOS run) | | |
+| 3.2 Sign-in | pass | Code from the fake SMS provider; Home shows both landlords' tenancies. |
+| 3.2 Kill the app and reopen it | pass | Still signed in after the app was stopped and launched again. |
+| 3.3 Home and tenancy figures | pass | Due now, paid until, next payment and the payment reference per tenancy; the tenancy opens with its terms. |
+| 3.3 Pay | pass, start only | Pay opens the pay page in an in-app Safari sheet with the amount due. Not paid, to keep the seeded figures. |
+| 3.4 Payments and receipts | pass | Rows per landlord with receipt numbers; RC-000018 opens as a PDF in the Safari sheet. Its "Paid towards" table repeats "Rent (invoice INV-000053), GH₵1,600.00" 24 times, without the month each covers (minor, the receipt template, not the app). |
+| 3.5 A notice to acknowledge | pass | To sign opens N-000024 on the links page; the SMS code and the typed name sign it, and the page thanks the tenant for acknowledging receipt. |
+| 3.6 A repair with a photo and a voice note | pass for the photo; the voice note not testable | The upload fix holds: MT-0021 arrived with its library photo (3.6 MB). Recording never started: the simulator's audio input failed (CoreAudio errors in the log), and the app showed neither a recording nor an error. The voice note needs a real iPhone; on Android it uploaded (MT-0019). |
+| 3.7 Offline, then a queued repair arriving once | pass | The offline fix holds: with the API cut off, the form offered the cached homes and said the request was saved on the phone. Back online, after the app returned to the front, it arrived once (MT-0022), and again no second copy after another return. |
+| 3.13 Profile's device list | **pass; fixed a missing back link** | The device-name fix holds: "iPhone (iOS 17.0.1)" and "Android phone (Android 14)", each with "Sign out this device". Profile had no way back on an iPhone, which has no back button (only the edge swipe); it now shows "‹ Home" like the other screens (section 5), checked on the simulator. |
+| 3.12 VoiceOver | n/a, spot check | The simulator has no VoiceOver, and the Accessibility Inspector needs a person at the Mac. The accessibility tree that VoiceOver reads gives each control a name: the tenancy card as one element ("TEM-EST-B1-01, Active, …, See the lease"), "Messages, new messages", "Pay rent", the repair kinds, "This is an emergency", the description field ("What is wrong?"). Roles and reading order were not checked. |
+| 3.10 A 5-inch screen | n/a | An Android step; covered there. |
+| 3.9 Push | n/a | Needs an EAS project. |
 
 ## 5. Known before the test (from the build, 2026-11-10)
 
@@ -227,6 +247,8 @@ The founder's choice: the native app on this Mac's Android 14 emulator and iOS 1
 - **Found on the Android emulator, 2026-11-10, and fixed in the app:**
   - **No photo, video or voice note uploaded from a phone.** On iOS and Android the app's `fetch` is Expo's (Expo SDK 58 installs it over React Native's), and it refused React Native's `{ uri, name, type }` form parts ("Unsupported FormDataPart implementation"). Each such part now carries a way to read its bytes, which Expo's fetch uses (`src/upload-part.ts`).
   - **Offline was never noticed on a phone.** Expo's fetch fails with an error whose message starts "fetch failed: ", not the TypeError a browser gives, so the app never showed what it had cached. It now knows both (`src/problems.ts`).
-  - **Profile named this phone "okhttp/4.12.0".** The API keeps a session's User-Agent header as its device. The app now sends "Android phone (Android 14)", "iPhone (iOS 17.0)" or "iPad (…)" on sign-in; a browser still names itself.
-- **Found, minor, not changed:** a receipt downloads named by its storage id rather than its receipt number; Repairs keeps its "offline" banner after the connection is back until it is opened again; the files of a request being written when the app is killed stay on the phone until sign-out; the device list does not mark the current device; a development build's warning "configured linking in multiple places" (Expo Router) shows in its toast.
+  - **Profile named this phone "okhttp/4.12.0".** The API keeps a session's User-Agent header as its device. The app now sends "Android phone (Android 14)", "iPhone (iOS 17.0.1)" or "iPad (…)" on sign-in; a browser still names itself.
+- **Found on the iOS simulator, 2026-11-11, and fixed in the app:** Profile was the one screen without a back link. An iPhone has no back button, so the only way back was the edge swipe. It now shows "‹ Home" like the other screens (`app/profile.tsx`, with a test).
+- **The three Android fixes hold on iOS:** uploads (MT-0021 with its photo), offline (MT-0022, once) and the device name ("iPhone (iOS 17.0.1)").
+- **Found, minor, not changed:** a receipt downloads named by its storage id rather than its receipt number; Repairs keeps its "offline" banner after the connection is back until it is opened again; the files of a request being written when the app is killed stay on the phone until sign-out; the device list does not mark the current device; a development build's warning "configured linking in multiple places" (Expo Router) shows in its toast; a receipt's "Paid towards" table lists each month as "Rent (invoice …)" without the month, so a 24-month advance prints 24 identical lines (the receipt template); the voice recorder shows nothing while it starts, so a microphone that never answers (as on the iOS simulator) leaves the button looking dead.
 - **Minimum versions:** React Native 0.88 supports Android 7 (API 24) and up, which covers Android 8. iOS 16.4 is the app's minimum (ADR-010).

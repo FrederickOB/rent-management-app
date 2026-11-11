@@ -11,6 +11,7 @@ import { ME } from './fixtures';
 const mockListSessions = jest.fn();
 const mockMe = jest.fn();
 const mockRedirect = jest.fn();
+const mockBack = jest.fn();
 
 jest.mock('expo-notifications', () => ({
   getPermissionsAsync: jest.fn(),
@@ -30,7 +31,7 @@ jest.mock('expo-router', () => ({
   useRouter: () => ({
     push: jest.fn(),
     replace: jest.fn(),
-    back: jest.fn(),
+    back: (...args: unknown[]) => mockBack(...args),
     canGoBack: () => true,
   }),
   usePathname: () => '/profile',
@@ -115,5 +116,18 @@ describe('AD-06 the devices signed in, when the list cannot be loaded', () => {
     mockListSessions.mockRejectedValueOnce(new TypeError('Network request failed'));
     await renderProfile();
     expect(await screen.findByTestId('devices-error')).toHaveTextContent(/connection|internet/i);
+  });
+});
+
+// M11 device test (iOS simulator, 2026-11-11): Profile was the one screen with no way back on an
+// iPhone, which has no back button of its own; the others show "‹ Home".
+describe('AD-06 Profile has a way back', () => {
+  it('shows "Home" as a back button, which goes back', async () => {
+    mockListSessions.mockResolvedValueOnce({ data: [phone], error: null });
+    await renderProfile();
+    const back = await screen.findByTestId('back');
+    expect(back).toHaveAccessibleName('Home');
+    await fireEvent.press(back);
+    expect(mockBack).toHaveBeenCalled();
   });
 });

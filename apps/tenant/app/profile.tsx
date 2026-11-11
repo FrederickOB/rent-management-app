@@ -9,6 +9,7 @@ import { markPromptAnswered } from '../src/push-prompt';
 import type { PushConsent } from '../src/push-registration';
 import { useSession } from '../src/session';
 import {
+  BackLink,
   Body,
   Button,
   Card,
@@ -63,8 +64,11 @@ export default function Profile() {
 
   if (!loading && !me) return <Redirect href="/sign-in" />;
 
+  // A visible way back, as on the other screens: an iPhone has no back button of its own.
+  const back = () => (router.canGoBack() ? router.back() : router.replace('/home'));
+
   return (
-    <Screen title="Profile" scroll>
+    <Screen title="Profile" top={<BackLink onPress={back} label="Home" />} scroll>
       <Notifications />
       <Heading>Devices</Heading>
       <Body>Devices signed in to your account. Sign out any you do not recognise.</Body>
