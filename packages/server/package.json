@@ -29,6 +29,9 @@
     "./reporting": "./src/reporting/index.ts",
     "./subscription": "./src/subscription/index.ts",
     "./admin": "./src/admin/index.ts",
+    "./onboarding": "./src/onboarding/index.ts",
+    "./ops": "./src/ops/index.ts",
+    "./data-protection": "./src/data-protection/index.ts",
     "./testing": "./test/support/index.ts"
   },
   "scripts": {
@@ -39,7 +42,11 @@
     "seed": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/seed.ts",
     "rules:add": "tsx --env-file-if-exists=../../.env scripts/rules-add.ts",
     "jobs:migrate": "tsx --env-file-if-exists=../../.env scripts/jobs-migrate.ts",
-    "platform:bootstrap": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/platform-bootstrap.ts"
+    "platform:bootstrap": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/platform-bootstrap.ts",
+    "identity:recover": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/identity-recover.ts",
+    "ops:replay-webhooks": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/ops-replay-webhooks.ts",
+    "ops:redrive": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/ops-redrive.ts",
+    "ops:reconcile": "tsx --tsconfig tsconfig.runtime.json --env-file-if-exists=../../.env scripts/ops-reconcile.ts"
   },
   "dependencies": {
     "@better-auth/expo": "catalog:",

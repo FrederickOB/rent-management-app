@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { clientFrom, payReturned } from '../../../lib/links-api';
+import { Recheck } from '../../_components/recheck';
 import {
   checksFrom,
   failureText,
@@ -17,8 +18,8 @@ export const metadata: Metadata = { title: 'Card payment' };
  * `/p/return?reference=pi-…`: the charge's reference, which the provider shows the payer anyway,
  * and never the pay link's token. So this page shows only what the reference may reveal, the
  * payment's status and receipt number, and never the invoice, the tenancy or the landlord.
- * While the payment is being confirmed it checks again with a plain refresh, as the pay page's
- * waiting step does. The API limits it per address and per reference.
+ * While the payment is being confirmed it checks again by itself and updates in place (Recheck),
+ * as the pay page's waiting step does. The API limits it per address and per reference.
  */
 export default async function CardReturnPage({
   searchParams,
@@ -56,16 +57,15 @@ export default async function CardReturnPage({
     const again = `/p/return?${new URLSearchParams({ reference, check: String(checks + 1) }).toString()}`;
     return (
       <>
-        <meta httpEquiv="refresh" content={`${seconds};url=${again}`} />
         <h1>We are confirming your payment</h1>
         <p>
           The payment provider is confirming your card payment. This usually takes a few seconds.
         </p>
         <p className="small" role="status">
-          This page checks again every {seconds} seconds.
+          <Recheck href={again} seconds={seconds} />
         </p>
         <p>
-          <a className="button secondary" href={again}>
+          <a className="button secondary" href={again} data-recheck-link="">
             Check now
           </a>
         </p>

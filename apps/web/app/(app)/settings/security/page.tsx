@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
+import { Card, CardHeader } from '@/components/ui/card';
 import { getMe } from '@/lib/server/session';
 import { BackupCodesCard } from './backup-codes-card';
 import { Devices } from './devices';
@@ -15,8 +17,24 @@ export default async function SecurityPage() {
     <>
       <PageHeader
         title="My security"
-        description="Where you are signed in, the backup codes for two-step sign-in, and how urgent alerts reach you."
+        description="Your password, where you are signed in, the backup codes for two-step sign-in, and how urgent alerts reach you."
       />
+      {me?.authMethod === 'password_totp' ? (
+        <Card>
+          <CardHeader
+            title="Password"
+            description="Changing it signs you out on every other device."
+            actions={
+              <Link
+                href="/settings/security/password"
+                className="text-sm font-medium underline underline-offset-2"
+              >
+                Change your password
+              </Link>
+            }
+          />
+        </Card>
+      ) : null}
       <Devices />
       <BackupCodesCard />
       {staff ? <WhatsappAlertsCard /> : null}

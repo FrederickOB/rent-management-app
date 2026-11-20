@@ -1,5 +1,12 @@
 import { MEDIA_MAX_FILES_PER_REQUEST, MEDIA_RULES } from '@rent/domain/maintenance';
-import { createJobSheetUpload, type ApiResult, type Client, type JobSheetView } from './links-api';
+import {
+  createJobSheetUpload,
+  checkJobSheet,
+  type ApiResult,
+  type Client,
+  type JobSheetView,
+} from './links-api';
+import { backToJobSheet, notFoundResponse } from './redirect';
 import { when } from './pay';
 import { problemText } from './problems';
 
@@ -32,6 +39,12 @@ const JOB_PROBLEMS: Readonly<Record<string, string>> = {
   CODE_LOCKED: 'Too many wrong codes.',
   BODY_TOO_LARGE: `Send at most ${MEDIA_MAX_FILES_PER_REQUEST} photos at a time, each ${MEDIA_RULES.image.maxBytes / 1_000_000} MB or smaller.`,
   RESPONSE_REQUIRED: 'Choose whether you can take the job.',
+  // M11 review: a form that stopped arriving, or came too slowly, holds no upload place.
+  UPLOAD_TOO_SLOW:
+    'Your photos took too long to arrive. Try again where the signal is better, or send fewer photos at a time.',
+  // M11 decision 6: a file still being scanned for viruses, or one that is not served.
+  SCAN_PENDING: 'That file is still being checked for viruses. Try again in a minute.',
+  FILE_NOT_AVAILABLE: 'That file is not available.',
 };
 
 /** The problem to show: the job sheet's own words first, then the signing page's for codes. */
@@ -115,6 +128,21 @@ export async function uploadPhotos(
   return { ok: true, uploadIds };
 }
 
+/**
+ * Whether a photo form's sheet is live, asked before the form counts toward its address's upload
+ * window or a byte of it is read (M11 security review F2, review B13 and C10). The API's check
+ * records nothing: no open, no open count. Null when the sheet is live; otherwise the answer to
+ * give, unread: not found for a token the API does not know, the sheet's own page for one that is
+ * closed, expired or replaced (it says which), or back to the sheet with the problem (too many
+ * requests, the API unreachable).
+ */
+export async function liveSheet(token: string, client: Client): Promise<Response | null> {
+  const checked = await checkJobSheet(token, client);
+  if (checked.ok) return checked.value.live ? null : backToJobSheet(token, {});
+  if (checked.status === 404) return notFoundResponse();
+  return backToJobSheet(token, { error: errorOf(checked) }, '#act');
+}
+
 /** The error code for the page after a refused action: the API's, or the rate limit's. */
 export function errorOf(result: Extract<ApiResult<unknown>, { ok: false }>): string {
   // A lock on the code is a 429 with its own words, and the time it ends (lockedUntil).
@@ -125,6 +153,18 @@ export function errorOf(result: Extract<ApiResult<unknown>, { ok: false }>): str
 /** What the page adds to a refused code: the tries left (code_wrong), or when a lock ends. */
 export function codeDetails(result: Extract<ApiResult<unknown>, { ok: false }>) {
   return { left: result.data?.attemptsLeft, until: result.data?.lockedUntil };
+}
+
+/**
+ * A file's malware scan (M11 decision 6): `pending` until the worker has scanned it, then
+ * `clean`. The API never lists an infected file; one that says so anyway is treated as such and
+ * never offered. A file without the field is clean, as every file was before scanning began.
+ */
+export type ScanStatus = 'pending' | 'clean' | 'infected';
+
+export function scanOf(attachment: JobSheetView['attachments'][number]): ScanStatus {
+  const scan: unknown = attachment.scan;
+  return scan === 'pending' || scan === 'infected' ? scan : 'clean';
 }
 
 /** How the page refers to one of the job's files. */

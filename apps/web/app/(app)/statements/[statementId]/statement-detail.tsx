@@ -32,6 +32,7 @@ import {
   statementEmailText,
   statementPages,
   type StatementRow,
+  openingRows,
 } from '@/lib/statements';
 import { formatMinor } from '@/lib/tenancy-format';
 import { startDownload } from '@/lib/browser-files';
@@ -318,6 +319,18 @@ export function StatementDetailView({ statementId }: { readonly statementId: str
         </Card>
       ))}
 
+      {/* M11 (P25): the opening balances, on the first statement after the cut-over. */}
+      {detail.opening ? (
+        <Card data-testid="statement-opening">
+          <CardHeader
+            title={`Opening balances on ${formatBusinessDate(detail.opening.cutOver)}`}
+            description="Brought in from the landlord’s own records when the platform took over. They were owed, paid or held before then, so no rent tax or fee is worked out on them here."
+          />
+          <CardBody>
+            <Rows title="At the cut-over" rows={openingRows(detail.opening)} />
+          </CardBody>
+        </Card>
+      ) : null}
       {detail.figures.agent ? (
         <Card data-testid="statement-agent">
           <CardHeader

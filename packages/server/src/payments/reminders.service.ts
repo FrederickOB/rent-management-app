@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, inArray, schema, sql, withCompany, type Database } from '@rent/db';
-import { formatBusinessDate } from '@rent/domain/dates';
+import { businessDateOf, formatBusinessDate, instantFrom, toIsoDate } from '@rent/domain/dates';
 import { format, money } from '@rent/domain/money';
 import { carriesInvoice, invoiceRemainingMinor, reminderDue } from '@rent/domain/payments';
 import { parseCompanySettings, paymentSettingsOf } from '@rent/domain/settings';
@@ -78,6 +78,17 @@ export class RemindersService {
                 inArray(schema.invoice.kind, ['cycle', 'deposit']),
               ),
             );
+          // M11 decision 2: an imported lease gets no catch-up reminders. A step dated before the
+          // day its import was committed is recorded as skipped, never sent.
+          const imported = await tx.execute<{ committed_at: Date | string | null }>(
+            sql`select b.committed_at from lease l
+                join onboarding_batch b on b.company_id = l.company_id and b.id = l.imported_batch_id
+                where l.id = ${leaseId}`,
+          );
+          const importedAt = imported.rows[0]?.committed_at ?? null;
+          const importedOn = importedAt
+            ? toIsoDate(businessDateOf(instantFrom(new Date(importedAt)), state.company.timeZone))
+            : null;
           const done = await tx
             .select({
               invoiceId: schema.reminderSent.invoiceId,
@@ -92,7 +103,7 @@ export class RemindersService {
               allocations: state.allocations,
               walk,
             });
-            const decision = reminderDue({
+            const ladder = reminderDue({
               dueDate: invoice.dueDate,
               offsetsDays: settings.reminderOffsetsDays,
               today,
@@ -101,6 +112,9 @@ export class RemindersService {
               ),
               outstandingMinor: remaining,
             });
+            const late =
+              importedOn !== null && ladder.send !== null && ladder.send.date < importedOn;
+            const decision = late ? { send: null, skip: [...ladder.skip, ladder.send!] } : ladder;
             const row = {
               companyId,
               propertyId: invoice.propertyId,

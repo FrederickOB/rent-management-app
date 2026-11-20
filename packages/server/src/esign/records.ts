@@ -33,7 +33,13 @@ export const signsAsTenant = (subjectType: string): boolean => TENANT_SELF.has(s
  * Why a link was revoked: a newer one went to the signer, the request closed, it expired, or the
  * message meant to carry it was never sent (so it reached nobody).
  */
-export type RevokeReason = 'superseded' | 'request_closed' | 'expired' | 'not_delivered';
+export type RevokeReason =
+  | 'superseded'
+  | 'request_closed'
+  | 'expired'
+  | 'not_delivered'
+  // M11 review R3 F7: too many code lockouts on the link.
+  | 'code_lockout';
 
 export async function requestRow(
   tx: Tx,

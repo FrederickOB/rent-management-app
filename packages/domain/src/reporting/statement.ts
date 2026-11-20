@@ -248,6 +248,11 @@ export interface OwnerStatementInput {
     readonly openingMinor: number;
     readonly closingMinor: number;
     readonly certifiedMinor?: number;
+    /**
+     * M11 (P25): paid to GRA in the month on the owner's own items, which carry no property (rent
+     * tax brought in at the cut-over). Part of what was paid to GRA, on no property's page.
+     */
+    readonly ownerPaidMinor?: number;
   };
   /** Null for an owner whose rent the agent does not hold (a self-managing landlord). */
   readonly agent: StatementAgentInput | null;
@@ -673,7 +678,9 @@ export function ownerStatementFigures(input: OwnerStatementInput): OwnerStatemen
     ? {
         openingMinor: whole(input.rentTaxPayable.openingMinor, 'Rent tax payable at the start'),
         accruedMinor: summary.cash.rentTaxAccruedMinor,
-        paidMinor: summary.cash.rentTaxPaidMinor,
+        paidMinor:
+          summary.cash.rentTaxPaidMinor +
+          whole(input.rentTaxPayable.ownerPaidMinor ?? 0, 'Rent tax paid on owner items'),
         certifiedMinor: atLeastZero(
           input.rentTaxPayable.certifiedMinor ?? 0,
           'Rent tax settled by certificates',

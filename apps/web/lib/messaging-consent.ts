@@ -13,7 +13,10 @@ import type { ConsentDraft } from './tenant-form';
 
 export type ChannelConsent = MessagingConsent['subjects'][number]['channels'][number];
 
-/** How the latest consent event came, for people. */
+/**
+ * How the latest consent event came, for people. M11 adds a data protection request (it only ever
+ * withdraws consent) and the onboarding workbook's import.
+ */
 export const CONSENT_SOURCE_LABELS: Record<ConsentSource, string> = {
   staff: 'recorded by staff',
   tenant_reply: 'replied YES on WhatsApp',
@@ -21,6 +24,8 @@ export const CONSENT_SOURCE_LABELS: Record<ConsentSource, string> = {
   start_keyword: 'sent START',
   tenant_app: 'set in the tenant app',
   email_unsubscribe: 'used the unsubscribe link',
+  data_protection: 'stopped for a data protection request',
+  import: 'brought in from the onboarding workbook',
 };
 
 /** What is missing when a channel has nowhere to send to. */

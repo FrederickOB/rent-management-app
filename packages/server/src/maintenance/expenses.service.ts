@@ -100,7 +100,9 @@ export class ExpensesService {
       this.row(tx, expenseId),
     );
     const url = row.receiptDocumentId
-      ? await this.documents.downloadUrl(staff.companyId, row.receiptDocumentId)
+      ? await this.documents.downloadUrl(staff.companyId, row.receiptDocumentId, undefined, {
+          viewer: staff.personId,
+        })
       : null;
     if (!url) throw notFound('Receipt');
     return { url, expiresAt: new Date(this.clock.now().getTime() + 300_000) };

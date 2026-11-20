@@ -231,11 +231,18 @@ export class ReconciliationService {
         }
       }
       if (!companyId) {
+        // M11: the reference, and the subaccount the provider lists it under (ids and codes).
+        const listedCharge = listed.find((t) => t.reference === exception.reference);
         await this.alerts.raise({
           severity: 'warning',
           code: 'payments.reconciliation_unowned',
           message: 'Reconciliation found a provider transaction that belongs to no company',
-          context: { provider, kind: exception.kind },
+          context: {
+            provider,
+            kind: exception.kind,
+            reference: exception.reference,
+            subaccountCode: listedCharge?.subaccountCode ?? null,
+          },
         });
         continue;
       }
@@ -331,7 +338,8 @@ export class ReconciliationService {
         severity: 'warning',
         code: 'payments.settlement_unowned',
         message: 'A settlement arrived for a subaccount we do not know',
-        context: { provider },
+        // M11: the provider's settlement and subaccount, to find it there.
+        context: { provider, settlementId: s.settlementId, subaccountCode: s.subaccountCode },
       });
       return false;
     }

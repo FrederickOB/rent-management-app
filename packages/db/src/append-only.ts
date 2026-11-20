@@ -86,6 +86,13 @@ export const APPEND_ONLY_TABLES = [
   'alert_event',
   // M10 review BE-5: billing turned on, one row per change.
   'billing_activation',
+  // M11: opening items, staff active days, the console's replays and retries, scan results and
+  // the nightly retention review.
+  'onboarding_item',
+  'staff_active_day',
+  'ops_action',
+  'document_scan',
+  'retention_review',
 ] as const;
 
 /** Global tables: no company_id and no RLS (ADR-002). Everything else is company-scoped. */
@@ -115,4 +122,7 @@ export const GLOBAL_TABLES = [
   'whatsapp_rate',
   'alert_event',
   'billing_activation',
+  // M11: the nightly retention review's counts and the worker's heartbeat (no personal data).
+  'retention_review',
+  'worker_heartbeat',
 ] as const;

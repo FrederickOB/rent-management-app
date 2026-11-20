@@ -261,7 +261,9 @@ describe('TX-03 rent tax endpoints over HTTP', () => {
 
 describe('P33 VAT endpoints over HTTP', () => {
   it('answers the VAT report and records a VAT payment as the web sends it', async () => {
-    const start = `${today.slice(0, 7)}-01`;
+    // From today, so next month's invoice (issued 14 days ahead) is not in this month's report on
+    // any day of the month (founder-approved setup fix, 2026-11-20).
+    const start = today;
     const leaseId = await paperLease({
       unitId: shops[0]!.id,
       start,
@@ -288,7 +290,7 @@ describe('P33 VAT endpoints over HTTP', () => {
         },
       }),
     );
-    expect(paid).toMatchObject({ amountMinor: 1_234, periodMonth: start });
+    expect(paid).toMatchObject({ amountMinor: 1_234, periodMonth: `${today.slice(0, 7)}-01` });
     await ok(await accountant.call(`/vat-payments?ownerId=${ownerVat}`));
   });
 });

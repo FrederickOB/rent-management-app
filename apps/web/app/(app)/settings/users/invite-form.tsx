@@ -8,12 +8,14 @@ import { Button } from '@/components/ui/button';
 import { CheckboxField, SelectField, TextField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { membershipSavedText } from '@/lib/membership-approval';
 import { roleLabel } from '@/lib/format';
 
 const ROLE_OPTIONS = STAFF_ROLES.map((role) => ({ value: role, label: roleLabel(role) }));
 
 export interface InviteFormProps {
-  readonly onInvited: (message: string) => void;
+  /** `approvals`: it waits for a second person (founder D1), so Approvals is linked. */
+  readonly onInvited: (message: string, approvals: boolean) => void;
   readonly onCancel: () => void;
 }
 
@@ -46,11 +48,12 @@ export function InviteForm({ onInvited, onCancel }: InviteFormProps) {
         whatsappConsent,
         ...(byEmail ? { email: email.trim() } : { phone: phone.trim() }),
       });
-      onInvited(
-        byEmail
-          ? `Invitation sent. ${added.name} will get an email with a link to set a password, then sets up two-step sign-in.`
-          : `${added.name} is added and signs in with a code sent to their phone.`,
-      );
+      const saved = membershipSavedText({
+        name: added.name,
+        approvalRequestId: added.approvalRequestId,
+        kind: byEmail ? 'invite_email' : 'invite_phone',
+      });
+      onInvited(saved.text, saved.approvals);
     } catch (failure) {
       setError(toProblem(failure).message);
     } finally {

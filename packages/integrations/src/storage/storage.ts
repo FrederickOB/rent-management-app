@@ -169,6 +169,8 @@ export class StorageError extends Error {
 const MAX_PRESIGN_SECONDS = 7 * 24 * 60 * 60;
 const CONTENT_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
 const BYPASS_GOVERNANCE_HEADER = 'x-amz-bypass-governance-retention';
+/** Every presigned download (M11 review R3 F5): a file someone may see now is never cached. */
+export const DOWNLOAD_CACHE_CONTROL = 'no-store';
 
 const hasControlCharacters = (value: string) =>
   [...value].some((ch) => {
@@ -353,6 +355,8 @@ export class S3Storage implements StoragePort {
       Bucket: request.bucket,
       Key: request.key,
       VersionId: request.versionId,
+      // M11 review R3 F5: never kept by a browser or a shared cache.
+      ResponseCacheControl: DOWNLOAD_CACHE_CONTROL,
       ResponseContentDisposition:
         request.filename === undefined ? undefined : attachmentDisposition(request.filename),
     });
@@ -632,6 +636,8 @@ export interface DownloadResponse {
   readonly status: number;
   readonly body: Buffer;
   readonly contentDisposition: string | null;
+  /** M11 review R3 F5: what a store answers on its presigned links. */
+  readonly cacheControl?: string;
 }
 
 /**
@@ -708,6 +714,7 @@ export class InMemoryStorage implements StoragePort {
       status: 200,
       body: Buffer.from(version.body),
       contentDisposition: download.disposition,
+      cacheControl: DOWNLOAD_CACHE_CONTROL,
     };
   }
 

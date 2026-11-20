@@ -10,6 +10,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { AWAITING_APPROVAL_TEXT } from '@/lib/membership-approval';
 import { formatDate, roleLabel } from '@/lib/format';
 import { EditMembership, type ScopeOptions } from './edit-membership';
 import { InviteForm } from './invite-form';
@@ -33,7 +34,12 @@ export interface UsersManagerProps {
   readonly scopeOptions: ScopeOptions;
 }
 
-type Notice = { readonly tone: 'success' | 'error'; readonly text: string } | null;
+type Notice = {
+  readonly tone: 'success' | 'error';
+  readonly text: string;
+  /** It waits for a second person (founder D1): Approvals is linked. */
+  readonly approvals?: boolean;
+} | null;
 
 /** Memberships (AD-03): list, invite, change role, scope and approver flag, and remove. */
 export function UsersManager({
@@ -59,8 +65,8 @@ export function UsersManager({
     [scopeOptions],
   );
 
-  async function refresh(message: string) {
-    setNotice({ tone: 'success', text: message });
+  async function refresh(message: string, approvals = false) {
+    setNotice({ tone: 'success', text: message, approvals });
     try {
       setRows(await api().memberships.list());
     } catch (failure) {
@@ -94,9 +100,9 @@ export function UsersManager({
           />
           <CardBody>
             <InviteForm
-              onInvited={(message) => {
+              onInvited={(message, approvals) => {
                 setInviting(false);
-                void refresh(message);
+                void refresh(message, approvals);
               }}
               onCancel={() => setInviting(false)}
             />
@@ -122,7 +128,19 @@ export function UsersManager({
           }
         />
         <CardBody>
-          {notice ? <Alert tone={notice.tone}>{notice.text}</Alert> : null}
+          {notice ? (
+            <Alert tone={notice.tone}>
+              {notice.text}
+              {notice.approvals ? (
+                <>
+                  {' '}
+                  <Link href="/approvals" className="font-medium underline underline-offset-2">
+                    Open Approvals
+                  </Link>
+                </>
+              ) : null}
+            </Alert>
+          ) : null}
           <Table caption="People in this company">
             <thead>
               <tr>
@@ -166,7 +184,20 @@ export function UsersManager({
                           <p className="text-slate-600">Emergency alerts on WhatsApp</p>
                         ) : null}
                       </Td>
-                      <Td>{STATUS_LABELS[row.status]}</Td>
+                      <Td>
+                        {STATUS_LABELS[row.status]}
+                        {row.status === 'invited' && row.approvalRequestId ? (
+                          <p className="text-slate-600" data-testid="membership-awaiting-approval">
+                            {AWAITING_APPROVAL_TEXT}.{' '}
+                            <Link
+                              href="/approvals"
+                              className="font-medium underline underline-offset-2"
+                            >
+                              Approvals
+                            </Link>
+                          </p>
+                        ) : null}
+                      </Td>
                       <Td>{scopeSummary(row.scope, names)}</Td>
                       <Td className="whitespace-nowrap">{formatDate(row.createdAt, timeZone)}</Td>
                       {showActions ? (
@@ -255,9 +286,9 @@ export function UsersManager({
                             row={row}
                             companyKind={companyKind}
                             scopeOptions={scopeOptions}
-                            onSaved={(message) => {
+                            onSaved={(message, approvals) => {
                               setEditing(null);
-                              void refresh(message);
+                              void refresh(message, approvals);
                             }}
                             onCancel={() => setEditing(null)}
                           />

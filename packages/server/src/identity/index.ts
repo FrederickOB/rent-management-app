@@ -1,3 +1,4 @@
+export * from './account-recovery';
 export * from './auth';
 export * from './auth-endpoints';
 export * from './identity.module';
@@ -8,3 +9,5 @@ export * from './session-policy';
 export * from './person-accounts';
 export * from './person-directory';
 export * from './step-up';
+export * from './password-hash';
+export * from './totp';

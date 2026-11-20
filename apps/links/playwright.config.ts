@@ -21,7 +21,9 @@ export default defineConfig({
     // A production build, written to .next/e2e so a running `next start` or `next dev` keeps
     // its own files.
     command: `./node_modules/.bin/next build && ./node_modules/.bin/next start --hostname 127.0.0.1 --port ${PORT}`,
-    env: { LINKS_DIST_DIR: '.next/e2e', NEXT_TELEMETRY_DISABLED: '1' },
+    // Production, whatever the shell exports: the stack's script exports NODE_ENV=development for
+    // the API, and `next build` fails under it.
+    env: { LINKS_DIST_DIR: '.next/e2e', NEXT_TELEMETRY_DISABLED: '1', NODE_ENV: 'production' },
     url: `${baseURL}/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,

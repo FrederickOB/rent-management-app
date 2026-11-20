@@ -3,6 +3,7 @@ import { AGE_BUCKETS, AGE_BUCKET_LABELS, type AgeBucket } from '@rent/domain/bil
 import type { RemittanceMethod } from '@rent/domain/ledger';
 import { UNIT_TYPE_LABELS, UNIT_TYPES } from '@rent/domain/portfolio';
 import type { CollectionMethod } from '@rent/domain/reporting';
+import { monthLabel } from './rent-tax';
 import { formatMinor } from './tenancy-format';
 
 // Owner reporting and the dashboard (M9: AC-02 to AC-05, DA-01, DA-02, DA-06, Gate 1). Every
@@ -317,4 +318,109 @@ export function refreshProblemText(status: number | null, fallback: string): str
   if (status === 429)
     return 'The figures were refreshed less than a minute ago. Try again in a minute.';
   return fallback;
+}
+
+// Gate 1 targets and the M11 measures (M11 decision 4) -----------------------------------------
+
+export type TargetState = 'met' | 'missed' | 'unknown';
+
+/**
+ * A Gate 1 target (95% collection, 95% auto-matched), as the API judges it: met, missed, or not
+ * measurable yet (nothing due or nothing to match). Months rolled up before M11 carry none.
+ */
+export function gate1Targets(g: Gate1): {
+  readonly key: 'collection' | 'auto_match';
+  readonly label: string;
+  readonly targetBps: number;
+  readonly state: TargetState;
+  readonly text: string;
+}[] {
+  if (!g.targets) return [];
+  const one = (
+    key: 'collection' | 'auto_match',
+    label: string,
+    target: { readonly targetBps: number; readonly met: boolean | null },
+  ) => {
+    const state: TargetState = target.met === null ? 'unknown' : target.met ? 'met' : 'missed';
+    return {
+      key,
+      label,
+      targetBps: target.targetBps,
+      state,
+      text:
+        state === 'unknown'
+          ? `Target ${bpsText(target.targetBps)}: not measurable yet`
+          : `Target ${bpsText(target.targetBps)}: ${state === 'met' ? 'met' : 'not met'}`,
+    };
+  };
+  return [
+    one('collection', 'Collection rate', g.targets.collectionRate),
+    one('auto_match', 'Provider payments matched automatically', g.targets.autoMatch),
+  ];
+}
+
+/**
+ * The measures M11 adds (decision 4), as rows like `gate1Rows`: arrears over 60 days, weekly
+ * active managers, WhatsApp adoption, time to receipt delivered and net revenue retention. Each
+ * only when the month has it; NRR says it needs 12 months of invoices until it has them.
+ */
+export function gate1ExtraRows(g: Gate1): Gate1Row[] {
+  const rows: Gate1Row[] = [];
+  if (g.arrearsOver60)
+    rows.push({
+      key: 'arrears_60',
+      label: 'Arrears over 60 days, of the rent roll',
+      value: ratioText(g.arrearsOver60.share),
+      detail: `${formatMinor(g.arrearsOver60.arrearsMinor)} of ${formatMinor(g.arrearsOver60.rentRollMinor)}${
+        g.arrearsOver60.baselineMonth && g.arrearsOver60.baselineShare
+          ? `; ${ratioText(g.arrearsOver60.baselineShare)} at the baseline, ${monthLabel(g.arrearsOver60.baselineMonth)}`
+          : '; no baseline yet (the first full month after the cut-over)'
+      }`,
+      bps: g.arrearsOver60.share.bps,
+    });
+  if (g.weeklyActiveManagers)
+    rows.push({
+      key: 'weekly_active',
+      label: 'Staff active 3 days a week or more',
+      value: ratioText(g.weeklyActiveManagers.share),
+      detail: `${g.weeklyActiveManagers.staff} staff; by week: ${
+        g.weeklyActiveManagers.weeks.map((w) => w.active).join(', ') || 'none yet'
+      }`,
+      bps: g.weeklyActiveManagers.share.bps,
+    });
+  if (g.whatsappAdoption)
+    rows.push({
+      key: 'whatsapp',
+      label: 'Tenants using WhatsApp',
+      value: ratioText(g.whatsappAdoption.share),
+      detail: `${g.whatsappAdoption.adopted} of ${g.whatsappAdoption.tenantsWithActiveLease} tenants with an active lease sent or read a WhatsApp message`,
+      bps: g.whatsappAdoption.share.bps,
+    });
+  if (g.timeToReceiptDelivered)
+    rows.push({
+      key: 'receipt_delivered',
+      label: 'Receipts delivered within a minute',
+      value: ratioText(g.timeToReceiptDelivered.share),
+      detail: `${g.timeToReceiptDelivered.withinTarget} of ${g.timeToReceiptDelivered.receipts} receipts (${g.timeToReceiptDelivered.delivered} delivered); median ${durationText(g.timeToReceiptDelivered.medianMs)}, 95th percentile ${durationText(g.timeToReceiptDelivered.p95Ms)}`,
+      bps: g.timeToReceiptDelivered.share.bps,
+    });
+  if (g.netRevenueRetention)
+    rows.push(
+      g.netRevenueRetention.available && g.netRevenueRetention.share
+        ? {
+            key: 'nrr',
+            label: 'Net revenue retention',
+            value: ratioText(g.netRevenueRetention.share),
+            detail: `Over ${g.netRevenueRetention.monthsOfHistory} months of subscription invoices`,
+            bps: g.netRevenueRetention.share.bps,
+          }
+        : {
+            key: 'nrr',
+            label: 'Net revenue retention',
+            value: NO_RATIO,
+            detail: `Needs 12 months of subscription invoices; ${g.netRevenueRetention.monthsOfHistory} so far`,
+            bps: null,
+          },
+    );
+  return rows;
 }

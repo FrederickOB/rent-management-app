@@ -1,6 +1,6 @@
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
-import { scopeSchema } from './memberships';
+import { scopeSchema, STAFF_ROLES } from './memberships';
 
 export const membershipSummarySchema = z.object({
   membershipId: z.string().uuid(),
@@ -31,6 +31,16 @@ export const meSchema = z.object({
 
 export type Me = z.infer<typeof meSchema>;
 
+/** Founder D2 (M11): an invitation to a company, waiting for the invited person to accept it. */
+export const invitationSchema = z.object({
+  membershipId: z.string().uuid(),
+  companyId: z.string().uuid(),
+  companyName: z.string(),
+  /** A platform admin invited as an existing person waits too (platform:bootstrap, D2). */
+  role: z.enum([...STAFF_ROLES, 'platform_admin']),
+});
+export type Invitation = z.infer<typeof invitationSchema>;
+
 export const meContract = {
   get: oc
     .route({
@@ -60,4 +70,29 @@ export const meContract = {
     })
     .input(z.object({ granted: z.boolean() }))
     .output(z.object({ granted: z.boolean(), phoneMasked: z.string().nullable() })),
+  /** Founder D2 (M11): a membership for an existing person waits until that person accepts it. */
+  invitations: oc
+    .route({
+      method: 'GET',
+      path: '/me/invitations',
+      summary: 'Invitations waiting for the signed-in person (D2)',
+    })
+    .output(z.array(invitationSchema)),
+  acceptInvitation: oc
+    .route({
+      method: 'POST',
+      path: '/me/invitations/{membershipId}/accept',
+      summary:
+        'Accept an invitation; needs the sign-in method of its role, and its approval if it needed one',
+    })
+    .input(z.object({ membershipId: z.string().uuid() }))
+    .output(meSchema),
+  declineInvitation: oc
+    .route({
+      method: 'POST',
+      path: '/me/invitations/{membershipId}/decline',
+      summary: 'Decline an invitation',
+    })
+    .input(z.object({ membershipId: z.string().uuid() }))
+    .output(z.object({ declined: z.literal(true) })),
 };

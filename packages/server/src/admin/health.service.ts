@@ -34,6 +34,8 @@ export interface HealthView {
     readonly code: string;
     readonly message: string;
     readonly companyId: string | null;
+    /** M11: the alert's stored context, already scrubbed by StoredAlert; nothing added. */
+    readonly data: Record<string, unknown> | null;
   }[];
 }
 
@@ -109,8 +111,9 @@ export class SystemHealthService {
           code: string;
           message: string;
           subject_company_id: string | null;
+          data: Record<string, unknown> | null;
         }>(
-          sql`select occurred_at, severity, code, message, subject_company_id
+          sql`select occurred_at, severity, code, message, subject_company_id, data
               from app.recent_alerts(${RECENT_ALERTS}::int)`,
         );
         const dead = queues.rows.find((q) => q.name === DEAD_LETTER_QUEUE);
@@ -138,6 +141,7 @@ export class SystemHealthService {
             code: a.code,
             message: a.message,
             companyId: a.subject_company_id,
+            data: a.data && typeof a.data === 'object' && !Array.isArray(a.data) ? a.data : null,
           })),
         };
       },

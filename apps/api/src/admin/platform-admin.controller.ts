@@ -9,6 +9,7 @@ import {
   UsageService,
 } from '@rent/server/admin';
 import { IdempotencyStore } from '@rent/server/core';
+import { AccountRecoveryService } from '@rent/server/identity';
 import { SubscriptionCreditNotesService, SubscriptionService } from '@rent/server/subscription';
 import { idempotent } from '../http/idempotency';
 import { serialize } from '../http/serialize';
@@ -35,6 +36,7 @@ export class PlatformAdminController {
     @Inject(SubscriptionCreditNotesService)
     private readonly credits: SubscriptionCreditNotesService,
     @Inject(IdempotencyStore) private readonly idempotency: IdempotencyStore,
+    @Inject(AccountRecoveryService) private readonly recovery: AccountRecoveryService,
   ) {}
 
   @Implement(contract.platformAdmin)
@@ -168,6 +170,25 @@ export class PlatformAdminController {
       ),
       supportOverview: implement(c.supportOverview).handler(async ({ input }) =>
         serialize(await this.support.overview(a, input.companyId, ctx.requestId)),
+      ),
+      // M11: the platform admin ends its own access to a company early (audited in both chains).
+      endSupport: implement(c.endSupport).handler(async ({ input }) =>
+        serialize(await this.support.endGrant(a, input.companyId, input.reason, ctx.requestId)),
+      ),
+      // Founder D4 (M11): recovery of a person's lost two-factor, and signing them out everywhere.
+      findPerson: implement(c.findPerson).handler(async ({ input }) => {
+        const found = await this.recovery.lookup({ kind: 'console', actor: a }, input.email);
+        return found ? { ...found, companies: [...found.companies] } : null;
+      }),
+      resetTwoFactor: implement(c.resetTwoFactor).handler(({ input }) =>
+        this.recovery.resetTwoFactor({ kind: 'console', actor: a }, input.personId, input.reason),
+      ),
+      revokeSessions: implement(c.revokeSessions).handler(({ input }) =>
+        this.recovery.revokeAllSessions(
+          { kind: 'console', actor: a },
+          input.personId,
+          input.reason,
+        ),
       ),
     };
   }

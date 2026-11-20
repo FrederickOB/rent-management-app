@@ -531,6 +531,8 @@ export const healthSchema = z.object({
       code: z.string(),
       message: z.string(),
       companyId: uuid.nullable(),
+      /** M11: the alert's context as stored (scrubbed as logs are: ids, codes and counts). */
+      data: z.record(z.string(), z.unknown()).nullable(),
     }),
   ),
 });
@@ -560,6 +562,18 @@ export const billingStateSchema = z.object({
   turnedOnByName: z.string().nullable(),
   /** The tiers whose price list in force today is a placeholder: billing cannot start on them. */
   placeholderTiers: z.array(tier),
+});
+
+/** Founder D4 (M11): a recovery action names the person and the identity check made. */
+const recoveryInput = z.object({
+  personId: uuid,
+  /** The reason, and the identity check made (docs/runbooks/lost-authenticator.md). */
+  reason: z.string().trim().min(10).max(500),
+});
+const recoveryResultSchema = z.object({
+  personId: uuid,
+  sessionsRevoked: z.number().int().nonnegative(),
+  twoFactorReset: z.boolean(),
 });
 
 export const platformAdminContract = {
@@ -808,4 +822,49 @@ export const platformAdminContract = {
     })
     .input(z.object({ companyId: uuid }))
     .output(supportOverviewSchema),
+  /** M11: a platform admin ends their own access early; only the company's admins can grant. */
+  endSupport: oc
+    .route({
+      method: 'POST',
+      path: '/platform/support/{companyId}/end',
+      summary:
+        'End the company’s active support grant now, with a reason: the platform’s own access only, audited in the platform’s chain and the company’s. 403 SUPPORT_NO_GRANT without one',
+    })
+    .input(z.object({ companyId: uuid, reason: z.string().trim().min(5).max(500) }))
+    .output(supportGrantSchema),
+  /** Founder D4 (M11): a person by exact email, before a recovery action. POST: no email in a URL. */
+  findPerson: oc
+    .route({
+      method: 'POST',
+      path: '/platform/people/find',
+      summary: 'A person by exact email, before a recovery action (D4)',
+    })
+    .input(z.object({ email: z.string().trim().email() }))
+    .output(
+      z
+        .object({
+          personId: uuid,
+          name: z.string(),
+          twoFactorEnabled: z.boolean(),
+          sessions: z.number().int().nonnegative(),
+          companies: z.array(z.object({ companyName: z.string(), role: z.string() })),
+        })
+        .nullable(),
+    ),
+  resetTwoFactor: oc
+    .route({
+      method: 'POST',
+      path: '/platform/people/{personId}/two-factor/reset',
+      summary: 'Reset a person’s lost two-factor and sign them out everywhere (D4)',
+    })
+    .input(recoveryInput)
+    .output(recoveryResultSchema),
+  revokeSessions: oc
+    .route({
+      method: 'POST',
+      path: '/platform/people/{personId}/sessions/revoke',
+      summary: 'Sign a person out everywhere (D4)',
+    })
+    .input(recoveryInput)
+    .output(recoveryResultSchema),
 };

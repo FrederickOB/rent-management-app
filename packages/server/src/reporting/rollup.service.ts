@@ -124,7 +124,15 @@ export class ReportingRollupService {
       this.database,
       ctx,
       async (tx) => {
-        const figures = await this.gate1.compute(tx, companyId, month, computedAt, timeZone);
+        // M11 decision 4: this month's arrears over 60 days read today's snapshot, written below.
+        const figures = await this.gate1.compute(tx, companyId, month, computedAt, timeZone, {
+          arrearsRows: rows.map((r) => ({
+            arrears61To90Minor: r.arrears61To90Minor ?? 0,
+            arrears90PlusMinor: r.arrears90PlusMinor ?? 0,
+            rentMinor: r.rentMinor ?? 0,
+            serviceChargeMinor: r.serviceChargeMinor ?? 0,
+          })),
+        });
         const finals: { month: string; metricDate: string; figures: StoredGate1 }[] = [];
         for (const past of await this.gate1.monthsToFinaliseIn(tx, month))
           finals.push({

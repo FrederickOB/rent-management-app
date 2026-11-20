@@ -159,7 +159,8 @@ export class TenantMoneyService {
                 exists (select 1 from receipt r where r.company_id = p.company_id and r.payment_id = p.id and r.kind = 'credit_receipt') as reversed,
                 (select r.id from receipt r where r.company_id = p.company_id and r.payment_id = p.id and r.kind = 'receipt') as receipt_id,
                 (select r.number from receipt r where r.company_id = p.company_id and r.payment_id = p.id and r.kind = 'receipt') as receipt_number
-              from payment p order by p.received_on desc, p.id desc limit 200`,
+              from payment p where p.source_type <> 'opening_balance'
+              order by p.received_on desc, p.id desc limit 200`,
         );
         return result.rows.flatMap((r) => {
           const leaseId = r.lease_id ?? r.match_lease_id;

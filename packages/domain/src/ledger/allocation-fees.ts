@@ -18,7 +18,10 @@ import { FEE_BEARING_KINDS, feeOnBaseMinor, refundFeeReversalMinor } from './fee
  * posted fee equals its rate on its base, which the nightly check verifies.
  */
 
-/** Allocation sources that are money: only these carry a fee. */
+/**
+ * Allocation sources that are money: only these carry a fee. Never `opening_balance` (P25): money
+ * received before the platform carries no fee (M11 decision 3, OQ-64).
+ */
 export const FEE_SOURCES: readonly AllocationSource[] = ['payment', 'deposit', 'withholding'];
 
 export interface FeeAllocation {
@@ -29,11 +32,17 @@ export interface FeeAllocation {
   readonly paymentId: string | null;
   /** Signed: a negative row undoes earlier rows. */
   readonly amountMinor: number;
+  /**
+   * P25: the row is paid by an opening payment (`isOpeningAllocation`): money received before the
+   * platform, which carries no fee, whether it pays a month at commit or its credit is drawn onto
+   * one later. A platform payment that pays an opening line carries its fee as usual.
+   */
+  readonly opening?: boolean;
 }
 
 /** Whether an allocation carries (or takes back) a fee: money on rent or service charge. */
-export const feeBearing = (a: Pick<FeeAllocation, 'lineKind' | 'source'>): boolean =>
-  FEE_BEARING_KINDS.includes(a.lineKind) && FEE_SOURCES.includes(a.source);
+export const feeBearing = (a: Pick<FeeAllocation, 'lineKind' | 'source' | 'opening'>): boolean =>
+  a.opening !== true && FEE_BEARING_KINDS.includes(a.lineKind) && FEE_SOURCES.includes(a.source);
 
 const groupKey = (a: FeeAllocation) => `${a.lineId}|${a.source}|${a.paymentId ?? ''}`;
 

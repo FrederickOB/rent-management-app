@@ -196,7 +196,8 @@ export function certificateLines(input: {
   readonly bookId: string;
   readonly lease: LeaseDimensions;
   readonly paymentId: string | null;
-  readonly debit: '2200' | '1160';
+  /** 3900 for withholding brought in at the cut-over, for an owner outside the letting business. */
+  readonly debit: '2200' | '1160' | '3900';
   readonly amountMinor: number;
 }): JournalLineDraft[] {
   const amount = positive(input.amountMinor, 'The certificate');

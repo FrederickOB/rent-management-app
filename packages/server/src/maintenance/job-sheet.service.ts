@@ -12,7 +12,7 @@ import {
   type Database,
   type Tx,
 } from '@rent/db';
-import { SIGNING_CODE, SIGNING_LIMITS } from '@rent/domain/esign';
+import { CODE_LOCKOUTS_BEFORE_REVOKE, SIGNING_CODE, SIGNING_LIMITS } from '@rent/domain/esign';
 import {
   formatTicketNumber,
   type MaintenanceCategory,
@@ -26,6 +26,7 @@ import type { Clock } from '../core/clock';
 import type { AppConfig } from '../core/config';
 import { maintenanceCheckConflict } from '../core/db-errors';
 import { AppError, conflict, invalid, notFound } from '../core/errors';
+import { queueMessage } from '../core/messages';
 import { consumeRateLimit, type RateLimit } from '../core/rate-limit';
 import { CLOCK, CONFIG, DATABASE, SMS_PORT } from '../core/tokens';
 import {
@@ -68,6 +69,8 @@ export interface JobSheetView {
     readonly kind: 'image' | 'video';
     readonly stage: 'report';
     readonly contentType: string;
+    /** M11 decision 6: an infected file is never listed. */
+    readonly scan: 'pending' | 'clean';
   }[];
   readonly timeZone: string;
   readonly linkExpiresAt: Date;
@@ -231,6 +234,20 @@ export class JobSheetService {
         })
         .where(eq(schema.secureLink.id, link.id));
       return this.view(tx, link, job);
+    });
+  }
+
+  /**
+   * M11 review B13: whether the sheet is live (not closed, expired or revoked), for apps/links to
+   * check before it reads a photo upload's body. It records nothing about the link (no open, no
+   * open count); only the per-address limit counts it. An unknown token is not found.
+   */
+  async check(token: string, client: ClientInfo): Promise<{ live: boolean }> {
+    await this.limit('open', client, SIGNING_LIMITS.opensPerIp);
+    const { companyId, linkId } = await this.resolve(token);
+    return withCompany(this.database, this.context(companyId), async (tx) => {
+      const { link, job } = await this.rows(tx, linkId);
+      return { live: !DEAD_SCREENS.includes(this.screen(link, job)) };
     });
   }
 
@@ -543,6 +560,22 @@ export class JobSheetService {
         .update(schema.jobSheetCode)
         .set({ attempts: challenge.attempts + 1 })
         .where(eq(schema.jobSheetCode.id, challenge.id));
+      // M11 review R3 F7: a running total of the link's wrong codes (every code it was sent);
+      // the lockout that reaches CODE_LOCKOUTS_BEFORE_REVOKE withdraws the link instead.
+      const failures = lockedUntil ? await this.failuresOn(tx, link.id) : 0;
+      if (
+        lockedUntil &&
+        Math.floor(failures / SIGNING_CODE.maxAttempts) >= CODE_LOCKOUTS_BEFORE_REVOKE
+      ) {
+        await this.revokeAfterLockouts(tx, link, now, failures);
+        return {
+          refused: new AppError(
+            410,
+            'job_sheet_revoked',
+            'Too many wrong codes: this link no longer works. Ask the property contact for a new one.',
+          ),
+        };
+      }
       await tx
         .update(schema.secureLink)
         .set({ failedCodeAttempts: lockedUntil ? 0 : failed, codeLockedUntil: lockedUntil })
@@ -559,6 +592,58 @@ export class JobSheetService {
       };
     });
     if (result.refused) throw result.refused;
+  }
+
+  /** Every wrong code entered on a link, across all the codes it was sent (M11 review R3 F7). */
+  private async failuresOn(tx: Tx, linkId: string): Promise<number> {
+    const [row] = await tx
+      .select({ n: sql<number>`coalesce(sum(${schema.jobSheetCode.attempts}), 0)::int` })
+      .from(schema.jobSheetCode)
+      .where(eq(schema.jobSheetCode.secureLinkId, linkId));
+    return Number(row?.n ?? 0);
+  }
+
+  /**
+   * M11 review R3 F7: the link is withdrawn after repeated lockouts, so nobody can keep guessing
+   * completion codes on it. Whoever assigned the artisan is told, so they can check with the
+   * artisan and send the job sheet again.
+   */
+  private async revokeAfterLockouts(tx: Tx, link: LinkRow, now: Date, failures: number) {
+    await tx
+      .update(schema.secureLink)
+      .set({
+        revokedAt: now,
+        revokeReason: 'code_lockout',
+        failedCodeAttempts: 0,
+        codeLockedUntil: null,
+      })
+      .where(eq(schema.secureLink.id, link.id));
+    const job = await this.maintenance.lockJob(tx, link.jobId!);
+    const [assigned] = await tx
+      .select({ personId: schema.maintenanceJobEvent.actorPersonId })
+      .from(schema.maintenanceJobEvent)
+      .where(
+        and(
+          eq(schema.maintenanceJobEvent.jobId, job.id),
+          eq(schema.maintenanceJobEvent.kind, 'assigned'),
+          sql`${schema.maintenanceJobEvent.actorPersonId} is not null`,
+        ),
+      )
+      .orderBy(desc(schema.maintenanceJobEvent.at))
+      .limit(1);
+    const personId = assigned?.personId ?? job.reportedBy;
+    if (!personId) return;
+    const ticket = formatTicketNumber(job.ticketNumber);
+    const name = await this.artisanName(tx, link.artisanId!);
+    await queueMessage(tx, job.companyId, {
+      recipient: { type: 'staff', personId },
+      purpose: 'staff_notice',
+      subject: `A job sheet link was withdrawn: ${ticket}`,
+      body: `Wrong completion codes were entered ${failures} times on the job sheet sent to ${name || 'the artisan'} for ${ticket}, so the link no longer works. The job was not completed. Check with them, then send the job sheet again if they still have the work.`,
+      channels: ['email'],
+      propertyId: job.propertyId,
+      related: { type: 'maintenance_job', id: job.id },
+    });
   }
 
   /** Refuses a step the job's state does not allow, before anything is staged. */
@@ -663,6 +748,7 @@ export class JobSheetService {
         kind: schema.maintenanceJobAttachment.kind,
         stage: schema.maintenanceJobAttachment.stage,
         contentType: schema.document.contentType,
+        scan: schema.documentScan.status,
       })
       .from(schema.maintenanceJobAttachment)
       .innerJoin(
@@ -672,11 +758,20 @@ export class JobSheetService {
           eq(schema.document.id, schema.maintenanceJobAttachment.documentId),
         ),
       )
+      .leftJoin(
+        schema.documentScan,
+        and(
+          eq(schema.documentScan.companyId, schema.document.companyId),
+          eq(schema.documentScan.documentId, schema.document.id),
+        ),
+      )
       .where(
         and(
           eq(schema.maintenanceJobAttachment.jobId, job.id),
           eq(schema.maintenanceJobAttachment.stage, SHEET_FILE_STAGE),
           inArray(schema.maintenanceJobAttachment.kind, [...SHEET_FILE_KINDS]),
+          // M11 decision 6: an infected file is quarantined and never listed.
+          sql`${schema.documentScan.status} is distinct from 'infected'`,
         ),
       );
     const [code] = await tx
@@ -729,6 +824,7 @@ export class JobSheetService {
             kind: f.kind as 'image' | 'video',
             stage: SHEET_FILE_STAGE,
             contentType: f.contentType,
+            scan: f.scan === 'clean' ? ('clean' as const) : ('pending' as const),
           })),
       timeZone: facts.timeZone,
       linkExpiresAt: link.expiresAt,

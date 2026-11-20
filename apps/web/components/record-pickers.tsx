@@ -106,8 +106,9 @@ export function TenantPicker({
 
   useEffect(() => {
     let current = true;
+    // M11 decision 6: by POST, so what is typed never sits in a URL.
     api()
-      .tenants.list({ search: query.trim() || undefined })
+      .tenants.search({ search: query.trim() || undefined })
       .then(
         (result) => {
           if (!current) return;

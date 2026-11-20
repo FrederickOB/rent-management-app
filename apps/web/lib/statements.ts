@@ -311,3 +311,31 @@ export function statementEmailText(
     ? `Emailed: sent ${formatTime(statement.sentAt, timeZone)}, delivered ${formatTime(statement.deliveredAt, timeZone)}.`
     : `Emailed: sent ${formatTime(statement.sentAt, timeZone)}; delivery not yet confirmed.`;
 }
+
+/**
+ * M11 (P25): the opening balances brought in at the cut-over, in their own section of the first
+ * statement. They were owed, paid or held before the platform, so no rent tax or fee was worked
+ * out on them here.
+ */
+export function openingRows(opening: NonNullable<OwnerStatementDetail['opening']>): StatementRow[] {
+  return [
+    { key: 'opening-arrears', label: 'Arrears owed by tenants', amountMinor: opening.arrearsMinor },
+    { key: 'opening-advances', label: 'Rent paid ahead', amountMinor: opening.advancesMinor },
+    { key: 'opening-deposits', label: 'Deposits held', amountMinor: opening.depositsMinor },
+    {
+      key: 'opening-withholding',
+      label: 'Withholding tax awaiting certificates',
+      amountMinor: opening.withholdingMinor,
+    },
+    {
+      key: 'opening-agent-cash',
+      label: 'Owner’s money held by the agency',
+      amountMinor: opening.agentCashMinor,
+    },
+    {
+      key: 'opening-rent-tax',
+      label: 'Rent tax still owed to GRA',
+      amountMinor: opening.rentTaxOutstandingMinor,
+    },
+  ];
+}

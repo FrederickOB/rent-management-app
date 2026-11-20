@@ -25,8 +25,10 @@ import {
   EXPORT_POLL_MS,
   EXPORT_POLL_TRIES,
   exportNext,
+  gate1ExtraRows,
   gate1Rows,
   gate1StatusText,
+  gate1Targets,
   monthsText,
   NO_FILTERS,
   ratioCounts,
@@ -37,6 +39,7 @@ import {
   type Dashboard,
   type DashboardFilters,
   type Gate1,
+  type TargetState,
 } from '@/lib/reporting';
 import { useRequestGate } from '@/lib/request-gate';
 import { formatMinor } from '@/lib/tenancy-format';
@@ -355,6 +358,12 @@ function Figure({
 }
 
 /** Gate 1 (PRD section 19) for the company this month. */
+export const TARGET_TONES: Record<TargetState, 'green' | 'red' | 'neutral'> = {
+  met: 'green',
+  missed: 'red',
+  unknown: 'neutral',
+};
+
 export function Gate1Card({ gate1, title }: { readonly gate1: Gate1; readonly title?: string }) {
   const { timeZone } = useApp();
   return (
@@ -370,9 +379,19 @@ export function Gate1Card({ gate1, title }: { readonly gate1: Gate1; readonly ti
           </span>
         }
       />
-      <CardBody>
+      <CardBody className="space-y-4">
+        {/* M11 decision 4: the two Gate 1 targets, met or not. */}
+        {gate1Targets(gate1).length > 0 ? (
+          <ul className="flex flex-wrap gap-2" data-testid="gate1-targets">
+            {gate1Targets(gate1).map((target) => (
+              <li key={target.key} data-testid={`gate1-target-${target.key}`}>
+                <Badge tone={TARGET_TONES[target.state]}>{`${target.label}: ${target.text}`}</Badge>
+              </li>
+            ))}
+          </ul>
+        ) : null}
         <ul className="grid gap-4 md:grid-cols-2">
-          {gate1Rows(gate1).map((row) => (
+          {[...gate1Rows(gate1), ...gate1ExtraRows(gate1)].map((row) => (
             <li key={row.key} className="space-y-1" data-testid={`gate1-${row.key}`}>
               <p className="flex items-baseline justify-between gap-2 text-sm">
                 <span className="font-medium text-slate-800">{row.label}</span>

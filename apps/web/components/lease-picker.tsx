@@ -74,11 +74,12 @@ export function LeasePicker({
     if (ownerId && properties === null) return;
     let current = true;
     const text = query.trim() || undefined;
+    // By POST (M11 decision 6, review): a name or phone never sits in a URL.
     const found = ownerId
       ? Promise.all(
-          (properties ?? []).map((propertyId) => api().leases.list({ propertyId, search: text })),
+          (properties ?? []).map((propertyId) => api().leases.search({ propertyId, search: text })),
         ).then((lists) => lists.flat())
-      : api().leases.list({ search: text });
+      : api().leases.search({ search: text });
     found.then(
       (list) => {
         if (!current) return;

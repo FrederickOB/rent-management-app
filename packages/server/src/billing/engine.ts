@@ -79,12 +79,13 @@ import {
   type PaymentAmount,
   type PostingRule,
 } from '@rent/domain/ledger';
+import type { OpeningLeasePlan } from '@rent/domain/onboarding';
 import { billingSettingsOf, parseCompanySettings } from '@rent/domain/settings';
 import { v7 as uuidv7 } from 'uuid';
 import { companyRecord, type CompanyRecord } from '../companies/companies.service';
 import { ownerFacts } from '../companies/owners.service';
 import type { Clock } from '../core/clock';
-import { AppError, conflict, invalid } from '../core/errors';
+import { AppError, conflict, invalid, notFound } from '../core/errors';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK } from '../core/tokens';
 import { DocumentsService } from '../documents/documents.service';
@@ -94,8 +95,10 @@ import { PostingService, type PostedEntry } from '../ledger/posting.service';
 import { RulesService, type ResolvedRule } from '../rules/rules.service';
 import {
   billingLeaseOf,
+  billingLeasesOf,
   renewedLeaseOf,
   scheduleRowsOf,
+  scheduleRowsOfMany,
   startedRenewalOf,
   type BillingLease,
 } from '../tenancy/billing-facts';
@@ -104,6 +107,7 @@ import {
   dimsOf,
   formatInvoiceNumber,
   formatReceiptNumber,
+  invoicedBooksOf,
   isoNow,
   leaseBookOf,
   loadAllocations,
@@ -113,6 +117,7 @@ import {
   paymentOrder,
   paymentsByIds,
   poolPayments,
+  poolPaymentsMany,
   requireBook,
   type AllocationRecord,
   type LeaseBook,
@@ -264,6 +269,19 @@ export function lastBillableDay(lease: BillingLease): string | null {
 }
 
 /**
+ * M11 founder decision 3 (P25): an imported lease billed from a later period than its start was
+ * settled before the platform up to its billing start, except the opening months still owed, so
+ * its paid-until never falls below that (the forward walk's `floor`). Null for any other lease.
+ */
+export function paidUntilFloor(lease: BillingLease): { readonly billingStart: string } | null {
+  return lease.importedBatchId !== null &&
+    lease.billingStartDate !== null &&
+    lease.billingStartDate > lease.startDate
+    ? { billingStart: lease.billingStartDate }
+    : null;
+}
+
+/**
  * The billing engine (M4a plan 4.4 to 4.11): each operation runs the domain's planning and posting
  * functions in the order of the reference model (packages/domain/src/billing/testing/
  * lease-ledger.ts) and writes the result in the caller's transaction, which holds the lease's
@@ -329,6 +347,57 @@ export class BillingEngine {
     state.vatRates =
       (await this.vatFor(tx, state, isoNow(this.clock, company.timeZone)))?.rates ?? null;
     return state;
+  }
+
+  /**
+   * load() for many leases at once, in a fixed number of queries plus one per lease without an
+   * invoice or with VAT (M11: the invoice list loaded each lease on its own, about ten queries a
+   * lease). Each state is the one load() gives: the same lines (numbered within the lease), the
+   * same allocations and pools in the same order.
+   */
+  async loadMany(
+    tx: Tx,
+    companyId: string,
+    leaseIds: readonly string[],
+  ): Promise<Map<string, LeaseState>> {
+    const out = new Map<string, LeaseState>();
+    const ids = [...new Set(leaseIds)];
+    if (ids.length === 0) return out;
+    const company = await companyRecord(tx, companyId);
+    if (!company) throw new Error('Company not found');
+    const today = isoNow(this.clock, company.timeZone);
+    const leases = await billingLeasesOf(tx, ids);
+    const lines = await loadLines(tx, ids);
+    const pools = await poolPaymentsMany(tx, ids);
+    const schedules = await scheduleRowsOfMany(tx, ids);
+    const allocations = await loadAllocations(tx, {
+      leaseIds: ids,
+      paymentIds: [...new Set([...pools.values()].flat().map((p) => p.id))],
+    });
+    const books = await invoicedBooksOf(tx, ids);
+    for (const leaseId of ids) {
+      const lease = leases.get(leaseId);
+      if (!lease) throw notFound('Lease');
+      const payments = pools.get(leaseId) ?? [];
+      const paid = new Set(payments.map((p) => p.id));
+      const state: LeaseState = {
+        company,
+        lease,
+        book: books.get(leaseId) ?? (await leaseBookOf(tx, lease, today)),
+        schedule: schedules.get(leaseId) ?? [],
+        lines: lines
+          .filter((l) => l.leaseId === leaseId)
+          .map((l, i) => ({ ...l, sequence: i + 1 })),
+        allocations: allocations.filter(
+          (a) => a.leaseId === leaseId || (a.paymentId !== null && paid.has(a.paymentId)),
+        ),
+        payments,
+        vatRates: null,
+      };
+      state.vatRates = (await this.vatFor(tx, state, today))?.rates ?? null;
+      out.set(leaseId, state);
+    }
+    return out;
   }
 
   // Invoices (BC-01; plan 4.4) -------------------------------------------------------------------
@@ -1346,6 +1415,9 @@ export class BillingEngine {
     companyKind: string,
   ): Promise<('collector' | 'owner_account' | 'agency_account' | 'provider')[]> {
     switch (payment.row.cashAccount) {
+      // M11 (P25): an opening payment is never reversed; an adjustment workbook lowers it.
+      case '3900':
+        return [];
       case '1050': {
         // Once the provider has paid it out (P22), the money sits in the account it settled to,
         // so a reversal takes it from there (architecture P21b; M4b review F3).
@@ -1423,6 +1495,9 @@ export class BillingEngine {
   }> {
     if (payment.reversedAccountingDate)
       throw conflict('payment_reversed', 'This payment was already reversed');
+    // M11 (P25): money brought in at the cut-over is never reversed (P21); an adjustment workbook
+    // lowers it, never below what has been drawn from it.
+    if (payment.opening) throw openingNeverReversed();
     // A deposit a move-out has used is never reversed by a staff correction (M8 review): its
     // settlement stands. A chargeback cannot be refused, so it takes the share back (P21b below).
     if (input.approvalRequestId !== null && (await this.depositUsed(tx, payment.id)) > 0)
@@ -2925,6 +3000,197 @@ export class BillingEngine {
     return posted;
   }
 
+  // Opening balances (P25; M11 decision 3) ------------------------------------------------------
+
+  /**
+   * Writes one lease's opening plan (`planOpeningLease` or `planOpeningAdjustment` of
+   * packages/domain/src/onboarding/opening.ts) in the caller's transaction, which holds the lease's
+   * billing lock and the counters: its opening invoice (kind `opening`, no PDF) with its lines and
+   * their accruals at the cut-over, its entries through the posting service (`P25:<batch>:<item>`,
+   * and the plan's P02 draws), its opening payments (source `opening_balance`, method `opening`,
+   * against 3900, never a receipt) and its allocations (record type `opening`). The fee and tax
+   * hooks are never called: opening money posts no P14 and no P17 (OQ-64). Returns each entry
+   * posted, by key. Reductions (an advance lowered) are the caller's onboarding items.
+   */
+  async recordOpening(
+    tx: Tx,
+    state: LeaseState,
+    plan: OpeningLeasePlan,
+    meta: { readonly batchId: string; readonly cutOver: string; readonly causedBy: string | null },
+  ): Promise<Map<string, PostedEntry>> {
+    const { company, lease } = state;
+    const book = requireBook(state.book);
+    const posted = new Map<string, PostedEntry>();
+    // Raised today: the invoice must be in the book of the property's owner on its issue date
+    // (RA050), and ownership recorded at the import starts today. Its lines keep their own
+    // periods and due dates, and every entry is dated the cut-over.
+    const issueDate = this.today(state);
+    if (plan.lines.length > 0) {
+      const owner = (await ownerFacts(tx, [book.ownerId])).get(book.ownerId);
+      if (!owner) throw new Error('The owner of this lease is not visible');
+      const reference = await this.ensureReference(tx, lease);
+      const invoiceNumber = await nextNumber(tx, company.id, 'invoice');
+      const invoiceId = uuidv7();
+      const dueDate = plan.lines.reduce(
+        (min, l) => (l.dueDate < min ? l.dueDate : min),
+        plan.lines[0]!.dueDate,
+      );
+      await tx.insert(schema.invoice).values({
+        id: invoiceId,
+        companyId: company.id,
+        number: invoiceNumber,
+        kind: 'opening',
+        propertyId: lease.propertyId,
+        tenantId: lease.tenantId,
+        leaseId: lease.id,
+        unitId: lease.unitId,
+        ownerId: book.ownerId,
+        bookId: book.bookId,
+        issueDate,
+        dueDate,
+        periodFrom: null,
+        periodTo: null,
+        cycleStart: null,
+        holdingOver: false,
+        paymentReference: reference,
+        unitCode: lease.unitCode,
+        propertyName: lease.propertyName,
+        billedToName: lease.tenantName,
+        billedToTin: lease.tenantTinMasked,
+        billedFromName: owner.name,
+        billedFromTin: owner.tinMasked,
+        renderRequestId: null,
+        createdBy: meta.causedBy,
+      });
+      await tx.insert(schema.invoiceLine).values(
+        plan.lines.map((l, i) => ({
+          id: l.id,
+          companyId: company.id,
+          invoiceId,
+          propertyId: lease.propertyId,
+          tenantId: lease.tenantId,
+          leaseId: lease.id,
+          position: i + 1,
+          kind: l.kind,
+          baseLineId: null,
+          chargePeriodId: l.chargePeriodId,
+          periodStart: l.periodStart,
+          periodEnd: l.periodEnd,
+          dueDate: l.dueDate,
+          amountMinor: l.amountMinor,
+          rateBps: null,
+          ruleId: null,
+        })),
+      );
+    }
+    for (const entry of plan.entries) {
+      const done = await this.posting.post(tx, {
+        companyId: company.id,
+        rule: entry.rule,
+        key: entry.key,
+        valueDate: entry.valueDate,
+        lines: entry.lines,
+        record: { type: 'onboarding_batch', id: meta.batchId },
+        causedBy: meta.causedBy,
+      });
+      if (done) posted.set(entry.key, done);
+    }
+    const entryOfItem = (itemId: string | null, lineId?: string): PostedEntry => {
+      const entry =
+        itemId === null
+          ? plan.entries.find((e) => e.itemId === null && e.key.startsWith(`P02:${lineId}:`))
+          : plan.entries.find((e) => e.itemId === itemId && e.rule === 'P25');
+      const done = entry ? posted.get(entry.key) : undefined;
+      if (!done) throw new Error(`No entry for opening item ${itemId ?? lineId}`);
+      return done;
+    };
+    for (const p of plan.payments) {
+      const entry = entryOfItem(p.itemId);
+      await tx.insert(schema.payment).values({
+        id: p.id,
+        companyId: company.id,
+        method: 'opening',
+        amountMinor: p.amountMinor,
+        receivedOn: p.receivedOn,
+        accountingDate: entry.accountingDate,
+        propertyId: lease.propertyId,
+        unitId: lease.unitId,
+        tenantId: lease.tenantId,
+        leaseId: lease.id,
+        ownerId: book.ownerId,
+        bookId: book.bookId,
+        cashAccount: '3900',
+        sourceType: 'opening_balance',
+        sourceId: p.id,
+        entryId: entry.entryId,
+        note: 'Brought in at the cut-over (opening balance)',
+        recordedBy: meta.causedBy,
+      });
+    }
+    const rows = plan.allocations
+      .filter((a) => a.amountMinor !== 0)
+      .map((a) => {
+        const entry = entryOfItem(a.itemId, a.lineId);
+        return {
+          // M11 review M1: credit the lease already held, drawn onto opening debt (no item).
+          draw: a.itemId === null,
+          companyId: company.id,
+          propertyId: lease.propertyId,
+          tenantId: lease.tenantId,
+          leaseId: lease.id,
+          invoiceLineId: a.lineId,
+          source: a.source,
+          paymentId: a.paymentId,
+          amountMinor: a.amountMinor,
+          valueDate: a.valueDate,
+          accountingDate: entry.accountingDate > a.valueDate ? entry.accountingDate : a.valueDate,
+          recordType: 'opening',
+          recordId: meta.batchId,
+          entryId: entry.entryId,
+        };
+      });
+    // The opening items' own allocations: money received before the platform, no fee (OQ-64).
+    const items = rows.filter((r) => !r.draw).map(({ draw: _draw, ...r }) => r);
+    if (items.length > 0) {
+      const inserted = await tx.insert(schema.allocation).values(items).returning();
+      state.allocations.push(...inserted.map(allocationRecord));
+    }
+    // M11 review M1: credit the lease already held drawn onto opening arrears (a P02 draw). Money
+    // a platform payment brought carries its fee as any credit drawn onto a month does; the fee
+    // hook leaves an opening payment's share out (`isOpeningAllocation`).
+    const draws = new Map<string, Omit<(typeof rows)[number], 'draw'>[]>();
+    for (const { draw, ...r } of rows)
+      if (draw) draws.set(r.entryId, [...(draws.get(r.entryId) ?? []), r]);
+    for (const [entryId, drawn] of draws) {
+      const inserted = await tx.insert(schema.allocation).values(drawn).returning();
+      state.allocations.push(...inserted.map(allocationRecord));
+      await this.feeHooks?.afterAllocations(tx, state, inserted, {
+        valueDate: drawn[0]!.valueDate,
+        recordType: 'opening',
+        recordId: meta.batchId,
+        entryId,
+        causedBy: meta.causedBy,
+      });
+    }
+    for (const l of plan.lines.filter((line) => line.accrued)) {
+      const entry = entryOfItem(l.itemId);
+      await tx.insert(schema.invoiceLineAccrual).values({
+        companyId: company.id,
+        propertyId: lease.propertyId,
+        tenantId: lease.tenantId,
+        leaseId: lease.id,
+        invoiceLineId: l.id,
+        amountMinor: l.amountMinor,
+        valueDate: meta.cutOver,
+        accountingDate: entry.accountingDate,
+        entryId: entry.entryId,
+      });
+    }
+    state.lines = await loadLines(tx, [lease.id]);
+    state.payments = await poolPayments(tx, lease.id);
+    return posted;
+  }
+
   // The forward walk (AR-02, AR-03; plan 4.7) -------------------------------------------------------
 
   /** The charge periods the lease will bill that have no invoice line yet. */
@@ -2960,7 +3226,7 @@ export class BillingEngine {
         scheduled: this.scheduled(state),
       }),
       creditPools(state.payments, state.allocations),
-      { lastDay: lastBillableDay(state.lease) },
+      { lastDay: lastBillableDay(state.lease), floor: paidUntilFloor(state.lease) },
     );
   }
 
@@ -2982,6 +3248,13 @@ export interface DepositUnwound {
   readonly retainedMinor: number;
   readonly refundMinor: number;
 }
+
+/** M11 (P25): an opening payment is never reversed (P21). */
+export const openingNeverReversed = () =>
+  conflict(
+    'opening_never_reversed',
+    'This is an opening balance brought in at the cut-over. It is never reversed; correct it with an adjustment workbook.',
+  );
 
 /** A staff reversal of a deposit a move-out has settled (M8 review). */
 export const depositSettled = () =>

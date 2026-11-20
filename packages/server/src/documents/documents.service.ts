@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { and, eq, schema, withCompany, type Database, type Tx } from '@rent/db';
 import {
   renderTemplateHtml,
@@ -18,18 +18,88 @@ import {
   MEDIA_SNIFF_BYTES,
   type MediaKind,
 } from '@rent/domain/maintenance';
-import { StorageError, type ObjectInfo, type StoragePort } from '@rent/integrations';
+import {
+  StorageError,
+  type MalwareScannerPort,
+  type ObjectInfo,
+  type ObjectRef,
+  type ScanResult,
+  type StoragePort,
+} from '@rent/integrations';
 import sharp from 'sharp';
 import { v7 as uuidv7 } from 'uuid';
 import type { Clock } from '../core/clock';
 import type { AppConfig } from '../core/config';
-import { invalid, notFound } from '../core/errors';
+import {
+  AppError,
+  documentQuarantined,
+  documentScanPending,
+  invalid,
+  notFound,
+} from '../core/errors';
 import { enqueueOutbox } from '../core/outbox';
 import { CLOCK, CONFIG, DATABASE, STORAGE_PORT } from '../core/tokens';
 import { AuditService } from '../audit/audit.service';
 import { RulesService } from '../rules/rules.service';
+import { MALWARE_SCANNER, malwareScannerFor } from './scanner';
 
 export const RENDER_PDF_JOB = 'documents.render-pdf';
+
+/**
+ * M11 decision 6 (plan 4.14): scans an upload's stored bytes, keyed by document. Queued through the
+ * outbox in the transaction that records every upload; does nothing for one already scanned.
+ */
+export const UPLOADS_SCAN_JOB = 'uploads.scan';
+
+/**
+ * Where a document's bytes came from (M11 decision 6). `generated`: we rendered or built them (a
+ * PDF, a statement, an export, a drawn signature re-encoded by us), so they are clean as stored.
+ * `upload`: anyone else's bytes (a person's upload or a provider's media), scanned before anyone
+ * but the uploader may open them.
+ */
+export type DocumentOrigin = 'generated' | 'upload';
+
+/** No scan result yet is `pending`; `infected` is quarantined: kept, never served. */
+export type DocumentScanStatus = 'pending' | 'clean' | 'infected';
+
+export interface DocumentScanState {
+  readonly documentId: string;
+  readonly status: DocumentScanStatus;
+  readonly scannedAt: Date | null;
+  readonly engine: string | null;
+  /** The person (or, on a job sheet, the artisan) who uploaded it. */
+  readonly createdBy: string | null;
+  readonly kind: string;
+}
+
+/** What a serving route does with a file that may not be served (M11 decision 6). */
+export interface ServeOptions {
+  /** The person asking: the uploader may open their own pending file. */
+  readonly viewer?: string | null;
+  /**
+   * `refuse` (a route serving one file): 409 while pending, 410 when quarantined. `omit` (a list
+   * or a page that shows a link beside other facts): no link, and nothing thrown.
+   */
+  readonly unscanned?: 'refuse' | 'omit';
+}
+
+/** A file's name when it is served as an attachment and the caller gave none (F5). */
+const EXTENSIONS: Readonly<Record<string, string>> = {
+  'application/pdf': 'pdf',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
+  'video/3gpp': '3gp',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/mpeg': 'mp3',
+  'audio/ogg': 'ogg',
+  'audio/amr': 'amr',
+  'text/csv': 'csv',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+};
 /**
  * Emitted in the transaction that records a rendered PDF, so whoever asked for it (the e-signing
  * engine, M3) acts once the document and its SHA-256 exist (architecture section 9).
@@ -99,6 +169,12 @@ export interface UploadPurpose {
     | 'expense_receipt';
   readonly contentTypes: readonly string[];
   readonly maxBytes: number;
+  /**
+   * M11 review R3 F10 (architecture, data protection): photos from tenants and artisans are
+   * re-encoded before they are stored, which drops EXIF and its location. The original's hash is
+   * kept in the audit event. A file that cannot be decoded is kept as it came (and still scanned).
+   */
+  readonly stripImageMetadata?: boolean;
 }
 
 /**
@@ -141,6 +217,7 @@ export const MESSAGE_PHOTO_UPLOAD: UploadPurpose = {
   purpose: 'message_photo',
   contentTypes: ['image/jpeg', 'image/png', 'image/webp'],
   maxBytes: 10_000_000,
+  stripImageMetadata: true,
 };
 
 /**
@@ -185,9 +262,42 @@ const media = (purpose: MediaPurpose['purpose'], kinds: readonly MediaKind[]): M
   contentTypes: typesOf(kinds),
   maxBytes: maxOf(kinds),
 });
-export const JOB_MEDIA_UPLOAD = media('job_media', ['image', 'video', 'audio']);
+/** Repairs: tenants' and artisans' photos lose their EXIF and location (M11 review R3 F10). */
+export const JOB_MEDIA_UPLOAD: MediaPurpose = {
+  ...media('job_media', ['image', 'video', 'audio']),
+  stripImageMetadata: true,
+};
 export const INSPECTION_PHOTO_UPLOAD = media('inspection_photo', ['image']);
 export const EXPENSE_RECEIPT_UPLOAD = media('expense_receipt', ['image', 'document']);
+
+/**
+ * Re-encodes a photo in its own format (M11 review R3 F10): sharp applies the orientation and
+ * writes no metadata, so EXIF, GPS and XMP are gone. Null when the bytes do not decode as an
+ * image, or the type is not a photo; the caller keeps the file as it came.
+ */
+export async function reencodeImage(bytes: Buffer, contentType: string): Promise<Buffer | null> {
+  const image = () => sharp(bytes, { limitInputPixels: 50_000_000 }).rotate();
+  try {
+    if (contentType === 'image/jpeg') return await image().jpeg({ quality: 90 }).toBuffer();
+    if (contentType === 'image/png') return await image().png().toBuffer();
+    if (contentType === 'image/webp') return await image().webp({ quality: 90 }).toBuffer();
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+const sha256Of = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * What arrived, when an upload was re-encoded before it was stored (F10; founder, review round):
+ * its SHA-256 and byte count, kept on the document row and in its audit event, so the original is
+ * shown to have arrived whole although only the re-encoded copy is kept.
+ */
+export interface OriginalFile {
+  readonly sha256: string;
+  readonly bytes: number;
+}
 
 /** A media upload checked and streamed to write-once storage, waiting to be recorded. */
 export interface StagedMedia {
@@ -205,6 +315,12 @@ export interface StagedMedia {
   readonly retentionMode: 'GOVERNANCE' | 'COMPLIANCE';
   readonly retainUntil: Date;
   readonly createdBy: string;
+  /** The scan of the stored copy, taken as it was staged; null when the scanner could not say. */
+  readonly scan: ScanResult | null;
+  /** F10: the upload's own hash when a photo was re-encoded to drop its metadata. */
+  readonly originalSha256: string | null;
+  /** F10 (founder, review round): the upload's own byte count, with its hash. */
+  readonly originalBytes: number | null;
 }
 
 /** The domain's media refusals as named 400s (`MEDIA_TYPE_MISMATCH`, `MEDIA_TOO_LARGE`, ...). */
@@ -226,6 +342,12 @@ export interface StagedEvidence {
   readonly retentionMode: 'GOVERNANCE' | 'COMPLIANCE';
   readonly retainUntil: Date;
   readonly createdBy: string;
+  /** The scan of the stored bytes, taken as they were staged; null when the scanner could not say. */
+  readonly scan: ScanResult | null;
+  /** F10: the upload's own hash when a photo was re-encoded to drop its metadata. */
+  readonly originalSha256: string | null;
+  /** F10 (founder, review round): the upload's own byte count, with its hash. */
+  readonly originalBytes: number | null;
 }
 
 /** One evidence key per upload, so staging it again finds the copy already made. */
@@ -262,6 +384,8 @@ export const LOGO_UPLOAD: UploadPurpose = {
  */
 @Injectable()
 export class DocumentsService {
+  private readonly scanner: MalwareScannerPort;
+
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
@@ -269,41 +393,124 @@ export class DocumentsService {
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(RulesService) private readonly rules: RulesService,
-  ) {}
+    // M11 decision 6: the configured scanner unless one is given (tests).
+    @Optional() @Inject(MALWARE_SCANNER) scanner?: MalwareScannerPort,
+  ) {
+    this.scanner = scanner ?? malwareScannerFor(config);
+  }
 
+  /**
+   * A 5-minute link to a stored document, issued after the caller's policy check (CLAUDE.md
+   * section 10). M11 decision 6: an upload not yet scanned is refused (409) to everyone but its
+   * uploader, and one found infected is never served (410); see ServeOptions. Every link is
+   * `no-store`, and an upload is served as an attachment, never inline (review R3 F5).
+   */
   async downloadUrl(
     companyId: string,
     documentId: string,
     filename?: string,
+    options: ServeOptions = {},
   ): Promise<string | null> {
-    const [doc] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
-      tx
-        .select()
-        .from(schema.document)
-        .where(and(eq(schema.document.companyId, companyId), eq(schema.document.id, documentId))),
-    );
-    if (!doc) return null;
+    const found = await this.servable(companyId, documentId, options);
+    if (!found) return null;
+    const { doc, ours } = found;
+    const name =
+      filename ?? (ours ? undefined : `${doc.kind}.${EXTENSIONS[doc.contentType] ?? 'bin'}`);
     return this.storage.createDownloadUrl({
       bucket: doc.bucket,
       key: doc.storageKey,
       versionId: doc.storageVersionId ?? undefined,
       expiresInSeconds: DOWNLOAD_SECONDS,
-      ...(filename ? { filename } : {}),
+      ...(name ? { filename: name } : {}),
     });
+  }
+
+  /**
+   * A document's scan state (M11 decision 6), read in the company's own context. Callers check
+   * first that the reader may see the document. Null when there is no such document.
+   */
+  async scanState(companyId: string, documentId: string): Promise<DocumentScanState | null> {
+    const [row] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+      this.documentWithScan(tx, companyId, documentId),
+    );
+    if (!row) return null;
+    return {
+      documentId: row.doc.id,
+      status: (row.scan?.status as DocumentScanStatus | undefined) ?? 'pending',
+      scannedAt: row.scan?.scannedAt ?? null,
+      engine: row.scan?.engine ?? null,
+      createdBy: row.doc.createdBy,
+      kind: row.doc.kind,
+    };
+  }
+
+  /** The document and its scan result, if any. */
+  private documentWithScan(tx: Tx, companyId: string, documentId: string) {
+    return tx
+      .select({ doc: schema.document, scan: schema.documentScan })
+      .from(schema.document)
+      .leftJoin(
+        schema.documentScan,
+        and(
+          eq(schema.documentScan.companyId, schema.document.companyId),
+          eq(schema.documentScan.documentId, schema.document.id),
+        ),
+      )
+      .where(and(eq(schema.document.companyId, companyId), eq(schema.document.id, documentId)));
+  }
+
+  /**
+   * The document, if it may be served (M11 decision 6): clean, or pending to its own uploader.
+   * `ours` is true for a document we generated, which may be shown inline.
+   */
+  private async servable(
+    companyId: string,
+    documentId: string,
+    options: ServeOptions,
+  ): Promise<{ doc: typeof schema.document.$inferSelect; ours: boolean } | null> {
+    const [row] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+      this.documentWithScan(tx, companyId, documentId),
+    );
+    if (!row) return null;
+    const omit = options.unscanned === 'omit';
+    const status = row.scan?.status ?? 'pending';
+    if (status === 'infected') {
+      if (omit) return null;
+      throw documentQuarantined();
+    }
+    if (status === 'pending') {
+      const uploader = !!options.viewer && row.doc.createdBy === options.viewer;
+      if (!uploader) {
+        if (omit) return null;
+        throw documentScanPending();
+      }
+    }
+    // Rendered by us: generated since M11, or stored before M11 from a template.
+    const ours =
+      row.scan?.engine === 'generated' ||
+      (row.scan?.engine === 'pre_m11' && row.doc.templateKey !== null);
+    return { doc: row.doc, ours };
   }
 
   /**
    * A stored document's bytes, re-hashed and compared with the fingerprint recorded when it was
    * stored (M1 verifyFingerprint). Callers check first that the reader may see the document.
+   * M11 decision 6: an infected file is never read (410); an upload not yet scanned is refused
+   * (409) unless `allowPending` (a caller that only re-encodes the pixels, such as a thumbnail).
    */
-  async documentFile(companyId: string, documentId: string): Promise<DocumentFile | null> {
-    const [doc] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
-      tx
-        .select()
-        .from(schema.document)
-        .where(and(eq(schema.document.companyId, companyId), eq(schema.document.id, documentId))),
+  async documentFile(
+    companyId: string,
+    documentId: string,
+    options: { readonly allowPending?: boolean } = {},
+  ): Promise<DocumentFile | null> {
+    const [row] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
+      this.documentWithScan(tx, companyId, documentId),
     );
-    if (!doc) return null;
+    if (!row) return null;
+    const doc = row.doc;
+    const status = row.scan?.status ?? 'pending';
+    if (status === 'infected') throw documentQuarantined();
+    if (status === 'pending' && !options.allowPending) throw documentScanPending();
     const bytes = await this.storage.get({
       bucket: doc.bucket,
       key: doc.storageKey,
@@ -354,7 +561,11 @@ export class DocumentsService {
     };
   }
 
-  /** Records a file from storeWriteOnce as a write-once document, in the caller's transaction. */
+  /**
+   * Records a file from storeWriteOnce as a write-once document, in the caller's transaction.
+   * M11 decision 6: a file we generated (the default) is recorded clean at once; pass
+   * `origin: 'upload'` for anyone else's bytes (a provider's media), which the worker then scans.
+   */
   async recordWriteOnce(
     tx: Tx,
     file: WriteOnceFile,
@@ -364,9 +575,14 @@ export class DocumentsService {
       readonly templateVersion?: number | null;
       readonly dataSnapshot?: Record<string, unknown> | null;
       readonly createdBy?: string | null;
+      readonly origin?: DocumentOrigin;
+      /** F10: what arrived, when a photo was re-encoded before it was stored. */
+      readonly original?: OriginalFile | null;
     },
   ): Promise<string> {
     return this.insertDocument(tx, {
+      origin: meta.origin ?? 'generated',
+      original: meta.original ?? null,
       companyId: file.companyId,
       kind: meta.kind,
       contentType: file.contentType,
@@ -518,7 +734,14 @@ export class DocumentsService {
     if (wanted.size === 0) return {};
     const images: Record<string, string> = {};
     for (const [documentId, sha256] of wanted) {
-      const file = await this.documentFile(companyId, documentId);
+      // M11 decision 6: a thumbnail is new pixels, so a photo still being scanned may be shown;
+      // a quarantined one never is.
+      const file = await this.documentFile(companyId, documentId, { allowPending: true }).catch(
+        (error: unknown) => {
+          if (error instanceof AppError && error.status === 410) return null;
+          throw error;
+        },
+      );
       if (!file || !file.intact || file.sha256 !== sha256) continue;
       const thumb = await sharp(file.bytes, { limitInputPixels: 50_000_000 })
         .rotate()
@@ -676,6 +899,8 @@ export class DocumentsService {
       sha256: string,
       versionId: string,
       lock: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
+      scan: ScanResult | null,
+      original: OriginalFile | null = null,
     ): StagedMedia => ({
       companyId: ctx.companyId,
       uploadId,
@@ -690,18 +915,26 @@ export class DocumentsService {
       retentionMode: lock.mode,
       retainUntil: lock.retainUntil,
       createdBy: uploader,
+      scan,
+      originalSha256: original?.sha256 ?? null,
+      originalBytes: original?.bytes ?? null,
     });
     const fromEarlier = async (info: ObjectInfo): Promise<StagedMedia> => {
       if (!info.versionId || !info.sha256)
         throw new Error('The evidence copy has no version or hash');
-      const head = await this.storage.getHead(
-        { ...evidence, versionId: info.versionId },
-        MEDIA_SNIFF_BYTES,
+      const copy = { ...evidence, versionId: info.versionId };
+      const head = await this.storage.getHead(copy, MEDIA_SNIFF_BYTES);
+      return staged(
+        check(head, info.size),
+        info.size,
+        info.sha256,
+        info.versionId,
+        {
+          mode: info.retentionMode ?? retention.mode,
+          retainUntil: info.retainUntil ?? retention.retainUntil,
+        },
+        await this.preScan(copy),
       );
-      return staged(check(head, info.size), info.size, info.sha256, info.versionId, {
-        mode: info.retentionMode ?? retention.mode,
-        retainUntil: info.retainUntil ?? retention.retainUntil,
-      });
     };
     const earlier = await this.storage.head(evidence);
     if (earlier) return fromEarlier(earlier);
@@ -714,43 +947,96 @@ export class DocumentsService {
         'size or type does not match',
         new DomainError('media.type_mismatch', 'The file does not match what was declared'),
       );
+    // M11 review R3 F3: every read is of the version the HEAD saw, so a second POST to the same
+    // presigned upload cannot swap the bytes after they were checked.
+    const pinned: ObjectRef = { ...upload, versionId: info.versionId ?? undefined };
     let checked: { readonly kind: MediaKind; readonly contentType: string };
     try {
-      checked = check(await this.storage.getHead(upload, MEDIA_SNIFF_BYTES), info.size);
+      checked = check(await this.storage.getHead(pinned, MEDIA_SNIFF_BYTES), info.size);
     } catch (error) {
       return reject('contents do not match the declared type', error);
     }
+    const store = async (
+      write: () => Promise<{ readonly versionId: string }>,
+      done: (versionId: string) => Promise<StagedMedia>,
+    ): Promise<StagedMedia> => {
+      try {
+        return await done((await write()).versionId);
+      } catch (error) {
+        const raced =
+          error instanceof StorageError && error.code === 'already_exists'
+            ? await this.storage.head(evidence)
+            : null;
+        if (!raced) throw error;
+        return fromEarlier(raced);
+      }
+    };
+    // M11 review R3 F10: a tenant's or artisan's photo is re-encoded, dropping EXIF and its
+    // location, before the evidence copy is made; the original's hash goes in the audit event.
+    if (purpose.stripImageMetadata && checked.kind === 'image') {
+      const original = await this.storage.get(pinned);
+      if (original.length !== info.size) throw new Error('The upload changed while it was read');
+      const cleaned = await reencodeImage(original, checked.contentType);
+      if (cleaned) {
+        const sha256 = sha256Of(cleaned);
+        return store(
+          () =>
+            this.storage.putWriteOnce({
+              ...evidence,
+              body: cleaned,
+              contentType: checked.contentType,
+              retainUntil: retention.retainUntil,
+              mode: retention.mode,
+            }),
+          async (versionId) =>
+            staged(
+              checked,
+              cleaned.length,
+              sha256,
+              versionId,
+              retention,
+              await this.preScan(cleaned),
+              { sha256: sha256Of(original), bytes: original.length },
+            ),
+        );
+      }
+    }
     const hash = createHash('sha256');
     let size = 0;
-    for await (const chunk of await this.storage.getStream(upload)) {
+    for await (const chunk of await this.storage.getStream(pinned)) {
       const bytes = chunk as Uint8Array;
       size += bytes.length;
       hash.update(bytes);
     }
     if (size !== info.size) throw new Error('The upload changed while it was read');
     const sha256 = hash.digest('hex');
-    try {
-      const stored = await this.storage.putWriteOnceStream({
-        ...evidence,
-        body: await this.storage.getStream(upload),
-        sizeBytes: size,
-        sha256,
-        contentType: checked.contentType,
-        retainUntil: retention.retainUntil,
-        mode: retention.mode,
-      });
-      return staged(checked, size, sha256, stored.versionId, retention);
-    } catch (error) {
-      const raced =
-        error instanceof StorageError && error.code === 'already_exists'
-          ? await this.storage.head(evidence)
-          : null;
-      if (!raced) throw error;
-      return fromEarlier(raced);
-    }
+    return store(
+      async () =>
+        this.storage.putWriteOnceStream({
+          ...evidence,
+          body: await this.storage.getStream(pinned),
+          sizeBytes: size,
+          sha256,
+          contentType: checked.contentType,
+          retainUntil: retention.retainUntil,
+          mode: retention.mode,
+        }),
+      async (versionId) =>
+        staged(
+          checked,
+          size,
+          sha256,
+          versionId,
+          retention,
+          await this.preScan({ ...evidence, versionId }),
+        ),
+    );
   }
 
-  /** Records staged media as a write-once document in the caller's transaction. */
+  /**
+   * Records staged media as a write-once document in the caller's transaction, with its scan
+   * result when staging had one, and the scan job queued (M11 decision 6).
+   */
   async recordStagedMedia(tx: Tx, staged: StagedMedia, kind: string): Promise<string> {
     const [row] = await tx
       .insert(schema.document)
@@ -767,6 +1053,9 @@ export class DocumentsService {
         retentionMode: staged.retentionMode,
         retainUntil: staged.retainUntil,
         createdBy: staged.createdBy,
+        // F10 (founder, review round): what arrived, before the re-encoding dropped its metadata.
+        originalSha256: staged.originalSha256,
+        originalBytes: staged.originalBytes,
       })
       .returning({ id: schema.document.id });
     await this.audit.append(tx, {
@@ -774,8 +1063,16 @@ export class DocumentsService {
       action: 'document.stored',
       recordType: 'document',
       recordId: row!.id,
-      data: { kind, sha256: staged.sha256, writeOnce: true },
+      data: {
+        kind,
+        sha256: staged.sha256,
+        writeOnce: true,
+        ...(staged.originalSha256
+          ? { originalSha256: staged.originalSha256, originalBytes: staged.originalBytes }
+          : {}),
+      },
     });
+    await this.recordScan(tx, staged.companyId, row!.id, 'upload', staged.scan);
     const updated = await tx
       .update(schema.uploadIntent)
       .set({ status: 'processed', documentId: row!.id })
@@ -788,11 +1085,26 @@ export class DocumentsService {
     return row!.id;
   }
 
-  /** Removes a staged upload's plain copy once its record has committed; never throws. */
+  /**
+   * Removes a staged upload's plain copy once its record has committed; never throws. A photo
+   * that was re-encoded loses every version of its original, which holds its location (F10).
+   */
   async discardStagedMedia(staged: StagedMedia): Promise<void> {
-    await this.storage
-      .delete({ bucket: this.config.S3_BUCKET_FILES, key: staged.uploadKey })
-      .catch(() => undefined);
+    await this.discardPlainCopy(staged.uploadKey, staged.originalSha256 !== null);
+  }
+
+  private async discardPlainCopy(key: string, everyVersion: boolean): Promise<void> {
+    const bucket = this.config.S3_BUCKET_FILES;
+    try {
+      if (!everyVersion) {
+        await this.storage.delete({ bucket, key });
+        return;
+      }
+      for (const version of await this.storage.listVersions({ bucket, key }))
+        await this.storage.delete({ bucket, key, versionId: version.versionId ?? undefined });
+    } catch {
+      // A copy left behind is only a stray file nobody can be sent.
+    }
   }
 
   /**
@@ -827,10 +1139,13 @@ export class DocumentsService {
       await this.rejectUpload(ctx, uploadId, 'size or type does not match');
       throw invalid('upload_rejected', 'The file does not match what was declared');
     }
+    // M11 review R3 F3: the version the HEAD checked.
     const original = await this.storage.get({
       bucket: this.config.S3_BUCKET_FILES,
       key: intent.storageKey,
+      versionId: head.versionId ?? undefined,
     });
+    if (original.length !== head.size) throw new Error('The upload changed while it was read');
     let png: Buffer;
     try {
       png = await sharp(original, { limitInputPixels: 25_000_000 })
@@ -851,8 +1166,12 @@ export class DocumentsService {
       contentType: 'image/png',
     });
     const stored = await this.storage.head({ bucket: this.config.S3_BUCKET_FILES, key });
+    // M11 decision 6: an upload, re-encoded or not, is scanned before others may open it.
+    const scan = await this.preScan(png);
     await withCompany(this.database, { ...ctx, actorKind: 'staff' }, async (tx) => {
       await this.insertDocument(tx, {
+        origin: 'upload',
+        scan,
         id: documentId,
         companyId: ctx.companyId,
         kind: 'logo',
@@ -914,6 +1233,8 @@ export class DocumentsService {
       bytes: Buffer,
       versionId: string,
       lock: { readonly mode: 'GOVERNANCE' | 'COMPLIANCE'; readonly retainUntil: Date },
+      scan: ScanResult | null,
+      original: OriginalFile | null = null,
     ): StagedEvidence => ({
       companyId: ctx.companyId,
       uploadId,
@@ -925,11 +1246,22 @@ export class DocumentsService {
       retentionMode: lock.mode,
       retainUntil: lock.retainUntil,
       createdBy: ctx.personId,
+      scan,
+      originalSha256: original?.sha256 ?? null,
+      originalBytes: original?.bytes ?? null,
     });
+    const fromEarlier = async (info: ObjectInfo) => {
+      const [bytes, versionId, lock] = await this.earlierEvidence(
+        evidence,
+        intent,
+        info,
+        retention,
+      );
+      return staged(bytes, versionId, lock, await this.preScan(bytes));
+    };
     // An earlier attempt copied it already: use that copy, checked again.
     const earlier = await this.storage.head(evidence);
-    if (earlier)
-      return staged(...(await this.earlierEvidence(evidence, intent, earlier, retention)));
+    if (earlier) return fromEarlier(earlier);
 
     const head = await this.storage.head({
       bucket: this.config.S3_BUCKET_FILES,
@@ -940,14 +1272,23 @@ export class DocumentsService {
       await this.rejectUpload(ctx, uploadId, 'size or type does not match');
       throw invalid('upload_rejected', 'The file does not match what was declared');
     }
-    const bytes = await this.storage.get({
+    // M11 review R3 F3: the version the HEAD checked.
+    const uploaded = await this.storage.get({
       bucket: this.config.S3_BUCKET_FILES,
       key: intent.storageKey,
+      versionId: head.versionId ?? undefined,
     });
-    if (sniffContentType(bytes) !== intent.contentType) {
+    if (uploaded.length !== head.size) throw new Error('The upload changed while it was read');
+    if (sniffContentType(uploaded) !== intent.contentType) {
       await this.rejectUpload(ctx, uploadId, 'contents do not match the declared type');
       throw invalid('upload_rejected', 'The file is not the PDF or image it was declared as');
     }
+    // M11 review R3 F10: a tenant's photo is re-encoded, dropping EXIF and its location.
+    const cleaned =
+      purpose.stripImageMetadata && intent.contentType.startsWith('image/')
+        ? await reencodeImage(uploaded, intent.contentType)
+        : null;
+    const bytes = cleaned ?? uploaded;
     let stored: { readonly versionId: string; readonly sha256: string };
     try {
       stored = await this.storage.putWriteOnce({
@@ -964,11 +1305,16 @@ export class DocumentsService {
           ? await this.storage.head(evidence)
           : null;
       if (!raced) throw error;
-      return staged(...(await this.earlierEvidence(evidence, intent, raced, retention)));
+      return fromEarlier(raced);
     }
-    if (stored.sha256 !== createHash('sha256').update(bytes).digest('hex'))
-      throw new Error('Stored bytes do not match the upload');
-    return staged(bytes, stored.versionId, retention);
+    if (stored.sha256 !== sha256Of(bytes)) throw new Error('Stored bytes do not match the upload');
+    return staged(
+      bytes,
+      stored.versionId,
+      retention,
+      await this.preScan(bytes),
+      cleaned ? { sha256: sha256Of(uploaded), bytes: uploaded.length } : null,
+    );
   }
 
   /**
@@ -1004,14 +1350,22 @@ export class DocumentsService {
    * committed. It never throws: a copy left behind is only a stray file nobody can be sent.
    */
   async discardStagedUpload(staged: StagedEvidence): Promise<void> {
-    await this.storage
-      .delete({ bucket: this.config.S3_BUCKET_FILES, key: staged.uploadKey })
-      .catch(() => undefined);
+    // A re-encoded photo's original, with its location, goes in every version (F10).
+    await this.discardPlainCopy(staged.uploadKey, staged.originalSha256 !== null);
   }
 
-  /** Records a staged upload as a write-once document in the caller's transaction. */
+  /**
+   * Records a staged upload as a write-once document in the caller's transaction, with its scan
+   * result when staging had one, and the scan job queued (M11 decision 6).
+   */
   async recordStagedEvidence(tx: Tx, staged: StagedEvidence, kind: string): Promise<string> {
     const documentId = await this.insertDocument(tx, {
+      origin: 'upload',
+      scan: staged.scan,
+      original:
+        staged.originalSha256 && staged.originalBytes
+          ? { sha256: staged.originalSha256, bytes: staged.originalBytes }
+          : null,
       companyId: staged.companyId,
       kind,
       contentType: staged.contentType,
@@ -1087,9 +1441,22 @@ export class DocumentsService {
     };
   }
 
+  /**
+   * Records a document in the caller's transaction (M11 decision 6): `generated` gets its clean
+   * scan result at once; `upload` gets the result staging took, if any, and the scan job, which
+   * scans it if not and raises the alert if it is infected.
+   */
   async insertDocument(
     tx: Tx,
     doc: {
+      origin: DocumentOrigin;
+      /** For an upload: the scan staging took of exactly these bytes. */
+      scan?: ScanResult | null;
+      /**
+       * F10 (founder, review round): a re-encoded upload's original hash and byte count, on the
+       * document row and in its `document.stored` audit event.
+       */
+      original?: OriginalFile | null;
       id?: string;
       companyId: string;
       kind: string;
@@ -1131,6 +1498,8 @@ export class DocumentsService {
         dataSnapshot: doc.dataSnapshot ?? null,
         dataSnapshotSha256: snapshotSha,
         createdBy: doc.createdBy ?? null,
+        originalSha256: doc.original?.sha256 ?? null,
+        originalBytes: doc.original?.bytes ?? null,
       })
       .returning({ id: schema.document.id });
     await this.audit.append(tx, {
@@ -1138,9 +1507,131 @@ export class DocumentsService {
       action: 'document.stored',
       recordType: 'document',
       recordId: row!.id,
-      data: { kind: doc.kind, sha256, writeOnce: doc.writeOnce },
+      data: {
+        kind: doc.kind,
+        sha256,
+        writeOnce: doc.writeOnce,
+        ...(doc.original
+          ? { originalSha256: doc.original.sha256, originalBytes: doc.original.bytes }
+          : {}),
+      },
     });
+    await this.recordScan(tx, doc.companyId, row!.id, doc.origin, doc.scan ?? null);
     return row!.id;
+  }
+
+  /**
+   * A new document's scan (M11 decision 6), in the transaction that records it. What we generated
+   * is clean (`generated`). An upload gets its staging result when there is one, and in every case
+   * the `uploads.scan` job, keyed by the document.
+   */
+  private async recordScan(
+    tx: Tx,
+    companyId: string,
+    documentId: string,
+    origin: DocumentOrigin,
+    scan: ScanResult | null,
+  ): Promise<void> {
+    if (origin === 'generated') {
+      await tx
+        .insert(schema.documentScan)
+        .values({ companyId, documentId, status: 'clean', engine: 'generated' });
+      return;
+    }
+    if (scan)
+      await tx.insert(schema.documentScan).values({
+        companyId,
+        documentId,
+        status: scan.status,
+        engine: scan.engine,
+        finding: scan.status === 'infected' ? scan.finding : null,
+      });
+    await enqueueOutbox(tx, {
+      companyId,
+      type: UPLOADS_SCAN_JOB,
+      payload: { documentId },
+      idempotencyKey: `${UPLOADS_SCAN_JOB}:${documentId}`,
+    });
+  }
+
+  /**
+   * M11 decision 6: scans an upload's bytes before they are recorded (outside any transaction),
+   * for a path that stores files itself (property files). Null when the scanner cannot say.
+   */
+  async scanBytes(bytes: Buffer): Promise<ScanResult | null> {
+    return this.preScan(bytes);
+  }
+
+  /**
+   * Scans bytes as they are staged, outside any transaction. Null when the scanner cannot say
+   * (unreachable, timed out): the document is then recorded pending and the worker's job scans it.
+   */
+  private async preScan(body: Buffer | ObjectRef): Promise<ScanResult | null> {
+    try {
+      return await this.scanner.scan(
+        Buffer.isBuffer(body) ? body : await this.storage.getStream(body),
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The `uploads.scan` job's work (M11 decision 6; plan 4.14, keyed by document): scans the stored
+   * version of an upload not yet scanned, after checking its bytes against the recorded SHA-256,
+   * and records the result once. A document already scanned is left as it is. The
+   * caller raises the alert for an infected one. Throws while the scanner cannot say, so the job
+   * retries (and dead-letters with an alert).
+   */
+  async scanUpload(
+    companyId: string,
+    documentId: string,
+  ): Promise<{
+    status: 'clean' | 'infected';
+    engine: string;
+    kind: string;
+    scanned: boolean;
+  } | null> {
+    const ctx = { companyId, actorKind: 'system' as const };
+    const [row] = await withCompany(this.database, ctx, (tx) =>
+      this.documentWithScan(tx, companyId, documentId),
+    );
+    if (!row) return null;
+    const doc = row.doc;
+    if (row.scan)
+      return {
+        status: row.scan.status as 'clean' | 'infected',
+        engine: row.scan.engine,
+        kind: doc.kind,
+        scanned: false,
+      };
+    const stored: ObjectRef = {
+      bucket: doc.bucket,
+      key: doc.storageKey,
+      versionId: doc.storageVersionId ?? undefined,
+    };
+    // The recorded version, checked first against its fingerprint, then scanned whole.
+    const hash = createHash('sha256');
+    for await (const chunk of await this.storage.getStream(stored))
+      hash.update(chunk as Uint8Array);
+    if (hash.digest('hex') !== doc.sha256)
+      throw new Error('The stored file no longer matches its fingerprint');
+    const result = await this.scanner.scan(await this.storage.getStream(stored));
+    const inserted = await withCompany(this.database, ctx, (tx) =>
+      tx
+        .insert(schema.documentScan)
+        .values({
+          companyId,
+          documentId,
+          status: result.status,
+          engine: result.engine,
+          finding: result.status === 'infected' ? result.finding : null,
+        })
+        .onConflictDoNothing()
+        .returning({ status: schema.documentScan.status, engine: schema.documentScan.engine }),
+    );
+    if (inserted.length === 0) return this.scanUpload(companyId, documentId);
+    return { status: result.status, engine: result.engine, kind: doc.kind, scanned: true };
   }
 
   private async rejectUpload(

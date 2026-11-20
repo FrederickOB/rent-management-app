@@ -419,7 +419,9 @@ export class NoticeAcknowledgementsService {
       return row && row.unitId === unitId ? row.documentId : null;
     });
     if (!documentId) throw notFound('Document');
-    const url = await this.documents.downloadUrl(staff.companyId, documentId, 'rent-assessment');
+    const url = await this.documents.downloadUrl(staff.companyId, documentId, 'rent-assessment', {
+      viewer: staff.personId,
+    });
     if (!url) throw notFound('Document');
     return url;
   }

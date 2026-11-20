@@ -63,6 +63,15 @@ const ITEMS: readonly NavItem[] = [
     description: 'Add or update properties and units from a spreadsheet.',
     needs: 'register.import',
   },
+  // M11 (decisions 2 and 3): pilot onboarding from workbooks, for company admins and unscoped
+  // managers.
+  {
+    href: '/onboarding',
+    label: 'Onboarding',
+    description:
+      'Bring a landlord in from workbooks: the register, tenancies, then opening balances, each previewed before it is written.',
+    needs: 'onboarding.import',
+  },
   // M3: tenants, leases, templates and approvals (plan section 4.16).
   {
     href: '/tenants',
@@ -316,6 +325,14 @@ const ITEMS: readonly NavItem[] = [
     description:
       'Your plan, its invoices and receipts, paying, changing plan, cancelling and support access.',
     needs: 'subscription.read',
+  },
+  // M11 (decision 5): data protection requests under Act 843, for company admins.
+  {
+    href: '/settings/data-protection',
+    label: 'Data protection',
+    description:
+      'Requests from tenants to see, correct, erase or object to the use of their data, with due dates and outcomes.',
+    needs: 'data_protection.manage',
   },
   {
     href: '/audit',

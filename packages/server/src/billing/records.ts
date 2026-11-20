@@ -22,7 +22,8 @@ import type { BillingLease } from '../tenancy/billing-facts';
 export interface LineRecord extends BillingLine {
   readonly invoiceId: string;
   readonly invoiceNumber: number;
-  readonly invoiceKind: 'cycle' | 'deposit' | 'one_off';
+  /** M11 (P25): `opening` holds the arrears and deposit a company brings at its cut-over. */
+  readonly invoiceKind: 'cycle' | 'deposit' | 'one_off' | 'opening';
   readonly issueDate: string;
   readonly leaseId: string;
   readonly propertyId: string;
@@ -60,6 +61,14 @@ export interface PaymentRecord extends PaymentRef {
    * `amountMinor` is what is left for allocation: the amount received less this.
    */
   readonly refundedMinor: number;
+  /**
+   * M11 (P25): an opening payment (source `opening_balance`): an advance brought in at the
+   * cut-over, received before the platform. It has no receipt, is never reversed (P21), and an
+   * adjustment that lowers it comes off `amountMinor`, as a refund part does.
+   */
+  readonly opening: boolean;
+  /** M11 (P25): what adjustments took off an opening payment (its negative advance items). */
+  readonly openingReducedMinor: number;
 }
 
 export const isoNow = (clock: Clock, timeZone: string): string =>
@@ -82,6 +91,59 @@ export const dimsOf = (lease: {
 
 /** The FIFO order of payments: when the money arrived, then which arrived first that day. */
 export const paymentOrder = (receivedOn: string, id: string) => `${receivedOn}#${id}`;
+
+/**
+ * M11 (P25): an opening payment's place first in, first out: before every payment on the
+ * platform, whatever day that one was received (`!` sorts before every digit), so later months
+ * draw on money received before the platform first, as the domain's plan assumes.
+ */
+export const openingPaymentOrder = (receivedOn: string, id: string) => `!${receivedOn}#${id}`;
+
+/** M11 (P25): the payment sources that are money received before the platform. */
+export const OPENING_PAYMENT_SOURCE = 'opening_balance';
+
+/**
+ * M11 (P25): which of these payments are opening payments (source `opening_balance`): money
+ * received before the platform, which posts no rent tax (P17) and carries no fee (P14).
+ */
+export async function openingPaymentIds(
+  tx: Tx,
+  paymentIds: readonly (string | null)[],
+): Promise<Set<string>> {
+  const ids = [...new Set(paymentIds.filter((id): id is string => id !== null))];
+  if (ids.length === 0) return new Set();
+  const rows = await tx
+    .select({ id: schema.payment.id })
+    .from(schema.payment)
+    .where(
+      and(inArray(schema.payment.id, ids), eq(schema.payment.sourceType, OPENING_PAYMENT_SOURCE)),
+    );
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * Founder 2026-11-10 (P25): the opening lines that raise a month brought in already, among
+ * `lines`: those with an opening line of the same charge period on an earlier invoice.
+ */
+export async function raisedOpeningLineIds(
+  tx: Tx,
+  lines: readonly Pick<LineRecord, 'id' | 'opening' | 'chargePeriodId'>[],
+): Promise<Set<string>> {
+  const ids = lines.filter((l) => l.opening === true && l.chargePeriodId).map((l) => l.id);
+  if (ids.length === 0) return new Set();
+  const rows = await tx.execute<{ id: string }>(
+    sql`select l.id from invoice_line l
+          join invoice i on i.company_id = l.company_id and i.id = l.invoice_id
+        where l.id in (${sql.join(
+          ids.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )}) and exists (select 1 from invoice_line x
+          join invoice xi on xi.company_id = x.company_id and xi.id = x.invoice_id
+          where x.company_id = l.company_id and x.charge_period_id = l.charge_period_id
+            and x.opening and xi.number < i.number)`,
+  );
+  return new Set(rows.rows.map((r) => r.id));
+}
 
 export async function loadLines(tx: Tx, leaseIds: readonly string[]): Promise<LineRecord[]> {
   if (leaseIds.length === 0) return [];
@@ -126,6 +188,12 @@ export async function loadLines(tx: Tx, leaseIds: readonly string[]): Promise<Li
       : r.line.baseLineId !== null
         ? (charges.get(`P32:${r.line.invoiceId}`) ?? r.issueDate)
         : null;
+  // M11 (P25): an opening line was owed from the cut-over, its accrual's value date (the invoice's
+  // issue date before it is accrued); an opening deposit is settled at commit and has none.
+  const openingChargedOn = (r: (typeof rows)[number]) =>
+    r.line.kind === 'rent' || r.line.kind === 'service_charge'
+      ? (r.accruedOn ?? r.issueDate)
+      : null;
   return rows.map((r, index) => ({
     id: r.line.id,
     kind: r.line.kind as LineKind,
@@ -137,7 +205,8 @@ export async function loadLines(tx: Tx, leaseIds: readonly string[]): Promise<Li
     amountMinor: r.line.amountMinor,
     accrued: r.accruedOn !== null,
     sequence: index + 1,
-    chargedOn: chargedOnOf(r),
+    chargedOn: r.invoiceKind === 'opening' ? openingChargedOn(r) : chargedOnOf(r),
+    opening: r.invoiceKind === 'opening',
     invoiceId: r.line.invoiceId,
     invoiceNumber: r.number,
     invoiceKind: r.invoiceKind as LineRecord['invoiceKind'],
@@ -183,6 +252,10 @@ export async function paymentsByIds(tx: Tx, ids: readonly string[]): Promise<Pay
         where r.company_id = ${schema.payment.companyId} and r.payment_id = ${schema.payment.id})
         + (select coalesce(sum(m.amount_minor), 0)::bigint from move_out_refund_part m
         where m.company_id = ${schema.payment.companyId} and m.payment_id = ${schema.payment.id})`,
+      // M11 (P25): an adjustment's lowering of an opening payment (negative advance items).
+      reduced: sql<string>`(select coalesce(-sum(o.amount_minor), 0)::bigint from onboarding_item o
+        where o.company_id = ${schema.payment.companyId} and o.payment_id = ${schema.payment.id}
+          and o.kind = 'advance' and o.amount_minor < 0)`,
     })
     .from(schema.payment)
     .leftJoin(
@@ -204,11 +277,15 @@ export async function paymentsByIds(tx: Tx, ids: readonly string[]): Promise<Pay
     .map((r) => {
       const leaseId = r.payment.leaseId ?? r.matchLeaseId ?? null;
       const refunded = Number(r.refunded ?? 0);
+      const opening = r.payment.sourceType === OPENING_PAYMENT_SOURCE;
+      const reduced = opening ? Number(r.reduced ?? 0) : 0;
       return {
         id: r.payment.id,
-        amountMinor: r.payment.amountMinor - refunded,
+        amountMinor: r.payment.amountMinor - refunded - reduced,
         refundedMinor: refunded,
-        order: paymentOrder(r.payment.receivedOn, r.payment.id),
+        opening,
+        openingReducedMinor: reduced,
+        order: (opening ? openingPaymentOrder : paymentOrder)(r.payment.receivedOn, r.payment.id),
         row: r.payment,
         leaseId,
         creditLeaseId: r.carriedTo ?? leaseId,
@@ -228,6 +305,45 @@ export async function poolPayments(tx: Tx, leaseId: string): Promise<PaymentReco
                     and c.payment_id = p.id and c.lease_id = ${leaseId}))`,
   );
   return candidates.filter((p) => p.reversedAccountingDate === null && p.creditLeaseId === leaseId);
+}
+
+/**
+ * poolPayments for many leases at once (M11 invoice list): each lease's live payments whose credit
+ * sits on it, first in, first out, as poolPayments gives them one lease at a time.
+ */
+export async function poolPaymentsMany(
+  tx: Tx,
+  leaseIds: readonly string[],
+): Promise<Map<string, PaymentRecord[]>> {
+  const out = new Map<string, PaymentRecord[]>(leaseIds.map((id) => [id, []]));
+  if (leaseIds.length === 0) return out;
+  const ids = sql`${`{${[...new Set(leaseIds)].join(',')}}`}::uuid[]`;
+  const candidates = await paymentRecords(
+    tx,
+    sql`(p.lease_id = any(${ids}) or m.lease_id = any(${ids})
+         or exists (select 1 from credit_carry_over c where c.company_id = p.company_id
+                    and c.payment_id = p.id and c.lease_id = any(${ids})))`,
+  );
+  for (const p of candidates)
+    if (p.reversedAccountingDate === null && p.creditLeaseId !== null)
+      out.get(p.creditLeaseId)?.push(p);
+  return out;
+}
+
+/** Each lease's book from its first invoice, for many leases at once (leaseBookOf's first step). */
+export async function invoicedBooksOf(
+  tx: Tx,
+  leaseIds: readonly string[],
+): Promise<Map<string, LeaseBook>> {
+  if (leaseIds.length === 0) return new Map();
+  const rows = await tx.execute<{ lease_id: string; book_id: string; owner_id: string }>(
+    sql`select distinct on (lease_id) lease_id, book_id, owner_id from invoice
+        where lease_id = any(${`{${[...new Set(leaseIds)].join(',')}}`}::uuid[])
+        order by lease_id, number`,
+  );
+  return new Map(
+    rows.rows.map((r) => [r.lease_id, { kind: 'book', bookId: r.book_id, ownerId: r.owner_id }]),
+  );
 }
 
 export async function loadAllocations(

@@ -17,10 +17,14 @@ import { formatReceiptNumber } from '../billing/records';
 export interface TaxItemRecord {
   readonly id: string;
   readonly kind: TaxItemKind;
-  readonly leaseId: string;
-  readonly propertyId: string;
-  readonly unitId: string;
-  readonly tenantId: string;
+  /**
+   * The lease, unit and tenant it is tax on. Null for an owner-level item (M11, P25): rent tax the
+   * owner still owed GRA at the cut-over (kind `opening`), and a reversal that lowers one.
+   */
+  readonly leaseId: string | null;
+  readonly propertyId: string | null;
+  readonly unitId: string | null;
+  readonly tenantId: string | null;
   readonly ownerId: string;
   readonly bookId: string;
   readonly paymentId: string | null;
@@ -32,11 +36,12 @@ export interface TaxItemRecord {
   readonly baseMinor: number;
   readonly rateBps: number;
   readonly taxMinor: number;
-  readonly leaseUse: 'residential' | 'commercial';
-  readonly unitCode: string;
-  readonly tenantName: string;
+  readonly leaseUse: 'residential' | 'commercial' | null;
+  readonly unitCode: string | null;
+  readonly tenantName: string | null;
   readonly receiptNumber: string | null;
-  readonly rateRuleId: string;
+  /** Null for an owner-level item: its amount was brought in, not worked out at a rate. */
+  readonly rateRuleId: string | null;
   readonly ruleIds: readonly string[];
   readonly alertRuleId: string | null;
   /** The due days and alert days its rules rows held (TX-02, TX-08; M5 review 8). */
@@ -53,10 +58,10 @@ export interface TaxItemRecord {
 type ItemRow = {
   id: string;
   kind: TaxItemKind;
-  lease_id: string;
-  property_id: string;
-  unit_id: string;
-  tenant_id: string;
+  lease_id: string | null;
+  property_id: string | null;
+  unit_id: string | null;
+  tenant_id: string | null;
   owner_id: string;
   book_id: string;
   payment_id: string | null;
@@ -68,11 +73,11 @@ type ItemRow = {
   base_minor: string;
   rate_bps: number;
   tax_minor: string;
-  lease_use: 'residential' | 'commercial';
-  unit_code: string;
-  tenant_name: string;
+  lease_use: 'residential' | 'commercial' | null;
+  unit_code: string | null;
+  tenant_name: string | null;
   receipt_number: string | null;
-  rate_rule_id: string;
+  rate_rule_id: string | null;
   base_rule_id: string | null;
   rounding_rule_id: string | null;
   service_charge_rule_id: string | null;

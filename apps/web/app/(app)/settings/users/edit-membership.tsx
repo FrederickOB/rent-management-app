@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { CheckboxField, SelectField } from '@/components/ui/field';
 import { api } from '@/lib/api';
 import { toProblem } from '@/lib/errors';
+import { membershipSavedText } from '@/lib/membership-approval';
 import { roleLabel } from '@/lib/format';
 import { changedFields } from '@/lib/patch';
 import {
@@ -34,7 +35,7 @@ export interface EditMembershipProps {
   readonly row: MembershipRow;
   readonly companyKind: CompanyKind;
   readonly scopeOptions: ScopeOptions;
-  readonly onSaved: (message: string) => void;
+  readonly onSaved: (message: string, approvals: boolean) => void;
   readonly onCancel: () => void;
 }
 
@@ -107,14 +108,22 @@ export function EditMembership({
     }
     setPending(true);
     try {
-      if (Object.keys(patch).length > 0)
-        await api().memberships.update({ membershipId: row.membershipId, ...patch });
+      const updated =
+        Object.keys(patch).length > 0
+          ? await api().memberships.update({ membershipId: row.membershipId, ...patch })
+          : null;
       if (consentChanged)
         await api().memberships.whatsappConsent({
           membershipId: row.membershipId,
           granted: whatsappConsent,
         });
-      onSaved(`Saved the changes for ${row.name}.`);
+      // Founder D1: a promotion or a nomination may wait for a second person.
+      const saved = membershipSavedText({
+        name: row.name,
+        approvalRequestId: updated?.approvalRequestId,
+        kind: 'change',
+      });
+      onSaved(saved.text, saved.approvals);
     } catch (failure) {
       // The API checks the scope against the role the person will have; place its answer where
       // it can be acted on.

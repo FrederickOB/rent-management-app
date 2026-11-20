@@ -65,8 +65,17 @@ export function RentTaxTable({
             </Td>
             {ownerNames ? <Td>{ownerNames.get(item.ownerId) ?? 'An owner'}</Td> : null}
             <Td>
-              <span className="font-mono">{item.unitCode}</span>
-              <p className="text-xs text-slate-600">{item.tenantName}</p>
+              {/* M11 (P25): an opening item is the owner's, with no lease or unit. */}
+              {item.unitCode ? (
+                <>
+                  <span className="font-mono">{item.unitCode}</span>
+                  <p className="text-xs text-slate-600">{item.tenantName}</p>
+                </>
+              ) : (
+                <span className="text-slate-700">
+                  {ownerNames?.get(item.ownerId) ?? 'The owner'}, at the cut-over
+                </span>
+              )}
             </Td>
             <Td className="text-right tabular-nums">{formatMinor(item.baseMinor)}</Td>
             <Td className="text-right tabular-nums">{rateLabel(item.rateBps)}</Td>

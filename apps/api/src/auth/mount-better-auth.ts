@@ -6,8 +6,9 @@ const DROP = new Set(['content-length', 'transfer-encoding', 'connection', 'x-re
 
 /**
  * Serves Better Auth at /api/auth/* on the Fastify instance under NestJS (ADR-011). Only the
- * allowlisted endpoints reach Better Auth. The client IP header is set here from Fastify's view
- * of the socket (or trusted proxy), never taken from the client.
+ * allowlisted endpoints reach Better Auth. The client IP header is set here from `request.ip`:
+ * the socket's address, or X-Forwarded-For only behind a proxy in TRUSTED_PROXIES (M11 review R3
+ * F1), never a value the client chose. The CSRF check in app.ts runs before this route.
  */
 export function mountBetterAuth(fastify: FastifyInstance, auth: Auth, config: AppConfig): void {
   fastify.route({

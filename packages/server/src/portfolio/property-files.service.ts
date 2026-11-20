@@ -285,11 +285,15 @@ export class PropertyFilesService {
       return fail('The image could not be read');
     }
 
+    // M11 decision 6: each stored file is scanned here, in the worker, before it is recorded.
+    const scans = await Promise.all(stored.map((s) => this.documents.scanBytes(s.bytes)));
     await withCompany(this.database, ctx, async (tx) => {
       const ids: string[] = [];
-      for (const s of stored)
+      for (const [i, s] of stored.entries())
         ids.push(
           await this.documents.insertDocument(tx, {
+            origin: 'upload',
+            scan: scans[i] ?? null,
             companyId,
             kind: s.kind,
             contentType: s.contentType,
@@ -385,7 +389,9 @@ export class PropertyFilesService {
       variant === 'thumbnail' ? (file.thumbnailDocumentId ?? file.documentId) : file.documentId;
     if (file.status !== 'ready' || !documentId)
       throw invalid('file_not_ready', 'This file is still being processed');
-    const url = await this.documents.downloadUrl(staff.companyId, documentId);
+    const url = await this.documents.downloadUrl(staff.companyId, documentId, undefined, {
+      viewer: staff.personId,
+    });
     if (!url) throw notFound('File');
     return url;
   }
@@ -417,7 +423,10 @@ export class PropertyFilesService {
   ): Promise<PropertyFileView> {
     const thumbnailUrl =
       file.status === 'ready' && file.thumbnailDocumentId
-        ? await this.documents.downloadUrl(companyId, file.thumbnailDocumentId)
+        ? // M11 decision 6: no thumbnail while the photo is being scanned, none if quarantined.
+          await this.documents.downloadUrl(companyId, file.thumbnailDocumentId, undefined, {
+            unscanned: 'omit',
+          })
         : null;
     return {
       id: file.id,

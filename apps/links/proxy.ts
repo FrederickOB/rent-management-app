@@ -3,7 +3,7 @@ import {
   contentSecurityPolicy,
   createNonce,
   forwardedRequestHeaders,
-  SECURITY_HEADERS,
+  securityHeaders,
 } from './lib/security-headers';
 
 /**
@@ -18,7 +18,7 @@ export function proxy(request: NextRequest): NextResponse {
     request: { headers: forwardedRequestHeaders(request.headers, csp, nonce) },
   });
   response.headers.set('Content-Security-Policy', csp);
-  for (const [name, value] of SECURITY_HEADERS) response.headers.set(name, value);
+  for (const [name, value] of securityHeaders()) response.headers.set(name, value);
   // Link pages show personal documents and money, the unsubscribe page a person's email and the
   // job sheet a tenant's home (M8): never stored by the browser or anything between.
   const { pathname } = request.nextUrl;

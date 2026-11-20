@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
@@ -10,7 +11,15 @@ import {
   selfUrl,
   type idGenerator,
 } from './shared';
-import type { FakeSettlement, FakeStore, FakeTransaction } from './store';
+import {
+  paymentsOutageOf,
+  resetPaymentsOutage,
+  type FakeSettlement,
+  type FakeStore,
+  type FakeTransaction,
+  type PaymentsOutageMode,
+  type WebhookDelivery,
+} from './store';
 
 export interface PaymentsOptions {
   /** Authenticates API calls and signs webhooks, as Paystack's secret key does both. */
@@ -89,6 +98,8 @@ const outcomeSchema = z.object({
   status: z.enum(['success', 'failed', 'abandoned']),
   amountMinor: pesewas.optional(),
   feesMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** M11 (e2e test controls): false marks the charge paid without sending its webhook. */
+  webhook: z.boolean().optional(),
 });
 
 function transactionView(tx: FakeTransaction) {
@@ -127,6 +138,17 @@ function settlementView(s: FakeSettlement) {
   };
 }
 
+/** Defaults for the outage switch: `slow` answers late; `timeout` outlasts the client's 10 s. */
+export const OUTAGE_DEFAULT_DELAY_MS: Readonly<Partial<Record<PaymentsOutageMode, number>>> = {
+  slow: 3_000,
+  timeout: 15_000,
+};
+
+const outageSchema = z.object({
+  mode: z.enum(['normal', 'down', 'slow', 'timeout', 'withhold', 'drop']),
+  delayMs: z.number().int().min(0).max(120_000).optional(),
+});
+
 const inRange = (at: string, range: { from: string; to: string }) => {
   const t = Date.parse(at);
   return t >= Date.parse(range.from) && t < Date.parse(range.to);
@@ -144,6 +166,53 @@ export function registerPayments(
   options: PaymentsOptions,
 ): void {
   type Outcome = z.infer<typeof outcomeSchema>;
+
+  /**
+   * Sends a payment webhook, unless the outage switch holds it back (`withhold`) or discards it
+   * (`drop`). Either way the attempt is listed on the dev inbox. With no webhook URL configured
+   * nothing is sent in any mode, as before.
+   */
+  const sendWebhook = async (
+    event: string,
+    rawBody: string,
+    headers: Record<string, string>,
+  ): Promise<WebhookDelivery | null> => {
+    const { mode } = paymentsOutageOf(store);
+    if (options.webhookUrl && (mode === 'withhold' || mode === 'drop')) {
+      const at = new Date().toISOString();
+      if (mode === 'withhold') store.withheldWebhooks.push({ event, rawBody, headers, at });
+      else store.droppedWebhooks.push({ event, at });
+      const record: WebhookDelivery = {
+        at,
+        kind: 'payments',
+        event,
+        url: options.webhookUrl,
+        error: mode === 'withhold' ? 'withheld' : 'dropped',
+      };
+      store.webhooks.unshift(record);
+      return record;
+    }
+    return deliverWebhook(store, 'payments', event, options.webhookUrl, rawBody, headers);
+  };
+
+  /** Sends what `withhold` held back, oldest first, one at a time. */
+  const releaseWithheld = async (): Promise<(WebhookDelivery | null)[]> => {
+    const held = store.withheldWebhooks.splice(0);
+    const results: (WebhookDelivery | null)[] = [];
+    for (const w of held)
+      results.push(
+        await deliverWebhook(store, 'payments', w.event, options.webhookUrl, w.rawBody, {
+          ...w.headers,
+        }),
+      );
+    return results;
+  };
+
+  const outageView = () => ({
+    ...paymentsOutageOf(store),
+    withheld: store.withheldWebhooks.length,
+    dropped: store.droppedWebhooks.length,
+  });
 
   /**
    * Rent always names a known subaccount, so it settles to the landlord or agency (D1). A charge
@@ -167,24 +236,32 @@ export function registerPayments(
     tx.amount = amount;
     tx.fees = fees;
     tx.paidAt = new Date().toISOString();
+    if (outcome.webhook === false) return { webhook: null, delivery: null } as const;
     const rawBody = JSON.stringify({ event: 'charge.success', data: transactionView(tx) });
     const signature = hmacHex('sha512', options.secretKey, rawBody);
-    const delivery = await deliverWebhook(
-      store,
-      'payments',
-      'charge.success',
-      options.webhookUrl,
-      rawBody,
-      {
-        'x-paystack-signature': signature,
-      },
-    );
+    const delivery = await sendWebhook('charge.success', rawBody, {
+      'x-paystack-signature': signature,
+    });
     return { webhook: { rawBody, signature }, delivery } as const;
   };
 
   // The provider's API sits behind the secret key, as Paystack's does.
   app.register(
     async (api) => {
+      // The outage switch, before the key check: an outage answers whoever calls.
+      api.addHook('onRequest', async (_request, reply) => {
+        if (paymentsOutageOf(store).mode === 'down')
+          return reply
+            .code(503)
+            .send({ status: false, message: 'Service temporarily unavailable' });
+      });
+      // `slow` and `timeout` hold the answer after the work is done: under `timeout` the charge
+      // exists although the caller gave up waiting, as when a provider's answer is lost.
+      api.addHook('onSend', async (_request, _reply, payload) => {
+        const { mode, delayMs } = paymentsOutageOf(store);
+        if (mode === 'slow' || mode === 'timeout') await sleep(delayMs, undefined, { ref: false });
+        return payload;
+      });
       api.addHook('onRequest', async (request, reply) => {
         if (request.headers.authorization !== `Bearer ${options.secretKey}`) {
           return reply.code(401).send({ status: false, message: 'Invalid key' });
@@ -480,6 +557,31 @@ export function registerPayments(
   );
 
   // Test controls and the fake checkout page: not part of Paystack's API, so no key.
+
+  /**
+   * The outage switch (M11 decision 9). `normal` sends whatever `withhold` held back, oldest first,
+   * and answers with what was released. Another mode keeps anything held until `normal`.
+   */
+  app.post('/payments/_test/outage', async (request, reply) => {
+    const parsed = outageSchema.safeParse(request.body);
+    if (!parsed.success) return invalid(reply, parsed.error);
+    const { mode } = parsed.data;
+    if (mode === 'normal') store.outages.delete('payments');
+    else
+      store.outages.set('payments', {
+        mode,
+        delayMs: parsed.data.delayMs ?? OUTAGE_DEFAULT_DELAY_MS[mode] ?? 0,
+      });
+    const released = mode === 'normal' ? await releaseWithheld() : [];
+    return reply.send({ ...outageView(), released: released.length, deliveries: released });
+  });
+  app.get('/payments/_test/outage', async (_request, reply) => reply.send(outageView()));
+  /** The reset path: back to normal, and anything withheld is discarded, never sent. */
+  app.delete('/payments/_test/outage', async (_request, reply) => {
+    resetPaymentsOutage(store);
+    return reply.code(204).send();
+  });
+
   app.post<{ Params: { reference: string } }>(
     '/payments/_test/charges/:reference',
     async (request, reply) => {
@@ -531,16 +633,9 @@ export function registerPayments(
         },
       });
       const signature = hmacHex('sha512', options.secretKey, rawBody);
-      await deliverWebhook(
-        store,
-        'payments',
-        'charge.dispute.resolve',
-        options.webhookUrl,
-        rawBody,
-        {
-          'x-paystack-signature': signature,
-        },
-      );
+      await sendWebhook('charge.dispute.resolve', rawBody, {
+        'x-paystack-signature': signature,
+      });
       return reply.send({ reference: tx.reference, webhook: { rawBody, signature } });
     },
   );

@@ -1,0 +1,1 @@
+ALTER TABLE "rent_tax_alert" ALTER COLUMN "property_id" DROP NOT NULL;

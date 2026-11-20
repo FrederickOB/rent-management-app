@@ -253,7 +253,9 @@ describe('AC-02 fees tied to allocations: the review scenarios (must-fix 1)', ()
 
   it('★ a refund of a drawn surplus: cancelling the month takes its fee back before the refund', async () => {
     const c = await agency('Fees Drawn Refund', LONG_AGO);
-    const start = plusMonths(monthStart(today), -1);
+    // A month before today: two months owed, and the third not yet invoiced (14 days ahead) on any
+    // day of the month (founder-approved setup fix, 2026-11-19).
+    const start = plusMonths(today, -1);
     const l = await lease(c, { start });
     await pay(c, l.id, 300_000);
     expect(await feesPosted(c, [l.id])).toBe(20_000);

@@ -36,6 +36,8 @@ export const TAX_ITEM_KIND_LABELS: Record<TaxItemKind, string> = {
   withholding: 'Withheld by the tenant',
   reversal: 'Payment reversed',
   withholding_offset: 'Replaced by withholding',
+  // M11 (P25): rent tax still owed at the cut-over, brought in from the onboarding workbook.
+  opening: 'Opening balance (owed at cut-over)',
 };
 
 /**
@@ -207,8 +209,9 @@ export interface TaxItemRow extends OwedItem {
   /** The payment taxed; none on tax withheld by the tenant without a payment. */
   readonly paymentId: string | null;
   readonly ownerId: string;
-  readonly unitCode: string;
-  readonly tenantName: string;
+  /** M11 (P25): null on an opening item, which is the owner's, with no lease or unit. */
+  readonly unitCode: string | null;
+  readonly tenantName: string | null;
   /** The rent (and service charge, while the rule says so) the receipt newly covers. */
   readonly baseMinor: number;
   readonly rateBps: number;

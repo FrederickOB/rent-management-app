@@ -1,8 +1,9 @@
 import type { TenancyGroupView, TenantSigningView } from '@rent/contracts';
 import { Redirect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../src/api';
+import { cachedTenancyCounts } from '../src/cache-peek';
 import { formatTime, leaseStatusLabel, leaseStatusTone, rentLabel, termLabel } from '../src/format';
 import { conversationsForCache, loadConversations } from '../src/messages';
 import { loadRepairs } from '../src/repair-queue';
@@ -45,6 +46,9 @@ export default function Home() {
   const router = useRouter();
   const { me, loading } = useSession();
   const tenancies = useCachedLoad('tenancies', loadTenancies, Boolean(me));
+  // The tenancies last cached here, read during this render, size their place while they load.
+  const personId = me?.personId ?? null;
+  const loadingHeight = useMemo(() => placeholderHeight(cachedTenancyCounts(personId)), [personId]);
   const signing = useLoad(loadSigning, Boolean(me));
   const conversations = useCachedLoad(
     'conversations',
@@ -78,6 +82,7 @@ export default function Home() {
       <ToSignEntry state={signing.state} onOpen={() => router.push('/to-sign')} />
       <Tenancies
         view={tenancies.view}
+        loadingHeight={loadingHeight}
         onRetry={tenancies.retry}
         onReload={tenancies.reload}
         moneyTick={moneyTick}
@@ -310,14 +315,23 @@ function Tenancies({
   onReload,
   moneyTick,
   onOpen,
+  loadingHeight,
 }: {
   view: CachedView<TenancyGroupView[]>;
+  loadingHeight: number;
   onRetry: () => void;
   onReload: () => void;
   moneyTick: number;
   onOpen: (leaseId: string) => void;
 }) {
-  if (view.status === 'loading') return <Loading label="Loading your tenancies" />;
+  // Their place is held while they load (M11 review, founder decision 8's layout budget), so
+  // Messages and the entries below stay where they will be.
+  if (view.status === 'loading')
+    return (
+      <View style={{ minHeight: loadingHeight }} testID="tenancies-loading">
+        <Loading label="Loading your tenancies" />
+      </View>
+    );
   if (view.status === 'error') {
     return (
       <View style={styles.stack}>
@@ -421,6 +435,33 @@ function TenancyRow({
         />
       ) : null}
     </View>
+  );
+}
+
+/**
+ * A landlord's card with one tenancy, on a phone: 446 points with rent due, about 411 with nothing
+ * due, and 425 while its figures load, their place held (src/tenancy-money.tsx). Each further
+ * tenancy in the card adds about 300 while loading, and cards stand 16 apart. Measured on the e2e
+ * stack at 360 and 393 wide (M11 review).
+ */
+const ONE_CARD_HEIGHT = 425;
+const FURTHER_TENANCY_HEIGHT = 300;
+const CARD_GAP = 16;
+
+/**
+ * The tenancies' place while they load: one card each landlord and one block each tenancy, as
+ * last cached on this device; about one card when nothing is cached, and none when the copy had
+ * no tenancy.
+ */
+function placeholderHeight(counts: readonly number[] | null): number {
+  if (counts === null) return ONE_CARD_HEIGHT;
+  return counts.reduce(
+    (height, tenancies, i) =>
+      height +
+      (i > 0 ? CARD_GAP : 0) +
+      ONE_CARD_HEIGHT +
+      Math.max(0, tenancies - 1) * FURTHER_TENANCY_HEIGHT,
+    0,
   );
 }
 

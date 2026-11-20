@@ -50,6 +50,7 @@ input[type="text"], input[type="tel"], textarea {
   border: 1px solid var(--line); border-radius: 0.375rem; padding: 0.625rem 0.75rem; margin: 0 0 1rem;
 }
 input.code { font-size: 1.5rem; letter-spacing: 0.3em; max-width: 12rem; }
+input[type="file"] { display: block; max-width: 100%; font: inherit; margin: 0 0 0.5rem; }
 .check { display: flex; gap: 0.625rem; align-items: flex-start; font-weight: 400; margin: 0 0 1rem; }
 .check input { margin-top: 0.3rem; width: 1.25rem; height: 1.25rem; flex: none; }
 button, .button {

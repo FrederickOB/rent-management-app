@@ -1,6 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, schema, sql, withCompany, type Database, type Tx } from '@rent/db';
-import { daysBetween, formatBusinessDate, parseBusinessDate } from '@rent/domain/dates';
+import {
+  addDays,
+  businessDateOf,
+  daysBetween,
+  formatBusinessDate,
+  instantFrom,
+  parseBusinessDate,
+  toIsoDate,
+} from '@rent/domain/dates';
 import type { Actor } from '@rent/domain/policy';
 import { paidUntilPromptDaysOf, parseCompanySettings } from '@rent/domain/settings';
 import type { VerificationStatus } from '@rent/domain/rules';
@@ -215,6 +223,21 @@ export class AdvanceService {
     if (!paidUntil) return 0;
     const days = daysBetween(parseBusinessDate(today), parseBusinessDate(paidUntil));
     if (days > lead || days <= lead - CATCH_UP_DAYS) return 0;
+    // M11 decision 2: an imported lease gets no catch-up prompt. Its day (the lead before
+    // paid-until) must not fall before the day the import was committed.
+    const imported = await tx.execute<{ committed_at: Date | string | null }>(
+      sql`select b.committed_at from lease l
+          join onboarding_batch b on b.company_id = l.company_id and b.id = l.imported_batch_id
+          where l.id = ${leaseId}`,
+    );
+    const importedAt = imported.rows[0]?.committed_at ?? null;
+    if (importedAt) {
+      const importedOn = toIsoDate(
+        businessDateOf(instantFrom(new Date(importedAt)), state.company.timeZone),
+      );
+      const promptDay = toIsoDate(addDays(parseBusinessDate(today), days - lead));
+      if (promptDay < importedOn) return 0;
+    }
     // Once per lease and paid-until date: under the lease's lock, so the check holds.
     const [done] = await tx
       .select({ id: schema.paidUntilPrompt.id })

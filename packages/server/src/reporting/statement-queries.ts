@@ -20,6 +20,7 @@ import {
   type OwnerStatementFigures,
   type OwnerStatementInput,
   type StatementAgentInput,
+  type StatementFigureRow,
   type StatementPropertyInput,
 } from '@rent/domain/reporting';
 import { sumLines, type BalanceFilter, type BalanceRow } from '../ledger/ledger.queries';
@@ -78,6 +79,83 @@ export interface StatementComputation {
   readonly figures: OwnerStatementFigures;
   readonly payments: readonly StatementPaymentRow[];
   readonly expenses: readonly StatementExpenseRow[];
+  /** M11 (P25): the opening balances reported in the month, or null when none were. */
+  readonly opening: StatementOpening | null;
+}
+
+/**
+ * M11 (P25; plan 4.2): the opening balances brought in at the company's cut-over and reported in
+ * the month (by accounting date), as the first owner statement shows them in their own section.
+ * From the P25 entries of the owner's book: arrears owed (1100 against 3900), advances held as
+ * opening payments (3900 on the payment), deposits held (2100), withholding awaiting its
+ * certificate (1150), cash the agent held (1070) and rent tax still owed (2200). An adjustment
+ * workbook's P25 entries are reported the same way, in the month they are posted to.
+ */
+export interface StatementOpening {
+  /** The cut-over the entries are dated. */
+  readonly cutOver: string;
+  readonly arrearsMinor: number;
+  readonly advancesMinor: number;
+  readonly depositsMinor: number;
+  readonly withholdingMinor: number;
+  readonly agentCashMinor: number;
+  readonly rentTaxOutstandingMinor: number;
+}
+
+/** The statement's stored rows for its opening section (decision 7: a reissue compares them). */
+export function openingFigureRows(opening: StatementOpening | null): StatementFigureRow[] {
+  if (!opening) return [];
+  return [
+    { key: 'owner.opening.arrears', value: opening.arrearsMinor },
+    { key: 'owner.opening.advances', value: opening.advancesMinor },
+    { key: 'owner.opening.deposits', value: opening.depositsMinor },
+    { key: 'owner.opening.withholding', value: opening.withholdingMinor },
+    { key: 'owner.opening.agent_cash', value: opening.agentCashMinor },
+    { key: 'owner.opening.rent_tax', value: opening.rentTaxOutstandingMinor },
+  ];
+}
+
+/** The P25 entries of a book reported in a month, by account (see `StatementOpening`). */
+export async function openingInMonth(
+  tx: Tx,
+  book: string,
+  firstDay: string,
+  lastDay: string,
+): Promise<StatementOpening | null> {
+  const [row] = (
+    await tx.execute<{
+      entries: number;
+      cut_over: string | null;
+      arrears: string;
+      advances: string;
+      deposits: string;
+      withholding: string;
+      agent_cash: string;
+      rent_tax: string;
+    }>(
+      sql`select count(distinct e.id)::int as entries, min(e.value_date)::text as cut_over,
+            coalesce(-sum(l.amount_minor) filter (where l.account_code = '3900' and l.invoice_line_id is not null), 0)::text as arrears,
+            coalesce(sum(l.amount_minor) filter (where l.account_code = '3900' and l.payment_id is not null), 0)::text as advances,
+            coalesce(-sum(l.amount_minor) filter (where l.account_code = '2100'), 0)::text as deposits,
+            coalesce(sum(l.amount_minor) filter (where l.account_code = '1150'), 0)::text as withholding,
+            coalesce(sum(l.amount_minor) filter (where l.account_code = '1070'), 0)::text as agent_cash,
+            coalesce(-sum(l.amount_minor) filter (where l.account_code = '2200'), 0)::text as rent_tax
+          from journal_entry e
+          join journal_line l on l.company_id = e.company_id and l.entry_id = e.id
+          where e.rule = 'P25' and l.book_id = ${book}::uuid
+            and e.accounting_date between ${firstDay}::date and ${lastDay}::date`,
+    )
+  ).rows;
+  if (!row || row.entries === 0 || !row.cut_over) return null;
+  return {
+    cutOver: row.cut_over,
+    arrearsMinor: num(row.arrears),
+    advancesMinor: num(row.advances),
+    depositsMinor: num(row.deposits),
+    withholdingMinor: num(row.withholding),
+    agentCashMinor: num(row.agent_cash),
+    rentTaxOutstandingMinor: num(row.rent_tax),
+  };
 }
 
 const num = (value: unknown): number => Number(value ?? 0);
@@ -137,10 +215,15 @@ export async function computeOwnerStatement(
     ]),
     'accountCode',
   );
-  const taxPaid = keyed(
-    await sumLines(tx, { ...inMonth, accounts: ['2200'], rules: ['P18'] }, ['propertyId']),
-    null,
-  );
+  const paidRows = await sumLines(tx, { ...inMonth, accounts: ['2200'], rules: ['P18'] }, [
+    'propertyId',
+  ]);
+  const taxPaid = keyed(paidRows, null);
+  // M11 (P25): paid to GRA on the owner's own items (rent tax brought in at the cut-over), which
+  // carry no property, so they are on no property's page.
+  const ownerPaidMinor = paidRows
+    .filter((r) => !r.propertyId)
+    .reduce((sum, r) => sum + r.balanceMinor, 0);
   // Deposits at the month's end, by property (2100).
   const held = keyed(
     await sumLines(tx, { ...atEnd, accounts: ['2100'] }, ['propertyId', 'accountCode']),
@@ -219,6 +302,9 @@ export async function computeOwnerStatement(
   const payable = async (filter: typeof atEnd) =>
     0 -
     (await sumLines(tx, { ...filter, accounts: ['2200'] })).reduce((s, r) => s + r.balanceMinor, 0);
+  // M11 (P25): rent tax still owed at the cut-over is brought in, not accrued in the month, so it
+  // is part of the payable the month starts from; the opening section shows it on its own.
+  const opening = await openingInMonth(tx, book, d.firstDay, d.lastDay);
 
   const input: OwnerStatementInput = {
     ownerId: scope.ownerId,
@@ -227,9 +313,10 @@ export async function computeOwnerStatement(
     processingFeesMinor,
     // Always given (founder decision, 2026-11-05: required when the agency pays GRA).
     rentTaxPayable: {
-      openingMinor: await payable(atStart),
+      openingMinor: (await payable(atStart)) + (opening?.rentTaxOutstandingMinor ?? 0),
       closingMinor: await payable(atEnd),
       certifiedMinor,
+      ownerPaidMinor,
     },
     agent: scope.agency
       ? await agentSide(tx, {
@@ -241,7 +328,7 @@ export async function computeOwnerStatement(
         })
       : null,
   };
-  return { input, figures: ownerStatementFigures(input), payments, expenses };
+  return { input, figures: ownerStatementFigures(input), payments, expenses, opening };
 }
 
 /**
@@ -283,6 +370,8 @@ async function rentTaxItems(
     sql`select i.property_id, i.tax_minor from rent_tax_item i
         where i.book_id = ${book}::uuid
           and i.accounting_date between ${firstDay}::date and ${lastDay}::date
+          -- M11 (P25): owner-level items (rent tax brought in at the cut-over) are no receipt's.
+          and i.lease_id is not null
         order by i.accounting_date, i.created_at, i.id`,
   );
   const out = new Map<string, number[]>();

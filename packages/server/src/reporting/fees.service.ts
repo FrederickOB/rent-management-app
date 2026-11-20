@@ -38,7 +38,7 @@ import {
   type JournalLineDraft,
   type PaymentCharge,
 } from '@rent/domain/ledger';
-import type { AllocationSource, LineKind } from '@rent/domain/billing';
+import { isOpeningAllocation, type AllocationSource, type LineKind } from '@rent/domain/billing';
 import type { AlertPort } from '@rent/integrations';
 import {
   BillingEngine,
@@ -46,7 +46,7 @@ import {
   type FeeHooks,
   type LeaseState,
 } from '../billing/engine';
-import { dimsOf } from '../billing/records';
+import { dimsOf, openingPaymentIds } from '../billing/records';
 import { companyRecord } from '../companies/companies.service';
 import type { Clock } from '../core/clock';
 import { ALERT_PORT, CLOCK, DATABASE } from '../core/tokens';
@@ -87,9 +87,15 @@ export interface FeeMismatch {
   readonly problems: string[];
 }
 
+/**
+ * M11 (P25; OQ-64): `opening` holds the opening payments among the rows' payments. A row paid by
+ * one, or of source `opening_balance`, is money received before the platform and carries no fee,
+ * whether it paid a month at commit or its credit is drawn onto a month later.
+ */
 const feeAllocationOf = (
   r: Pick<AllocationRow, 'id' | 'invoiceLineId' | 'source' | 'paymentId' | 'amountMinor'>,
   kinds: ReadonlyMap<string, LineKind>,
+  opening: ReadonlySet<string>,
 ): FeeAllocation => ({
   id: r.id,
   lineId: r.invoiceLineId,
@@ -97,6 +103,10 @@ const feeAllocationOf = (
   source: r.source as AllocationSource,
   paymentId: r.paymentId,
   amountMinor: Number(r.amountMinor),
+  opening: isOpeningAllocation(
+    { source: r.source as AllocationSource, paymentId: r.paymentId },
+    opening,
+  ),
 });
 
 /** A charged allocation as stored, with its event row and what was taken back so far. */
@@ -249,8 +259,12 @@ export class ManagementFeesService implements FeeHooks {
       state,
       rows.map((r) => r.invoiceLineId),
     );
+    const opening = await openingPaymentIds(
+      tx,
+      rows.map((r) => r.paymentId),
+    );
     const fee = rows
-      .map((r) => ({ row: r, alloc: feeAllocationOf(r, kinds) }))
+      .map((r) => ({ row: r, alloc: feeAllocationOf(r, kinds, opening) }))
       .filter((x) => feeBearing(x.alloc));
     if (fee.length === 0) return;
     const byLease = new Map<string, typeof fee>();
@@ -306,13 +320,16 @@ export class ManagementFeesService implements FeeHooks {
     const charged = new Map<string, StoredCharge>();
     if (negatives.length > 0) {
       const lineIds = [...new Set(negatives.map((n) => n.lineId))];
-      const history = (
-        await tx
-          .select()
-          .from(schema.allocation)
-          .where(inArray(schema.allocation.invoiceLineId, lineIds))
-          .orderBy(asc(schema.allocation.createdAt), asc(schema.allocation.id))
-      ).map((r) => feeAllocationOf(r, kinds));
+      const historyRows = await tx
+        .select()
+        .from(schema.allocation)
+        .where(inArray(schema.allocation.invoiceLineId, lineIds))
+        .orderBy(asc(schema.allocation.createdAt), asc(schema.allocation.id));
+      const opening = await openingPaymentIds(
+        tx,
+        historyRows.map((r) => r.paymentId),
+      );
+      const history = historyRows.map((r) => feeAllocationOf(r, kinds, opening));
       const undone = undoings(history, new Set(negatives.map((n) => n.id)));
       const ids = [...new Set(undone.map((u) => u.undoesId))];
       if (ids.length > 0) {
@@ -713,9 +730,12 @@ export class ManagementFeesService implements FeeHooks {
           payment_id: string | null;
           amount_minor: string;
           value_date: string;
+          opening_payment: boolean;
         }>(
           sql`select a.id, a.lease_id, a.invoice_line_id, il.kind, a.source, a.payment_id,
-                a.amount_minor::text as amount_minor, a.value_date::text as value_date
+                a.amount_minor::text as amount_minor, a.value_date::text as value_date,
+                exists (select 1 from payment p where p.company_id = a.company_id
+                        and p.id = a.payment_id and p.source_type = 'opening_balance') as opening_payment
               from allocation a
               join invoice_line il on il.company_id = a.company_id and il.id = a.invoice_line_id
               where a.property_id in (
@@ -735,6 +755,8 @@ export class ManagementFeesService implements FeeHooks {
           source: r.source as AllocationSource,
           paymentId: r.payment_id,
           amountMinor: Number(r.amount_minor),
+          // M11 (P25): money received before the platform carries no fee.
+          opening: r.source === 'opening_balance' || r.opening_payment,
         }));
         const termed = new Set(
           leaseRows

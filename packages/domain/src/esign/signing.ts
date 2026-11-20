@@ -60,6 +60,14 @@ export const SIGNING_LIMITS = {
   opensPerIp: { count: 600, windowMinutes: 15 },
 } as const;
 
+/**
+ * M11 security review R3 F7: a code lockout (SIGNING_CODE.maxAttempts wrong codes) lifts after
+ * SIGNING_CODE.lockMinutes, but the failures are not forgotten. The lockout that reaches this
+ * count on one link (a signing or a job-sheet link) revokes the link instead, and staff are told
+ * so they can send a new one. A security default, not law.
+ */
+export const CODE_LOCKOUTS_BEFORE_REVOKE = 3;
+
 /** Signing reminders go out this many hours after the links were sent: a product default. */
 export const DEFAULT_SIGNING_REMINDER_HOURS: readonly number[] = [24, 72, 168];
 

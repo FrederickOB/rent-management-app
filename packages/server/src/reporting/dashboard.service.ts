@@ -442,6 +442,8 @@ export class DashboardService {
       sql`l.kind in ('rent', 'service_charge')`,
       sql`l.period_start >= ${first}::date and l.period_start < ${until}::date`,
       sql`app.owner_row_visible(i.owner_id)`,
+      // M11 (P25): arrears brought in at the cut-over are from before the platform (as Gate 1).
+      sql`i.kind <> 'opening'`,
     ];
     if (filters.ownerId) where.push(sql`i.owner_id = ${filters.ownerId}::uuid`);
     if (filters.propertyId) where.push(sql`l.property_id = ${filters.propertyId}::uuid`);
@@ -467,13 +469,26 @@ export class DashboardService {
             source: AllocationSource;
             amount_minor: number;
             value_date: string;
+            opening: boolean;
           }>(
-            sql`select a.invoice_line_id, a.source, a.amount_minor, a.value_date::text as value_date
+            sql`select a.invoice_line_id, a.source, a.amount_minor, a.value_date::text as value_date,
+                  exists (select 1 from payment p where p.company_id = a.company_id
+                          and p.id = a.payment_id and p.source_type = 'opening_balance') as opening
                 from allocation a
                 where a.invoice_line_id = any(${`{${lines.rows.map((l) => l.id).join(',')}}`}::uuid[])`,
           );
     const byLine = new Map<string, PeriodCollectionLine['allocations'][number][]>();
+    // M11 (P25): what money received before the platform pays of a month is neither due through
+    // the platform nor collected by it (as Gate 1).
+    const openingPaid = new Map<string, number>();
     for (const a of allocations.rows) {
+      if (a.opening) {
+        openingPaid.set(
+          a.invoice_line_id,
+          (openingPaid.get(a.invoice_line_id) ?? 0) + Number(a.amount_minor),
+        );
+        continue;
+      }
       const list = byLine.get(a.invoice_line_id) ?? [];
       list.push({ source: a.source, amountMinor: Number(a.amount_minor), valueDate: a.value_date });
       byLine.set(a.invoice_line_id, list);
@@ -484,7 +499,7 @@ export class DashboardService {
         lineId: l.id,
         kind: l.kind,
         periodStart: l.period_start,
-        amountMinor: Number(l.amount_minor),
+        amountMinor: Math.max(0, Number(l.amount_minor) - (openingPaid.get(l.id) ?? 0)),
         allocations: byLine.get(l.id) ?? [],
       })),
     });

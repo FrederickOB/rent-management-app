@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { api } from '@/lib/api';
 import { openFetchedLink } from '@/lib/browser-files';
+import { scanNote, type ScanNote } from '@/lib/document-scan';
 import { toProblem } from '@/lib/errors';
 import { Button } from './ui/button';
 
@@ -18,15 +19,20 @@ export function TaxFileButton({
   readonly label: string;
 }) {
   const [problem, setProblem] = useState<string | null>(null);
+  const [note, setNote] = useState<ScanNote | null>(null);
   const [pending, setPending] = useState(false);
 
   async function open() {
     setProblem(null);
+    setNote(null);
     setPending(true);
     try {
       await openFetchedLink(async () => (await api().rentTax.file({ documentId })).url);
     } catch (failure) {
-      setProblem(toProblem(failure).message);
+      // M11 decision 6: still being scanned (try again), or quarantined (never opened).
+      const scan = scanNote(failure);
+      if (scan) setNote(scan);
+      else setProblem(toProblem(failure).message);
     } finally {
       setPending(false);
     }
@@ -40,6 +46,19 @@ export function TaxFileButton({
       {problem ? (
         <span role="alert" className="text-sm font-medium text-red-700">
           {problem}
+        </span>
+      ) : null}
+      {note ? (
+        <span
+          role={note.state === 'quarantined' ? 'alert' : 'status'}
+          className={
+            note.state === 'quarantined'
+              ? 'text-sm font-medium text-red-700'
+              : 'text-sm text-slate-700'
+          }
+          data-testid="scan-note"
+        >
+          {note.text}
         </span>
       ) : null}
     </span>

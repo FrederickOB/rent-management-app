@@ -64,8 +64,14 @@ export const rentTaxItem = pgTable(
   {
     id: id(),
     companyId: companyId(),
-    ...leaseRef(),
-    unitId: uuid().notNull(),
+    /**
+     * The lease the tax was received on. M11 (P25): null only for `opening`, rent tax an owner
+     * still owed GRA at the cut-over, which belongs to no lease.
+     */
+    propertyId: uuid(),
+    tenantId: uuid(),
+    leaseId: uuid(),
+    unitId: uuid(),
     ownerId: uuid().notNull(),
     bookId: uuid().notNull(),
     kind: text().notNull(),
@@ -80,14 +86,12 @@ export const rentTaxItem = pgTable(
     rateBps: integer().notNull(),
     taxMinor: minor().notNull(),
     currency: currency(),
-    leaseUse: text().notNull(),
-    unitCode: text().notNull(),
-    tenantName: text().notNull(),
+    leaseUse: text(),
+    unitCode: text(),
+    tenantName: text(),
     receiptNumber: bigint({ mode: 'number' }),
-    /** The rate's rule (rent tax, or withholding for a withholding item). */
-    rateRuleId: uuid()
-      .notNull()
-      .references(() => rule.id),
+    /** The rate's rule (rent tax, or withholding for a withholding item); none for `opening`. */
+    rateRuleId: uuid().references(() => rule.id),
     baseRuleId: uuid().references(() => rule.id),
     roundingRuleId: uuid().references(() => rule.id),
     serviceChargeRuleId: uuid().references(() => rule.id),
@@ -157,7 +161,19 @@ export const rentTaxItem = pgTable(
     check(
       'rent_tax_item_kind_check',
       // M8: `deposit_applied`, rent a move-out settled from the deposit (P11), received then.
-      sql`${t.kind} in ('receipt', 'carry_over', 'deposit_applied', 'withholding', 'reversal', 'withholding_offset')`,
+      // M11 (P25): `opening`, rent tax an owner still owed GRA at the cut-over (no lease).
+      sql`${t.kind} in ('receipt', 'carry_over', 'deposit_applied', 'withholding', 'reversal', 'withholding_offset', 'opening')`,
+    ),
+    check(
+      'rent_tax_item_lease_check',
+      // Every item but an owner-level opening one (and its reversal) names its lease, unit and rule.
+      sql`case when ${t.leaseId} is null
+            then ${t.kind} in ('opening', 'reversal') and ${t.propertyId} is null and ${t.tenantId} is null
+              and ${t.unitId} is null and ${t.leaseUse} is null and ${t.unitCode} is null and ${t.tenantName} is null
+              and ${t.paymentId} is null and ${t.withholdingId} is null and ${t.baseMinor} = 0
+            else ${t.kind} <> 'opening' and ${t.propertyId} is not null and ${t.tenantId} is not null
+              and ${t.unitId} is not null and ${t.leaseUse} is not null and ${t.unitCode} is not null
+              and ${t.tenantName} is not null and ${t.rateRuleId} is not null end`,
     ),
     check('rent_tax_item_use_check', sql`${t.leaseUse} in ('residential', 'commercial')`),
     check('rent_tax_item_currency_check', sql`${t.currency} = 'GHS'`),
@@ -174,7 +190,8 @@ export const rentTaxItem = pgTable(
       // credit (M5 review 2); a reversal or a carry-over never does.
       sql`(${t.kind} not in ('withholding', 'withholding_offset') or ${t.withholdingId} is not null)
           and (${t.kind} not in ('reversal', 'carry_over', 'deposit_applied') or ${t.withholdingId} is null)
-          and (${t.kind} not in ('receipt', 'reversal') or ${t.paymentId} is not null)`,
+          and (${t.kind} <> 'receipt' or ${t.paymentId} is not null)
+          and (${t.kind} <> 'reversal' or ${t.paymentId} is not null or ${t.leaseId} is null)`,
     ),
     check('rent_tax_item_entry_check', sql`(${t.taxMinor} <> 0) = (${t.entryId} is not null)`),
     check('rent_tax_item_dates_check', sql`${t.accountingDate} >= ${t.valueDate}`),
@@ -386,10 +403,12 @@ export const withholdingCertificate = pgTable(
       sql`(${t.status} = 'awaiting_confirmation') = (${t.decidedBy} is null)`,
     ),
     check(
+      // M11 review S4 (founder 4): an opening withholding certificate of an owner outside the
+      // letting business clears against opening balances (3900); a letting business's, 1160.
       'withholding_certificate_posted_check',
       sql`(${t.status} = 'confirmed') = (${t.entryId} is not null)
           and (${t.status} = 'confirmed') = (${t.debitAccount} is not null)
-          and (${t.debitAccount} is null or ${t.debitAccount} in ('2200', '1160'))`,
+          and (${t.debitAccount} is null or ${t.debitAccount} in ('2200', '1160', '3900'))`,
     ),
   ],
 );
@@ -581,7 +600,8 @@ export const rentTaxAlert = pgTable(
     companyId: companyId(),
     itemId: uuid().notNull(),
     ownerId: uuid().notNull(),
-    propertyId: uuid().notNull(),
+    /** M11 (P25): null for an owner-level opening item's alert (no property). */
+    propertyId: uuid(),
     alertDay: integer().notNull(),
     alertDate: day().notNull(),
     ruleId: uuid().references(() => rule.id),

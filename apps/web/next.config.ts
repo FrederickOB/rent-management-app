@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { securityHeaders } from './lib/security-headers';
 
 /**
  * The browser only ever talks to this origin. Better Auth and the API are proxied, so staff
@@ -6,20 +7,6 @@ import type { NextConfig } from 'next';
  * the app is built, so a deployment sets API_BASE_URL at build time as well as at run time.
  */
 const apiBaseUrl = (process.env.API_BASE_URL ?? 'http://localhost:3700').replace(/\/+$/, '');
-
-// No script policy here: Next.js needs inline scripts and eval in development. The strict,
-// nonce-based policy belongs to apps/links; this one stops framing and base or plugin abuse.
-const securityHeaders = [
-  {
-    key: 'Content-Security-Policy',
-    value: "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'",
-  },
-  { key: 'X-Frame-Options', value: 'DENY' },
-  { key: 'X-Content-Type-Options', value: 'nosniff' },
-  // The set-password link carries its token in the query string; never send it elsewhere.
-  { key: 'Referrer-Policy', value: 'same-origin' },
-  { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=()' },
-];
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
@@ -32,7 +19,7 @@ const nextConfig: NextConfig = {
     ];
   },
   async headers() {
-    return [{ source: '/:path*', headers: securityHeaders }];
+    return [{ source: '/:path*', headers: securityHeaders(process.env.NODE_ENV) }];
   },
 };
 

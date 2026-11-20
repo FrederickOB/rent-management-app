@@ -141,6 +141,15 @@ const MATRIX: Partial<Record<PolicyAction, string>> = {
   'support.use': '00000001',
   'usage.read': '00000001',
   'health.read': '00000001',
+  // M11 section 4.13.
+  'onboarding.import': '10110000',
+  'data_protection.manage': '10100000',
+  'data_protection.export': '10100000',
+  'platform.ops.replay': '00000001',
+  'platform.ops.redrive': '00000001',
+  'settlement_account.change_agency': '10100000',
+  'person.two_factor.reset': '00000001',
+  'person.sessions.revoke': '00000001',
 };
 
 function actorFor(

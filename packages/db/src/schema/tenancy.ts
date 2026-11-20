@@ -75,6 +75,11 @@ export const tenant = pgTable(
     isTestContact: boolean().notNull().default(false),
     createdBy: uuid().references(() => person.id),
     archivedAt: ts(),
+    /**
+     * M11 decision 5: when an erasure request anonymised the personal fields in place. The record
+     * stays (its leases, money and notices refer to it); only who it was is gone.
+     */
+    anonymisedAt: ts(),
     createdAt: tsNow(),
     updatedAt: tsNow(),
   },
@@ -130,6 +135,8 @@ export const tenantContact = pgTable(
     notes: text(),
     isTestContact: boolean().notNull().default(false),
     archivedAt: ts(),
+    /** M11 decision 5: anonymised with its tenant by an erasure request. */
+    anonymisedAt: ts(),
     createdAt: tsNow(),
     updatedAt: tsNow(),
   },
@@ -238,7 +245,9 @@ export const consentEvent = pgTable(
       'consent_event_source_check',
       // M6 (plan 4.2): the sources tenants give and withdraw consent through. 'reply' and 'stop'
       // were reserved in M3 and never written; they stay valid so no stored row could break.
-      sql`${t.source} in ('staff', 'reply', 'stop', 'tenant_app', 'tenant_reply', 'stop_keyword', 'start_keyword', 'email_unsubscribe')`,
+      // M11: `import` from the onboarding workbook (decision 2); `data_protection` withdrawn by an
+      // erasure request (decision 5).
+      sql`${t.source} in ('staff', 'reply', 'stop', 'tenant_app', 'tenant_reply', 'stop_keyword', 'start_keyword', 'email_unsubscribe', 'import', 'data_protection')`,
     ),
     check('consent_event_sha_check', sql`${t.textSha256} ~ '^[0-9a-f]{64}$'`),
   ],
@@ -398,12 +407,21 @@ export const lease = pgTable(
      * another period start. Set once, as the lease is signed.
      */
     billingStartDate: day(),
+    /**
+     * M11 decision 2: the onboarding batch that imported this paper lease. Its scan may follow
+     * (signed_document_id null until attached); a lease entered by hand still needs its scan. The
+     * foreign key (with company_id) is in 0068.
+     */
+    importedBatchId: uuid(),
     createdBy: uuid().references(() => person.id),
     createdAt: tsNow(),
     updatedAt: tsNow(),
   },
   (t) => [
     unique('lease_company_id_id_key').on(t.companyId, t.id),
+    index('lease_scan_to_follow_idx')
+      .on(t.companyId)
+      .where(sql`${t.importedBatchId} is not null and ${t.signedDocumentId} is null`),
     unique('lease_scope_key').on(t.companyId, t.propertyId, t.tenantId, t.id),
     foreignKey({
       name: 'lease_unit_fk',

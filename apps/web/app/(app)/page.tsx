@@ -2,6 +2,7 @@ import { DISPLAY_STATUS_LABELS, DISPLAY_STATUSES } from '@rent/domain/portfolio'
 import Link from 'next/link';
 import { navFor } from '@/components/nav';
 import { PageHeader } from '@/components/page-header';
+import { PendingInvitations } from '@/components/pending-invitations';
 import { STATUS_TONES } from '@/components/status-badge';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -56,6 +57,8 @@ export default async function HomePage() {
           You are not a member of any company yet. Ask an administrator to invite you.
         </Alert>
       )}
+      {/* M11 founder D2: invitations waiting for this person, to accept or decline. */}
+      <PendingInvitations />
       {/* Refresh is for agency admins, managers and landlords (M9 review), who manage leases. */}
       {dashboard ? <DashboardView canRefresh={allowed(me, 'lease.manage')} /> : null}
       {register ? (

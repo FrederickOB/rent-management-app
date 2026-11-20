@@ -124,6 +124,9 @@ export function planAccrual(
 ): AccrualPlan {
   if (line.accrued)
     throw new DomainError('billing.already_accrued', `Line ${line.id} is already accrued`);
+  // P25: an opening line was accrued at commit against opening balances; it is never income.
+  if (line.opening === true)
+    throw new DomainError('billing.opening_line', `Line ${line.id} is an opening balance`);
   if (line.periodStart === null)
     throw new DomainError('billing.not_recurring', `Line ${line.id} is not a charge period`);
   const balance = lineBalance(line, allocations);

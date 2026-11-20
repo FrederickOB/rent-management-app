@@ -54,6 +54,22 @@ export const SECURITY_HEADERS: readonly (readonly [name: string, value: string])
 ];
 
 /**
+ * HSTS (M11 decision 6, NFR-SEC), in production only, as apps/web sends it: a year, without
+ * `includeSubDomains` or `preload`, which are hard to undo. Browsers ignore it over plain HTTP, so
+ * a production build run locally is unaffected.
+ */
+export const HSTS_VALUE = 'max-age=31536000';
+
+/** Every security header for one response: SECURITY_HEADERS, and HSTS in production. */
+export function securityHeaders(
+  nodeEnv: string | undefined = process.env.NODE_ENV,
+): readonly (readonly [name: string, value: string])[] {
+  return nodeEnv === 'production'
+    ? [...SECURITY_HEADERS, ['Strict-Transport-Security', HSTS_VALUE]]
+    : SECURITY_HEADERS;
+}
+
+/**
  * The request headers routes see. Cookies are dropped, so nothing in this app can read one. The
  * nonce travels in the CSP header, where Next.js reads it for its own scripts, and in x-nonce for
  * our components. Both overwrite whatever the client sent.
@@ -73,7 +89,7 @@ export function forwardedRequestHeaders(incoming: Headers, csp: string, nonce: s
 export function secured(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set('Content-Security-Policy', contentSecurityPolicy(createNonce()));
-  for (const [name, value] of SECURITY_HEADERS) headers.set(name, value);
+  for (const [name, value] of securityHeaders()) headers.set(name, value);
   headers.set('Cache-Control', 'no-store');
   return new Response(response.body, { status: response.status, headers });
 }

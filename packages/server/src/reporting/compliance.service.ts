@@ -191,16 +191,25 @@ export class ComplianceService {
     );
     const groups = new Map<
       string,
-      { ownerId: string; propertyId: string; dueDate: string | null; total: number; n: number }
+      {
+        ownerId: string;
+        propertyId: string | null;
+        dueDate: string | null;
+        total: number;
+        n: number;
+        /** M11 (P25): rent tax brought in at the cut-over, owner-level (no property). */
+        opening: boolean;
+      }
     >();
     for (const item of open) {
-      const key = `${item.ownerId}:${item.propertyId}:${item.dueDate ?? ''}`;
+      const key = `${item.ownerId}:${item.propertyId ?? 'owner'}:${item.dueDate ?? ''}`;
       const group = groups.get(key) ?? {
         ownerId: item.ownerId,
         propertyId: item.propertyId,
         dueDate: item.dueDate,
         total: 0,
         n: 0,
+        opening: item.propertyId === null,
       };
       group.total += item.outstandingMinor;
       group.n += 1;
@@ -208,10 +217,14 @@ export class ComplianceService {
     }
     return [...groups.values()].map((g) => {
       const overdue = g.dueDate !== null && g.dueDate < today;
-      const receipts = g.n === 1 ? 'one receipt' : `${g.n} receipts`;
+      const receipts = g.opening
+        ? 'what was owed at the cut-over'
+        : g.n === 1
+          ? 'one receipt'
+          : `${g.n} receipts`;
       const kind = overdue ? ('rent_tax_overdue' as const) : ('rent_tax_due' as const);
       return {
-        id: `${kind}:${g.ownerId}:${g.propertyId}:${g.dueDate ?? 'undated'}`,
+        id: `${kind}:${g.ownerId}:${g.propertyId ?? 'owner'}:${g.dueDate ?? 'undated'}`,
         kind,
         owner: names.owner(g.ownerId),
         property: names.property(g.propertyId),

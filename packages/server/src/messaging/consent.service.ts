@@ -24,6 +24,7 @@ import { AppError, forbidden, notFound } from '../core/errors';
 import { consumeRateLimit } from '../core/rate-limit';
 import type { AppConfig } from '../core/config';
 import { CLOCK, CONFIG, DATABASE } from '../core/tokens';
+import { SigningHasher } from '../esign/secrets';
 import { PolicyService, staffContext } from '../policy/policy.service';
 import { TenantsService } from '../tenancy/tenants.service';
 import { maskEmail, unsubscribeAddressHash } from './store';
@@ -248,7 +249,11 @@ export class MessagingConsentService {
       !(await consumeRateLimit(this.database, key, { count, windowMinutes: 15 }, nowMs));
     if (await limited(`unsubscribe:${sha256(token)}`, 30))
       throw new AppError(429, 'rate_limited', 'Too many tries; wait a few minutes');
-    if (!confirm && client?.ip && (await limited(`unsubscribe-ip:${sha256(client.ip)}`, 60)))
+    // M11 review R3 F6: the browser's address as a keyed hash, never a plain SHA-256.
+    const address = client?.ip
+      ? new SigningHasher(this.config.BETTER_AUTH_SECRET).address(client.ip)
+      : null;
+    if (!confirm && address && (await limited(`unsubscribe-ip:${address}`, 60)))
       throw new AppError(429, 'rate_limited', 'Too many tries; wait a few minutes');
     const found = await withSystem(this.database, { actorKind: 'link' }, (tx) =>
       tx.execute<{ company_id: string; token_id: string }>(

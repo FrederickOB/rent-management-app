@@ -96,9 +96,46 @@ const configSchema = z.object({
    * platform admins only. Never in production: the config refuses it there.
    */
   E2E_TEST_CONTROLS: z.enum(['on', 'off']).default('off'),
+  /**
+   * M11: the e2e owner connection, for the one test control that must lift a check (ending an
+   * OQ-29 cooling-off). Read only while E2E_TEST_CONTROLS is on; never set in production.
+   */
+  E2E_DATABASE_OWNER_URL: z.string().optional(),
+  /**
+   * M11 security review R3 F1: the addresses or CIDRs of the proxies in front of the API,
+   * comma-separated (the load balancer, and the web app, which proxies /api/auth and /api/v1).
+   * Fastify believes X-Forwarded-For only from these; unset, it uses the socket's address.
+   * Required in production.
+   */
+  TRUSTED_PROXIES: z.string().min(1).optional(),
+  /**
+   * M11 decision 6: the malware scanner for uploads. `fake` (development and tests: only the EICAR
+   * test file is infected) or `clamav` (clamd over TCP, `docker compose --profile scan`). The
+   * documents module refuses `fake` in production.
+   */
+  MALWARE_SCANNER: z.enum(['fake', 'clamav']).default('fake'),
+  CLAMAV_HOST: z.string().min(1).default('localhost'),
+  CLAMAV_PORT: z.coerce.number().int().positive().max(65_535).default(3310),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
+
+/**
+ * The configuration a running API or worker uses (M11 review B5): NODE_ENV must be set, so a
+ * deployment that forgets it fails at start rather than running with production's guards off
+ * (NODE_ENV defaults to development for unit tests that build configurations by hand). The dev
+ * scripts set it to development themselves.
+ */
+export function loadProcessConfig(
+  env: Record<string, string | undefined> = process.env,
+): AppConfig {
+  const mode = env.NODE_ENV;
+  if (mode !== 'development' && mode !== 'test' && mode !== 'production')
+    throw new Error(
+      'NODE_ENV must be set to development, test or production; a deployment sets production',
+    );
+  return loadConfig(env);
+}
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   const result = configSchema.safeParse(env);
@@ -115,6 +152,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   if (config.NODE_ENV === 'production' && config.E2E_TEST_CONTROLS === 'on') {
     throw new Error('E2E_TEST_CONTROLS cannot be turned on in production');
+  }
+  // M11 review: the owner connection exists for one e2e test control; never in production.
+  if (config.NODE_ENV === 'production' && config.E2E_DATABASE_OWNER_URL) {
+    throw new Error('E2E_DATABASE_OWNER_URL must not be set in production');
+  }
+  // M11 security review R1 F11: the development secret is published in .env.example. (The API
+  // refuses to start in production without TRUSTED_PROXIES: apps/api/src/auth/request-origin.ts.)
+  if (
+    config.NODE_ENV === 'production' &&
+    (config.BETTER_AUTH_SECRET === DEV_BETTER_AUTH_SECRET ||
+      config.BETTER_AUTH_SECRET.startsWith('dev-only'))
+  ) {
+    throw new Error('BETTER_AUTH_SECRET must be a secret of its own in production');
   }
   if (
     config.NODE_ENV === 'production' &&
@@ -213,6 +263,9 @@ export function customerEmailDomainOf(config: AppConfig): string {
  * a secret: production refuses it, so a links app deployed without its key fails closed.
  */
 export const DEV_LINKS_API_KEY = 'dev-only-links-api-key-not-a-secret-000000';
+
+/** The development BETTER_AUTH_SECRET in .env.example. Published, so production refuses it. */
+export const DEV_BETTER_AUTH_SECRET = 'dev-only-better-auth-secret-0000000000000000';
 
 /** The key the links API accepts: the configured one, or the development stand-in outside production. */
 export function linksApiKeyOf(config: AppConfig): string {

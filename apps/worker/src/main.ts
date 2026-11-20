@@ -18,7 +18,7 @@ import {
   CoreModule,
   createLogger,
   DATABASE,
-  loadConfig,
+  loadProcessConfig,
   NestLogger,
   PAYMENT_PROVIDERS,
   STORAGE_PORT,
@@ -26,6 +26,11 @@ import {
   type Clock,
   type PaymentProviders,
 } from '@rent/server/core';
+import {
+  DataProtectionModule,
+  DataProtectionService,
+  RetentionReviewService,
+} from '@rent/server/data-protection';
 import { DocumentsModule, DocumentsService } from '@rent/server/documents';
 import { EsignModule, EsignService } from '@rent/server/esign';
 import { JobsService, OutboxRelay } from '@rent/server/jobs';
@@ -34,6 +39,7 @@ import { LedgerModule } from '@rent/server/ledger';
 import { AgentCashCheckService } from '@rent/server/ledger';
 import { MaintenanceModule, MaintenanceService } from '@rent/server/maintenance';
 import { MoveInReportService, MoveOutModule, MoveOutService } from '@rent/server/moveout';
+import { OnboardingModule, OnboardingService } from '@rent/server/onboarding';
 import { NoticesModule, NoticeTrackingService } from '@rent/server/notices';
 import { TasksModule } from '@rent/server/tasks';
 import {
@@ -45,6 +51,13 @@ import {
   MessagingService,
   TemplatesService,
 } from '@rent/server/messaging';
+import {
+  DeadLetterService,
+  OpsModule,
+  OpsPruningService,
+  QueueMonitorService,
+  WorkerHeartbeat,
+} from '@rent/server/ops';
 import {
   PaymentsModule,
   ProviderPaymentsService,
@@ -89,12 +102,14 @@ import {
 import { agentCashJobs } from './agent-cash.jobs';
 import { BILLING_EVENT_TYPES, billingJobs } from './billing.jobs';
 import { closeRenderer, renderOnPool, renderPdfJob } from './render-pdf.job';
+import { DATA_PROTECTION_EVENT_TYPES, dataProtectionJobs } from './data-protection.jobs';
 import { ESIGN_EVENT_TYPES, esignJobs } from './esign.jobs';
 import { workerJobs } from './jobs';
 import { MESSAGING_EVENT_TYPES, messagingJobs } from './messaging.jobs';
 import { MAINTENANCE_EVENT_TYPES, maintenanceJobs, moveOutOnRendered } from './maintenance.jobs';
 import { NOTICES_EVENT_TYPES, noticesJobs, noticesOnRendered } from './notices.jobs';
 import { PAYMENTS_EVENT_TYPES, paymentsJobs } from './payments.jobs';
+import { ONBOARDING_EVENT_TYPES, onboardingJobs } from './onboarding.jobs';
 import { REGISTER_EVENT_TYPES, registerJobs } from './register.jobs';
 import {
   dashboardOnRendered,
@@ -112,10 +127,12 @@ import {
   subscriptionJobs,
   subscriptionOnRendered,
 } from './subscription.jobs';
+import { OPS_EVENT_TYPES, opsJobs } from './ops.jobs';
 import { taxJobs } from './tax.jobs';
 import { TENANCY_EVENT_TYPES, tenancyJobs } from './tenancy.jobs';
+import { UPLOADS_EVENT_TYPES, uploadsJobs } from './uploads.jobs';
 
-const config = loadConfig();
+const config = loadProcessConfig();
 const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
 
 @Module({
@@ -148,6 +165,12 @@ const logger = createLogger({ level: config.LOG_LEVEL, name: 'worker' });
     // M10: subscription billing, paying, the lifecycle and dunning (platform `SUB-` charges are
     // handed to it by the payments webhooks once this module starts).
     SubscriptionModule,
+    // M11 (decision 9): retries of dead-lettered jobs, queue age alerts and pruning.
+    OpsModule,
+    // M11 decision 5: an access request's export, and the nightly retention review.
+    DataProtectionModule,
+    // M11 decisions 2 and 3 (P25): onboarding's dry runs, tenancies commits and opening balances.
+    OnboardingModule,
   ],
 })
 class WorkerModule {}
@@ -179,10 +202,13 @@ await jobs.start();
 const definitions = [
   ...workerJobs(deps),
   renderPdfJob({ ...deps, storage }),
+  // M11 (decision 6): every upload scanned for malware before anyone but its uploader opens it.
+  ...uploadsJobs(deps),
   ...registerJobs({
     propertyFiles: app.get(PropertyFilesService),
     imports: app.get(RegisterImportService),
   }),
+  ...onboardingJobs({ onboarding: app.get(OnboardingService) }),
   ...tenancyJobs({
     ...deps,
     messaging: app.get(MessagingService),
@@ -264,6 +290,20 @@ const definitions = [
     subledger: app.get(SubscriptionSubledgerCheck),
     notices: app.get(SubscriptionNoticesService),
   }),
+  // M11 (decision 9): a platform admin's job retries, the queue age alerts and the daily pruning.
+  ...opsJobs({
+    ...deps,
+    jobs,
+    deadLetters: app.get(DeadLetterService),
+    queues: app.get(QueueMonitorService),
+    pruning: app.get(OpsPruningService),
+  }),
+  // M11 decision 5: the tenant's export, and the nightly retention review (counts only).
+  ...dataProtectionJobs({
+    ...deps,
+    dataProtection: app.get(DataProtectionService),
+    retention: app.get(RetentionReviewService),
+  }),
 ];
 for (const definition of definitions) await jobs.register(definition);
 await jobs.watchDeadLetters();
@@ -276,6 +316,7 @@ const relay = new OutboxRelay(
   new Set<string>([
     'documents.render-pdf',
     ...REGISTER_EVENT_TYPES,
+    ...ONBOARDING_EVENT_TYPES,
     ...TENANCY_EVENT_TYPES,
     ...ESIGN_EVENT_TYPES,
     ...BILLING_EVENT_TYPES,
@@ -286,16 +327,23 @@ const relay = new OutboxRelay(
     ...REPORTING_DASHBOARD_EVENT_TYPES,
     ...REPORTING_STATEMENTS_EVENT_TYPES,
     ...SUBSCRIPTION_EVENT_TYPES,
+    ...DATA_PROTECTION_EVENT_TYPES,
+    ...UPLOADS_EVENT_TYPES,
+    ...OPS_EVENT_TYPES,
   ]),
 );
 await relay.start();
 // Provider webhooks stored by the API, queued for processing as they arrive (M4b plan 4.4).
 const inbox = new WebhookInboxRelay(database, jobs, logger);
 await inbox.start();
+// M11 decision 9: the worker's heartbeat, every 30 seconds, for /health/worker and the console.
+const heartbeat = new WorkerHeartbeat(database, app.get<Clock>(CLOCK), logger);
+await heartbeat.start();
 logger.info({ jobs: definitions.map((d) => d.name) }, 'worker started');
 
 async function shutdown(signal: string) {
   logger.info({ signal }, 'worker stopping');
+  await heartbeat.stop();
   await relay.stop();
   await inbox.stop();
   await jobs.stop();

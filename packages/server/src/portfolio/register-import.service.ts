@@ -36,7 +36,17 @@ import {
   type UnitType,
   type Utility,
 } from '@rent/domain/portfolio';
+import {
+  checkOwnerRows,
+  ONBOARDING_SHEETS,
+  OWNER_COLUMNS,
+  ownerFieldsAfterImport,
+  type OwnerImportFields,
+  type OwnerImportRow,
+} from '@rent/domain/onboarding';
+import type { OwnerKind } from '@rent/domain/portfolio';
 import type { StoragePort } from '@rent/integrations';
+import { v7 as uuidv7 } from 'uuid';
 import readXlsxFile from 'read-excel-file/node';
 import writeXlsxFile from 'write-excel-file/node';
 import type { Clock } from '../core/clock';
@@ -94,6 +104,8 @@ export interface ImportReport {
   readonly fileName: string | null;
   readonly sha256: string;
   readonly counts: {
+    /** M11 (onboarding step 1): the Owners sheet, when the file has one. */
+    readonly owners?: ImportCounts;
     readonly properties: ImportCounts;
     readonly units: ImportCounts;
     readonly blocks: number;
@@ -117,7 +129,7 @@ export interface RegisterImportView {
   readonly committedAt: Date | null;
 }
 
-type SheetRows = { row: number; values: Record<string, unknown> }[];
+export type SheetRows = { row: number; values: Record<string, unknown> }[];
 
 interface ExistingUnit {
   id: string;
@@ -141,6 +153,10 @@ interface Taken {
 }
 
 interface Plan {
+  /** M11 (onboarding step 1): owners from the Owners sheet, written before the properties. */
+  readonly ownersToCreate: OwnerImportRow[];
+  readonly ownersToUpdate: { id: string; row: OwnerImportRow; next: OwnerImportFields }[];
+  ownersUnchanged: number;
   readonly propertiesToCreate: PropertyImportRow[];
   readonly propertiesToUpdate: {
     id: string;
@@ -167,6 +183,9 @@ const meterKey = (utility: string, supplier: string, number: string) =>
 const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
 const samePin = (a: string | null, b: string | null) =>
   (a === null && b === null) || (a !== null && b !== null && Number(a) === Number(b));
+
+/** M11: an owner on the Owners sheet, not yet recorded; the commit creates it first. */
+const NEW_OWNER = 'new:';
 
 /** Said for a row about a property outside the person's scope; it reveals nothing more (AD-02). */
 const notYours = (code: string) => `${code} is not a property you can manage`;
@@ -219,8 +238,8 @@ const unitChanged = (a: UnitImportFields, b: UnitImportFields) =>
   !same(a.description, b.description) ||
   a.availability !== b.availability;
 
-/** Maps a sheet's header row to column keys and returns its non-empty rows. */
-function mapSheet(
+/** Maps a sheet's header row to column keys and returns its non-empty rows. M11 onboarding too. */
+export function mapSheet(
   name: string,
   data: readonly (readonly unknown[])[] | null,
   columns: readonly { key: string; header: string; required: boolean }[],
@@ -272,8 +291,14 @@ export class RegisterImportService {
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
-  /** The template, with the company's owner references and every allowed value on a Lists sheet. */
-  async template(actor: Actor | null): Promise<Buffer> {
+  /**
+   * The template, with the company's owner references and every allowed value on a Lists sheet.
+   * With `owners` (onboarding step 1, M11 decision 2), an Owners sheet comes first.
+   */
+  async template(
+    actor: Actor | null,
+    options: { readonly owners?: boolean } = {},
+  ): Promise<Buffer> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'register.import');
     const { regions, owners } = await withCompany(
@@ -299,6 +324,9 @@ export class RegisterImportService {
       ['Region', regions],
       ['Owner reference', owners.map((o) => `${o.reference}`)],
       ['Owner name', owners.map((o) => o.name)],
+      ...(options.owners
+        ? ([['Owner kind', ['Individual', 'Company']]] as [string, string[]][])
+        : []),
     ];
     const depth = Math.max(...lists.map(([, values]) => values.length));
     const listRows = [
@@ -309,6 +337,9 @@ export class RegisterImportService {
     ];
     const header = (columns: readonly { header: string }[]) => [columns.map((c) => bold(c.header))];
     return writeXlsxFile([
+      ...(options.owners
+        ? [{ sheet: ONBOARDING_SHEETS.owners, data: header(OWNER_COLUMNS), stickyRowsCount: 1 }]
+        : []),
       { sheet: IMPORT_SHEETS.properties, data: header(PROPERTY_COLUMNS), stickyRowsCount: 1 },
       { sheet: IMPORT_SHEETS.units, data: header(UNIT_COLUMNS), stickyRowsCount: 1 },
       { sheet: IMPORT_SHEETS.lists, data: listRows, stickyRowsCount: 1 },
@@ -493,6 +524,8 @@ export class RegisterImportService {
     }
     const taken = await this.takenInCompany(companyId);
     const scope = options.scope ?? null;
+    // M11: an Owners sheet's TINs are sealed in the commit; the company's key exists first.
+    await this.owners.ensureFieldKey(companyId);
     const ctx = { companyId, personId: row.createdBy, actorKind: 'system' as const, scope };
     const outcome = await withCompany(this.database, ctx, async (tx) => {
       // Locked and read again, so a job delivered twice applies the import once.
@@ -645,6 +678,8 @@ export class RegisterImportService {
     const suppliers = await this.defaultSuppliers(tx, companyId);
     const properties = checkPropertyRows(sheets.properties.rows, { regions });
     const units = checkUnitRows(sheets.units.rows, { defaultSuppliers: suppliers });
+    const ownerRows = sheets.owners ? checkOwnerRows(sheets.owners.rows) : null;
+    if (sheets.owners && ownerRows) issues.push(...sheets.owners.issues, ...ownerRows.issues);
     issues.push(
       ...sheets.properties.issues,
       ...sheets.units.issues,
@@ -659,6 +694,7 @@ export class RegisterImportService {
       issues,
       { properties: sheets.properties.rows, units: sheets.units.rows },
       { taken: context.taken, scoped: context.scope !== null },
+      ownerRows?.rows ?? [],
     );
     issues.sort((a, b) => a.sheet.localeCompare(b.sheet) || (a.row ?? 0) - (b.row ?? 0));
     return {
@@ -667,6 +703,15 @@ export class RegisterImportService {
         fileName,
         sha256,
         counts: {
+          ...(sheets.owners
+            ? {
+                owners: {
+                  create: plan.ownersToCreate.length,
+                  update: plan.ownersToUpdate.length,
+                  unchanged: plan.ownersUnchanged,
+                },
+              }
+            : {}),
           properties: {
             create: plan.propertiesToCreate.length,
             update: plan.propertiesToUpdate.length,
@@ -686,7 +731,14 @@ export class RegisterImportService {
     };
   }
 
-  private async readSheets(file: Buffer, issues: ImportIssue[]) {
+  private async readSheets(
+    file: Buffer,
+    issues: ImportIssue[],
+  ): Promise<{
+    properties: { rows: SheetRows; issues: ImportIssue[] };
+    units: { rows: SheetRows; issues: ImportIssue[] };
+    owners?: { rows: SheetRows; issues: ImportIssue[] };
+  }> {
     const none = { rows: [] as SheetRows, issues: [] as ImportIssue[] };
     const whole = (message: string) =>
       issues.push({ sheet: 'File', row: null, column: null, message });
@@ -718,13 +770,18 @@ export class RegisterImportService {
       workbook.find((s) => s.sheet.trim().toLowerCase() === name.toLowerCase())?.data ?? null;
     const propertyData = sheet(IMPORT_SHEETS.properties);
     const unitData = sheet(IMPORT_SHEETS.units);
-    if (!propertyData && !unitData)
+    // M11 (onboarding step 1): an agency's owners, read before the properties that name them.
+    const ownerData = sheet(ONBOARDING_SHEETS.owners);
+    if (!propertyData && !unitData && !ownerData)
       whole(
         `The workbook needs a "${IMPORT_SHEETS.properties}" or a "${IMPORT_SHEETS.units}" sheet`,
       );
     return {
       properties: mapSheet(IMPORT_SHEETS.properties, propertyData, PROPERTY_COLUMNS),
       units: mapSheet(IMPORT_SHEETS.units, unitData, UNIT_COLUMNS),
+      ...(ownerData
+        ? { owners: mapSheet(ONBOARDING_SHEETS.owners, ownerData, OWNER_COLUMNS) }
+        : {}),
     };
   }
 
@@ -754,6 +811,7 @@ export class RegisterImportService {
     issues: ImportIssue[],
     raw: { properties: SheetRows; units: SheetRows },
     context: { readonly taken: Taken; readonly scoped: boolean },
+    ownerRows: readonly OwnerImportRow[] = [],
   ): Promise<Plan> {
     const { taken, scoped } = context;
     const issue = (sheet: string, row: number, column: string, message: string) =>
@@ -774,6 +832,15 @@ export class RegisterImportService {
           .where(isNull(schema.owner.archivedAt))
       ).map((o) => [o.reference, o.id]),
     );
+    const { ownersToCreate, ownersToUpdate, ownersUnchanged } = await this.planOwners(
+      tx,
+      companyId,
+      ownerRows,
+      issues,
+      scoped,
+    );
+    // Owners on the Owners sheet can be named by the Properties sheet of the same file.
+    for (const row of ownersToCreate) owners.set(row.reference, `${NEW_OWNER}${row.reference}`);
     const existingProperties = new Map(
       (await tx.select().from(schema.property)).map((p) => [p.code, p]),
     );
@@ -788,6 +855,9 @@ export class RegisterImportService {
       ).rows.map((r) => [r.property_id, r.owner_id]),
     );
     const plan: Plan = {
+      ownersToCreate,
+      ownersToUpdate,
+      ownersUnchanged,
       propertiesToCreate: [],
       propertiesToUpdate: [],
       propertiesUnchanged: 0,
@@ -1034,8 +1104,109 @@ export class RegisterImportService {
     return plan;
   }
 
+  /**
+   * M11 (onboarding step 1; decision 2): the Owners sheet against the owners recorded, matched by
+   * reference. A blank optional cell keeps what an owner has (`ownerFieldsAfterImport`); a TIN is
+   * compared by its keyed hash and stored encrypted. Owners are company-wide, so a person limited
+   * to some owners or properties cannot import them, and an archived owner is never revived.
+   */
+  private async planOwners(
+    tx: Tx,
+    companyId: string,
+    rows: readonly OwnerImportRow[],
+    issues: ImportIssue[],
+    scoped: boolean,
+  ): Promise<Pick<Plan, 'ownersToCreate' | 'ownersToUpdate' | 'ownersUnchanged'>> {
+    const out: Pick<Plan, 'ownersToCreate' | 'ownersToUpdate' | 'ownersUnchanged'> = {
+      ownersToCreate: [],
+      ownersToUpdate: [],
+      ownersUnchanged: 0,
+    };
+    if (rows.length === 0) return out;
+    const O = ONBOARDING_SHEETS.owners;
+    if (scoped) {
+      issues.push({
+        sheet: O,
+        row: null,
+        column: null,
+        message: 'Owners are imported by people who manage the whole company',
+      });
+      return out;
+    }
+    const recorded = new Map((await tx.select().from(schema.owner)).map((o) => [o.reference, o]));
+    for (const row of rows) {
+      const existing = recorded.get(row.reference);
+      if (!existing) {
+        out.ownersToCreate.push(row);
+        continue;
+      }
+      if (existing.archivedAt) {
+        issues.push({
+          sheet: O,
+          row: row.row,
+          column: 'Owner reference',
+          message: `Owner ${row.reference} is archived; its reference is never reused`,
+        });
+        continue;
+      }
+      const before: OwnerImportFields = {
+        kind: existing.kind as OwnerKind,
+        displayName: existing.displayName,
+        legalName: existing.legalName,
+        phone: existing.phone,
+        email: existing.email,
+      };
+      const next = ownerFieldsAfterImport(before, row);
+      const tinChanged =
+        row.tin !== null && existing.tinIndex !== this.owners.tinIndexFor(companyId, row.tin);
+      const changed =
+        tinChanged ||
+        (Object.keys(next) as (keyof OwnerImportFields)[]).some(
+          (k) => (next[k] ?? null) !== (before[k] ?? null),
+        );
+      if (changed)
+        out.ownersToUpdate.push({
+          id: existing.id,
+          row: tinChanged ? row : { ...row, tin: null },
+          next,
+        });
+      else out.ownersUnchanged += 1;
+    }
+    return out;
+  }
+
   /** Writes the plan. Runs in the commit transaction; codes come from the file and never change. */
   private async apply(tx: Tx, companyId: string, personId: string, plan: Plan): Promise<void> {
+    // M11 (onboarding step 1): owners first, so the properties can name them.
+    const newOwners = new Map<string, string>();
+    for (const row of plan.ownersToCreate) {
+      const id = uuidv7();
+      await tx.insert(schema.owner).values({
+        id,
+        companyId,
+        reference: row.reference,
+        kind: row.kind,
+        displayName: row.displayName,
+        legalName: row.legalName,
+        phone: row.phone,
+        email: row.email,
+        ...(await this.owners.importTin(companyId, id, row.tin ?? undefined)),
+      });
+      newOwners.set(`${NEW_OWNER}${row.reference}`, id);
+    }
+    for (const { id, row, next } of plan.ownersToUpdate)
+      await tx
+        .update(schema.owner)
+        .set({
+          kind: next.kind,
+          displayName: next.displayName,
+          legalName: next.legalName,
+          phone: next.phone,
+          email: next.email,
+          ...(row.tin ? await this.owners.importTin(companyId, id, row.tin) : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.owner.id, id));
     const portfolioId = await this.register.defaultPortfolio(tx, companyId);
     const propertyIds = new Map(
       (
@@ -1065,7 +1236,8 @@ export class RegisterImportService {
         address,
       });
       propertyIds.set(row.code, id);
-      const owner = plan.ownerByProperty.get(row.code);
+      const named = plan.ownerByProperty.get(row.code);
+      const owner = named?.startsWith(NEW_OWNER) ? newOwners.get(named) : named;
       const ownerId =
         owner === 'landlord' || !owner ? await this.owners.landlordOwner(tx, companyId) : owner;
       if (!ownerId) throw new Error(`no owner for ${row.code}`);

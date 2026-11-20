@@ -7,6 +7,7 @@ import {
   gte,
   inArray,
   lte,
+  ne,
   schema,
   sql,
   withCompany,
@@ -55,6 +56,7 @@ import {
   loadLines,
   paymentsByIds,
   pendingBanking,
+  raisedOpeningLineIds,
   type AllocationRecord,
   type LineRecord,
   type PaymentRecord,
@@ -107,7 +109,8 @@ export interface AllocationView {
 export interface InvoiceRowView {
   readonly id: string;
   readonly number: string;
-  readonly kind: 'cycle' | 'deposit' | 'one_off';
+  /** M11 (P25): `opening` holds the arrears and deposit brought in at the cut-over. */
+  readonly kind: 'cycle' | 'deposit' | 'one_off' | 'opening';
   readonly leaseId: string;
   readonly tenantId: string;
   readonly tenantName: string;
@@ -476,8 +479,18 @@ export class BillingReadService {
   ): Promise<(InvoiceRowView & { lines: LineRecord[]; allocations: AllocationRecord[] })[]> {
     if (rows.length === 0) return [];
     const leaseIds = [...new Set(rows.map((r) => r.leaseId))];
-    const lines = await loadLines(tx, leaseIds);
-    const allocations = await loadAllocations(tx, { leaseIds, paymentIds: [] });
+    // M11 (load smoke): every lease's state in a fixed number of queries, not ten a lease.
+    const states = await this.engine.loadMany(tx, companyId, leaseIds);
+    const lines = [...states.values()].flatMap((st) => st.lines);
+    // The allocations on these leases' own lines (what loadAllocations({ leaseIds }) gives).
+    const allocations = [
+      ...new Map(
+        [...states.values()]
+          .flatMap((st) => st.allocations)
+          .filter((a) => leaseIds.includes(a.leaseId))
+          .map((a) => [a.id, a]),
+      ).values(),
+    ];
     const owners = await ownerFacts(tx, [...new Set(rows.map((r) => r.ownerId))]);
     const ruleIds = [...new Set(lines.flatMap((l) => (l.ruleId ? [l.ruleId] : [])))];
     const rules = ruleIds.length
@@ -491,13 +504,18 @@ export class BillingReadService {
     // Credit the lease holds pays periods as they start (P02): what is left to pay after it is
     // what the walk and ageing count, so an invoice paid ahead is never overdue (M4b review F5).
     const walks = new Map<string, ReturnType<BillingEngine['walk']>>();
-    for (const leaseId of leaseIds)
-      walks.set(leaseId, this.engine.walk(await this.engine.load(tx, companyId, leaseId)));
+    for (const [leaseId, state] of states) walks.set(leaseId, this.engine.walk(state));
+    // Each line's balance needs only its own lease's allocations.
+    const byLease = new Map<string, typeof allocations>();
+    for (const a of allocations) byLease.set(a.leaseId, [...(byLease.get(a.leaseId) ?? []), a]);
+    const linesOf = new Map<string, LineRecord[]>();
+    for (const l of lines) linesOf.set(l.invoiceId, [...(linesOf.get(l.invoiceId) ?? []), l]);
     return rows.map((r) => {
-      const mine = lines.filter((l) => l.invoiceId === r.id);
-      const balances = mine.map((l) => lineBalance(l, allocations));
+      const mine = linesOf.get(r.id) ?? [];
+      const own = byLease.get(r.leaseId) ?? [];
+      const balances = mine.map((l) => lineBalance(l, own));
       const walk = walks.get(r.leaseId)!;
-      const outstanding = mine.reduce((s, l) => s + remainingAfterWalk(l, allocations, walk), 0);
+      const outstanding = mine.reduce((s, l) => s + remainingAfterWalk(l, own, walk), 0);
       return {
         id: r.id,
         number: formatInvoiceNumber(r.number),
@@ -568,9 +586,16 @@ export class BillingReadService {
           `The VAT and levy rates on this invoice come from a rule that is not verified yet (${r.key}, ${r.verificationStatus === 'from_prd' ? 'taken from the PRD' : 'unverified'}): the tax adviser is to confirm it (OQ-20).`,
       );
       const { lines: _lines, allocations: _allocations, ...base } = view!;
+      const raised = await raisedOpeningLineIds(tx, view!.lines);
       return {
         ...base,
-        lines: view!.lines.map((l) => this.lineView(l, view!.allocations, rules.get(l.id) ?? null)),
+        lines: view!.lines.map((l) => {
+          const line = this.lineView(l, view!.allocations, rules.get(l.id) ?? null);
+          // A month brought in again by an adjustment shows as the raise (founder 2026-11-10).
+          return raised.has(l.id)
+            ? { ...line, label: `${line.label} (raised by an adjustment)` }
+            : line;
+        }),
         allocations: await this.allocationViews(tx, mineAllocations, view!.lines),
         billedTo: { name: row.billedToName, tin: row.billedToTin },
         billedFrom: { name: row.billedFromName, tin: row.billedFromTin },
@@ -954,6 +979,9 @@ export class BillingReadService {
           : undefined,
         filter.ownerId ? eq(p.ownerId, filter.ownerId) : undefined,
         filter.method ? eq(p.method, filter.method) : undefined,
+        // M11 (P25): opening payments are not money received through the platform: no receipt,
+        // never reversed. The lease's money card shows what they still hold.
+        ne(p.sourceType, 'opening_balance'),
         filter.from ? gte(p.receivedOn, filter.from) : undefined,
         filter.to ? lte(p.receivedOn, filter.to) : undefined,
       ].filter((c) => c !== undefined);
@@ -1077,7 +1105,8 @@ export class BillingReadService {
     this.policy.assert(staff, 'billing.view');
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const [payment] = await paymentsByIds(tx, [paymentId]);
-      if (!payment) throw notFound('Payment');
+      // M11 (P25): an opening payment is not a payment received through the platform.
+      if (!payment || payment.opening) throw notFound('Payment');
       const [row] = await this.paymentRows(tx, [payment]);
       const allocations = await loadAllocations(tx, { leaseIds: [], paymentIds: [paymentId] });
       const lines = await loadLines(tx, [...new Set(allocations.map((a) => a.leaseId))]);
@@ -1303,7 +1332,9 @@ export class BillingReadService {
     });
     if (allowed === false) throw notFound('File');
     if (allowed === null) throw forbidden();
-    const url = await this.documents.downloadUrl(staff.companyId, documentId);
+    const url = await this.documents.downloadUrl(staff.companyId, documentId, undefined, {
+      viewer: staff.personId,
+    });
     if (!url) throw notFound('File');
     return url;
   }

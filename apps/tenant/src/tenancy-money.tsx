@@ -82,7 +82,14 @@ export function TenancyMoney({
   }
 
   const view = billing.view;
-  if (view.status === 'loading') return <Small testID="money-loading">Loading what is due…</Small>;
+  // Its place is held at about the figures' height while they load (M11 review), so the card
+  // and what is below it do not move when they arrive.
+  if (view.status === 'loading')
+    return (
+      <View style={styles.moneyLoading}>
+        <Small testID="money-loading">Loading what is due…</Small>
+      </View>
+    );
   if (view.status === 'error') {
     // Not billed (404), or the session ended (401, handled by the loader): nothing to say here.
     if (view.problem.status === 404 || view.problem.status === 401) return null;
@@ -134,6 +141,13 @@ export function TenancyMoney({
   );
 }
 
+/**
+ * About the figures' height on a phone: 222 points with Pay, about 187 with nothing due (measured
+ * on the e2e stack at 360 and 393 wide, M11 review).
+ */
+const FIGURES_HEIGHT = 205;
+
 const styles = StyleSheet.create({
   money: { gap: 8, marginTop: 4 },
+  moneyLoading: { marginTop: 4, minHeight: FIGURES_HEIGHT },
 });

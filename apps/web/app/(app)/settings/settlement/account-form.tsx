@@ -29,11 +29,14 @@ import { useLoad } from '@/lib/use-load';
  */
 export function AccountRequestForm({
   companyKind,
+  canChangeAgency,
   owners,
   onDone,
   onCancel,
 }: {
   readonly companyKind: 'landlord' | 'agency' | 'platform';
+  /** The agency's own client account needs `settlement_account.change_agency` (M11). */
+  readonly canChangeAgency: boolean;
   readonly owners: readonly { readonly id: string; readonly label: string }[];
   readonly onDone: (text: string) => void;
   readonly onCancel: () => void;
@@ -104,7 +107,9 @@ export function AccountRequestForm({
     ? [
         { value: '', label: 'Choose whose account' },
         { value: 'owner', label: 'An owner’s own account' },
-        { value: 'agency', label: 'The agency’s client account' },
+        ...(canChangeAgency
+          ? [{ value: 'agency' as const, label: 'The agency’s client account' }]
+          : []),
       ]
     : [{ value: 'owner', label: 'Your own account' }];
 

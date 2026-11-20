@@ -269,8 +269,9 @@ describe('AC-02 management fees per receipt (P14)', () => {
     expect(await settledBy(c.companyId, ahead.paymentId)).toBe(1_200_000);
     const [fee] = await feesOf(c.companyId, { leaseId: annual.id });
     expect(fee).toMatchObject({ baseMinor: 1_200_000, feeMinor: 120_000, source: 'payment' });
-    // Surplus bears no fee until a month draws it.
-    const over = await lease(c, { start: monthStart(today) });
+    // Surplus bears no fee until a month draws it. From today, so its next month is not yet
+    // invoiced (14 days ahead) on any day of the month (founder-approved setup fix, 2026-11-19).
+    const over = await lease(c, { start: today });
     await b.money.recordProviderPayment(c.companyId, {
       leaseId: over.id,
       amountMinor: 150_000,

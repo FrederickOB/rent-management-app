@@ -76,6 +76,35 @@ services:
       timeout: 3s
       retries: 30
 
+  # M11 decision 6: ClamAV for malware scanning of uploads, only with `--profile scan` (it needs
+  # about 1.5 GB of memory). The worker and API use it with MALWARE_SCANNER=clamav; the fake
+  # scanner is the default otherwise. The debian variant is the multi-architecture image (arm64
+  # too). The first start downloads the signatures, which takes a few minutes.
+  clamav:
+    image: clamav/clamav:1.5.4-debian
+    profiles: ['scan']
+    # M11 review: clamd has no authentication, so it listens on this machine only.
+    ports:
+      - '127.0.0.1:3310:3310'
+    # M11 review: every upload is scanned whole. The largest we accept is a 50 MB video
+    # (MEDIA_RULES); these limits are twice that, and a file past any limit is reported as
+    # Heuristics.Limits.Exceeded (AlertExceedsMax), which the worker quarantines, never "clean".
+    # A stream past StreamMaxLength is refused ("size limit exceeded"): left pending and retried.
+    environment:
+      CLAMD_CONF_StreamMaxLength: 100M
+      CLAMD_CONF_MaxFileSize: 100M
+      CLAMD_CONF_MaxScanSize: 400M
+      CLAMD_CONF_AlertExceedsMax: 'yes'
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ['CMD-SHELL', 'clamdcheck.sh || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 300s
+
 volumes:
   postgres-data:
   seaweedfs-data:
+  clamav-data:

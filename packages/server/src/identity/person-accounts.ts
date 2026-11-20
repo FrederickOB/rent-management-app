@@ -39,7 +39,9 @@ export class PersonAccounts {
         id,
         name: input.name,
         email,
-        emailVerified: false,
+        // Only the seed and tests create someone with a password; everyone else proves their
+        // address by using the set-password link (auth.ts marks it then; founder D2).
+        emailVerified: !!input.password && !isPlaceholderEmail(email),
         ...(phone ? { phoneNumber: phone, phoneNumberVerified: false } : {}),
         isTestContact: input.isTestContact ?? false,
       },

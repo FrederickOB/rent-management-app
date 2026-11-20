@@ -9,6 +9,7 @@ import type { ApprovalStatus } from '@rent/domain/approvals';
 import type { Actor, CertificateResource, StaffRole } from '@rent/domain/policy';
 import {
   certificateDebitFor,
+  openingCertificateDebit,
   checkWithholding,
   type WithholdingTaxTreatment,
 } from '@rent/domain/tax';
@@ -132,7 +133,7 @@ export interface WithholdingView {
     readonly decidedByName: string | null;
     readonly decidedAt: Date | null;
     readonly rejectReason: string | null;
-    readonly debitAccount: '2200' | '1160' | null;
+    readonly debitAccount: '2200' | '1160' | '3900' | null;
     /** Whether the person reading may confirm or reject it now (decision 3). */
     readonly mayDecide: boolean;
     /**
@@ -711,11 +712,17 @@ export class WithholdingService {
     await this.refuseClosed(tx, c.withholdingId, true);
     // Review 1: from what was recorded with the withholding, never the owner's flag today: 2200
     // only when P17 accrued the amount withheld to 2200 (an item of kind `withholding`).
-    const accrued = await tx.execute<{ accrued: boolean }>(
+    // M11 founder decision 4 (OQ-64): withholding brought in at the cut-over (its entry is P25) has
+    // no P17 item; its debit follows the owner's letting-business flag recorded with it then.
+    const facts = await tx.execute<{ accrued: boolean; opening: boolean }>(
       sql`select exists (select 1 from rent_tax_item i where i.withholding_id = ${w.id}
-            and i.kind = 'withholding') as accrued`,
+            and i.kind = 'withholding') as accrued,
+          exists (select 1 from journal_entry e where e.company_id = ${companyId}
+            and e.id = ${w.entryId} and e.rule = 'P25') as opening`,
     );
-    const debit = certificateDebitFor({ accruedToRentTax: accrued.rows[0]!.accrued });
+    const debit = facts.rows[0]!.opening
+      ? openingCertificateDebit({ lettingBusiness: w.rentTaxTreatment === 'letting_business' })
+      : certificateDebitFor({ accruedToRentTax: facts.rows[0]!.accrued });
     const lease = await billingLeaseOf(tx, w.leaseId);
     const posted = await this.posting.post(tx, {
       companyId,
@@ -1217,7 +1224,7 @@ export class WithholdingService {
               : null,
             decidedAt: live.decidedAt,
             rejectReason: live.rejectReason,
-            debitAccount: live.debitAccount as '2200' | '1160' | null,
+            debitAccount: live.debitAccount as '2200' | '1160' | '3900' | null,
             mayDecide,
             selfConfirmation: await this.selfConfirmation(tx, live.id).then((r) =>
               r && r.mode === 'single_user'

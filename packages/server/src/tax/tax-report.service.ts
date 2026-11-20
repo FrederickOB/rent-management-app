@@ -34,7 +34,20 @@ const KIND_LABELS: Record<TaxItemKind, string> = {
   withholding: 'Withheld by the tenant',
   reversal: 'Payment reversed',
   withholding_offset: 'Replaced by withholding',
+  opening: 'Owed at the cut-over',
 };
+
+/**
+ * The day an item's alert days count from (TX-02): when the money was received, for tax on a
+ * receipt. Rent tax brought in at the cut-over (P25) keeps its own due date, so its alerts come
+ * as they would have for a receipt due that day: the due days before it.
+ */
+export function alertAnchor(
+  item: Pick<TaxItemRecord, 'kind' | 'valueDate' | 'dueDate' | 'dueDays'>,
+): string {
+  if (item.kind !== 'opening' || !item.dueDate || item.dueDays === null) return item.valueDate;
+  return toIsoDate(addDays(parseBusinessDate(item.dueDate), -item.dueDays));
+}
 
 export interface TaxItemView extends TaxItemRecord {
   readonly rules: readonly {
@@ -160,7 +173,7 @@ export class TaxReportService {
           parseBusinessDate(i.dueDate ?? i.valueDate),
         ),
         alertsReached: rentTaxAlertsReached(
-          i.valueDate,
+          alertAnchor(i),
           (i.alertRuleId && alertDays.get(i.alertRuleId)) || [],
           today,
         ),
@@ -278,8 +291,9 @@ export class TaxReportService {
         accountingDate: i.accountingDate,
         kind: KIND_LABELS[i.kind],
         receiptNumber: i.receiptNumber,
-        unitCode: i.unitCode,
-        tenantName: i.tenantName,
+        // M11 (P25): an owner-level item (rent tax brought in at the cut-over) has no unit or tenant.
+        unitCode: i.unitCode ?? 'Owner',
+        tenantName: i.tenantName ?? 'Brought in at the cut-over',
         baseMinor: i.baseMinor,
         rateBps: i.rateBps,
         taxMinor: i.taxMinor,
@@ -391,7 +405,9 @@ export class TaxReportService {
         ).rows[0]!.n > 0,
     );
     if (!visible) throw notFound('File');
-    const url = await this.documents.downloadUrl(staff.companyId, documentId);
+    const url = await this.documents.downloadUrl(staff.companyId, documentId, undefined, {
+      viewer: staff.personId,
+    });
     if (!url) throw notFound('File');
     return url;
   }

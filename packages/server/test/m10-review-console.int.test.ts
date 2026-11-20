@@ -2,7 +2,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { sql, withCompany, withSystem } from '@rent/db';
 import type { Actor } from '@rent/domain/policy';
 import { InMemoryAlert, InMemoryEmail, InMemorySms } from '@rent/integrations';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 import { AdminModule } from '../src/admin/admin.module';
 import { bootstrapPlatform, PlatformAdminExistsError } from '../src/admin/bootstrap';
 import { PlatformCompaniesService } from '../src/admin/companies.service';
@@ -37,6 +37,22 @@ const email = new InMemoryEmail();
 
 /** Monday 9 November 2026, 10:00 in Accra. */
 const START = new Date('2026-11-09T10:00:00Z');
+/**
+ * The month after the real one, and the one after it. A new price list must take effect after
+ * the database's real date (RA112), so the price-list tests run in that month, on its 9th, 15th
+ * and 20th as before; a fixed November 2026 failed once the real date passed the 15th
+ * (founder-approved setup fix, 2026-11-19).
+ */
+const monthAfter = (month: string) => {
+  const [y, m] = month.split('-').map(Number) as [number, number];
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+};
+const MONTH = monthAfter(new Date().toISOString().slice(0, 7));
+const NEXT_MONTH = monthAfter(MONTH);
+const inMonth = () => {
+  ctx.clock.set(new Date(`${MONTH}-09T10:00:00Z`));
+  onTestFinished(() => ctx.clock.set(START));
+};
 
 beforeAll(async () => {
   ctx = await startServerTest();
@@ -154,6 +170,7 @@ describe('BE-25 PB-03 a price list is in force for a month from the month’s 1s
   });
 
   it('prices this month with the list of its 1st, and next month with a list dated the 15th', async () => {
+    inMonth();
     const pricing = moduleRef.get(PlatformPricingService);
     const subscriptions = moduleRef.get(SubscriptionService, { strict: false });
     const billing = moduleRef.get(SubscriptionBillingService, { strict: false });
@@ -170,21 +187,21 @@ describe('BE-25 PB-03 a price list is in force for a month from the month’s 1s
       ratesMinor: { single_room: 1_100, self_contained: 2_100, commercial: 4_100 },
       minimumMinor: 99_900,
       annualDiscountBps: 0,
-      effectiveFrom: '2026-11-15',
+      effectiveFrom: `${MONTH}-15`,
     });
-    expect(midMonth).toMatchObject({ effectiveFrom: '2026-11-15', appliesFromMonth: '2026-12' });
+    expect(midMonth).toMatchObject({ effectiveFrom: `${MONTH}-15`, appliesFromMonth: NEXT_MONTH });
     expect(
       (await pricing.priceLists(admin)).find((l) => l.id === midMonth.id)!.appliesFromMonth,
-    ).toBe('2026-12');
+    ).toBe(NEXT_MONTH);
 
-    // On the 20th, the list dated the 15th is in force, but November is still priced on its 1st.
-    ctx.clock.set(new Date('2026-11-20T10:00:00Z'));
+    // On the 20th, the list dated the 15th is in force, but this month is still priced on its 1st.
+    ctx.clock.set(new Date(`${MONTH}-20T10:00:00Z`));
     try {
       expect((await subscriptions.viewFor(agency)).estimate).toEqual(estimateBefore);
-      const november = await billing.invoice(agency, { month: '2026-11' });
-      const december = await billing.invoice(agency, { month: '2026-12' });
-      // No units let: each bill is the Growth minimum. November's comes from the placeholder list
-      // in force on 1 November (GH₵150, prorated from the start), never the new GH₵999.
+      const november = await billing.invoice(agency, { month: MONTH });
+      const december = await billing.invoice(agency, { month: NEXT_MONTH });
+      // No units let: each bill is the Growth minimum. This month's comes from the placeholder list
+      // in force on its 1st (GH₵150, prorated from the start), never the new GH₵999.
       expect(november!.totalMinor).toBeGreaterThan(0);
       expect(november!.totalMinor).toBeLessThanOrEqual(15_000);
       expect(december!.totalMinor).toBe(99_900);
@@ -194,6 +211,7 @@ describe('BE-25 PB-03 a price list is in force for a month from the month’s 1s
   });
 
   it('shows this month’s plan cards at the rates of its 1st (needs the lead’s viewFor change)', async () => {
+    inMonth();
     const pricing = moduleRef.get(PlatformPricingService);
     const subscriptions = moduleRef.get(SubscriptionService, { strict: false });
     const agency = await company(ctx, 'agency', 'Plan Cards Agency');
@@ -203,9 +221,9 @@ describe('BE-25 PB-03 a price list is in force for a month from the month’s 1s
       ratesMinor: { single_room: 700, self_contained: 1_300, commercial: 2_700 },
       minimumMinor: 77_700,
       annualDiscountBps: 0,
-      effectiveFrom: '2026-11-16',
+      effectiveFrom: `${MONTH}-16`,
     });
-    ctx.clock.set(new Date('2026-11-20T10:00:00Z'));
+    ctx.clock.set(new Date(`${MONTH}-20T10:00:00Z`));
     try {
       expect((await subscriptions.viewFor(agency)).tiers).toEqual(cardsBefore);
     } finally {

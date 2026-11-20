@@ -173,7 +173,9 @@ export class TenantRepairsService {
           : null,
       );
       if (!documentId) continue;
-      const url = await this.documents.downloadUrl(companyId, documentId);
+      const url = await this.documents.downloadUrl(companyId, documentId, undefined, {
+        viewer: tenant.personId,
+      });
       if (url) return { url };
     }
     throw notFound('File');

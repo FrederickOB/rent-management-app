@@ -16,6 +16,7 @@ import type { Auth } from '@rent/server/identity';
 import { v7 as uuidv7 } from 'uuid';
 import { AppModule } from './app.module';
 import { mountBetterAuth } from './auth/mount-better-auth';
+import { csrfRefusal, trustedOriginsOf, trustProxyOf } from './auth/request-origin';
 import { ApiExceptionFilter } from './http/errors';
 
 const REQUEST_ID = /^[0-9a-f-]{36}$/i;
@@ -27,7 +28,8 @@ export async function createApiApp(core: CoreOptions = {}): Promise<NestFastifyA
 
   const adapter = new FastifyAdapter({
     bodyLimit: 1_000_000,
-    trustProxy: config.NODE_ENV === 'production',
+    // M11 review R3 F1: only the listed proxies' X-Forwarded-For is believed, never the client's.
+    trustProxy: trustProxyOf(config),
     requestIdHeader: 'x-request-id',
     genReqId: (request: RawRequestDefaultExpression) => {
       const incoming = request.headers['x-request-id'];
@@ -51,6 +53,18 @@ export async function createApiApp(core: CoreOptions = {}): Promise<NestFastifyA
   app.useGlobalFilters(new ApiExceptionFilter(logger));
 
   const fastify = app.getHttpAdapter().getInstance();
+  // M11 review R1 F7: state-changing requests must come from our origins and carry JSON.
+  const trusted = trustedOriginsOf(config);
+  fastify.addHook('onRequest', async (request, reply) => {
+    const refusal = csrfRefusal(
+      request.method,
+      request.url.split('?')[0] ?? '/',
+      request.headers,
+      trusted,
+    );
+    if (refusal)
+      return reply.code(refusal.status).send({ code: refusal.code, message: refusal.message });
+  });
   fastify.addHook('onSend', async (request, reply) => {
     void reply.header('x-request-id', String(request.id));
   });

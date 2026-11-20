@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/page-header';
 import { allowed } from '@/lib/policy';
 import { getMe, loadLease } from '@/lib/server/session';
 import { LeaseDetail, LeaseLimited } from './lease-detail';
+import { ScanToFollow } from './scan-to-follow';
 
 type Params = Promise<{ readonly leaseId: string }>;
 
@@ -43,36 +44,41 @@ export default async function LeasePage({
     return <LeaseLimited lease={loaded.data} canRecordCash={allowed(me, 'payment.record')} />;
   const saved = typeof query.saved === 'string' ? query.saved : null;
   return (
-    <LeaseDetail
-      initial={loaded.data}
-      saved={saved}
-      can={{
-        manage: allowed(me, 'lease.manage'),
-        cancelSigned: allowed(me, 'lease.cancel_signed'),
-        seeApprovals: allowed(me, 'approval.view'),
-        seeTenant: allowed(me, 'tenant.view'),
-        money: {
-          view: allowed(me, 'billing.view'),
-          recordCash: allowed(me, 'payment.record'),
-          recordTransfer: allowed(me, 'payment.record_transfer'),
-          sendPayLink: allowed(me, 'billing.manage'),
-        },
-        tax: {
-          manage: allowed(me, 'billing.manage'),
-          confirm: allowed(me, 'withholding.confirm'),
-        },
-        agency:
-          me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind === 'agency',
-        // M8 (plan 4.11): the move-in report and the move-out, on every plan (decision 1).
-        inspections: {
-          see: allowed(me, 'inspection.read'),
-          perform: allowed(me, 'inspection.perform'),
-        },
-        moveOut: {
-          manage: allowed(me, 'moveout.manage'),
-          see: allowed(me, 'moveout.manage') || allowed(me, 'moveout.settle'),
-        },
-      }}
-    />
+    <>
+      {/* M11 decision 2: an imported lease's scan, still to follow. */}
+      {allowed(me, 'onboarding.import') ? <ScanToFollow leaseId={leaseId} /> : null}
+      <LeaseDetail
+        initial={loaded.data}
+        saved={saved}
+        can={{
+          manage: allowed(me, 'lease.manage'),
+          cancelSigned: allowed(me, 'lease.cancel_signed'),
+          seeApprovals: allowed(me, 'approval.view'),
+          seeTenant: allowed(me, 'tenant.view'),
+          money: {
+            view: allowed(me, 'billing.view'),
+            recordCash: allowed(me, 'payment.record'),
+            recordTransfer: allowed(me, 'payment.record_transfer'),
+            sendPayLink: allowed(me, 'billing.manage'),
+          },
+          tax: {
+            manage: allowed(me, 'billing.manage'),
+            confirm: allowed(me, 'withholding.confirm'),
+          },
+          agency:
+            me.memberships.find((m) => m.companyId === me.activeCompanyId)?.companyKind ===
+            'agency',
+          // M8 (plan 4.11): the move-in report and the move-out, on every plan (decision 1).
+          inspections: {
+            see: allowed(me, 'inspection.read'),
+            perform: allowed(me, 'inspection.perform'),
+          },
+          moveOut: {
+            manage: allowed(me, 'moveout.manage'),
+            see: allowed(me, 'moveout.manage') || allowed(me, 'moveout.settle'),
+          },
+        }}
+      />
+    </>
   );
 }

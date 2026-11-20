@@ -160,6 +160,15 @@ export const maintenanceAttachmentSchema = z.object({
   /** Server time it was added. */
   createdAt: iso,
   addedByKind: z.enum(['staff', 'artisan', 'tenant', 'message']),
+  /**
+   * M11 founder decision (review round): for a photo re-encoded before it was stored (its EXIF and
+   * location dropped), the original's SHA-256 and byte count, so the original is shown to have
+   * arrived whole. Null when the stored file is the upload itself. Staff only.
+   */
+  original: z
+    .object({ sha256: z.string().regex(/^[0-9a-f]{64}$/), bytes: z.number().int().positive() })
+    .nullable()
+    .optional(),
 });
 
 const jobTaskSchema = z.object({
@@ -525,13 +534,19 @@ export const jobSheetSchema = z.object({
   contact: z.object({ name: z.string(), phone: z.string().nullable() }).nullable(),
   artisan: z.object({ name: z.string(), response: z.enum(['accepted', 'declined']).nullable() }),
   visitAt: iso.nullable(),
-  /** F1: the report's photos and videos only. Empty on a dead link. */
+  /**
+   * F1: the report's photos and videos only. Empty on a dead link. M11 decision 6: `pending` until
+   * the malware scan is done (opening it answers 409 DOCUMENT_SCAN_PENDING); an infected file is
+   * never listed.
+   */
   attachments: z.array(
     z.object({
       id: uuid,
       kind: z.enum(['image', 'video']),
       stage: z.literal('report'),
       contentType: z.string(),
+      /** Always sent by the API; optional so a page built before M11 still parses. */
+      scan: z.enum(['pending', 'clean']).optional(),
     }),
   ),
   timeZone: z.string(),
@@ -558,6 +573,19 @@ export const jobSheetSchema = z.object({
 export type JobSheetView = z.infer<typeof jobSheetSchema>;
 
 export const jobSheetContract = {
+  /**
+   * M11 review B13: whether a job sheet is live (not closed, expired or revoked), for apps/links
+   * to check before it reads a photo upload's body. It records nothing about the link: no open, no
+   * open count. An unknown token answers 404, as every link route.
+   */
+  check: oc
+    .route({
+      method: 'POST',
+      path: '/job-sheets/check',
+      summary: 'Whether a job sheet is live; records nothing (M11 review B13)',
+    })
+    .input(sheetInput)
+    .output(z.object({ live: z.boolean() })),
   open: oc
     .route({
       method: 'POST',

@@ -1,7 +1,8 @@
-import { tryNormalisePhone } from '@rent/domain/phone';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { authClient } from '../src/auth-client';
+import { signInPhone } from '../src/phone';
+import { codeRefusalMessage, codeSendRefusalMessage } from '../src/problems';
 import { clearDroppedRepairs, droppedRepairs } from '../src/repair-dropped';
 import { useSession } from '../src/session';
 import { Body, Button, ErrorText, Field, Notice, Screen } from '../src/ui';
@@ -23,7 +24,7 @@ export default function SignIn() {
 
   async function sendCode() {
     setError(null);
-    const phone = tryNormalisePhone(phoneInput);
+    const phone = await signInPhone(phoneInput);
     if (!phone) {
       setError('Enter your phone number, for example 024 412 3456.');
       return;
@@ -34,11 +35,7 @@ export default function SignIn() {
     const result = await authClient.phoneNumber.sendOtp({ phoneNumber: phone });
     setBusy(false);
     if (result.error) {
-      setError(
-        result.error.status === 429
-          ? 'Too many codes requested. Try again in a few minutes.'
-          : 'We could not send a code. Try again.',
-      );
+      setError(codeSendRefusalMessage(result.error));
       return;
     }
     setCode('');
@@ -56,11 +53,7 @@ export default function SignIn() {
     const result = await authClient.phoneNumber.verify({ phoneNumber: step.phone, code });
     if (result.error) {
       setBusy(false);
-      setError(
-        result.error.status === 403
-          ? 'Too many attempts. Request a new code.'
-          : 'That code is not right, or it has expired.',
-      );
+      setError(codeRefusalMessage(result.error));
       return;
     }
     await refresh();
@@ -110,7 +103,9 @@ export default function SignIn() {
         value={code}
         onChangeText={(text) => setCode(text.replace(/\D/g, '').slice(0, 6))}
         keyboardType="number-pad"
-        autoComplete="sms-otp"
+        // The web's own value, valid HTML (axe, M11). React Native turns it into Android's
+        // `sms-otp`, which keeps SMS autofill there, and iOS reads textContentType.
+        autoComplete="one-time-code"
         textContentType="oneTimeCode"
         maxLength={6}
       />

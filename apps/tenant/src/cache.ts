@@ -9,7 +9,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  * the tap that opened it); anything that holds a URL is refused. Signing out empties it.
  */
 const PREFIX = 'rent.cache.v1';
-const ME_KEY = `${PREFIX}:me`;
+/** Where the person last signed in on this device is kept (rememberPerson). */
+export const ME_KEY = `${PREFIX}:me`;
 
 export interface Cached<T> {
   readonly data: T;
@@ -17,7 +18,8 @@ export interface Cached<T> {
   readonly savedAt: string;
 }
 
-const keyFor = (personId: string, name: string) => `${PREFIX}:${personId}:${name}`;
+/** Where one person's copy of `name` is kept. */
+export const keyFor = (personId: string, name: string) => `${PREFIX}:${personId}:${name}`;
 
 /**
  * Anything shaped like a link: a scheme, or a secure-link path (signing, pay, receipt,

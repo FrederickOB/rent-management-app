@@ -1901,9 +1901,29 @@ const DEMO_ACCOUNTS: {
   },
 ];
 
-/** The demo TOTP code now: the agency's sole admin confirms her own requests after cooling off (OQ-29). */
-const demoTotp = async (): Promise<string> =>
-  (await generate({ secret: base32(DEMO_TOTP_SECRET) })) as unknown as string;
+/** The last TOTP time step each demo person confirmed with (M11: a step-up code is accepted once). */
+const lastDemoStep = new Map<string, number>();
+
+/**
+ * A demo TOTP code for one person's self-confirmation after cooling off (OQ-29). Each uses a fresh,
+ * later time step: the step-up refuses a step it has accepted (M11 security review R1 F4). The
+ * server takes the current or the next step, so a third confirmation inside one 30-second step
+ * waits for the next one.
+ */
+async function demoTotp(person: string): Promise<string> {
+  for (;;) {
+    const current = Math.floor(Date.now() / 30_000);
+    const step = Math.max(current, (lastDemoStep.get(person) ?? -1) + 1);
+    if (step <= current + 1) {
+      lastDemoStep.set(person, step);
+      return (await generate({
+        secret: base32(DEMO_TOTP_SECRET),
+        epoch: step * 30,
+      })) as unknown as string;
+    }
+    await new Promise((resolve) => setTimeout(resolve, (current + 1) * 30_000 - Date.now() + 100));
+  }
+}
 
 async function ensureSettlementAccounts(
   database: Database,
@@ -1973,7 +1993,7 @@ async function ensureSettlementAccounts(
           p.approvalId,
           {
             decision: 'self_confirm',
-            code: await demoTotp(),
+            code: await demoTotp(p.requester),
           },
         );
       else
@@ -2010,7 +2030,7 @@ async function ensureSettlementAccounts(
     for (const approvalId of asked)
       await services.approvals.decide(admin, approvalId, {
         decision: 'self_confirm',
-        code: await demoTotp(),
+        code: await demoTotp('agency.admin@demo.invalid'),
       });
   } finally {
     seedClock.offsetMs = 0;

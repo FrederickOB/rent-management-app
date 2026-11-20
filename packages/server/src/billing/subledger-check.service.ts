@@ -109,7 +109,29 @@ export class SubledgerCheckService {
           union select lease_id from payment_match union select lease_id from credit_carry_over`,
     );
     let lineCount = 0;
-    for (const { lease_id: leaseId } of leaseRows.rows) {
+    // M11 (load smoke): the deposits carried and applied are summed in one query each, not two a
+    // lease. Each lease's state is still loaded on its own, as the snapshot test observes.
+    const allLeases = leaseRows.rows.map((r) => r.lease_id);
+    const carriedBy = new Map(
+      (
+        await tx.execute<{ lease_id: string; net: number }>(
+          sql`select l as lease_id, coalesce(sum(case when c.lease_id = l then c.amount_minor else -c.amount_minor end), 0)::bigint as net
+              from unnest(${`{${allLeases.join(',')}}`}::uuid[]) as l
+              join credit_carry_over c on c.kind = 'deposit' and (c.lease_id = l or c.from_lease_id = l)
+              group by l`,
+        )
+      ).rows.map((r) => [r.lease_id, Number(r.net)]),
+    );
+    const usedBy = new Map(
+      (
+        await tx.execute<{ lease_id: string; total: number }>(
+          sql`select lease_id, coalesce(sum(case when kind = 'unwound' then -amount_minor else amount_minor end), 0)::bigint as total
+              from deposit_application where lease_id = any(${`{${allLeases.join(',')}}`}::uuid[])
+              group by lease_id`,
+        )
+      ).rows.map((r) => [r.lease_id, Number(r.total)]),
+    );
+    for (const leaseId of allLeases) {
       const state = await this.engine.load(tx, companyId, leaseId);
       let onLines = 0;
       let depositsSettled = 0;
@@ -133,21 +155,12 @@ export class SubledgerCheckService {
         expectedMinor: onLines + credit,
         actualMinor: -(prepaid.get(leaseId) ?? 0),
       });
-      const carried = await tx.execute<{ net: number }>(
-        sql`select coalesce(sum(case when lease_id = ${leaseId} then amount_minor else -amount_minor end), 0)::bigint as net
-            from credit_carry_over where kind = 'deposit' and (lease_id = ${leaseId} or from_lease_id = ${leaseId})`,
-      );
       // M8: what a move-out applied, retained or approved for refund left the deposit (P11, P12),
       // less what a chargeback's P21b gave back to it (M8 review).
-      const used = await tx.execute<{ total: number }>(
-        sql`select coalesce(sum(case when kind = 'unwound' then -amount_minor else amount_minor end), 0)::bigint as total
-            from deposit_application where lease_id = ${leaseId}`,
-      );
       add({
         check: 'deposit',
         subject: leaseId,
-        expectedMinor:
-          depositsSettled + Number(carried.rows[0]?.net ?? 0) - Number(used.rows[0]?.total ?? 0),
+        expectedMinor: depositsSettled + (carriedBy.get(leaseId) ?? 0) - (usedBy.get(leaseId) ?? 0),
         actualMinor: -(deposits.get(leaseId) ?? 0),
       });
     }
@@ -190,16 +203,22 @@ export class SubledgerCheckService {
         )
       ).rows.map((r) => r.payment_id),
     );
+    // Each payment's own allocations, indexed once (a scan per payment grew with the square).
+    const byPayment = new Map<string, typeof allocations>();
+    for (const a of allocations)
+      if (a.paymentId !== null)
+        byPayment.set(a.paymentId, [...(byPayment.get(a.paymentId) ?? []), a]);
     for (const p of payments) {
-      const allocated = allocations
-        .filter((a) => a.source === 'payment' && a.paymentId === p.id)
+      const own = byPayment.get(p.id) ?? [];
+      const allocated = own
+        .filter((a) => a.source === 'payment')
         .reduce((s, a) => s + a.amountMinor, 0);
       if (p.reversedAccountingDate !== null)
         add({ check: 'payment', subject: p.id, expectedMinor: 0, actualMinor: allocated });
       else {
         let credit: number;
         try {
-          credit = paymentCredit(p, allocations);
+          credit = paymentCredit(p, own);
         } catch {
           credit = -1;
         }

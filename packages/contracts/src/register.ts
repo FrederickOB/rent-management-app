@@ -261,6 +261,8 @@ export const registerImportSchema = z.object({
       fileName: z.string().nullable(),
       sha256: z.string(),
       counts: z.object({
+        /** M11 (onboarding step 1): the Owners sheet, for agencies. */
+        owners: importCounts.optional(),
         properties: importCounts,
         units: importCounts,
         blocks: z.number().int(),

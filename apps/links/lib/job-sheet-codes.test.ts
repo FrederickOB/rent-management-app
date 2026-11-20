@@ -57,6 +57,20 @@ function stubApi(path: string, answer: () => Response) {
   );
 }
 
+/** stubApi, with the live check made before a photo form is read (/job-sheets/check) answered. */
+function stubApiAndCheck(path: string, answer: () => Response) {
+  stubApi(path, answer);
+  const stubbed = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init?: RequestInit) =>
+      new URL(url).pathname === '/job-sheets/check'
+        ? Response.json({ live: true })
+        : stubbed(url, init),
+    ),
+  );
+}
+
 function completion() {
   const form = new FormData();
   form.append(
@@ -81,7 +95,7 @@ afterEach(() => {
 
 describe('MI-06 the job sheet’s code problems, as the signing page words them', () => {
   it('a locked code says until when, in the job’s zone', async () => {
-    stubApi('/job-sheets/complete', locked);
+    stubApiAndCheck('/job-sheets/complete', locked);
     const answer = await complete(completion(), params);
     expect(answer.headers.get('location')).toBe(
       `/j/${TOKEN}?error=CODE_LOCKED&until=${encodeURIComponent(UNTIL)}#act`,
@@ -115,7 +129,7 @@ describe('MI-06 the job sheet’s code problems, as the signing page words them'
   });
 
   it('a wrong code says how many tries are left', async () => {
-    stubApi('/job-sheets/complete', () =>
+    stubApiAndCheck('/job-sheets/complete', () =>
       Response.json(
         { code: 'CODE_WRONG', message: 'Wrong code', data: { attemptsLeft: '1' } },
         { status: 400 },
@@ -135,7 +149,7 @@ describe('MI-06 the job sheet’s code problems, as the signing page words them'
     expect(jobSheetProblem({ error: 'CODE_LOCKED' })).toBe(
       'Too many wrong codes. Wait a while before you try again.',
     );
-    stubApi('/job-sheets/complete', () =>
+    stubApiAndCheck('/job-sheets/complete', () =>
       Response.json({ code: 'TOO_MANY_REQUESTS', message: 'Slow down' }, { status: 429 }),
     );
     const answer = await complete(completion(), params);

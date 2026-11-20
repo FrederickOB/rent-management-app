@@ -48,12 +48,18 @@ export function messagingJobs(
         const outcome = await deps.inbound.process(inboxId);
         ctx.logger.info({ outcome }, 'inbound message processed');
       },
-      async onDeadLetter({ inboxId }) {
-        await deps.inbound.failed(inboxId);
+      async onDeadLetter({ inboxId }, { error, createdAt }) {
+        // M11 decision 9: the row keeps why its last try failed (a code, never a body); a row
+        // replayed since this job was queued waits for the replay's own job (M11 review).
+        if (createdAt) await deps.inbound.failed(inboxId, error ?? null, createdAt);
+        else if (error) await deps.inbound.failed(inboxId, error);
+        else await deps.inbound.failed(inboxId);
       },
     }),
     defineJob({
       name: FETCH_MEDIA_JOB,
+      // M11 drill: a burst (decision 7's peak) must clear without a 1 s pause after every job.
+      drain: true,
       scope: 'company',
       schema: z
         .object({

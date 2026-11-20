@@ -12,6 +12,7 @@ import { authProblem } from '@/lib/errors';
 /** New backup codes replace the old ones at once; they are shown here a single time. */
 export function BackupCodesCard() {
   const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
   const [codes, setCodes] = useState<readonly string[] | null>(null);
   const [saved, setSaved] = useState(false);
   const [pending, setPending] = useState(false);
@@ -22,7 +23,10 @@ export function BackupCodesCard() {
     setPending(true);
     setError(null);
     try {
-      const result = await authClient().twoFactor.generateBackupCodes({ password });
+      // M11 security review: making new codes needs the current authenticator code too. The
+      // server reads `code`; Better Auth's own client type does not list it.
+      const input = { password, code: code.trim() } as { password: string };
+      const result = await authClient().twoFactor.generateBackupCodes(input);
       if (result.error || !result.data) {
         setError(authProblem(result.error).message);
         return;
@@ -30,6 +34,7 @@ export function BackupCodesCard() {
       setCodes(result.data.backupCodes);
       setSaved(false);
       setPassword('');
+      setCode('');
     } catch (failure) {
       setError(authProblem(failure).message);
     } finally {
@@ -64,11 +69,23 @@ export function BackupCodesCard() {
               label="Password"
               type="password"
               autoComplete="current-password"
-              hint="Confirm your password to make new codes."
+              hint="Confirm your password and a code to make new codes."
               required
               className="max-w-sm"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+            />
+            <TextField
+              label="6-digit code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              hint="The current code from your authenticator app. Each code works once: if you just used it, wait for the next one."
+              required
+              className="max-w-48"
+              value={code}
+              onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))}
             />
             <Button type="submit" variant="secondary" pending={pending}>
               Make new backup codes

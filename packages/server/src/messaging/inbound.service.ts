@@ -12,6 +12,7 @@ import {
   type Tx,
 } from '@rent/db';
 import { instantFrom } from '@rent/domain/dates';
+import { sniffContentType } from '@rent/domain/maintenance';
 import { providerCostToMinor } from '@rent/domain/money';
 import {
   applyConversationEvent,
@@ -55,6 +56,7 @@ import type { Clock } from '../core/clock';
 import { messagingWebhookSecretOf, whatsappAppSecretOf, type AppConfig } from '../core/config';
 import { MESSAGING_INBOUND_JOB, queueMessage, type NewMessage } from '../core/messages';
 import { enqueueOutbox } from '../core/outbox';
+import { scrubString } from '../core/logging/redact';
 import { consumeRateLimit } from '../core/rate-limit';
 import {
   ALERT_PORT,
@@ -65,7 +67,12 @@ import {
   SMS_PORT,
   WHATSAPP_PORT,
 } from '../core/tokens';
-import { DocumentsService, type StagedEvidence } from '../documents/documents.service';
+import {
+  DocumentsService,
+  reencodeImage,
+  type StagedEvidence,
+} from '../documents/documents.service';
+import { SigningHasher } from '../esign/secrets';
 import { MaintenanceService } from '../maintenance/maintenance.service';
 import { PolicyService } from '../policy/policy.service';
 import { TenantsService } from '../tenancy/tenants.service';
@@ -164,6 +171,9 @@ const UNKNOWN_MEDIA_PER_DAY = 10;
  */
 @Injectable()
 export class InboundService {
+  /** M11 review R3 F6: addresses and phones in rate-limit keys are keyed hashes, not SHA-256. */
+  private readonly hasher: SigningHasher;
+
   constructor(
     @Inject(DATABASE) private readonly database: Database,
     @Inject(CONFIG) private readonly config: AppConfig,
@@ -180,7 +190,9 @@ export class InboundService {
     @Inject(BotService) private readonly bot: BotService,
     @Inject(TemplatesService) private readonly templates: TemplatesService,
     @Optional() @Inject(WHATSAPP_PORT) private readonly whatsapp: WhatsAppPort | null = null,
-  ) {}
+  ) {
+    this.hasher = new SigningHasher(config.BETTER_AUTH_SECRET);
+  }
 
   /** M8 review: the maintenance module honours STOP and START from artisans and staff. */
   private readonly contactKeywords: ((
@@ -219,7 +231,7 @@ export class InboundService {
         request.ip &&
         !(await consumeRateLimit(
           this.database,
-          `messaging-webhook:bad:${sha256(request.ip)}`,
+          `messaging-webhook:bad:${this.hasher.address(request.ip)}`,
           { count: 20, windowMinutes: 15 },
           this.clock.now().getTime(),
         ))
@@ -409,8 +421,13 @@ export class InboundService {
 
   /** `messaging.process-inbound`: one stored row, once. */
   async process(inboxId: string): Promise<string> {
+    // M11 decision 9: read under the row's lock, so a replay still committing is waited for.
     const [row] = await withSystem(this.database, {}, (tx) =>
-      tx.select().from(schema.webhookInbox).where(eq(schema.webhookInbox.id, inboxId)),
+      tx
+        .select()
+        .from(schema.webhookInbox)
+        .where(eq(schema.webhookInbox.id, inboxId))
+        .for('update'),
     );
     if (!row || row.status !== 'received' || !row.signatureValid || !row.rawBody) return 'skipped';
     const body = JSON.parse(row.rawBody) as unknown;
@@ -471,12 +488,32 @@ export class InboundService {
     return outcome;
   }
 
-  async failed(inboxId: string): Promise<void> {
+  /** The job's dead letter: the row is failed, with why (M11 decision 9: a code, never a body). */
+  async failed(
+    inboxId: string,
+    lastError: string | null = null,
+    jobCreatedAt: Date | null = null,
+  ): Promise<void> {
     await withSystem(this.database, {}, (tx) =>
       tx
         .update(schema.webhookInbox)
-        .set({ status: 'failed', outcome: 'dead_lettered', processedAt: new Date() })
-        .where(eq(schema.webhookInbox.id, inboxId)),
+        .set({
+          status: 'failed',
+          outcome: 'dead_lettered',
+          processedAt: new Date(),
+          // M11 review: scrubbed as logs are, so the console never shows personal data or tokens.
+          lastError: lastError ? scrubString(lastError).slice(0, 200) : null,
+        })
+        .where(
+          and(
+            eq(schema.webhookInbox.id, inboxId),
+            // M11 review: a row a platform admin replayed after this job was queued waits for the
+            // replay's own job; this job's giving up does not fail it.
+            jobCreatedAt
+              ? sql`(${schema.webhookInbox.lastReplayedAt} is null or ${schema.webhookInbox.lastReplayedAt} < ${jobCreatedAt.toISOString()}::timestamptz)`
+              : undefined,
+          ),
+        ),
     );
   }
 
@@ -1067,7 +1104,7 @@ export class InboundService {
       ? inbound.media.slice(0, 20)
       : (await consumeRateLimit(
             this.database,
-            `messaging-media:unknown:${sha256(inbound.from)}`,
+            `messaging-media:unknown:${this.hasher.destination(inbound.from)}`,
             { count: UNKNOWN_MEDIA_PER_DAY, windowMinutes: 24 * 60 },
             now.getTime(),
           ))
@@ -1443,9 +1480,34 @@ export class InboundService {
           .toLowerCase();
       }
     }
-    const kind = MEDIA_TYPES[contentType];
+    // M11 review R3 F4: the bytes decide what a file is, never the type the sender declared. A
+    // file of a type we take is stored under the type its first bytes show, when that is of the
+    // same kind as declared (a PNG sent as a JPEG is still an image); anything else is refused.
+    const declaredKind = MEDIA_TYPES[contentType];
+    const sniffed = tooLarge ? null : sniffContentType(bytes);
+    const sniffedKind = sniffed ? MEDIA_TYPES[sniffed] : undefined;
+    const kind = declaredKind;
     const reject =
-      tooLarge || bytes.length > MEDIA_MAX_BYTES ? 'too_large' : !kind ? 'type_not_accepted' : null;
+      tooLarge || bytes.length > MEDIA_MAX_BYTES
+        ? 'too_large'
+        : !declaredKind
+          ? 'type_not_accepted'
+          : !sniffedKind || sniffedKind !== declaredKind
+            ? 'type_mismatch'
+            : null;
+    if (!reject && sniffed) contentType = sniffed;
+    // M11 review R3 F10: a photo sent by WhatsApp or email is re-encoded before it is stored,
+    // which drops its EXIF and location; the document and its audit event keep the original's
+    // hash and size (founder, review round). A sticker (animated, and never a camera's) and a
+    // photo that does not decode are kept as they came.
+    let original: { sha256: string; bytes: number } | null = null;
+    if (!reject && kind === 'image' && job.kind !== 'sticker') {
+      const cleaned = await reencodeImage(bytes, contentType);
+      if (cleaned) {
+        original = { sha256: sha256(bytes), bytes: bytes.length };
+        bytes = cleaned;
+      }
+    }
     const [company] = await withCompany(this.database, { companyId, actorKind: 'system' }, (tx) =>
       tx
         .select({ countryCode: schema.company.countryCode })
@@ -1475,7 +1537,11 @@ export class InboundService {
           });
     return withCompany(this.database, { companyId, actorKind: 'system' }, async (tx) => {
       const documentId = file
-        ? await this.documents.recordWriteOnce(tx, file, { kind: 'message_media' })
+        ? await this.documents.recordWriteOnce(tx, file, {
+            kind: 'message_media',
+            origin: 'upload',
+            original,
+          })
         : null;
       const [attachment] = await tx
         .insert(schema.messageAttachment)

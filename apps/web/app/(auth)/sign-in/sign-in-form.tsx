@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { TextField } from '@/components/ui/field';
 import { authClient } from '@/lib/auth-client';
-import { authProblem } from '@/lib/errors';
+import { passwordSignInProblem } from '@/lib/errors';
 
 /** Email and password (AD-06). Staff with TOTP continue to the code step; the rest go home. */
 export function SignInForm() {
@@ -25,7 +25,7 @@ export function SignInForm() {
     try {
       const result = await authClient().signIn.email({ email: email.trim(), password });
       if (result.error) {
-        setError(authProblem(result.error).message);
+        setError(passwordSignInProblem(result.error).message);
         setPending(false);
         return;
       }
@@ -36,7 +36,7 @@ export function SignInForm() {
       // A password-only session; the server sends it on to TOTP enrolment.
       window.location.assign('/');
     } catch (failure) {
-      setError(authProblem(failure).message);
+      setError(passwordSignInProblem(failure).message);
       setPending(false);
     }
   }

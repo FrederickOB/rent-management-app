@@ -1,6 +1,6 @@
 import type { TenantConversation } from '@rent/contracts';
 import { Redirect, useRouter } from 'expo-router';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { formatTime } from '../../src/format';
 import { conversationsForCache, loadConversations, unreadLabel } from '../../src/messages';
 import { useSession } from '../../src/session';
@@ -92,7 +92,13 @@ function ConversationRow({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Messages with ${conversation.landlordName}${unread > 0 ? `, ${unreadLabel(unread)}` : ''}`}
+      // On the web the row's name is its own text, which a screen reader reads whole and voice
+      // control can match (WCAG 2.5.3; M11 axe). The phone apps keep the short name.
+      accessibilityLabel={
+        Platform.OS === 'web'
+          ? undefined
+          : `Messages with ${conversation.landlordName}${unread > 0 ? `, ${unreadLabel(unread)}` : ''}`
+      }
       testID="conversation-row"
       onPress={onOpen}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}

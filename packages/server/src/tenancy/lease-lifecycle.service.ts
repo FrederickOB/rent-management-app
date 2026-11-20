@@ -101,7 +101,9 @@ export class LeaseLifecycleService {
         'lease_not_signable',
         `Only a lease that is ${expected.replace('_', ' ')} can be signed this way`,
       );
-    if (input.source === 'paper' && !input.signedDocumentId)
+    // M11 decision 2: an imported paper lease's scan may follow (RA023 allows it); a lease
+    // entered by hand still needs its scan as it is signed (M3 decision 7).
+    if (input.source === 'paper' && !input.signedDocumentId && !row.importedBatchId)
       throw invalid('scan_required', 'Upload the signed lease');
     const company = await companyFacts(tx, row.companyId);
     // A paper lease starts holding the unit now; an e-signed one has held it since it was issued.

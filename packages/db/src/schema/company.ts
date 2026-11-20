@@ -99,6 +99,11 @@ export const membership = pgTable(
     createdAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp({ withTimezone: true }),
+    /**
+     * M11 (founder D2; TL-12): the name the inviter typed. Until an existing person accepts, the
+     * company sees this, never another landlord's record of that person.
+     */
+    invitedName: text(),
   },
   (t) => [
     unique('membership_company_id_id_key').on(t.companyId, t.id),
@@ -111,6 +116,10 @@ export const membership = pgTable(
       sql`${t.role} in ('owner', 'agency_admin', 'property_manager', 'accountant', 'caretaker', 'adviser', 'platform_admin')`,
     ),
     check('membership_status_check', sql`${t.status} in ('invited', 'active', 'revoked')`),
+    check(
+      'membership_invited_name_check',
+      sql`${t.invitedName} is null or length(${t.invitedName}) between 1 and 200`,
+    ),
   ],
 );
 

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback } from 'react';
 import { Empty, LoadFailed, Loading } from '@/components/load-state';
 import { Badge } from '@/components/ui/badge';
@@ -8,6 +9,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Table, Td, Th } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import { formatTime } from '@/lib/format';
+import { alertContextRows, alertDataOf } from '@/lib/ops';
 import { ALERT_SEVERITY_LABELS } from '@/lib/subscription';
 import { useLoad } from '@/lib/use-load';
 
@@ -28,6 +30,9 @@ export function HealthView() {
     <>
       <p className="flex flex-wrap items-center gap-3 text-sm text-slate-700">
         <span>Checked {time(health.checkedAt)}.</span>
+        <Link href="/platform/retention" className="font-medium underline underline-offset-2">
+          Retention review
+        </Link>
         <Button size="sm" variant="secondary" onClick={reload}>
           Check again
         </Button>
@@ -160,6 +165,22 @@ export function HealthView() {
                     <span className="text-xs text-slate-600">{time(alert.at)}</span>
                   </p>
                   <p className="text-slate-800">{alert.message}</p>
+                  {/* M11 runbook review: the stored, scrubbed context, as text only. */}
+                  {alertContextRows(alertDataOf(alert)).length > 0 ? (
+                    <details data-testid="health-alert-context">
+                      <summary className="cursor-pointer text-xs font-medium text-slate-700">
+                        Details
+                      </summary>
+                      <dl className="mt-1 space-y-1 text-xs">
+                        {alertContextRows(alertDataOf(alert)).map((row) => (
+                          <div key={row.key} className="grid gap-1 sm:grid-cols-[12rem_1fr]">
+                            <dt className="font-mono text-slate-600">{row.key}</dt>
+                            <dd className="font-mono break-all text-slate-900">{row.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </details>
+                  ) : null}
                 </li>
               ))}
             </ul>

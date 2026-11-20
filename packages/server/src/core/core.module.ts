@@ -45,6 +45,7 @@ import { FieldCipher } from './crypto/field-cipher';
 import { IdempotencyStore } from './idempotency';
 import { PaymentProviders, paymentProvidersFor } from './payment-providers';
 import { createLogger, type AppLogger } from './logging/logger';
+import { poolErrorLogger } from './pool-errors';
 import { StoredAlert } from './stored-alert';
 import {
   ADDRESS_LOOKUP_PORT,
@@ -195,6 +196,8 @@ export class CoreModule {
           options.database ??
           createDatabase(config.DATABASE_URL, {
             applicationName: options.applicationName ?? 'rent',
+            // M11: an ended idle connection is a warning in this process's log (code only).
+            onError: poolErrorLogger(logger),
           }),
       },
       { provide: SMS_PORT, useFactory: () => options.sms ?? smsFor(config) },

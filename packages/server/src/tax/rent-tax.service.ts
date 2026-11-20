@@ -17,7 +17,13 @@ import {
 import type { AlertPort } from '@rent/integrations';
 import { v7 as uuidv7 } from 'uuid';
 import { BillingEngine, type LeaseState, type TaxHooks } from '../billing/engine';
-import { dimsOf, paymentsByIds, requireBook, type PaymentRecord } from '../billing/records';
+import {
+  dimsOf,
+  openingPaymentIds,
+  paymentsByIds,
+  requireBook,
+  type PaymentRecord,
+} from '../billing/records';
 import { ownerFacts } from '../companies/owners.service';
 import { ALERT_PORT } from '../core/tokens';
 import { PostingService } from '../ledger/posting.service';
@@ -281,18 +287,31 @@ export class RentTaxService implements TaxHooks {
         .reduce((s, a) => s + a.amountMinor, 0);
       if (net > 0) withheld.add(line.chargePeriodId);
     }
+    // M11 (P25; OQ-64): money received before the platform (opening payments, and the deposit held
+    // at the cut-over) is not rent received through it: what it covers is left out of every period,
+    // paid onto a month or still credit the walk applies forward. Opening payments whose credit
+    // moved to a renewal still paid this lease's lines, so they are found from the allocations too.
+    const opening = await openingPaymentIds(tx, [
+      ...state.payments.map((p) => p.id),
+      ...state.allocations.map((a) => a.paymentId),
+    ]);
     return taxPeriodsFromWalk({
       walk: this.engine.walk(state),
       periodKeyOf: (key) => keyOf.get(key) ?? key,
       taxed: await taxedByPeriod(tx, state.lease.id),
       withheld,
+      opening: { paymentIds: opening, allocations: state.allocations },
     });
   }
 
+  /**
+   * The invoice line a period's rent tax line names. A month brought in at the cut-over and raised
+   * later has more than one opening line (founder 2026-11-10): the earliest, in invoice order.
+   */
   private lineOfPeriod(state: LeaseState): (periodId: string) => string | null {
-    const lines = new Map(
-      state.lines.flatMap((l) => (l.chargePeriodId ? [[l.chargePeriodId, l.id] as const] : [])),
-    );
+    const lines = new Map<string, string>();
+    for (const l of state.lines)
+      if (l.chargePeriodId && !lines.has(l.chargePeriodId)) lines.set(l.chargePeriodId, l.id);
     return (periodId) => lines.get(periodId) ?? null;
   }
 
@@ -797,9 +816,28 @@ export class RentTaxService implements TaxHooks {
    * Writes an item, its lines and its entry (P17 for tax accrued, P21 for tax taken back) in the
    * caller's transaction. A key posted before means the item exists: nothing new is written.
    */
-  private async writeItem(tx: Tx, state: LeaseState, item: NewItem): Promise<string | null> {
+  private async writeItem(tx: Tx, state: LeaseState, given: NewItem): Promise<string | null> {
     const book = requireBook(state.book);
     const id = uuidv7();
+    // One line per charge period (rent_tax_item_line_period_key): a month with two opening lines
+    // (an opening line and its raise, founder 2026-11-10) is one period, named by its first line.
+    const lineOf = this.lineOfPeriod(state);
+    const byPeriod = new Map<string, NewItem['lines'][number]>();
+    for (const l of given.lines) {
+      const was = byPeriod.get(l.chargePeriodId);
+      byPeriod.set(
+        l.chargePeriodId,
+        was
+          ? {
+              chargePeriodId: l.chargePeriodId,
+              invoiceLineId: lineOf(l.chargePeriodId) ?? was.invoiceLineId,
+              baseMinor: was.baseMinor + l.baseMinor,
+              taxMinor: was.taxMinor + l.taxMinor,
+            }
+          : l,
+      );
+    }
+    const item = { ...given, lines: [...byPeriod.values()] };
     const baseMinor = item.lines.reduce((s, l) => s + l.baseMinor, 0);
     const taxMinor = item.lines.reduce((s, l) => s + l.taxMinor, 0);
     if (await this.posting.findByKey(tx, state.company.id, item.key)) return null;

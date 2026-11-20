@@ -57,7 +57,8 @@ export interface GraPaymentView {
   readonly items: readonly {
     readonly itemId: string;
     readonly receiptNumber: string | null;
-    readonly unitCode: string;
+    /** Null for rent tax brought in at the cut-over (M11, P25): an owner-level item. */
+    readonly unitCode: string | null;
     readonly valueDate: string;
     readonly amountMinor: number;
   }[];
@@ -246,12 +247,17 @@ export class GraService {
             return {
               paymentId: item.paymentId,
               amountMinor: s.amountMinor,
-              lease: {
-                propertyId: item.propertyId,
-                unitId: item.unitId,
-                leaseId: item.leaseId,
-                tenantId: item.tenantId,
-              },
+              // M11 (P25): an owner-level item (rent tax brought in at the cut-over) clears 2200
+              // at the owner's level, as it was brought in.
+              lease:
+                item.leaseId && item.propertyId && item.unitId && item.tenantId
+                  ? {
+                      propertyId: item.propertyId,
+                      unitId: item.unitId,
+                      leaseId: item.leaseId,
+                      tenantId: item.tenantId,
+                    }
+                  : undefined,
             };
           }),
         }),
@@ -348,7 +354,7 @@ export class GraService {
               gra_payment_id: string;
               item_id: string;
               receipt_number: string | null;
-              unit_code: string;
+              unit_code: string | null;
               value_date: string;
               amount_minor: string;
             }>(

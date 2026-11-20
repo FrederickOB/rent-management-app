@@ -99,6 +99,11 @@ export interface PostedEntry {
 export interface ModelPayment extends PaymentRef {
   readonly cash: CashAccount;
   reversed: boolean;
+  /**
+   * M11 (P25): an opening payment, money received before the platform. Its debit side is opening
+   * balances (3900), not cash; it is never reversed (an adjustment lowers it instead).
+   */
+  readonly opening?: boolean;
 }
 
 export class LeaseLedgerModel {
@@ -149,6 +154,44 @@ export class LeaseLedgerModel {
       if (isRecurring(line.kind) && this.accruedIds.has(line.id) !== line.accrued)
         this.lines[i] = { ...line, accrued: this.accruedIds.has(line.id) };
     }
+  }
+
+  /**
+   * M11 (P25): records what a plan made outside the model (opening balances): lines, an accrued
+   * one staying accrued; allocation rows; opening payments; reductions of an opening payment's
+   * amount; and entries, each posted once under its key, as any other.
+   */
+  adopt(input: {
+    readonly lines?: readonly BillingLine[];
+    readonly allocations?: readonly AllocationRow[];
+    readonly payments?: readonly PaymentRef[];
+    readonly reductions?: readonly { readonly paymentId: string; readonly amountMinor: number }[];
+    readonly entries?: readonly PostedEntry[];
+  }): void {
+    for (const line of input.lines ?? []) {
+      if (this.lines.some((l) => l.id === line.id))
+        throw new DomainError('model.line_exists', `Line ${line.id} is already on the lease`);
+      this.lines.push(line);
+      if (line.accrued) this.accruedIds.add(line.id);
+      this.sequence = Math.max(this.sequence, line.sequence);
+    }
+    for (const row of input.allocations ?? []) this.addAllocation(row);
+    for (const p of input.payments ?? [])
+      this.payments.push({
+        id: p.id,
+        amountMinor: p.amountMinor,
+        order: p.order,
+        cash: '1010',
+        reversed: false,
+        opening: true,
+      });
+    for (const r of input.reductions ?? []) {
+      const index = this.payments.findIndex((p) => p.id === r.paymentId);
+      const payment = this.payments[index];
+      if (!payment) throw new DomainError('model.no_payment', `No payment ${r.paymentId}`);
+      this.payments[index] = { ...payment, amountMinor: payment.amountMinor - r.amountMinor };
+    }
+    for (const e of input.entries ?? []) this.post(e.rule, e.key, e.lines, e.valueDate);
   }
 
   /**
@@ -374,6 +417,8 @@ export class LeaseLedgerModel {
     const payment = this.payments.find((p) => p.id === paymentId);
     if (!payment || payment.reversed)
       throw new DomainError('model.no_payment', 'No live payment to reverse');
+    if (payment.opening)
+      throw new DomainError('model.opening_payment', 'An opening payment is never reversed');
     this.refreshAccrued();
     const plan = planPaymentReversal({
       payment,
@@ -689,7 +734,8 @@ export class LeaseLedgerModel {
       const allocated = this.allocations
         .filter((a) => a.source === 'payment' && a.paymentId === p.id)
         .reduce((sum, a) => sum + a.amountMinor, 0);
-      const cashHeld = cash.get(`${p.cash}|${p.id}`) ?? 0;
+      // An opening payment's debit side is opening balances (P25), less what lowered it.
+      const cashHeld = cash.get(`${p.opening ? '3900' : p.cash}|${p.id}`) ?? 0;
       if (p.reversed) {
         if (allocated !== 0) fail(`reversed ${p.id} still allocates ${allocated}`);
         if (cashHeld !== 0) fail(`reversed ${p.id} still holds ${cashHeld} on its cash side`);

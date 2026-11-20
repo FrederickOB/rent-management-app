@@ -8,6 +8,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { TextField } from '@/components/ui/field';
 import { authClient } from '@/lib/auth-client';
 import { authProblem } from '@/lib/errors';
+import { LINK_LIFETIMES_TEXT } from '@/lib/passwords';
 
 const MIN_LENGTH = 12; // Better Auth's minPasswordLength on the API (M1 plan 4.5)
 const MAX_LENGTH = 128;
@@ -27,7 +28,7 @@ export function SetPasswordForm({ token }: { readonly token: string | null }) {
         <CardBody>
           <Alert tone="error">This link is not valid, has expired or has already been used.</Alert>
           <p className="text-sm text-slate-700">
-            Ask the person who invited you to send a new invitation.
+            {LINK_LIFETIMES_TEXT} Ask the person who invited you to send a new invitation.
           </p>
         </CardBody>
       </Card>
@@ -80,7 +81,7 @@ export function SetPasswordForm({ token }: { readonly token: string | null }) {
     <Card>
       <CardHeader
         title={<span className="text-xl">Set your password</span>}
-        description="Choose a password for your Rent Platform account. A long phrase is easier to remember and harder to guess."
+        description={`Choose a password for your Rent Platform account. A long phrase is easier to remember and harder to guess; a password found in a data breach is refused. ${LINK_LIFETIMES_TEXT}`}
       />
       <CardBody>
         <form onSubmit={submit} className="space-y-4">

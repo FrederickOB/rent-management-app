@@ -415,7 +415,11 @@ export class TenantMessagingService {
         );
       return a?.status === 'stored' ? a.documentId : null;
     });
-    const url = documentId ? await this.documents.downloadUrl(companyId, documentId) : null;
+    const url = documentId
+      ? await this.documents.downloadUrl(companyId, documentId, undefined, {
+          viewer: tenant.personId,
+        })
+      : null;
     if (!url) throw notFound('Attachment');
     return { url, expiresAt: new Date(this.clock.now().getTime() + 300_000) };
   }

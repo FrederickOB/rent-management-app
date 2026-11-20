@@ -199,6 +199,8 @@ export class SettlementAccountsService {
   ): Promise<{ accountId: string; approvalId: string }> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'settlement_account.change');
+    // M11 review R2 F1: the company's own account is for people who see the whole company.
+    if (input.holder === 'agency') this.policy.assert(staff, 'settlement_account.change_agency');
     const number = input.accountNumber.replace(/\s/g, '');
     if (!/^\d{6,20}$/.test(number))
       throw invalid('account_number', 'Enter the account number, digits only');
@@ -289,6 +291,8 @@ export class SettlementAccountsService {
     this.policy.assert(staff, 'settlement_account.change');
     return withCompany(this.database, staffContext(staff), async (tx) => {
       const account = await this.row(tx, accountId);
+      if (account.holder === 'agency')
+        this.policy.assert(staff, 'settlement_account.change_agency');
       if (!['active', 'cooling_off'].includes(account.status))
         throw conflict('account_not_live', 'Only an approved account can be retired');
       return this.approvals.createInTx(tx, staff, {
@@ -425,6 +429,9 @@ export class SettlementAccountsService {
   ): Promise<AgreementView> {
     const staff = staffActor(actor);
     this.policy.assert(staff, 'settlement_account.change');
+    // M11 review R2 F1: sending an owner's rent to the agency's own account needs the whole company.
+    if (input.destination === 'agency_client_account')
+      this.policy.assert(staff, 'settlement_account.change_agency');
     if (staff.companyKind !== 'agency')
       throw conflict('not_an_agency', 'A landlord’s rent always goes to their own account');
     if (!(RENT_DESTINATIONS as readonly string[]).includes(input.destination))

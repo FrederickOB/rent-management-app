@@ -128,6 +128,12 @@ export const CONSENT_TEXTS: Readonly<Record<string, string>> = {
     'This person used the unsubscribe link in an email and no longer wants messages by {channel}.',
   'staff_withdraw.v1':
     'Staff recorded that this person no longer wants messages about their tenancy by {channel}.',
+  // M11 decision 5: an erasure request (Act 843) stops messaging on every channel at once.
+  'data_protection_withdraw.v1':
+    'This person asked for their personal data to be erased (Data Protection Act, 2012), so no messages go to them by {channel}.',
+  // M11 decision 2: consent from the onboarding workbook, as the landlord recorded it on paper.
+  'import.v1':
+    'The landlord recorded, in its onboarding workbook, that this person agreed to receive messages about their tenancy by {channel}.',
   // M6 decision 8 (OQ-54): consent belongs to the address it was given for.
   // M8 decisions 5 and 6: staff and artisans, recorded in contact_consent_event.
   'staff_alerts.v1':

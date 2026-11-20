@@ -1,0 +1,137 @@
+name: Scheduled drills and load test
+
+# M11 decisions 7 and 10 (plan 4.6 and 4.8): the restore and point-in-time recovery drills monthly
+# (the NFR asks for quarterly), and the month-end load test weekly, on a profile cut to fit a runner
+# in about an hour. Never on pull requests. Results are kept as artifacts; CI's runners are small,
+# so the load numbers are a regression check, not capacity (production is measured in M12).
+on:
+  schedule:
+    # 03:00 UTC on the 1st of each month: the drills.
+    - cron: '0 3 1 * *'
+    # 04:00 UTC every Sunday: the load test.
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      run:
+        description: What to run
+        type: choice
+        options: [both, drills, load]
+        default: both
+      load_profile:
+        description: 'Load profile: ci (about an hour), full (decision 7: 5,000 units, a 60-minute peak hour), smoke (minutes)'
+        type: choice
+        options: [ci, full, smoke]
+        default: ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  NEXT_TELEMETRY_DISABLED: '1'
+  TURBO_TELEMETRY_DISABLED: '1'
+
+jobs:
+  drills:
+    name: Restore and point-in-time recovery drills
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 3 1 * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run != 'load')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: cp .env.example .env
+      # The seed takes its demo payments through the fake payment provider (M4b).
+      - run: docker compose up -d --wait postgres seaweedfs mailpit fake-providers
+      - name: Install Chromium's headless shell for the seed's notice PDFs
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+      # The drills refuse `rent`: they run on a database of their own, migrated and seeded here.
+      - name: Migrate and seed the drills' source database
+        run: |
+          db=rent_drill_source
+          docker compose exec -T postgres psql --username=postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE $db OWNER rent_owner" \
+            -c "REVOKE ALL ON DATABASE $db FROM PUBLIC" \
+            -c "GRANT CONNECT ON DATABASE $db TO rent_app"
+          export DATABASE_URL="$(grep '^DATABASE_URL=' .env | cut -d= -f2- | sed "s#/rent\$#/$db#")"
+          export DATABASE_OWNER_URL="$(grep '^DATABASE_OWNER_URL=' .env | cut -d= -f2- | sed "s#/rent\$#/$db#")"
+          pnpm db:migrate
+          pnpm db:seed
+      - name: Restore drill
+        run: |
+          mkdir -p "$RUNNER_TEMP/drills"
+          bash scripts/drill-restore.sh rent_drill_source --json "$RUNNER_TEMP/drills/restore.json" \
+            | tee "$RUNNER_TEMP/drills/restore.log"
+      - name: Point-in-time recovery drill
+        run: |
+          bash scripts/drill-pitr.sh rent_drill_source --json "$RUNNER_TEMP/drills/pitr.json" \
+            | tee "$RUNNER_TEMP/drills/pitr.log"
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '## Backup drills'
+            for f in restore pitr; do
+              echo
+              echo "### $f"
+              echo '```'
+              tail -12 "$RUNNER_TEMP/drills/$f.log" 2>/dev/null || echo 'did not run'
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the drill results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backup-drills
+          path: ${{ runner.temp }}/drills
+          retention-days: 400
+
+  load:
+    name: Month-end load test
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run != 'drills')
+    runs-on: ubuntu-24.04
+    # The ci profile: about 10 minutes of fixture, 30 of run, up to 15 of drain. The full profile
+    # needs longer, and a bigger runner to mean much.
+    timeout-minutes: ${{ inputs.load_profile == 'full' && 180 || 90 }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: cp .env.example .env
+      # The load test starts its own fake provider; the Compose one is not needed.
+      - run: docker compose up -d --wait postgres seaweedfs mailpit
+      - name: Install Chromium for the worker's receipt and notice PDFs
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+      - name: Choose the profile
+        env:
+          PROFILE: ${{ inputs.load_profile || 'ci' }}
+        run: |
+          case "$PROFILE" in
+            full) echo "LOAD_UNITS=5000 LOAD_STAFF=50 LOAD_DURATION_MIN=60 LOAD_PAYMENTS=2500 LOAD_PEAK_PAYMENTS=1000 LOAD_PEAK_MIN=10 LOAD_TENANT_PAGES=500" ;;
+            smoke) echo "LOAD_UNITS=400 LOAD_STAFF=10 LOAD_DURATION_MIN=3 LOAD_PAYMENTS=150 LOAD_PEAK_PAYMENTS=60 LOAD_PEAK_MIN=1 LOAD_TENANT_PAGES=40" ;;
+            *) echo "LOAD_UNITS=2000 LOAD_STAFF=30 LOAD_DURATION_MIN=30 LOAD_PAYMENTS=1000 LOAD_PEAK_PAYMENTS=400 LOAD_PEAK_MIN=10 LOAD_TENANT_PAGES=200" ;;
+          esac | tr ' ' '\n' >> "$GITHUB_ENV"
+          echo "LOAD_PROFILE=$PROFILE" >> "$GITHUB_ENV"
+      - name: Month-end load test
+        env:
+          LOAD_DB: rent_load_ci
+          LOAD_OUT: ${{ runner.temp }}/load
+        run: pnpm load:month-end
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: cat "$RUNNER_TEMP/load/summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo 'No summary was written.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the load results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: load-month-end-${{ env.LOAD_PROFILE }}
+          path: ${{ runner.temp }}/load
+          retention-days: 90

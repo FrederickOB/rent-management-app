@@ -20,3 +20,6 @@ export * from './tasks';
 export * from './moveout';
 export * from './reporting';
 export * from './subscription';
+export * from './onboarding';
+export * from './data-protection';
+export * from './ops';

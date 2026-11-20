@@ -37,6 +37,11 @@ export interface SettlementPermissions {
   readonly change: boolean;
   /** settlement_account.reveal: show a full account number, with a reason (audited). */
   readonly reveal: boolean;
+  /**
+   * M11 security review: settlement_account.change_agency, the agency's own client account. Whole
+   * company, so a person limited to some owners or properties never has it.
+   */
+  readonly changeAgency: boolean;
   readonly seeApprovals: boolean;
 }
 
@@ -116,6 +121,7 @@ export function SettlementView({
           {adding ? (
             <AccountRequestForm
               companyKind={companyKind}
+              canChangeAgency={can.changeAgency}
               owners={owners}
               onDone={done}
               onCancel={() => setAdding(false)}
@@ -281,7 +287,10 @@ function AccountItem({
             <span className="sr-only"> of {account.bankName}</span>
           </Button>
         ) : null}
-        {can.change && mayRetire(account) && !retiring ? (
+        {can.change &&
+        (account.holder !== 'agency' || can.changeAgency) &&
+        mayRetire(account) &&
+        !retiring ? (
           <Button size="sm" variant="secondary" onClick={() => setRetiring(true)}>
             Ask to stop using it
             <span className="sr-only">

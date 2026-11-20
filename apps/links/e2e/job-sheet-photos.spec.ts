@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import {
   jobForNewArtisan,
@@ -27,6 +28,7 @@ interface JobDetail {
     readonly stage: string;
     readonly addedByKind: string;
     readonly sizeBytes: number | null;
+    readonly original: { readonly sha256: string; readonly bytes: number } | null;
   }[];
 }
 
@@ -69,9 +71,10 @@ test.describe('MI-06 the finished work with 12 MB of photos (review LT 1 and LT 
     expect(sms).not.toMatch(SHEET_PATH);
     const code = /\b(\d{6})\b/.exec(sms)![1]!;
 
+    const photos = [largePng(SIX_MB), largePng(SIX_MB)];
     await page.getByLabel('Photos of the finished work').setInputFiles([
-      { name: 'tiles-1.png', mimeType: 'image/png', buffer: largePng(SIX_MB) },
-      { name: 'tiles-2.png', mimeType: 'image/png', buffer: largePng(SIX_MB) },
+      { name: 'tiles-1.png', mimeType: 'image/png', buffer: photos[0]! },
+      { name: 'tiles-2.png', mimeType: 'image/png', buffer: photos[1]! },
     ]);
     await page.getByLabel('What did you do?').fill(NOTE);
     await page.getByLabel('Your 6-digit code').fill(code === '000000' ? '111111' : '000000');
@@ -95,9 +98,17 @@ test.describe('MI-06 the finished work with 12 MB of photos (review LT 1 and LT 
     expect(done.completionNote).toBe(NOTE);
     const after = done.attachments.filter((a) => a.stage === 'after');
     expect(after).toHaveLength(2);
+    // Whole: each upload, before it was re-encoded (M11 review R3 F10), is byte for byte what was
+    // sent (founder decision, 2026-11-10).
+    const sent = photos.map((bytes) => ({
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      bytes: bytes.length,
+    }));
+    const bySha = (a: { sha256: string }, b: { sha256: string }) =>
+      a.sha256.localeCompare(b.sha256);
     for (const photo of after) {
       expect(photo).toMatchObject({ kind: 'image', addedByKind: 'artisan' });
-      expect(photo.sizeBytes).toBeGreaterThanOrEqual(SIX_MB - 100);
     }
+    expect(after.map((photo) => photo.original!).sort(bySha)).toEqual(sent.sort(bySha));
   });
 });

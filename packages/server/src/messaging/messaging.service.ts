@@ -154,6 +154,22 @@ interface Prepared {
   readonly account: Awaited<ReturnType<typeof sendingAccount>>;
   readonly template: TemplateOnAccount | null;
   readonly conversationId: string | null;
+  /** M11 decision 5: an erasure request stopped messaging to this tenant on every channel. */
+  readonly messagingStopped: boolean;
+}
+
+/**
+ * M11 decision 5 (CM-09): whether an erasure request stopped messaging to the tenant. It stands
+ * until the request is refused; consent was withdrawn on every channel too, so a refused request
+ * needs staff to record the tenant's consent again before anything is sent.
+ */
+export async function messagingStoppedFor(tx: Tx, tenantId: string): Promise<boolean> {
+  const rows = await tx.execute<{ stopped: boolean }>(
+    sql`select exists (select 1 from data_protection_request r
+                       where r.tenant_id = ${tenantId}::uuid and r.kind = 'erasure'
+                         and r.messaging_stopped_at is not null and r.status <> 'refused') as stopped`,
+  );
+  return rows.rows[0]?.stopped === true;
 }
 
 /**
@@ -268,6 +284,11 @@ export class MessagingService {
     if (events.some((e) => e.status === 'failed' && e.reason === 'delivery_failed'))
       return 'failed';
     if (!reach) return this.finish(companyId, request, 'not_sent', 'no_recipient');
+    // M11 decision 5: nothing goes to a tenant (or their contacts) once an erasure request has
+    // stopped messaging, whatever the purpose or channel. A notice's message is withheld the same
+    // way, and its ladder falls back to physical service (`messaging.not_sent`).
+    if (prepared.messagingStopped)
+      return this.finish(companyId, request, 'not_sent', 'messaging_stopped');
     // Real adapters never send to test contacts (as in M1); fakes capture everything locally.
     if (reach.isTestContact && this.config.NODE_ENV === 'production')
       return this.finish(companyId, request, 'not_sent', 'test_contact');
@@ -467,6 +488,10 @@ export class MessagingService {
       account,
       template,
       conversationId,
+      // The tenant or contact themselves (`subject`), never a staff or witness signer of their lease.
+      messagingStopped: reach?.subject
+        ? await messagingStoppedFor(tx, reach.subject.tenantId)
+        : false,
     };
   }
 
@@ -490,6 +515,7 @@ export class MessagingService {
       ? await resolver.reach(tx, companyId, input.recipient, input.purpose)
       : null;
     if (!reach) return [];
+    if (reach.subject && (await messagingStoppedFor(tx, reach.subject.tenantId))) return [];
     const prepared = await this.gather(
       tx,
       companyId,

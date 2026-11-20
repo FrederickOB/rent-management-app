@@ -1,0 +1,2 @@
+ALTER TABLE "ops_action" DROP CONSTRAINT "ops_action_kind_check";--> statement-breakpoint
+ALTER TABLE "ops_action" ADD CONSTRAINT "ops_action_kind_check" CHECK ("ops_action"."kind" in ('webhook_replay', 'job_retry', 'reconcile_run'));

@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { sql, type Database, type Tx } from '@rent/db';
+import type { EmailPort } from '@rent/integrations';
 import { isValidTimeZone } from '@rent/domain/dates';
 import type { Actor } from '@rent/domain/policy';
 import { SUBSCRIPTION_TIERS, type SubscriptionTier } from '@rent/domain/settings';
@@ -13,7 +14,7 @@ import type { AppConfig } from '../core/config';
 import { conflict, invalid, notFound } from '../core/errors';
 import type { IdempotencyClaim } from '../core/idempotency';
 import type { AppLogger } from '../core/logging/logger';
-import { AUTH, CONFIG, DATABASE, LOGGER } from '../core/tokens';
+import { AUTH, CONFIG, DATABASE, EMAIL_PORT, LOGGER } from '../core/tokens';
 import type { Auth } from '../identity/auth';
 import { PersonAccounts } from '../identity/person-accounts';
 import { PolicyService } from '../policy/policy.service';
@@ -21,7 +22,13 @@ import { SubscriptionBillingService } from '../subscription/billing.service';
 import { SubscriptionCoreService } from '../subscription/core.service';
 import { withPlatform } from '../subscription/platform';
 import { SubscriptionService } from '../subscription/subscription.service';
-import { invitationSender, personForEmail } from './invitations';
+import {
+  acceptanceNotice,
+  firstAdminStatus,
+  hasPassword,
+  invitationSender,
+  personForEmail,
+} from './invitations';
 import { platformAdminFor, type PlatformAdmin } from './platform-admin';
 import { SupportAccessService, type SupportGrantView } from './support.service';
 import { UsageService, type UsageView } from './usage.service';
@@ -109,6 +116,7 @@ export class PlatformCompaniesService {
     @Inject(AUTH) private readonly auth: Auth,
     @Inject(CONFIG) private readonly config: AppConfig,
     @Inject(LOGGER) private readonly logger: AppLogger,
+    @Inject(EMAIL_PORT) private readonly email: EmailPort,
   ) {}
 
   private context(admin: PlatformAdmin, requestId?: string | null) {
@@ -218,9 +226,11 @@ export class PlatformCompaniesService {
           `subscription_started:${sub.id}`,
         );
         // The landlord runs a landlord company; an agency's first person is its admin (AD-03).
+        // M11 founder D2: someone already on the platform is pending until they accept, signed in
+        // with their password and authenticator; a person made for this is active, as before.
         await tx.execute(
           sql`select app.onboard_first_admin(${id}::uuid, ${person.personId}::uuid,
-                ${JSON.stringify({ tier, trialDays })}::jsonb)`,
+                ${JSON.stringify({ tier, trialDays })}::jsonb, ${firstAdminStatus(person)})`,
         );
         await this.audit.append(tx, {
           companyId: platformId,
@@ -234,7 +244,10 @@ export class PlatformCompaniesService {
       },
     );
     try {
-      await invitationSender(this.auth, this.config.WEB_ORIGIN)(adminEmail);
+      // Someone who can already sign in is told to accept; anyone else gets the set-password link.
+      if (!person.created && (await hasPassword(this.database, person.personId)))
+        await acceptanceNotice(this.email, this.config)(adminEmail, name);
+      else await invitationSender(this.auth, this.config.WEB_ORIGIN)(adminEmail);
     } catch (error) {
       // The company is made and its answer stored: a retry replays it and sends nothing, so the
       // failure is logged (ids only) for the platform team rather than reported as a failed

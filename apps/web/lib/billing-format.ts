@@ -42,6 +42,8 @@ export const INVOICE_KIND_LABELS: Record<InvoiceKind, string> = {
   cycle: 'Rent',
   deposit: 'Security deposit',
   one_off: 'Charge',
+  // M11 (P25): arrears from before the cut-over, brought in from the onboarding workbook.
+  opening: 'Opening balance',
 };
 
 export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
@@ -149,6 +151,8 @@ export const ALLOCATION_SOURCE_LABELS: Record<AllocationSource, string> = {
   withholding: 'Withholding tax',
   credit_note: 'Credit note',
   write_off: 'Write-off',
+  // M11 (P25): money held or owed before the cut-over, brought in from the onboarding workbook.
+  opening_balance: 'Opening balance',
 };
 
 export const RECEIPT_KIND_LABELS: Record<'receipt' | 'credit_receipt', string> = {

@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { schema, sql, withCompany, withSystem, type Database, type Tx } from '@rent/db';
 import {
   checkSignature,
+  CODE_LOCKOUTS_BEFORE_REVOKE,
   CURRENT_CONSENT,
   CURRENT_MOVE_IN_REPORT_CONSENT,
   CURRENT_NOTICE_CONSENT,
@@ -189,6 +190,9 @@ export class SigningPageService {
             : 'notice_closed'
           : reason;
       const consentVersion = consentVersionFor(request);
+      // M11 review R3 F9: an expired or revoked link names no one and no document. It keeps what
+      // its closed page shows: the landlord's contact and, for a notice, its number and dates.
+      const dead = screen === 'expired' || screen === 'revoked';
       const view: SigningPageView = {
         screen,
         reason: pageReason,
@@ -197,20 +201,20 @@ export class SigningPageService {
         timeZone: company.timeZone,
         linkExpiresAt: link.expiresAt,
         document: {
-          title: facts.title,
-          reference: facts.reference,
-          sha256: request.documentSha256,
+          title: dead ? '' : facts.title,
+          reference: dead ? '' : facts.reference,
+          sha256: dead ? null : request.documentSha256,
           finalSha256: screen === 'copy' ? request.finalSha256 : null,
           html: null,
           downloadable,
         },
         signer: {
-          name: signer.name,
+          name: dead ? '' : signer.name,
           role: signer.signerRole as SignerRole,
           roleLabel: SIGNER_ROLE_LABELS[signer.signerRole as SignerRole],
           status: signer.status as SignerStatus,
-          signedAt: signer.signedAt,
-          declinedAt: signer.declinedAt,
+          signedAt: dead ? null : signer.signedAt,
+          declinedAt: dead ? null : signer.declinedAt,
         },
         signers:
           screen === 'sign' || screen === 'signed' || screen === 'copy'
@@ -522,11 +526,18 @@ export class SigningPageService {
         client,
       });
       if (lockedUntil) {
+        // M11 review R3 F7: lockouts are counted per link and never reset; the one that reaches
+        // CODE_LOCKOUTS_BEFORE_REVOKE withdraws the link, and whoever sent it is told.
+        const lockout = (await this.lockoutsOn(tx, signer.id, link.id)) + 1;
         await signingEvent(tx, request, 'signer.locked', now, {
           signerId: signer.id,
-          data: { until: lockedUntil.toISOString() },
+          data: { until: lockedUntil.toISOString(), linkId: link.id, lockout },
           client,
         });
+        if (lockout >= CODE_LOCKOUTS_BEFORE_REVOKE) {
+          await this.revokeAfterLockouts(tx, request, signer, link, now);
+          return { refused: notUsable('revoked') };
+        }
         return { refused: locked(lockedUntil) };
       }
       const left = SIGNING_CODE.maxAttempts - failed;
@@ -800,6 +811,65 @@ export class SigningPageService {
         .set({ failedCodeAttempts: 0, lockedUntil: null, updatedAt: now })
         .where(sql`${schema.signer.id} = ${signer.id}`);
     return null;
+  }
+
+  /** The code lockouts already recorded on this link (M11 review R3 F7). */
+  private async lockoutsOn(tx: Tx, signerId: string, linkId: string): Promise<number> {
+    const rows = await tx.execute<{ n: number }>(
+      sql`select count(*)::int as n from signing_event
+          where signer_id = ${signerId} and kind = 'signer.locked' and data->>'linkId' = ${linkId}`,
+    );
+    return rows.rows[0]?.n ?? 0;
+  }
+
+  /**
+   * M11 review R3 F7: the link is withdrawn after repeated lockouts, so nobody can keep guessing
+   * codes on it, and the signer starts afresh on any new link. Whoever sent it is told, so they
+   * can check with the signer and send a new one.
+   */
+  private async revokeAfterLockouts(
+    tx: Tx,
+    request: RequestRow,
+    signer: SignerRow,
+    link: LinkRow,
+    now: Date,
+  ): Promise<void> {
+    // Every wrong code on the link, across all the codes it was sent.
+    const counted = await tx.execute<{ n: number }>(
+      sql`select coalesce(sum(attempts), 0)::int as n from otp_challenge where secure_link_id = ${link.id}`,
+    );
+    const failures = counted.rows[0]?.n ?? 0;
+    await tx
+      .update(schema.secureLink)
+      .set({ revokedAt: now, revokeReason: 'code_lockout' })
+      .where(sql`${schema.secureLink.id} = ${link.id} and ${schema.secureLink.revokedAt} is null`);
+    await tx
+      .update(schema.signer)
+      .set({ failedCodeAttempts: 0, lockedUntil: null, updatedAt: now })
+      .where(sql`${schema.signer.id} = ${signer.id}`);
+    await signingEvent(tx, request, 'link.revoked', now, {
+      signerId: signer.id,
+      data: { linkId: link.id, reason: 'code_lockout', failures },
+    });
+    await this.audit.append(tx, {
+      companyId: request.companyId,
+      action: 'signing.link_revoked',
+      recordType: 'signing_request',
+      recordId: request.id,
+      data: { linkId: link.id, signerId: signer.id, reason: 'code_lockout', failures },
+    });
+    if (request.createdBy) {
+      const facts = await this.esign.documentFacts(tx, request);
+      await queueMessage(tx, request.companyId, {
+        recipient: { type: 'staff', personId: request.createdBy },
+        purpose: 'staff_notice',
+        subject: `A signing link was withdrawn: ${facts.title}`,
+        body: `Wrong one-time codes were entered ${failures} times on the link sent to ${signer.name} (${SIGNER_ROLE_LABELS[signer.signerRole as SignerRole]}) to sign ${facts.title} (reference ${facts.reference}), so the link no longer works. Nothing was signed. Check with them, then send them a new link if they still need to sign.`,
+        channels: ['email'],
+        propertyId: request.propertyId,
+        related: { type: 'signing_request', id: request.id },
+      });
+    }
   }
 
   private async failedAttempts(tx: Tx, signerId: string): Promise<number> {

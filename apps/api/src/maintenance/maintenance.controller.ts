@@ -148,6 +148,10 @@ export class JobSheetsController {
   jobSheetsRouter() {
     const s = this.sheets;
     return {
+      // M11 review B13: the links server's pre-check before a photo body; records nothing.
+      check: implement(contract.jobSheets.check).handler(({ input }) =>
+        s.check(input.token, clientOf(input.client)),
+      ),
       open: implement(contract.jobSheets.open).handler(async ({ input }) =>
         serialize(await s.open(input.token, clientOf(input.client))),
       ),
