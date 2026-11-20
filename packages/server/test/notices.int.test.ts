@@ -63,8 +63,22 @@ const base32 = (text: string) => {
     out += alphabet[Number.parseInt(bits.slice(i, i + 5).padEnd(5, '0'), 2)];
   return out;
 };
-/** Monday 9 November 2026, 10:00 in Accra: inside the sending window (decision 11). */
-const START = new Date('2026-11-09T10:00:00Z');
+/**
+ * A Monday at 10:00 in Accra, inside the sending window (decision 11): the Monday nearest the real
+ * date. The service runs on this test clock, but approval requests expire by the database's real
+ * clock (now()). A fixed day (9 November 2026) failed once the real date passed it by a week
+ * (founder-approved setup fix, 2026-11-19; what the tests check is unchanged).
+ */
+const START = (() => {
+  const now = Date.now();
+  const today = new Date(now);
+  const monday = new Date(
+    Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 10),
+  );
+  monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+  if (now - monday.getTime() > 84 * HOUR) monday.setUTCDate(monday.getUTCDate() + 7);
+  return monday;
+})();
 const today = () => toIsoDate(parseBusinessDate(ctx.clock.now().toISOString().slice(0, 10)));
 const plus = (days: number) => toIsoDate(addDays(parseBusinessDate(today()), days));
 

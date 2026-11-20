@@ -67,8 +67,19 @@ let ownerId: string;
 let units: string[];
 
 const HOUR = 3_600_000;
-/** Monday 9 November 2026, 10:00 in Accra: inside the sending window. */
-const START = new Date('2026-11-09T10:00:00Z');
+/**
+ * 10:00 in Accra, inside the daily sending window (07:00 to 20:00), on the latest day it is at
+ * least two hours past: never in the future, since a settlement account becomes usable by the
+ * database's real clock (now()), and never more than 26 hours back, since approval requests
+ * expire by it. A fixed day (9 November 2026) failed once the real date passed it by a week
+ * (founder-approved setup fix, 2026-11-19; what the tests check is unchanged).
+ */
+const START = (() => {
+  const now = Date.now();
+  const today = new Date(now);
+  const at10 = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 10);
+  return new Date(now - at10 >= 2 * HOUR ? at10 : at10 - 24 * HOUR);
+})();
 const plusDays = (date: string, days: number) => toIsoDate(addDays(parseBusinessDate(date), days));
 const plusMonths = (date: string, months: number) =>
   toIsoDate(addMonths(parseBusinessDate(date), months));

@@ -378,7 +378,9 @@ describe('P33 VAT returns', () => {
       use: 'commercial',
       units: [{ unitType: 'shop', count: 2 }],
     });
-    const start = `${today.slice(0, 7)}-01`;
+    // From today, so next month's invoice (issued 14 days ahead) is not in this month's report on
+    // any day of the month (founder-approved setup fix, 2026-11-19).
+    const start = today;
     const lease = await billedLease(ctx, s, b, agency.manager, {
       unitId: Object.values(place.units)[0]!,
       tenantId: await tenant('Shop Tenant'),

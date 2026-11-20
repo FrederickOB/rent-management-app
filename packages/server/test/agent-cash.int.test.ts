@@ -342,7 +342,9 @@ describe('TX-03 F3 rent tax paid to GRA from the agency’s account (P18)', () =
 describe('P33 F3 VAT and levies paid to GRA from the agency’s account', () => {
   it('is refused beyond what is held, with nothing posted or staged; accepted within it, the rest from the owner’s account', async () => {
     const c = await agencyWithOwner('F3 VAT', { commercial: true });
-    const start = monthStart(today);
+    // From today, so next month's invoice (issued 14 days ahead) is not in this month's report on
+    // any day of the month (founder-approved setup fix, 2026-11-19).
+    const start = today;
     const l = await lease(c, { start, rent: 1_000_000, commercial: true });
     await transfer(c, l.id, 1_200_000, today, 'owner_account');
     const month = today.slice(0, 7);
